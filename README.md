@@ -8,11 +8,9 @@
 
 ## 下载安装
 
-> 前往 [Releases 页面](https://gitee.com/my-yang-yunfan/dsh_desktop/releases) 获取最新版本。
->
-> 由于 Gitee 单文件限制 100 MB，安装包已拆分为 2 个分片，下载后合并即可。
+### 国内用户（Gitee，分片下载）
 
-### 方式一：下载分片 + 自动合并（推荐）
+> Gitee 单文件限制 100 MB，安装包已拆分为 2 个分片，下载后合并即可。
 
 1. 下载以下文件，放到**同一个文件夹**：
 
@@ -26,19 +24,24 @@
 
 2. 下载 [merge.bat](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.2.0/merge.bat)，放到同一文件夹，双击运行即可自动合并出 exe。
 
-### 方式二：手动合并
+   不想用 merge.bat？在 CMD 中手动合并：
 
-如果不想用 merge.bat，在 CMD 中执行：
+   ```cmd
+   :: 便携版
+   copy /b DSH-Desktop-0.2.0-portable-x64.exe.part1 + DSH-Desktop-0.2.0-portable-x64.exe.part2 DSH-Desktop-0.2.0-portable-x64.exe
 
-```cmd
-:: 便携版
-copy /b DSH-Desktop-0.2.0-portable-x64.exe.part1 + DSH-Desktop-0.2.0-portable-x64.exe.part2 DSH-Desktop-0.2.0-portable-x64.exe
+   :: 安装版
+   copy /b DSH-Desktop-Setup-0.2.0-x64.exe.part1 + DSH-Desktop-Setup-0.2.0-x64.exe.part2 DSH-Desktop-Setup-0.2.0-x64.exe
+   ```
 
-:: 安装版
-copy /b DSH-Desktop-Setup-0.2.0-x64.exe.part1 + DSH-Desktop-Setup-0.2.0-x64.exe.part2 DSH-Desktop-Setup-0.2.0-x64.exe
-```
+### 国际用户（GitHub，单文件下载）
 
-> GitHub 也可直接下载单文件完整版：[GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases/latest)
+> GitHub 无单文件大小限制，可直接下载完整安装包。
+
+| 文件 | 说明 | 大小 |
+| --- | --- | --- |
+| [便携版 exe](https://github.com/myYangyunfan/dsh_desktop/releases/latest/download/DSH-Desktop-0.2.0-portable-x64.exe) | 免安装，双击即用 | ~126 MB |
+| [安装版 exe](https://github.com/myYangyunfan/dsh_desktop/releases/latest/download/DSH-Desktop-Setup-0.2.0-x64.exe) | 安装到系统，创建快捷方式 | ~126 MB |
 
 **首次使用**：双击运行后会显示启动动画，随后进入 DeepSeek Harness Web UI。如尚未配置 API Key，在界面内完成配置即可开始使用（与命令行 dsh 完全一致）。
 

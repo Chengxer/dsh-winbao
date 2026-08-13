@@ -8,11 +8,18 @@ A ready-to-use Windows desktop client wrapping [@deepseek-ai/dsh](https://www.np
 
 ## Download & Install
 
-> Go to the [Releases page](https://gitee.com/my-yang-yunfan/dsh_desktop/releases) for the latest version.
->
-> Due to Gitee's 100 MB single-file limit, installers are split into 2 parts. Download both and merge.
+### International users (GitHub, single-file download)
 
-### Option 1: Download parts + auto-merge (recommended)
+> GitHub has no single-file size limit — download the complete installer directly.
+
+| File | Description | Size |
+| --- | --- | --- |
+| [Portable exe](https://github.com/myYangyunfan/dsh_desktop/releases/latest/download/DSH-Desktop-0.2.0-portable-x64.exe) | No install needed, double-click to run | ~126 MB |
+| [Setup exe](https://github.com/myYangyunfan/dsh_desktop/releases/latest/download/DSH-Desktop-Setup-0.2.0-x64.exe) | Installs to system, creates shortcuts | ~126 MB |
+
+### China users (Gitee, split-part download)
+
+> Gitee has a 100 MB single-file limit, so installers are split into 2 parts. Download both and merge.
 
 1. Download the following files into **the same folder**:
 
@@ -26,19 +33,15 @@ A ready-to-use Windows desktop client wrapping [@deepseek-ai/dsh](https://www.np
 
 2. Download [merge.bat](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.2.0/merge.bat), place it in the same folder, and double-click to automatically merge the exe.
 
-### Option 2: Manual merge
+   Prefer manual merge? Run this in CMD:
 
-If you prefer not to use merge.bat, run this in CMD:
+   ```cmd
+   :: Portable
+   copy /b DSH-Desktop-0.2.0-portable-x64.exe.part1 + DSH-Desktop-0.2.0-portable-x64.exe.part2 DSH-Desktop-0.2.0-portable-x64.exe
 
-```cmd
-:: Portable
-copy /b DSH-Desktop-0.2.0-portable-x64.exe.part1 + DSH-Desktop-0.2.0-portable-x64.exe.part2 DSH-Desktop-0.2.0-portable-x64.exe
-
-:: Setup
-copy /b DSH-Desktop-Setup-0.2.0-x64.exe.part1 + DSH-Desktop-Setup-0.2.0-x64.exe.part2 DSH-Desktop-Setup-0.2.0-x64.exe
-```
-
-> Single-file downloads also available on GitHub: [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases/latest)
+   :: Setup
+   copy /b DSH-Desktop-Setup-0.2.0-x64.exe.part1 + DSH-Desktop-Setup-0.2.0-x64.exe.part2 DSH-Desktop-Setup-0.2.0-x64.exe
+   ```
 
 **First run**: A loading animation appears briefly, then the DeepSeek Harness Web UI loads. If you haven't configured an API Key yet, set it up in the UI to get started (same as the `dsh` CLI).
 
