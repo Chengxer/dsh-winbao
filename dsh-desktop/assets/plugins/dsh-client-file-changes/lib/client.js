@@ -663,7 +663,8 @@ window.__ModuleLoader__.load({
 									className: "dsh-fc-empty",
 									children: [
 										react_jsx_runtime.jsx("div", { className: "dsh-fc-empty-title", children: "暂无文件更改记录" }),
-										react_jsx_runtime.jsx("div", { className: "dsh-fc-empty-sub", children: "本会话中 agent 修改过的文件会显示在这里，支持逐文件或全部还原。也可以切到「全部文件」浏览项目目录。" }),
+										react_jsx_runtime.jsx("div", { className: "dsh-fc-empty-sub", children: "本会话中 agent 用 write/edit 等文件工具修改过的文件会显示在这里（支持还原）；通过代码执行类工具（run_code/pwsh/bash）改的文件无法生成 diff，不会出现在此。" }),
+										react_jsx_runtime.jsx("div", { className: "dsh-fc-empty-sub", children: "也可以切到「全部文件」浏览项目目录。" }),
 										react_jsx_runtime.jsx("div", {
 											className: "dsh-fc-empty-sub",
 											children: "投影诊断: " + (value === undefined ? "undefined（投影未返回）" : JSON.stringify(value).slice(0, 240))
