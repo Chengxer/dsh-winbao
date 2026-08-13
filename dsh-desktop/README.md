@@ -5,10 +5,16 @@
 - ✅ **免安装 Node**：内置独立的 Node 运行时与 npm CLI，目标机器无需安装 Node.js
 - ✅ **内置 dsh CLI**：完整打包 `@deepseek-ai/dsh` 及其全部插件，离线可用
 - ✅ **一键启动**：双击即启动 `dsh web`，自动挑空闲端口，就绪后加载到原生窗口
-- ✅ **退出即清理**：关闭窗口自动结束 dsh 进程树，不留孤儿进程
+- ✅ **风格化无边框窗口**：无原生标题栏/菜单栏，自绘 36px 玻璃栏（圆角图标 + 拖拽 + ⋯ 菜单 + 窗口控制），Win11 原生圆角；快捷键 Ctrl+R / F12 / F11 保留
+- ✅ **系统托盘常驻**：点关闭默认隐藏到托盘（可关闭），托盘菜单提供显示/检查更新/退出
+- ✅ **退出即清理**：退出应用自动结束 dsh 进程树，不留孤儿进程
 - ✅ **便携版**：`portable` 版数据（日志、配置）跟随 exe 所在目录，拷到 U 盘就能用
 - ✅ **与 CLI 共享配置**：默认沿用 dsh 自身的 `DSH_HOME`（通常是 `~\.dsh`），已有会话/API Key 直接生效
 - ✅ **跟随官方更新**：官方 @deepseek-ai/dsh 发新版时弹窗提醒，经用户同意后自动下载安装，重启生效，失败自动保留旧版
+- ✅ **客户端自更新**：自动检查上游仓库（GitHub→Gitee 双源，Gitee 分片自动合并）发布的 DSH Desktop 新版本，经用户同意后下载、替换、重启；便携版/安装版各自适配
+- ✅ **快捷方式自动维护**：便携版首次运行自动创建开始菜单 + 桌面快捷方式；exe 移动后自动重建（修复"快捷方式指向的文件消失"）；从临时目录运行时给出提示
+- ✅ **DeepSeek 余额小部件**：对话底部统计栏内联显示「本轮 ¥X.XX · 余额 ¥Y.YY」（自动注入配套 dsh 客户端插件，点击跳转充值）
+- ✅ **文件更改追踪 + 一键还原**：详情面板新增「文件」标签页，聚合本会话 agent 修改过的全部文件（新建/修改/删除、行级 diff、逐文件或全部还原）；数据只读复用会话日志已持久化的 `tool/result.meta.diffs`，还原由桌面壳做内容精确匹配后替换，失败安全提示
 - ✅ **会话完成系统通知**：agent 任务跑完时弹 Windows 系统通知，点击回到窗口
 
 ## 快速开始（成品用户）
@@ -30,6 +36,49 @@
 - 完成后提示**立即重启 / 稍后重启**，重启即用新版；启动时 dsh 路径解析优先使用 overlay、内置版本兜底。
 - 若新版启动失败，启动失败对话框提供**「回退到内置版本并重试」**一键回退。
 - 尊重用户 npm 配置：自定义 registry 镜像/代理请设 `NPM_CONFIG_REGISTRY`（如 `https://registry.npmmirror.com`）。
+
+## 客户端自更新（封装层）
+
+- 启动 60 秒后及此后每 12 小时，自动查询上游仓库的最新 release（**GitHub Releases → Gitee Releases 双源回退**；可用环境变量 `DSH_DESKTOP_RELEASE_API` 指向自定义镜像 API），比较当前版本。
+- 发现新版本时弹窗询问：**立即更新 / 跳过此版本 / 稍后**；同意后带进度条下载安装包（便携版选 `*-portable-x64.exe`，安装版选 `Setup-*-x64.exe`；Gitee 因单文件 100MB 限制拆分的 `.part1/.part2` 分片会自动按序下载并合并），下载到 `<数据目录>\updates\`。
+- 确认重启后：**便携版**用 detached 脚本等待旧 exe 解锁 → 备份 → 原地替换 → 自动启动新版本（只读目录自动退化为直接启动新 exe）；**安装版**等待进程退出后以向导方式启动新安装包。失败自动保留当前版本，下次启动继续提示待安装更新。
+- 菜单入口：chrome 栏 ⋯ 菜单 →「检查客户端更新…」；托盘菜单同样可用。跳过版本记录在 `settings.json`（`skipClientVersion`）。
+- **更新源可见可复制**：⋯ 菜单内「更新源」区块与「关于 DSH Desktop」对话框展示两个项目仓库地址（GitHub / Gitee），一键复制到剪贴板。
+- 链路自检：`node scripts/check-client-latest.js [--download]`（可设 `DSH_DESKTOP_RELEASE_API` / `PORTABLE_EXECUTABLE_DIR`）。
+
+## DeepSeek 余额小部件
+
+- 桌面端读取 `~/.dsh/.credentials.yaml` 的 `DEEPSEEK_API_KEY`（或环境变量），调用 `https://api.deepseek.com/user/balance`，每 15 分钟刷新，通过 preload 推送到 Web UI。
+- 配套 dsh 客户端插件（`assets/plugins/dsh-balance`）在每次启动时自动同步进 web profile 并注册到 `conversation.composer.dock`，在对话底部统计栏内联显示：**本轮 ¥X.XX · 余额 ¥Y.YY**（本轮费用按 token 用量 × 价格档估算，缓存命中/未命中/输出分别计价）。
+- 价格档默认：deepseek-chat 2/0.5/8、deepseek-reasoner 与 deepseek-v4-pro 4/1/16（¥/百万 token）；可在 `<数据目录>\settings.json` 的 `balancePrices.<model>` 覆盖。代理/镜像可用 `DEEPSEEK_API_BASE` 或 `DEEPSEEK_BALANCE_URL` 环境变量。
+- 纯浏览器打开 Web UI 时无桌面壳推送，小部件只显示「本轮」费用。
+
+## 快捷方式与托盘
+
+- **托盘**：点窗口关闭按钮默认隐藏到托盘并提示一次；托盘菜单可显示窗口 / 检查更新 / 开关会话通知 / 退出。chrome 菜单「关闭时最小化到托盘」可关闭该行为。
+- **快捷方式**：便携版首次运行自动创建桌面 + 开始菜单快捷方式（开始菜单快捷方式同时是 Windows Toast 通知的前置条件）；每次启动校验，exe 被移动后自动重建指向新位置；从系统临时目录运行时弹窗提醒移动到固定位置。
+
+## 文件更改追踪与回退
+
+- 详情面板新增「文件」标签页（与 对话/轨迹 并列）：聚合当前会话 agent 改过的所有文件，展示新建/修改/删除标记、行数变化与行级 diff。
+- **数据来源**：只读复用官方会话日志已持久化的 `tool/result.data.meta.diffs`（`ctx.fs` 写前锁内全文），配套 host 插件 `@deepseek-ai/dsh-file-changes` 注册 `fileChanges` 会话投影，零写入、零格式变更，对 dsh 升级完全稳定。
+- **还原**：逐文件或全部还原 —— 客户端把该文件的变更按逆序发给桌面壳，壳层做**内容精确匹配后替换**（新建→删除、删除→恢复、修改→回写写前全文）；文件已被后续改动时提示冲突，绝不覆盖未知内容。
+- **对话回退**：沿用 dsh 内置的会话分叉（消息尾部「从此处分叉」），可与文件还原组合使用。
+- 配套插件随桌面端分发（`assets/plugins/`），每次启动自动同步进 web profile 并幂等注册。
+
+## 项目文件树与 HTML/端口预览
+
+- 「文件」标签页内新增「全部文件」子视图：VSCode 风格的层级文件树（懒加载、目录优先排序、文件大小/修改时间、本会话改过的文件带绿点标记），点击文件用系统默认程序打开；配套 host 插件注册 `GET /api/dsh-files/list`（仅回环）。
+- **站内侧边预览**（可拖宽，宽度持久化）：树中 HTML 文件的悬停「▶」按钮或「本会话修改」列表的「预览」按钮打开右侧预览面板；宿主插件以 `GET /dsh-files/static/<绝对路径>` 提供静态文件服务，HTML 的相对资源引用（`./css`、`../img`）随 URL 自然解析，与本地打开一致。
+- **端口预览**：预览面板地址栏可直接输入 `3000` / `localhost:5173` 等，宿主插件探测本机回环监听端口（`GET /api/dsh-files/ports`）并以徽章列出，点击即预览；`GET /api/dsh-files/check` 提供在线状态检查（面板状态栏显示 HTTP 状态）。
+- 预览面板带前进/后退/刷新/外部打开（系统浏览器）；全部路由仅接受回环地址请求。
+
+## 会话内终端
+
+- 新增「终端」标签页（与 对话/轨迹/文件 并列）：在当前会话的项目目录下启动持久 PowerShell shell，SSE 流式输出、命令历史（↑/↓）、清屏、重启、断线自动重连（切换标签页/刷新不丢，回放最近 512KB 输出）。
+- **编码**：宿主插件用显式 UTF-8 的 mini-REPL（自建读行循环 + `Invoke-Expression`）绕开 PowerShell 5.1 原生 REPL 对重定向 stdin 的编码漂移，中文输入输出双向干净。
+- **限制**：非 PTY（vim/htop 等全屏交互程序不支持）；PowerShell 语法（`&&` 用 `;` 或 `if ($?)` 替代）；多行脚本请用 `;` 分行。
+- 宿主插件路由：`GET /dsh-files/term/events`（SSE）、`POST /dsh-files/term/input`、`POST /dsh-files/term/close`，全部仅接受回环地址请求；断开后 shell 保留 15 分钟。
 
 ## 会话完成通知
 
@@ -79,7 +128,7 @@ npm run dist                   # 构建 portable + NSIS 安装包，输出到 di
 | 决策 | 原因 |
 | --- | --- |
 | `asar: false` | dsh 依赖 sharp / node-pty / koffi 等原生模块，必须以真实文件落盘 |
-| 内置独立 node.exe + npm | 预编译原生模块 ABI 与安装时的 Node 版本绑定；Electron 内嵌 Node ABI 不同。内置同版本 node.exe 零配置保证一致，npm 用于官方更新 |
+| 内置独立 node.exe + npm | 预编译原生模块 ABI 与安装时的 Node 版本绑定；Electron 内嵌 Node ABI 不同。内置同版本 node.exe 零配置保证一致，npm 用于官方更新。注意：electron-builder 复制 extraResources 时会剥掉嵌套 node_modules，npm 自己的依赖由 \`afterPack\` 钩子原样补拷（scripts/after-pack.js） |
 | `npmRebuild: false` | 绝不为 Electron 重编译原生模块，否则内置 node.exe 反而加载不了 |
 | `--port 0` + 解析 stdout | 由 OS 分配空闲端口，避免端口冲突；本机回环绑定不对外暴露 |
 | 退出时 `taskkill /T /F` | dsh 会派生 pwsh 等子进程，按进程树整体回收 |
@@ -107,16 +156,20 @@ npm run dist                   # 构建 portable + NSIS 安装包，输出到 di
 
 ```
 dsh-desktop/
-├── main.js               # Electron 主进程（启动/监控/回收 dsh web + 通知 + 更新）
-├── updater.js            # 官方更新引擎（检查 / 同意后安装 / 回退）
+├── main.js               # Electron 主进程（无边框窗口/托盘/自绘 chrome IPC + 余额推送 + 客户端自更新 + 快捷方式维护）
+├── updater.js            # dsh agent 官方更新引擎（检查 / 同意后安装 / 回退）
+├── client-updater.js     # 客户端（封装层）自更新引擎（GitHub/Gitee 双源 + 分片合并 + 原地替换）
+├── balance.js            # DeepSeek 账户余额查询（主进程）
 ├── session-watcher.js    # 会话完成监听（zstd 多帧解码 + turn/end 检测）
-├── preload.js            # 沙箱预加载（仅暴露版本信息）
-├── assets/               # 加载页、更新进度页、图标
+├── preload.js            # 沙箱预加载（自绘玻璃标题栏 + 窗口控制/菜单 IPC + 余额事件桥）
+├── assets/               # 加载页、更新进度页、图标、托盘图标、配套 dsh 插件
+│   └── plugins/          # dsh-balance（余额小部件）、dsh-file-changes（文件更改投影）、dsh-client-file-changes（「文件」视图）—— 自动同步进 web profile
 ├── scripts/
 │   ├── fetch-node.js     # 内置 node.exe 复制脚本
 │   ├── fetch-npm.js      # 内置 npm CLI 复制脚本
-│   ├── build-icon.ps1    # 生成应用图标
-│   ├── check-latest.js   # 更新链路测试工具
+│   ├── build-icon.ps1    # 生成应用图标（透明圆角蒙版）+ 托盘图标
+│   ├── check-latest.js   # agent 更新链路测试工具
+│   ├── check-client-latest.js # 客户端更新链路测试工具
 │   ├── test-watcher.js   # 通知检测单测
 │   └── inspect-session.js# 会话日志解析工具
 ├── build/icon.png        # electron-builder 图标源

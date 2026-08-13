@@ -5,6 +5,10 @@ directories:
   output: dist
   buildResources: build
 
+# electron-builder strips nested node_modules from extraResources; this hook
+# restores the bundled npm CLI's own dependencies after packing.
+afterPack: scripts/after-pack.js
+
 # Native modules (sharp / node-pty / koffi) are loaded by the bundled plain
 # node.exe, so keep everything as real files and never rebuild for Electron.
 asar: false
@@ -14,6 +18,8 @@ buildDependenciesFromSource: false
 files:
   - main.js
   - updater.js
+  - client-updater.js
+  - balance.js
   - session-watcher.js
   - preload.js
   - assets/**/*

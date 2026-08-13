@@ -4,3 +4,7 @@ vendor/
 *.log
 data/
 .DS_Store
+# build/ 只保留图标（打包必需），其余构建产物不入库
+build/*
+!build/icon.ico
+!build/icon.png

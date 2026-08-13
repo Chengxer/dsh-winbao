@@ -50,10 +50,13 @@ copy /b DSH-Desktop-Setup-0.1.0-x64.exe.part1 + DSH-Desktop-Setup-0.1.0-x64.exe.
 - **No Node.js needed**: Bundles a standalone Node runtime and npm CLI — target machine needs nothing extra
 - **Bundled dsh CLI**: Full `@deepseek-ai/dsh` package with all plugins, works offline
 - **One-click launch**: Double-click to start `dsh web`, auto-selects a free port, loads into a native window
-- **Clean exit**: Closing the window kills the entire dsh process tree — no orphan processes
+- **Frameless styled window + system tray**: No native title/menu bar — a custom glass bar (rounded icon, ⋯ menu, window controls) with Win11 rounded corners; closing hides to the tray
+- **Clean exit**: Quitting kills the entire dsh process tree — no orphan processes
 - **Portable**: Data follows the exe, copy it to a USB stick and go
 - **Shares CLI config**: Defaults to `DSH_HOME` (typically `~\.dsh`), so existing sessions/API keys work out of the box
-- **Auto-update**: Notifies on official dsh releases; installs on consent, restarts to apply, rolls back on failure
+- **Dual auto-update**: official dsh agent updates (npm overlay) + client-wrapper self-update (GitHub→Gitee fallback, split-part auto-merge, in-place replace & restart), both user-consented
+- **Shortcut self-healing**: the portable build creates/repairs desktop & Start Menu shortcuts automatically
+- **DeepSeek balance widget**: inline「this turn ¥X · balance ¥Y」in the conversation stats bar, click to top up
 - **Session notifications**: Windows system notification when an agent task completes — click to bring the window back
 
 ## Requirements

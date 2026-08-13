@@ -11,6 +11,10 @@ dsh-desktop/vendor/
 .dev-data/
 .update-test/
 
+# openclaw-dsh-bridge (微信桥接插件) build artifacts
+openclaw-dsh-bridge/node_modules/
+openclaw-dsh-bridge/dist/
+
 # Logs
 *.log
 dsh-desktop/data/
@@ -18,3 +22,8 @@ dsh-desktop/data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Temp & updater artifacts
+*.tmp
+updates/
+

@@ -121,12 +121,16 @@ function runNpm(ctx, args, { timeoutMs = 30 * 60 * 1000, logStream = null } = {}
     let stdoutBuf = '';
     const finish = (fn, value) => { if (!settled) { settled = true; clearTimeout(timer); activeProc = null; fn(value); } };
     const timer = setTimeout(() => { killProc(proc); finish(reject, new Error('npm 执行超时（' + Math.round(timeoutMs / 1000) + ' 秒）')); }, timeoutMs);
+    let stderrBuf = '';
     proc.stdout.on('data', (c) => { stdoutBuf += c.toString(); if (logStream) logStream.write(c); });
-    proc.stderr.on('data', (c) => { if (logStream) logStream.write(c); });
+    proc.stderr.on('data', (c) => { stderrBuf += c.toString(); if (logStream) logStream.write(c); });
     proc.on('error', (err) => finish(reject, err));
     proc.on('exit', (code) => {
       if (code === 0) finish(resolve, stdoutBuf);
-      else finish(reject, new Error('npm 退出码 ' + code));
+      else {
+        const tail = (stderrBuf + stdoutBuf).split(/\r?\n/).filter(Boolean).slice(-6).join(' | ');
+        finish(reject, new Error('npm 退出码 ' + code + (tail ? '：' + tail.slice(-500) : '')));
+      }
     });
   });
 }
@@ -167,14 +171,20 @@ async function applyUpdate(ctx, version) {
   }
 
   // Atomic swap: old overlay -> backup, staging -> overlay, drop backup.
+  // M4 修复：两处重命名都纳入 try，失败时回滚并清理 staging 残留。
   const overlay = overlayDir(ctx);
   const backup = path.join(ctx.userDataDir, 'agent-old-' + Date.now());
-  if (fs.existsSync(overlay)) fs.renameSync(overlay, backup);
   try {
+    if (fs.existsSync(overlay)) fs.renameSync(overlay, backup);
     fs.renameSync(staging, overlay);
   } catch (err) {
-    if (fs.existsSync(backup)) fs.renameSync(backup, overlay);
-    throw new Error('切换新版本失败: ' + err.message);
+    try {
+      if (!fs.existsSync(overlay) && fs.existsSync(backup)) fs.renameSync(backup, overlay);
+    } catch (rollbackErr) {
+      ctx.log('update', '回滚 overlay 失败: ' + String(rollbackErr && rollbackErr.message));
+    }
+    fs.rmSync(staging, { recursive: true, force: true });
+    throw new Error('切换新版本失败: ' + (err && err.message) + '（staging 已清理）');
   }
   fs.rmSync(backup, { recursive: true, force: true });
 
