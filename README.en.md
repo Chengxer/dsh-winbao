@@ -6,14 +6,39 @@ A ready-to-use Windows desktop client wrapping [@deepseek-ai/dsh](https://www.np
 
 ---
 
-## Download
+## Download & Install
 
-> Go to the [Releases page](https://github.com/myYangyunfan/dsh_desktop/releases/latest) for the latest version.
+> Go to the [Releases page](https://gitee.com/my-yang-yunfan/dsh_desktop/releases) for the latest version.
+>
+> Due to Gitee's 100 MB single-file limit, installers are split into 2 parts. Download both and merge.
 
-| File | Description | Size |
-| --- | --- | --- |
-| [Portable exe](https://github.com/myYangyunfan/dsh_desktop/releases/latest/download/DSH-Desktop-0.1.0-portable-x64.exe) | No install needed, just double-click and run | ~125 MB |
-| [Setup exe](https://github.com/myYangyunfan/dsh_desktop/releases/latest/download/DSH-Desktop-Setup-0.1.0-x64.exe) | NSIS installer, creates desktop/start menu shortcuts | ~125 MB |
+### Option 1: Download parts + auto-merge (recommended)
+
+1. Download the following files into **the same folder**:
+
+   **Portable** (no install, double-click to run, USB-friendly):
+   - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.1.0/DSH-Desktop-0.1.0-portable-x64.exe.part1) (~95 MB)
+   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.1.0/DSH-Desktop-0.1.0-portable-x64.exe.part2) (~30 MB)
+
+   **Setup** (installs to system, creates desktop/start menu shortcuts):
+   - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.1.0/DSH-Desktop-Setup-0.1.0-x64.exe.part1) (~95 MB)
+   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.1.0/DSH-Desktop-Setup-0.1.0-x64.exe.part2) (~30 MB)
+
+2. Download [merge.bat](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.1.0/merge.bat), place it in the same folder, and double-click to automatically merge the exe.
+
+### Option 2: Manual merge
+
+If you prefer not to use merge.bat, run this in CMD:
+
+```cmd
+:: Portable
+copy /b DSH-Desktop-0.1.0-portable-x64.exe.part1 + DSH-Desktop-0.1.0-portable-x64.exe.part2 DSH-Desktop-0.1.0-portable-x64.exe
+
+:: Setup
+copy /b DSH-Desktop-Setup-0.1.0-x64.exe.part1 + DSH-Desktop-Setup-0.1.0-x64.exe.part2 DSH-Desktop-Setup-0.1.0-x64.exe
+```
+
+> Single-file downloads also available on GitHub: [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases/latest)
 
 **First run**: A loading animation appears briefly, then the DeepSeek Harness Web UI loads. If you haven't configured an API Key yet, set it up in the UI to get started (same as the `dsh` CLI).
 
@@ -45,7 +70,7 @@ npm run fetch-runtime    # bundle node.exe + npm CLI
 npm run dist             # build portable + NSIS installer -> dist/
 ```
 
-> Behind a firewall? Electron mirror: `$env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'`; builder toolchain mirror: `$env:ELECTRON_BUILDER_BINARIES_MIRROR='https://npmmirror.com/mirrors/electron-builder-binaries/'`.
+> Behind a firewall? Electron mirror: `$env:ELECTRON_MIRROR='https://npmirror.com/mirrors/electron/'`; builder toolchain mirror: `$env:ELECTRON_BUILDER_BINARIES_MIRROR='https://npmirror.com/mirrors/electron-builder-binaries/'`.
 
 ## Architecture
 
