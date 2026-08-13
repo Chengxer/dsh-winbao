@@ -6,12 +6,12 @@
 
 ## 下载安装
 
-> 前往 [Releases 页面](https://github.com/myYangyunfan/dsh_desktop/releases/latest) 获取最新版本。
+> 前往 [Releases 页面](https://gitee.com/my-yang-yunfan/dsh_desktop/releases) 获取最新版本。
 
 | 文件 | 说明 | 大小 |
 | --- | --- | --- |
-| [便携版 exe](https://github.com/myYangyunfan/dsh_desktop/releases/latest/download/DSH-Desktop-0.1.0-portable-x64.exe) | 免安装，双击即用，可放 U 盘 | ~125 MB |
-| [安装版 exe](https://github.com/myYangyunfan/dsh_desktop/releases/latest/download/DSH-Desktop-Setup-0.1.0-x64.exe) | 安装到系统，创建桌面/开始菜单快捷方式 | ~125 MB |
+| [便携版 exe](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.1.0/DSH-Desktop-0.1.0-portable-x64.exe) | 免安装，双击即用，可放 U 盘 | ~125 MB |
+| [安装版 exe](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.1.0/DSH-Desktop-Setup-0.1.0-x64.exe) | 安装到系统，创建桌面/开始菜单快捷方式 | ~125 MB |
 
 **首次使用**：双击运行后会显示启动动画，随后进入 DeepSeek Harness Web UI。如尚未配置 API Key，在界面内完成配置即可开始使用（与命令行 dsh 完全一致）。
 
