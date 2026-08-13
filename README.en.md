@@ -17,14 +17,14 @@ A ready-to-use Windows desktop client wrapping [@deepseek-ai/dsh](https://www.np
 1. Download the following files into **the same folder**:
 
    **Portable** (no install, double-click to run, USB-friendly):
-   - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.1.0/DSH-Desktop-0.1.0-portable-x64.exe.part1) (~95 MB)
-   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.1.0/DSH-Desktop-0.1.0-portable-x64.exe.part2) (~30 MB)
+   - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.2.0/DSH-Desktop-0.2.0-portable-x64.exe.part1) (~95 MB)
+   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.2.0/DSH-Desktop-0.2.0-portable-x64.exe.part2) (~31 MB)
 
    **Setup** (installs to system, creates desktop/start menu shortcuts):
-   - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.1.0/DSH-Desktop-Setup-0.1.0-x64.exe.part1) (~95 MB)
-   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.1.0/DSH-Desktop-Setup-0.1.0-x64.exe.part2) (~30 MB)
+   - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.2.0/DSH-Desktop-Setup-0.2.0-x64.exe.part1) (~95 MB)
+   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.2.0/DSH-Desktop-Setup-0.2.0-x64.exe.part2) (~32 MB)
 
-2. Download [merge.bat](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.1.0/merge.bat), place it in the same folder, and double-click to automatically merge the exe.
+2. Download [merge.bat](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.2.0/merge.bat), place it in the same folder, and double-click to automatically merge the exe.
 
 ### Option 2: Manual merge
 
@@ -32,10 +32,10 @@ If you prefer not to use merge.bat, run this in CMD:
 
 ```cmd
 :: Portable
-copy /b DSH-Desktop-0.1.0-portable-x64.exe.part1 + DSH-Desktop-0.1.0-portable-x64.exe.part2 DSH-Desktop-0.1.0-portable-x64.exe
+copy /b DSH-Desktop-0.2.0-portable-x64.exe.part1 + DSH-Desktop-0.2.0-portable-x64.exe.part2 DSH-Desktop-0.2.0-portable-x64.exe
 
 :: Setup
-copy /b DSH-Desktop-Setup-0.1.0-x64.exe.part1 + DSH-Desktop-Setup-0.1.0-x64.exe.part2 DSH-Desktop-Setup-0.1.0-x64.exe
+copy /b DSH-Desktop-Setup-0.2.0-x64.exe.part1 + DSH-Desktop-Setup-0.2.0-x64.exe.part2 DSH-Desktop-Setup-0.2.0-x64.exe
 ```
 
 > Single-file downloads also available on GitHub: [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases/latest)

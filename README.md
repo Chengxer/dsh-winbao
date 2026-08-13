@@ -17,14 +17,14 @@
 1. 下载以下文件，放到**同一个文件夹**：
 
    **便携版**（免安装，双击即用，可放 U 盘）：
-   - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.1.0/DSH-Desktop-0.1.0-portable-x64.exe.part1)（~95 MB）
-   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.1.0/DSH-Desktop-0.1.0-portable-x64.exe.part2)（~30 MB）
+   - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.2.0/DSH-Desktop-0.2.0-portable-x64.exe.part1)（~95 MB）
+   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.2.0/DSH-Desktop-0.2.0-portable-x64.exe.part2)（~31 MB）
 
    **安装版**（安装到系统，创建桌面/开始菜单快捷方式）：
-   - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.1.0/DSH-Desktop-Setup-0.1.0-x64.exe.part1)（~95 MB）
-   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.1.0/DSH-Desktop-Setup-0.1.0-x64.exe.part2)（~30 MB）
+   - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.2.0/DSH-Desktop-Setup-0.2.0-x64.exe.part1)（~95 MB）
+   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.2.0/DSH-Desktop-Setup-0.2.0-x64.exe.part2)（~32 MB）
 
-2. 下载 [merge.bat](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.1.0/merge.bat)，放到同一文件夹，双击运行即可自动合并出 exe。
+2. 下载 [merge.bat](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.2.0/merge.bat)，放到同一文件夹，双击运行即可自动合并出 exe。
 
 ### 方式二：手动合并
 
@@ -32,10 +32,10 @@
 
 ```cmd
 :: 便携版
-copy /b DSH-Desktop-0.1.0-portable-x64.exe.part1 + DSH-Desktop-0.1.0-portable-x64.exe.part2 DSH-Desktop-0.1.0-portable-x64.exe
+copy /b DSH-Desktop-0.2.0-portable-x64.exe.part1 + DSH-Desktop-0.2.0-portable-x64.exe.part2 DSH-Desktop-0.2.0-portable-x64.exe
 
 :: 安装版
-copy /b DSH-Desktop-Setup-0.1.0-x64.exe.part1 + DSH-Desktop-Setup-0.1.0-x64.exe.part2 DSH-Desktop-Setup-0.1.0-x64.exe
+copy /b DSH-Desktop-Setup-0.2.0-x64.exe.part1 + DSH-Desktop-Setup-0.2.0-x64.exe.part2 DSH-Desktop-Setup-0.2.0-x64.exe
 ```
 
 > GitHub 也可直接下载单文件完整版：[GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases/latest)
