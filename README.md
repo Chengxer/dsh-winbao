@@ -1,3 +1,5 @@
+[中文](README.md) | [English](README.en.md)
+
 # DSH Desktop
 
 把 [@deepseek-ai/dsh](https://www.npmjs.com/package/@deepseek-ai/dsh)（DeepSeek Harness）封装为开箱即用的 Windows 桌面客户端。
