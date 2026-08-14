@@ -15,23 +15,23 @@
 1. 下载以下文件，放到**同一个文件夹**：
 
    **便携版**（免安装，双击即用，可放 U 盘）：
-   - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.0/DSH-Desktop-0.3.0-portable-x64.exe.part1)（~95 MB）
-   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.0/DSH-Desktop-0.3.0-portable-x64.exe.part2)（~31 MB）
+   - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.1/DSH-Desktop-0.3.1-portable-x64.exe.part1)（~95 MB）
+   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.1/DSH-Desktop-0.3.1-portable-x64.exe.part2)（~31 MB）
 
    **安装版**（安装到系统，创建桌面/开始菜单快捷方式）：
-   - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.0/DSH-Desktop-Setup-0.3.0-x64.exe.part1)（~95 MB）
-   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.0/DSH-Desktop-Setup-0.3.0-x64.exe.part2)（~32 MB）
+   - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.1/DSH-Desktop-Setup-0.3.1-x64.exe.part1)（~95 MB）
+   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.1/DSH-Desktop-Setup-0.3.1-x64.exe.part2)（~32 MB）
 
-2. 下载 [merge.bat](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.0/merge.bat)，放到同一文件夹，双击运行即可自动合并出 exe。
+2. 下载 [merge.bat](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.1/merge.bat)，放到同一文件夹，双击运行即可自动合并出 exe。
 
    不想用 merge.bat？在 CMD 中手动合并：
 
    ```cmd
    :: 便携版
-   copy /b DSH-Desktop-0.3.0-portable-x64.exe.part1 + DSH-Desktop-0.3.0-portable-x64.exe.part2 DSH-Desktop-0.3.0-portable-x64.exe
+   copy /b DSH-Desktop-0.3.1-portable-x64.exe.part1 + DSH-Desktop-0.3.1-portable-x64.exe.part2 DSH-Desktop-0.3.1-portable-x64.exe
 
    :: 安装版
-   copy /b DSH-Desktop-Setup-0.3.0-x64.exe.part1 + DSH-Desktop-Setup-0.3.0-x64.exe.part2 DSH-Desktop-Setup-0.3.0-x64.exe
+   copy /b DSH-Desktop-Setup-0.3.1-x64.exe.part1 + DSH-Desktop-Setup-0.3.1-x64.exe.part2 DSH-Desktop-Setup-0.3.1-x64.exe
    ```
 
 ### 国际用户（GitHub，单文件下载）
@@ -40,8 +40,8 @@
 
 | 文件 | 说明 | 大小 |
 | --- | --- | --- |
-| [便携版 exe](https://github.com/myYangyunfan/dsh_desktop/releases/latest/download/DSH-Desktop-0.3.0-portable-x64.exe) | 免安装，双击即用 | ~126 MB |
-| [安装版 exe](https://github.com/myYangyunfan/dsh_desktop/releases/latest/download/DSH-Desktop-Setup-0.3.0-x64.exe) | 安装到系统，创建快捷方式 | ~126 MB |
+| [便携版 exe](https://github.com/myYangyunfan/dsh_desktop/releases/latest/download/DSH-Desktop-0.3.1-portable-x64.exe) | 免安装，双击即用 | ~126 MB |
+| [安装版 exe](https://github.com/myYangyunfan/dsh_desktop/releases/latest/download/DSH-Desktop-Setup-0.3.1-x64.exe) | 安装到系统，创建快捷方式 | ~126 MB |
 
 **首次使用**：双击运行后会显示启动动画，随后进入 DeepSeek Harness Web UI。如尚未配置 API Key，在界面内完成配置即可开始使用（与命令行 dsh 完全一致）。
 
@@ -63,6 +63,11 @@
 - **DeepSeek 余额小部件**：对话底部统计栏显示「本轮 ¥X · 余额 ¥Y」，点击跳转充值
 - **文件更改追踪 + 一键还原**：详情面板「文件」标签页查看本会话全部文件改动（行级 diff）并逐文件/全部还原，数据只读复用会话日志，稳定不受升级影响
 - **会话完成通知**：agent 任务跑完时弹 Windows 系统通知，点击回到窗口
+
+- **隐藏对话输出**：设置 → 通用设置 →「隐藏对话输出」，隐藏模型长篇文字，仅保留工具调用/文件操作/结果等重要信息
+- **会话导航滑轨**：对话右侧的虚化滑轨随会话长度变化；悬停时在鼠标位置显示垂直短横线预览，点击才跳转
+- **便携版解压缓存**：首次解压后缓存到 `%TEMP%\dsh-desktop-portable`，后续启动秒开，不再每次解压 132MB / 2.4 万文件
+- **启动自愈与看门狗**：自动修复 profile 符号链接损坏导致的 `dsh web` 退出码 1；主进程异常退出时自动拉起并发送恢复通知
 
 ## 系统要求
 

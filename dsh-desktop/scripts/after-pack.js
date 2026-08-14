@@ -17,6 +17,11 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
+// Portable cache patch must be applied before electron-builder compiles the
+// NSIS portable target; doing it here covers direct `electron-builder` runs,
+// not just `npm run dist`.
+require('./patch-portable-template');
+
 // Regexes for files that are safe to delete (pure metadata / dev artifacts).
 const DROP_BASENAME = /^(LICENSE.*|README.*|CHANGELOG.*|HISTORY.*|COPYING.*|NOTICE.*|AUTHORS.*|SECURITY.*|CONTRIBUTING.*|\.gitignore|\.npmignore|\.editorconfig|\.eslintrc.*|\.prettierrc.*|\.babelrc.*)$/i;
 const DROP_EXT = new Set(['.map', '.md', '.markdown', '.tsbuildinfo', '.d.ts']);

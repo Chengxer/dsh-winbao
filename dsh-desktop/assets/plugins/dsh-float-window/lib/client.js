@@ -31,8 +31,10 @@ window.__ModuleLoader__.load({
 			// 浮窗侧：折叠时隐藏 56px 侧栏 rail，让会话占满。
 			// AppFrame 根节点在折叠时带 data-sidebar-collapsed 属性（官方布局源码），
 			// 用它做稳定选择器，避免依赖哈希类名。
+			// 注意：绝不能对首个子列（sidebarCol）用 display:none —— 该列离开
+			// grid 后，centerCol/detailsCol 会自动前移一列：centerCol 落入 0px
+			// 侧栏轨道，detailsCol 落入 1fr 中间轨道，表现为「会话空白、只剩详情」。
 			'body[data-dsh-float] [data-sidebar-collapsed]{grid-template-columns:0 minmax(0,1fr) 0!important}',
-			'body[data-dsh-float] [data-sidebar-collapsed]>div:first-child{display:none}',
 			// 主窗侧：弹出按钮（与头部其它动作一致的小图标按钮）。
 			".dsh-float-btn{display:inline-flex;align-items:center;justify-content:center;",
 			"box-sizing:border-box;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;",
@@ -147,13 +149,13 @@ window.__ModuleLoader__.load({
 				if (sessions.list && typeof sessions.list.getSnapshot === "function") {
 					const snap = sessions.list.getSnapshot();
 					if (snap && typeof snap === "object") {
-						// DEBUG: 打印快照顶层键，排查浮窗空白问题
+						// DEBUG: 打印快照顶层键，排查浮窗空白问题（stringify 后 DevTools/日志都能直接看到键名）。
 						if (!selectTarget._debugged) {
 							selectTarget._debugged = true;
-							console.log("[dsh-float-window] snap keys:", Object.keys(snap), "targetId:", targetId);
-							if (snap.byId) console.log("[dsh-float-window] snap.byId keys:", Object.keys(snap.byId).slice(0, 5));
-							if (Array.isArray(snap.items)) console.log("[dsh-float-window] snap.items sample:", snap.items.slice(0, 3).map((i) => i && i.id));
-							if (Array.isArray(snap.summaries)) console.log("[dsh-float-window] snap.summaries sample:", snap.summaries.slice(0, 3).map((s) => s && s.id));
+							console.log("[dsh-float-window] snap keys:", JSON.stringify(Object.keys(snap)), "phase:", snap.phase, "targetId:", targetId);
+							if (snap.byId) console.log("[dsh-float-window] snap.byId keys:", JSON.stringify(Object.keys(snap.byId).slice(0, 5)));
+							if (Array.isArray(snap.items)) console.log("[dsh-float-window] snap.items sample:", JSON.stringify(snap.items.slice(0, 3).map((i) => i && i.id)));
+							if (Array.isArray(snap.summaries)) console.log("[dsh-float-window] snap.summaries sample:", JSON.stringify(snap.summaries.slice(0, 3).map((s) => s && s.id)));
 						}
 						let found = false;
 						if (snap.byId && typeof snap.byId === "object" && snap.byId[targetId]) {
@@ -261,6 +263,9 @@ window.__ModuleLoader__.load({
 		// ------------------------------------------------------------------
 		function setupDragOut() {
 			let dragCtx = null;
+			// 主进程已按 sessionId 去重；这里再对拖拽手势做 1.2s 节流，
+			// 防止同一手势被重复监听器/dragleave 触发多次。
+			let lastPop = { at: 0, sessionId: "" };
 
 			const onDragStart = (e) => {
 				const row = e.target && e.target.closest ? e.target.closest('[role="treeitem"][draggable]') : null;
@@ -275,8 +280,11 @@ window.__ModuleLoader__.load({
 			const onDragLeave = (e) => {
 				if (!dragCtx || dragCtx.popped) return;
 				if (e.relatedTarget !== null) return; // 仍在窗口内（子元素间切换也会触发）
+				const now = Date.now();
+				if (lastPop.sessionId === dragCtx.sessionId && now - lastPop.at < 1200) return;
 				// 拖拽已越出窗口边界 → 弹出独立窗口（一个拖拽手势只触发一次）。
 				dragCtx.popped = true;
+				lastPop = { at: now, sessionId: dragCtx.sessionId };
 				const bridge = typeof window !== "undefined" ? window.dshDesktop : undefined;
 				if (bridge && bridge.floatWindow && typeof bridge.floatWindow.open === "function") {
 					bridge.floatWindow.open(dragCtx.sessionId);

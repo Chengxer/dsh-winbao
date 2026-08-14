@@ -83,7 +83,7 @@ let webUrl = null;
 let quitting = false;
 let updateBusy = false;
 let notifyOnTurnEnd = true;
-let currentSessionId = ''; // 主窗当前正在观看的会话（渲染进程上报），用于抑制「正在看还在弹」的通知
+let currentSessionId = ''; // 主窗当前正在观看的会话（渲染进程上报），现仅用于完成通知的调试日志
 let sessionWatcher = null;
 let userDataDir = '';
 let logsDir = '';
@@ -95,12 +95,14 @@ let clientUpdateBusy = false;
 let balanceCache = null;
 let balanceTimer = null;
 let restartingServer = false;
+let trayRecoveryTimer = null;
 
 // ---------------------------------------------------------------------------
 // 会话浮窗（分屏）：把会话弹出到独立窗口
 // ---------------------------------------------------------------------------
 const FLOAT_MAX = 8; // 浮窗总数上限，防资源滥用
 const floatWindows = new Set(); // BrowserWindow 集合
+const floatBySession = new Map(); // sessionId -> BrowserWindow（同一会话只允许一个浮窗）
 let sponsorWindow = null; // 「请作者喝咖啡」独立小窗（单例）
 
 // ---------------------------------------------------------------------------
@@ -112,6 +114,175 @@ function log(tag, msg) {
   try { if (desktopLog) desktopLog.write(line); } catch {}
   if (process.env.DSH_DESKTOP_DEBUG) process.stdout.write(line);
 }
+
+// ---------------------------------------------------------------------------
+// 运行状态标记 + 看门狗（防“进程/托盘凭空消失且无任何提醒”）
+// ---------------------------------------------------------------------------
+
+function runStatePath() {
+  return path.join(userDataDir, 'run-state.json');
+}
+
+function writeRunState(extra = {}) {
+  try {
+    fs.writeFileSync(runStatePath(), JSON.stringify({
+      pid: process.pid,
+      exe: process.execPath,
+      cleanExit: false,
+      startedAt: new Date().toISOString(),
+      version: APP_VERSION,
+      ...extra,
+    }));
+  } catch (err) {
+    log('watchdog', '写运行状态失败: ' + err.message);
+  }
+}
+
+function markCleanExit() {
+  try {
+    const p = runStatePath();
+    let state = {};
+    try { state = JSON.parse(fs.readFileSync(p, 'utf8')); } catch {}
+    state.cleanExit = true;
+    state.endedAt = new Date().toISOString();
+    fs.writeFileSync(p, JSON.stringify(state));
+  } catch (err) {
+    log('watchdog', '写退出标记失败: ' + err.message);
+  }
+}
+
+function detectUncleanPreviousRun() {
+  try {
+    const prev = JSON.parse(fs.readFileSync(runStatePath(), 'utf8'));
+    if (prev && prev.cleanExit !== true && prev.pid && Number(prev.pid) !== process.pid) {
+      log('crash', '检测到上次运行未正常退出: ' + JSON.stringify(prev));
+      return prev;
+    }
+  } catch {}
+  return null;
+}
+
+function notifyUncleanRestart(prev) {
+  try {
+    const started = prev && prev.startedAt ? new Date(prev.startedAt) : null;
+    const when = started && !Number.isNaN(started.getTime())
+      ? started.toLocaleString('zh-CN', { hour12: false })
+      : '上次';
+    const n = new Notification({
+      title: 'DSH Desktop 已自动恢复',
+      body: `检测到应用在 ${when} 前后未正常退出，看门狗已重新启动应用。`,
+      icon: path.join(__dirname, 'assets', 'icon.png'),
+    });
+    n.on('click', () => showMainWindow());
+    n.show();
+  } catch (err) {
+    log('crash', '恢复通知发送失败: ' + err.message);
+  }
+}
+
+function startWatchdog() {
+  // 仅安装版启用：开发模式下重启 Electron 会与调试流程互相干扰。
+  if (!app.isPackaged || !IS_WIN) return;
+  const watchdogJs = path.join(__dirname, 'watchdog.js');
+  if (!fs.existsSync(watchdogJs)) return;
+  try {
+    const child = spawn(nodeExe(), [
+      watchdogJs,
+      '--pid=' + process.pid,
+      '--exe=' + process.execPath,
+      '--state=' + runStatePath(),
+      '--log=' + path.join(logsDir, 'watchdog.log'),
+    ], {
+      cwd: path.dirname(process.execPath),
+      detached: true,
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+    log('watchdog', `看门狗已启动 pid=${child.pid}`);
+  } catch (err) {
+    log('watchdog', '看门狗启动失败: ' + err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// profile fallback 自愈：dsh 要求 $DSH_HOME/profiles/node_modules 下属于
+// 依赖闭包的包必须是指向其真实安装位置的符号链接。用户迁移/复制/云同步
+// DSH_HOME 时这些链接常被还原成真实目录，dsh web 会以 exit code 1 启动失败。
+// 这里在每次启动 dsh 前调用官方 healProfilesModuleFallback；它若报
+// "exists and is not a symlink"，就移除该真实目录后重试，直到修复完成。
+// ---------------------------------------------------------------------------
+function dshPackageJson() {
+  const bin = dshBin();
+  const candidates = [
+    path.join(path.dirname(bin), 'package.json'),
+    path.join(path.dirname(bin), '..', 'package.json'),
+  ];
+  for (const candidate of candidates) {
+    try { if (fs.existsSync(candidate)) return candidate; } catch {}
+  }
+  try { return require.resolve('@deepseek-ai/dsh/package.json'); } catch { return candidates[1]; }
+}
+
+async function repairProfileFallback(home) {
+  let bootMod;
+  try {
+    bootMod = await import('@deepseek-ai/dsh-app-boot');
+  } catch (err) {
+    log('boot', 'profile fallback 修复模块不可用: ' + err.message);
+    return;
+  }
+  if (typeof bootMod.healProfilesModuleFallback !== 'function') return;
+  const modulesRoot = path.join(home, 'profiles', 'node_modules');
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    try {
+      bootMod.healProfilesModuleFallback(dshPackageJson(), home);
+      if (attempt > 0) log('boot', `profile fallback 已修复（重试 ${attempt} 次）`);
+      return;
+    } catch (err) {
+      const message = String((err && err.message) || err);
+      const match = /dsh: (.+) exists and is not a symlink/.exec(message);
+      if (!match) {
+        log('boot', 'profile fallback 修复失败: ' + message);
+        return;
+      }
+      const badPath = match[1].trim();
+      // 只清理 DSH_HOME 自己的 profile fallback 目录，拒绝越界删除。
+      if (badPath !== modulesRoot && !badPath.startsWith(modulesRoot + path.sep)) {
+        log('boot', '拒绝清理 profile fallback 之外的路径: ' + badPath);
+        return;
+      }
+      log('boot', '检测到 profile fallback 非符号链接，移除并重试: ' + badPath);
+      try { fs.rmSync(badPath, { recursive: true, force: true }); } catch (rmErr) {
+        log('boot', '移除失败: ' + rmErr.message);
+        return;
+      }
+    }
+  }
+}
+
+
+// 主进程未捕获异常：记录堆栈并保持进程存活，避免无痕退出。
+process.on('uncaughtException', (err) => {
+  const stack = (err && (err.stack || err.message)) || String(err);
+  log('crash', 'uncaughtException: ' + stack);
+  try {
+    dialog.showErrorBox('DSH Desktop 遇到异常', '应用已记录该错误并继续运行。\n\n' + stack.slice(0, 500));
+  } catch {}
+});
+
+process.on('unhandledRejection', (reason) => {
+  log('crash', 'unhandledRejection: ' + String((reason && (reason.stack || reason.message)) || reason));
+});
+
+process.on('exit', (code) => {
+  const line = `[${new Date().toISOString()}] [crash] 主进程退出 code=${code}\n`;
+  try {
+    const lp = path.join(app.getPath('userData'), 'logs', 'desktop.log');
+    fs.mkdirSync(path.dirname(lp), { recursive: true });
+    fs.appendFileSync(lp, line);
+  } catch {}
+});
 
 function nodeExe() {
   if (app.isPackaged) return path.join(process.resourcesPath, 'node', 'node.exe');
@@ -464,9 +635,16 @@ function guardWebContents(wc) {
   };
   wc.on('will-navigate', guardNavigation);
   wc.on('will-redirect', guardNavigation);
-  wc.on('console-message', (_e, level, message, line, sourceId) => {
-    if (level === 'error' || level === 'warning') {
-      log('float-page', `[${level}] ${message} (${sourceId || 'unknown'}:${line})`);
+  wc.on('console-message', (details, level, message, line, sourceId) => {
+    // Electron 43 起第一参是 { level, message, lineNumber, sourceId }；
+    // 后面 4 个旧位置参数保留为兼容。浮窗插件的排查日志是 console.log
+    // （info 级）：同样落进 desktop.log，不必再要求用户打开 DevTools。
+    const text = (details && details.message) || message || '';
+    const lvl = (details && details.level) || level;
+    const lineNo = (details && details.lineNumber) ?? line;
+    const src = (details && details.sourceId) || sourceId || 'unknown';
+    if (lvl === 'error' || lvl === 3 || lvl === 'warning' || lvl === 2 || /\[dsh-float-window\]/.test(text)) {
+      log('float-page', `[${lvl}] ${text} (${src}:${lineNo})`);
     }
   });
   wc.on('render-process-gone', (_e, details) => {
@@ -504,6 +682,7 @@ function createFloatWindow(sessionId, { title } = {}) {
     },
   });
   floatWindows.add(win);
+  floatBySession.set(sessionId, win);
   win.loadURL(webUrl).catch((err) => log('float', '浮窗加载失败: ' + ((err && err.message) || err)));
 
   // 窗口标题跟随会话（去掉通用前缀，保留会话相关标题）。
@@ -515,7 +694,12 @@ function createFloatWindow(sessionId, { title } = {}) {
   });
 
   win.once('ready-to-show', () => { if (!win.isDestroyed()) win.show(); });
-  win.on('closed', () => { floatWindows.delete(win); });
+  win.on('closed', () => {
+    floatWindows.delete(win);
+    for (const [sid, w] of floatBySession) {
+      if (w === win) { floatBySession.delete(sid); break; }
+    }
+  });
   guardWebContents(win.webContents);
 
   log('float', '已创建会话浮窗 sessionId=' + sessionId);
@@ -528,6 +712,7 @@ function closeAllFloatWindows() {
     if (!win.isDestroyed()) win.destroy();
   }
   floatWindows.clear();
+  floatBySession.clear();
   if (sponsorWindow && !sponsorWindow.isDestroyed()) sponsorWindow.destroy();
   sponsorWindow = null;
 }
@@ -643,6 +828,7 @@ function fatal(title, err) {
   const detail = '错误：' + ((err && err.message) || err) + '\n\n日志目录：' + logsDir;
   if (!mainWindow || mainWindow.isDestroyed()) {
     dialog.showErrorBox(title, detail);
+    markCleanExit();
     app.exit(1);
     return;
   }
@@ -757,6 +943,7 @@ async function runUpdateFlow(manual) {
     });
     if (r2 === 0) {
       quitting = true;
+      markCleanExit();
       killTree(serverProc);
       app.relaunch();
       app.exit(0);
@@ -786,10 +973,10 @@ let lastGlobalNotifyAt = 0; // 全局限流：短时间窗口内至多一条，�
 function onSessionTurnEnd(info) {
   log('notify', 'DEBUG turn detected: ' + JSON.stringify({ sid: info.sessionId, title: info.title, notifyOnTurnEnd, quitting, vis: mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible(), foc: mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused(), curSid: currentSessionId }));
   if (!notifyOnTurnEnd || quitting) { log('notify', 'DEBUG skip: notifyOnTurnEnd=' + notifyOnTurnEnd + ' quitting=' + quitting); return; }
-  // 主窗可见且聚焦：用户正在操作，不弹通知打扰。最小化/隐藏时不拦截。
+  // 主窗可见且聚焦：用户正在操作，不弹通知打扰。最小化/隐藏/失焦时不拦截。
+  // 「当前正在观看的会话」不再单独拦截：同一会话在后台完成时（窗口被遮挡、
+  // 最小化或切走）正是最需要系统提醒的场景，日志证实旧逻辑在这里把提醒全部吞掉。
   if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && mainWindow.isFocused()) { log('notify', 'DEBUG skip: window visible+focused'); return; }
-  // 正处于当前观看的会话：用户在盯着它，不需要再弹完成通知。
-  if (currentSessionId && info.sessionId && currentSessionId === info.sessionId) { log('notify', 'DEBUG skip: current session match'); return; }
   const now = Date.now();
   const last = lastNotifyAt.get(info.sessionId) || 0;
   if (now - last < 30000) return; // 同一会话：30s 内至多一条
@@ -940,6 +1127,16 @@ function registerChromeIpc() {
     if (action !== 'open') return { ok: false, error: 'bad-action' };
     if (!webUrl) return { ok: false, error: 'not-ready' };
     if (typeof sessionId !== 'string' || !sessionId) return { ok: false, error: 'bad-session' };
+    // 同一会话只保留一个浮窗：拖出/按钮连续触发或重复请求时，
+    // 复用已有窗口而不是再开第二个。
+    const existing = floatBySession.get(sessionId);
+    if (existing && !existing.isDestroyed()) {
+      if (existing.isMinimized()) existing.restore();
+      existing.show();
+      existing.focus();
+      return { ok: true, id: existing.id, reused: true };
+    }
+    if (existing) floatBySession.delete(sessionId);
     if (floatWindows.size >= FLOAT_MAX) return { ok: false, error: 'too-many' };
     const win = createFloatWindow(sessionId);
     if (!win) return { ok: false, error: 'too-many' };
@@ -980,7 +1177,7 @@ function registerChromeIpc() {
     log('page-error', String(payload));
   });
 
-  // 渲染进程上报「当前观看的会话」ID，主进程据此抑制「正在看还在弹」的完成通知。
+  // 渲染进程上报「当前观看的会话」ID，供完成通知的调试日志记录。
   ipcMain.on('dsh:current-session', (event, sessionId) => {
     if (typeof sessionId !== 'string' || !sessionId) return;
     currentSessionId = sessionId;
@@ -1087,6 +1284,13 @@ function showMainWindow() {
   mainWindow.focus();
 }
 
+function ensureTray() {
+  if (!IS_WIN || quitting) return;
+  if (tray && !tray.isDestroyed()) return;
+  log('tray', '检测到托盘不可用，尝试重建');
+  createTray();
+}
+
 function createTray() {
   if (!IS_WIN) return;
   try {
@@ -1169,9 +1373,32 @@ const COMPANION_PLUGINS = [
   { id: 'terminal', name: '@deepseek-ai/dsh-terminal-tab' },
   { id: 'plugin-marketplace', name: '@deepseek-ai/dsh-plugin-marketplace' },
   { id: 'float-window', name: '@deepseek-ai/dsh-float-window' },
+  { id: 'conversation-tweaks', name: '@deepseek-ai/dsh-conversation-tweaks' },
   { id: 'prompt-custom', name: '@deepseek-ai/dsh-prompt-custom' },
   { id: 'third-party-thinking', name: '@deepseek-ai/dsh-third-party-thinking' },
 ];
+
+function removeStaleCompanionPlugins(profileModules, expectedDirs) {
+  let entries;
+  try { entries = fs.readdirSync(profileModules, { withFileTypes: true }); } catch { return; }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || expectedDirs.has(entry.name)) continue;
+    const pkgPath = path.join(profileModules, entry.name, 'package.json');
+    let pkg;
+    try { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')); } catch { continue; }
+    // 只清理「DSH Desktop 配套插件」遗留的旧包名（例如改名为 dsh-terminal-tab
+    // 之前同步进 profile 的 dsh-terminal）。判定依据是该包由本壳层私有同步而来，
+    // 避免误删用户自己安装或官方预设依赖的同名包。
+    if (pkg && pkg.private === true && typeof pkg.description === 'string' && /DSH Desktop/.test(pkg.description)) {
+      try {
+        fs.rmSync(path.join(profileModules, entry.name), { recursive: true, force: true });
+        log('boot', '已清理过期配套插件: ' + entry.name);
+      } catch (err) {
+        log('boot', '清理过期配套插件失败 ' + entry.name + ': ' + err.message);
+      }
+    }
+  }
+}
 
 function syncCompanionPlugins() {
   if (!IS_WIN) return;
@@ -1180,6 +1407,8 @@ function syncCompanionPlugins() {
     const profileDir = path.join(home, 'profiles', 'web');
     const profileModules = path.join(profileDir, 'node_modules', '@deepseek-ai');
     fs.mkdirSync(profileModules, { recursive: true });
+    const expectedDirs = new Set(COMPANION_PLUGINS.map((p) => p.name.slice('@deepseek-ai/'.length)));
+    removeStaleCompanionPlugins(profileModules, expectedDirs);
     for (const p of COMPANION_PLUGINS) {
       const src = path.join(__dirname, 'assets', 'plugins', p.name.slice('@deepseek-ai/'.length));
       if (!fs.existsSync(path.join(src, 'package.json'))) continue;
@@ -1377,6 +1606,7 @@ function warnTempRun() {
 function quitForClientUpdate(ctx, pending) {
   quitting = true;
   forceQuit = true;
+  markCleanExit();
   try {
     killTree(serverProc);
   } catch (err) {
@@ -1610,7 +1840,7 @@ function startPreviewStaticServer() {
   server.on("error", (err) => log("boot", "预览静态服务失败: " + err.message));
 }
 
-function boot() {
+async function boot() {
   // Portable builds keep all data next to the exe.
   if (!app.isPackaged && process.env.DSH_DESKTOP_USERDATA) {
     app.setPath('userData', process.env.DSH_DESKTOP_USERDATA);
@@ -1628,15 +1858,25 @@ function boot() {
   desktopLog = fs.createWriteStream(path.join(logsDir, 'desktop.log'), { flags: 'a' });
   log('boot', `DSH Desktop ${APP_VERSION}  userData=${userDataDir}  dshHome=${dshHome || '(dsh 默认)'}  agent=${dshVersion()}(${dshVersionSource()})`);
 
+  // 运行状态/看门狗：先读取上一次运行是否干净退出，再写入本次状态。
+  const uncleanPrev = detectUncleanPreviousRun();
+  writeRunState();
+  startWatchdog();
+
   // 移除原生菜单栏（文件/视图/帮助），全部功能由自绘 chrome 与托盘提供。
   Menu.setApplicationMenu(null);
   startPreviewStaticServer();
   registerChromeIpc();
   createTray();
+  // 托盘图标被 explorer 重启等外部因素清掉后，周期性自愈。
+  trayRecoveryTimer = setInterval(ensureTray, 30 * 1000);
+  if (uncleanPrev) notifyUncleanRestart(uncleanPrev);
   syncCompanionPlugins();
   applyRuntimeFlashFix();
   applyPromptExposeFix();
   createWindow();
+  const home = dshHome || process.env.DSH_HOME || require('node:path').join(require('node:os').homedir(), '.dsh');
+  await repairProfileFallback(home);
   startAndShow()
     .then(() => {
       // Session-completion notifications: watch dsh session logs under the
@@ -1705,12 +1945,14 @@ if (!gotLock) {
   app.on('before-quit', () => {
     quitting = true;
     forceQuit = true;
+    markCleanExit();
     log('boot', '正在退出，销毁会话浮窗并停止 dsh web 进程树…');
     closeAllFloatWindows();
     killTree(serverProc);
     updater.abort();
     if (sessionWatcher) sessionWatcher.stop();
     if (balanceTimer) clearInterval(balanceTimer);
+    if (trayRecoveryTimer) { clearInterval(trayRecoveryTimer); trayRecoveryTimer = null; }
     if (tray) { try { tray.destroy(); } catch {} tray = null; }
   });
   // 关闭窗口后常驻托盘；托盘不存在时才随窗口退出。

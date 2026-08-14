@@ -30,6 +30,7 @@ updates/
 # Dev diagnostic scripts (not for open source)
 _cdp.js
 scripts-scan-slots.js
+_float-diag.js
 
 # Personal / internal (not for open source)
 支付二维码/

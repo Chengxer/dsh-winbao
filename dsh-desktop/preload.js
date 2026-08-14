@@ -100,7 +100,7 @@ ipcRenderer.on('dsh:balance', (_e, data) => {
   try { window.dispatchEvent(new CustomEvent('dsh-balance-changed', { detail: data })); } catch {}
 });
 
-// 上报「当前观看的会话」ID → 主进程（用于抑制「正在看还在弹」的完成通知）。
+// 上报「当前观看的会话」ID → 主进程（仅用于完成通知的调试日志）。
 // 轮询读取 localStorage['dsh.sessions.current'].sessionId，仅在变化时发送。
 {
   let lastReported = '';
