@@ -33,7 +33,11 @@ window.__ModuleLoader__.load({
 			saving: "保存中…",
 			saved: "已保存",
 			loading: "加载中…",
-			unavailable: "设置不可用（需要在本机浏览器中打开）"
+			unavailable: "设置不可用（需要在本机浏览器中打开）",
+			preview: "预览官方提示词",
+			previewLoading: "加载中…",
+			previewHint: "渲染后的官方默认 system prompt（不含自定义节），供对照编辑。",
+			previewError: "预览加载失败"
 		};
 
 		function fieldRow(label, hint, input) {
@@ -55,6 +59,9 @@ window.__ModuleLoader__.load({
 			const [text, setText] = react.useState("");
 			const [busy, setBusy] = react.useState(false);
 			const [saved, setSaved] = react.useState(false);
+			const [previewText, setPreviewText] = react.useState("");
+			const [previewLoading, setPreviewLoading] = react.useState(false);
+			const [previewError, setPreviewError] = react.useState("");
 
 			react.useEffect(() => {
 				if (snap.status !== "ready") return;
@@ -86,6 +93,27 @@ window.__ModuleLoader__.load({
 				}
 			};
 
+			const loadPreview = async () => {
+				setPreviewLoading(true);
+				setPreviewError("");
+				setPreviewText("");
+				try {
+					const resp = await fetch("/api/dsh-prompt-custom/preview");
+					let data = null;
+					try { data = await resp.json(); } catch { data = null; }
+					if (!resp.ok || !data || data.ok === false) {
+						setPreviewError((data && data.message) || (L.previewError + "（HTTP " + resp.status + "）"));
+						return;
+					}
+					setPreviewText(typeof data.text === "string" ? data.text : "");
+					if (data.message) setPreviewError(data.message);
+				} catch (error) {
+					setPreviewError(L.previewError + "：" + String((error && error.message) || error));
+				} finally {
+					setPreviewLoading(false);
+				}
+			};
+
 			return jsxs("div", {
 				style: { display: "flex", flexDirection: "column", gap: 12 },
 				children: [
@@ -114,6 +142,13 @@ window.__ModuleLoader__.load({
 						style: { display: "flex", alignItems: "center", gap: 8 },
 						children: [
 							jsx(Button, {
+								variant: "outline",
+								size: "sm",
+								disabled: previewLoading,
+								onClick: loadPreview,
+								children: previewLoading ? L.previewLoading : L.preview
+							}),
+							jsx(Button, {
 								variant: "primary",
 								size: "sm",
 								disabled: busy || !snap.writable,
@@ -122,7 +157,30 @@ window.__ModuleLoader__.load({
 							}),
 							saved ? jsx("span", { children: L.saved }) : null
 						]
-					})
+					}),
+					previewError ? jsx("div", {
+						style: { fontSize: 12, opacity: 0.75 },
+						children: previewError
+					}) : null,
+					previewText ? jsxs("div", {
+						style: { display: "flex", flexDirection: "column", gap: 4 },
+						children: [
+							jsx("span", { children: L.previewHint }),
+							jsx("textarea", {
+								value: previewText,
+								readOnly: true,
+								rows: 12,
+								style: {
+									width: "100%",
+									fontFamily: "monospace, inherit",
+									fontSize: 12,
+									padding: "6px 8px",
+									boxSizing: "border-box",
+									resize: "vertical"
+								}
+							})
+						]
+					}) : null
 				]
 			});
 		}

@@ -1,6 +1,11 @@
 appId: com.deepseek.dsh.desktop
 productName: DSH Desktop
 copyright: MIT License
+# 仅保留中英文，移除 Electron 其余 53 个语言包（.pak，约 80MB），
+# 不影响功能体验（右键菜单/DevTools 等界面语言随系统 locale 取 en-US/zh-CN）。
+electronLanguages:
+  - en-US
+  - zh-CN
 directories:
   output: dist
   buildResources: build

@@ -125,30 +125,116 @@ window.__ModuleLoader__.load({
 
 			// 1) 选中目标会话。sessions 服务在 runtime apply 时已提供，对外方法
 			//    是 open(id)（select 是内部私有方法，不暴露到服务上）。
-			//    open() 在会话摘要未加载完会抛「unknown session」，故带重试。
-			retry(() => {
+			//    必须等会话列表就绪（summaries 已加载）后再 open，否则 open() 会抛
+			//    「unknown session」导致浮窗空内容。因此先轮询列表就绪，再显式 open，
+			//    若 open 仍抛 unknown session（该会话尚未纳入列表）则继续等待重试。
+			const ready = (sessions) => {
+				// 优先用 list 能力判断列表 phase 已 ready；退化：检查是否存在 current 能力。
+				if (sessions && typeof sessions.list === "object" && sessions.list !== null) {
+					const snap =
+						typeof sessions.list.getSnapshot === "function" ? sessions.list.getSnapshot() : undefined;
+					if (snap && typeof snap === "object" && snap.phase === "ready") return true;
+				}
+				if (sessions && typeof sessions.current !== "undefined") return true;
+				return false;
+			};
+			// 1) 选中目标会话（串行第一步）。
+			const selectTarget = () => {
 				const sessions = typeof ctx.get === "function" ? ctx.get("sessions", false) : undefined;
 				if (!sessions || typeof sessions.open !== "function") return false;
+				if (!ready(sessions)) return false; // 列表尚未就绪，继续等待
+				// 检查快照中是否已包含目标会话，避免 open() 因 "unknown session" 失败
+				if (sessions.list && typeof sessions.list.getSnapshot === "function") {
+					const snap = sessions.list.getSnapshot();
+					if (snap && typeof snap === "object") {
+						let found = false;
+						if (snap.byId && typeof snap.byId === "object" && snap.byId[targetId]) {
+							found = true;
+						} else if (Array.isArray(snap.items)) {
+							found = snap.items.some((item) => item && String(item.id) === targetId);
+						} else if (Array.isArray(snap.summaries)) {
+							found = snap.summaries.some((s) => s && String(s.id) === targetId);
+						}
+						if (!found) return false;
+					}
+				}
 				try {
 					sessions.open(targetId);
 				} catch {
+					// unknown session：会话尚未纳入列表，继续重试等待
 					return false;
 				}
 				return true;
-			}, { label: "选中目标会话" });
+			};
 
-			// 2) 关闭详情 + 折叠侧栏。layout 服务需 root 挂载后才有动作。
-			retry(() => {
+			// 目标会话是否已选中且已渲染（非 blank）。blank 表示会话内容尚未加载，
+			// 此刻关闭详情会被详情面板占用者随后重新打开。读取失败时退化放行。
+			const targetRendered = (sessions) => {
+				try {
+					const cur = sessions && sessions.current;
+					if (!cur || typeof cur.getSnapshot !== "function") return true;
+					const snap = cur.getSnapshot();
+					if (!snap || typeof snap !== "object") return true;
+					const id = snap.current ?? snap.sessionId;
+					if (id === undefined || String(id) !== targetId) return false;
+					const sess = snap.byId && snap.byId[id];
+					return !(sess && sess.blank === true);
+				} catch {
+					return true;
+				}
+			};
+
+			// 关闭详情 + 折叠侧栏。layout 服务需 root 挂载后才有动作。
+			const foldLayout = () => {
 				const layout = typeof ctx.get === "function" ? ctx.get("layout", false) : undefined;
 				if (!layout || typeof layout.closeDetails !== "function") return false;
 				try {
 					layout.closeDetails();
-					if (typeof window !== "undefined" && window.innerWidth >= 1024) layout.toggleSidebar();
+					// 侧栏：仅当根 frame 尚未折叠时再 toggle 一次；已折叠（含窄屏默认
+					// data-sidebar-collapsed）则跳过，避免 toggle 反向把侧栏展开。
+					if (typeof document !== "undefined" && !document.querySelector("[data-sidebar-collapsed]")) {
+						layout.toggleSidebar();
+					}
 				} catch {
 					return false;
 				}
 				return true;
-			}, { label: "折叠布局" });
+			};
+
+			// 兜底：若目标会话始终未在列表中出现（例如旧会话已清理），至少让 UI
+			// 不再空白——重试耗尽后保持现状并打印警告提示。
+			setTimeout(() => {
+				const sessions = typeof ctx.get === "function" ? ctx.get("sessions", false) : undefined;
+				if (sessions && typeof sessions.open === "function") {
+					try {
+						sessions.open(targetId);
+					} catch (e) {
+						console.warn(
+							"[dsh-float-window] 目标会话 " + targetId + " 未在会话列表出现，浮窗可能为空: " +
+							((e && e.message) || e)
+						);
+					}
+				}
+			}, 40 * 500 + 200);
+
+			// 2) 串行化：先确保目标会话选中并渲染，再关闭详情/折叠侧栏。
+			//    弃用原先两个并发 retry 的竞态实现——若关闭详情先于会话选中完成，
+			//    详情面板会在会话选中后被占用者重新打开，导致占位文案残留。
+			retry(selectTarget, { label: "选中目标会话" }).then((ok) => {
+				if (!ok) return;
+				retry(() => {
+					const sessions = typeof ctx.get === "function" ? ctx.get("sessions", false) : undefined;
+					if (!targetRendered(sessions)) return false;
+					return foldLayout();
+				}, { label: "折叠布局" }).then((done) => {
+					if (!done) return;
+					// 兜底：详情面板占用者可能在会话挂载后才打开面板，稍后再补一次关闭。
+					setTimeout(() => {
+						const sessions = typeof ctx.get === "function" ? ctx.get("sessions", false) : undefined;
+						if (targetRendered(sessions)) foldLayout();
+					}, 1200);
+				});
+			});
 		}
 
 		// ------------------------------------------------------------------

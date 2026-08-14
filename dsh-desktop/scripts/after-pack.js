@@ -6,21 +6,70 @@
 // extraResources, but the bundled npm CLI needs its own bundled deps
 // (graceful-fs, semver, ...). Copy vendor/npm verbatim into the packed app
 // after packaging; both the portable and NSIS targets then archive this copy.
+//
+// Also prunes pure-redundant files out of the packed app to shrink install
+// size/time WITHOUT touching anything that runs:
+//   - *.map  : source maps (dev-only, never used at runtime)
+//   - doc/license files (LICENSE*, README*, CHANGELOG*, HISTORY, COPYING,
+//     NOTICE, AUTHORS, SECURITY, NOTICE, *.md)
+// No .js/.json/.node/.exe/.dll or any other runtime file is ever removed.
 
 const fs = require('node:fs');
 const path = require('node:path');
+
+// Regexes for files that are safe to delete (pure metadata / dev artifacts).
+const DROP_BASENAME = /^(LICENSE.*|README.*|CHANGELOG.*|HISTORY.*|COPYING.*|NOTICE.*|AUTHORS.*|SECURITY.*|CONTRIBUTING.*|\.gitignore|\.npmignore|\.editorconfig|\.eslintrc.*|\.prettierrc.*|\.babelrc.*)$/i;
+const DROP_EXT = new Set(['.map', '.md', '.markdown', '.tsbuildinfo', '.d.ts']);
+
+function isDroppable(name) {
+  if (DROP_BASENAME.test(name)) return true;
+  const ext = path.extname(name).toLowerCase();
+  return DROP_EXT.has(ext);
+}
+
+// Recursively remove droppable files. Never descends into node_modules/.bin
+// (symlinks) and never follows symlinks. Returns the number of files removed.
+function pruneDroppable(root) {
+  let removed = 0;
+  const walk = (dir) => {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isSymbolicLink()) continue; // never touch symlinks (e.g. .bin)
+      if (e.isDirectory()) {
+        if (e.name === '.bin') continue;
+        walk(full);
+      } else if (e.isFile() && isDroppable(e.name)) {
+        try { fs.unlinkSync(full); removed++; } catch { /* keep going */ }
+      }
+    }
+  };
+  walk(root);
+  return removed;
+}
 
 module.exports = async function afterPack(context) {
   const { appOutDir, electronPlatformName } = context;
   if (electronPlatformName !== 'win32') return;
   const src = path.resolve(__dirname, '..', 'vendor', 'npm');
   const dest = path.join(appOutDir, 'resources', 'npm');
-  if (!fs.existsSync(src)) {
+  if (fs.existsSync(src)) {
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.cpSync(src, dest, { recursive: true });
+    const deps = fs.readdirSync(path.join(dest, 'node_modules')).length;
+    console.log(`afterPack: bundled npm copied (deps: ${deps})`);
+  } else {
     console.warn('afterPack: vendor/npm missing — npm CLI will not be bundled');
-    return;
   }
-  fs.rmSync(dest, { recursive: true, force: true });
-  fs.cpSync(src, dest, { recursive: true });
-  const deps = fs.readdirSync(path.join(dest, 'node_modules')).length;
-  console.log(`afterPack: bundled npm copied (deps: ${deps})`);
+
+  // Prune redundant files from the packed app (resources/app/...) and the
+  // bundled npm CLI (resources/npm/...). Runtime files are never removed.
+  const targets = [
+    path.join(appOutDir, 'resources', 'app'),
+    dest,
+  ].filter((p) => fs.existsSync(p));
+  let total = 0;
+  for (const t of targets) total += pruneDroppable(t);
+  console.log(`afterPack: pruned ${total} redundant files (install shrink)`);
 };

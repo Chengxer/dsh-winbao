@@ -83,6 +83,7 @@ let webUrl = null;
 let quitting = false;
 let updateBusy = false;
 let notifyOnTurnEnd = true;
+let currentSessionId = ''; // 主窗当前正在观看的会话（渲染进程上报），用于抑制「正在看还在弹」的通知
 let sessionWatcher = null;
 let userDataDir = '';
 let logsDir = '';
@@ -100,6 +101,7 @@ let restartingServer = false;
 // ---------------------------------------------------------------------------
 const FLOAT_MAX = 8; // 浮窗总数上限，防资源滥用
 const floatWindows = new Set(); // BrowserWindow 集合
+let sponsorWindow = null; // 「请作者喝咖啡」独立小窗（单例）
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -423,7 +425,11 @@ function createWindow() {
     }
   });
 
-  mainWindow.on('closed', () => { mainWindow = null; });
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+    if (sponsorWindow && !sponsorWindow.isDestroyed()) sponsorWindow.destroy();
+    sponsorWindow = null;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +494,10 @@ function createFloatWindow(sessionId, { title } = {}) {
       nodeIntegration: false,
       sandbox: true,
       spellcheck: false,
+      // 独立分区：浮窗与主窗隔离 localStorage，避免互相覆盖 dsh.sessions.current。
+      // 会话数据在服务端（~/.dsh），localStorage 仅存 UI 选中态，无 cookie 认证，
+      // 独立分区安全。所有浮窗共享同一 partition 字符串。
+      partition: 'persist:dsh-float',
       // 用 additionalArguments 而非 URL 参数，避免污染 Web UI 见到的地址；
       // preload 从 process.argv 读取 --dsh-float=<sessionId>。
       additionalArguments: ['--dsh-float=' + sessionId],
@@ -518,6 +528,114 @@ function closeAllFloatWindows() {
     if (!win.isDestroyed()) win.destroy();
   }
   floatWindows.clear();
+  if (sponsorWindow && !sponsorWindow.isDestroyed()) sponsorWindow.destroy();
+  sponsorWindow = null;
+}
+
+// ---------------------------------------------------------------------------
+// 赞助小窗：独立「请作者喝咖啡」收款码窗口
+// ---------------------------------------------------------------------------
+
+// 读取支付宝 / 微信收款码图片，返回 data URI（供 IPC 与小窗复用）。
+function readSponsorQr() {
+  const read = (name) => {
+    try {
+      const buf = fs.readFileSync(path.join(__dirname, 'assets', 'sponsor', name));
+      const mime = name.endsWith('.png') ? 'image/png' : 'image/jpeg';
+      return 'data:' + mime + ';base64,' + buf.toString('base64');
+    } catch { return ''; }
+  };
+  return { ok: true, alipay: read('sponsor-alipay.jpg'), wechat: read('sponsor-wechat.png') };
+}
+
+// 创建（或聚焦已有）赞助小窗。窗口为原生边框小窗，内嵌深色 HTML 展示两码。
+function createSponsorWindow() {
+  if (sponsorWindow && !sponsorWindow.isDestroyed()) {
+    sponsorWindow.show();
+    sponsorWindow.focus();
+    return sponsorWindow;
+  }
+  const qr = readSponsorQr();
+  const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0b1220;color:#e6ecff;font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+    display:flex;flex-direction:column;height:100vh;user-select:none}
+  .head{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;
+    border-bottom:1px solid rgba(255,255,255,.08)}
+  .title{font-size:14px;font-weight:600}
+  .close{width:26px;height:26px;display:grid;place-items:center;border:none;border-radius:8px;
+    background:transparent;color:#a9b8de;cursor:pointer;font-size:16px;line-height:1}
+  .close:hover{background:rgba(255,255,255,.1);color:#eef2ff}
+  .sub{font-size:12px;color:#8b9ac4;line-height:18px;padding:10px 14px 0}
+  .codes{flex:1;display:flex;gap:16px;justify-content:center;align-items:center;padding:8px 14px 16px}
+  .code{flex:1;min-width:0;text-align:center}
+  .code img{width:100%;max-width:150px;aspect-ratio:1/1;object-fit:contain;display:block;margin:0 auto;
+    border-radius:10px;background:#fff;padding:8px;box-sizing:border-box}
+  .code p{margin:8px 0 0;font-size:12px;color:#a9b8de}
+  .empty{font-size:12px;color:#8b9ac4;text-align:center;padding:16px 0}
+</style>
+</head>
+<body>
+  <div class="head">
+    <div class="title">☕ 请作者喝咖啡</div>
+    <button class="close" title="关闭" aria-label="关闭" onclick="window.close()">×</button>
+  </div>
+  <div class="sub">如果这个桌面客户端帮到了你，欢迎扫一扫支持一下作者，谢谢你的鼓励～</div>
+  <div class="codes" id="codes"></div>
+  <script>
+    var codes = [
+      { name: '支付宝', src: \`${qr.alipay}\` },
+      { name: '微信', src: \`${qr.wechat}\` },
+    ].filter(function (c) { return c.src; });
+    var box = document.getElementById('codes');
+    if (!codes.length) {
+      box.className = 'empty';
+      box.textContent = '未找到收款码资源';
+    } else {
+      box.className = 'codes';
+      box.innerHTML = codes.map(function (c) {
+        return '<div class="code"><img alt="' + c.name + '收款码" src="' + c.src + '"><p>' + c.name + '</p></div>';
+      }).join('');
+    }
+  </script>
+</body>
+</html>`;
+  const win = new BrowserWindow({
+    width: 360,
+    height: 420,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    show: false,
+    title: '请作者喝咖啡',
+    backgroundColor: '#0b1220',
+    icon: path.join(__dirname, 'assets', 'icon.png'),
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
+    },
+  });
+  sponsorWindow = win;
+  win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
+    .catch((err) => log('sponsor', '赞助小窗加载失败: ' + ((err && err.message) || err)));
+  win.once('ready-to-show', () => { if (!win.isDestroyed()) win.show(); });
+  win.on('closed', () => { if (sponsorWindow === win) sponsorWindow = null; });
+  // Esc 关闭小窗。
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.key === 'Escape') {
+      event.preventDefault();
+      if (!win.isDestroyed()) win.close();
+    }
+  });
+  log('sponsor', '已打开赞助小窗');
+  return win;
 }
 
 function fatal(title, err) {
@@ -662,14 +780,21 @@ async function runUpdateFlow(manual) {
 // Session-completion notifications
 // ---------------------------------------------------------------------------
 
-const lastNotifyAt = new Map(); // sessionId -> timestamp (rate-limit)
+const lastNotifyAt = new Map(); // sessionId -> timestamp (per-session rate-limit)
+let lastGlobalNotifyAt = 0; // 全局限流：短时间窗口内至多一条，避免多会话同时完成刷屏
 
 function onSessionTurnEnd(info) {
   if (!notifyOnTurnEnd || quitting) return;
+  // 主窗可见且聚焦：用户正在操作，不弹通知打扰。最小化/隐藏时不拦截。
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && mainWindow.isFocused()) return;
+  // 正处于当前观看的会话：用户在盯着它，不需要再弹完成通知。
+  if (currentSessionId && info.sessionId && currentSessionId === info.sessionId) return;
   const now = Date.now();
   const last = lastNotifyAt.get(info.sessionId) || 0;
-  if (now - last < 30000) return; // same session: at most one toast per 30s
+  if (now - last < 30000) return; // 同一会话：30s 内至多一条
+  if (now - lastGlobalNotifyAt < 15000) return; // 全局限流：15s 内至多一条
   lastNotifyAt.set(info.sessionId, now);
+  lastGlobalNotifyAt = now;
   log('notify', '任务完成: ' + JSON.stringify(info));
   try {
     const n = new Notification({
@@ -838,20 +963,26 @@ function registerChromeIpc() {
   // 请作者喝咖啡：读取赞助二维码图片（支付宝 / 微信），以 data URI 返回给渲染进程。
   ipcMain.handle('dsh:sponsor-qr', (event) => {
     if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false };
-    const read = (name) => {
-      try {
-        const buf = fs.readFileSync(path.join(__dirname, 'assets', 'sponsor', name));
-        const mime = name.endsWith('.png') ? 'image/png' : 'image/jpeg';
-        return 'data:' + mime + ';base64,' + buf.toString('base64');
-      } catch { return ''; }
-    };
-    return { ok: true, alipay: read('sponsor-alipay.jpg'), wechat: read('sponsor-wechat.png') };
+    return readSponsorQr();
+  });
+
+  // 赞助小窗：打开独立「请作者喝咖啡」窗口（校验来源是主窗）。
+  ipcMain.handle('chrome:sponsor-window', (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'unauthorized' };
+    createSponsorWindow();
+    return { ok: true };
   });
 
   // preload 转发的页面异常（window.onerror / unhandledrejection）。
   ipcMain.on('dsh:page-error', (event, payload) => {
     if (!mainWindow || event.sender !== mainWindow.webContents) return;
     log('page-error', String(payload));
+  });
+
+  // 渲染进程上报「当前观看的会话」ID，主进程据此抑制「正在看还在弹」的完成通知。
+  ipcMain.on('dsh:current-session', (event, sessionId) => {
+    if (typeof sessionId !== 'string' || !sessionId) return;
+    currentSessionId = sessionId;
   });
 
   ipcMain.handle('dsh:balance-refresh', async (event) => {
@@ -1038,6 +1169,7 @@ const COMPANION_PLUGINS = [
   { id: 'plugin-marketplace', name: '@deepseek-ai/dsh-plugin-marketplace' },
   { id: 'float-window', name: '@deepseek-ai/dsh-float-window' },
   { id: 'prompt-custom', name: '@deepseek-ai/dsh-prompt-custom' },
+  { id: 'third-party-thinking', name: '@deepseek-ai/dsh-third-party-thinking' },
 ];
 
 function syncCompanionPlugins() {
@@ -1112,6 +1244,38 @@ function applyRuntimeFlashFix() {
     log('boot', 'runtime 补丁: 已修复会话列表刷新闪跳（mergeOrderedBaseline 保留本地新会话）');
   } catch (err) {
     log('boot', 'runtime 补丁失败: ' + err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// dsh-host-apiproxy 设置暴露补丁：官方代理只把少数命名空间暴露给浏览器端
+// 配置客户端（WEB_SETTINGS_NAMESPACES 白名单）。我们配套的 dsh-prompt-custom
+// 插件注册了「自定义提示词」命名空间 dsh-prompt，默认不在白名单里，导致设置页
+// 该栏只读（显示「设置不可用」）。这里幂等地把 dsh-prompt 追加进白名单；
+// dsh 包更新后本函数会在下次启动重新应用。
+// ---------------------------------------------------------------------------
+function applyPromptExposeFix() {
+  try {
+    const home = dshHome || path.join(os.homedir(), '.dsh');
+    const file = path.join(home, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js');
+    if (!fs.existsSync(file)) { log('boot', '提示词暴露补丁: 未找到 dsh-host-apiproxy，跳过'); return; }
+    let src = fs.readFileSync(file, 'utf8');
+    // 幂等地把配套命名空间追加进 WEB_SETTINGS_NAMESPACES 数组（数组以 "\n];" 收尾）。
+    // 逐个检查缺失项，缺失就在数组收尾前插入，避免对已应用过的中间态失配。
+    const namespaces = ['dsh-prompt', 'dsh-third-party-thinking'];
+    let changed = false;
+    for (const ns of namespaces) {
+      if (src.includes('"' + ns + '"')) continue;
+      const closeIdx = src.indexOf('\n];');
+      if (closeIdx === -1) { log('boot', '提示词暴露补丁: 未匹配到设置命名空间数组收尾，跳过'); return; }
+      src = src.slice(0, closeIdx) + ',\n\t"' + ns + '"' + src.slice(closeIdx);
+      changed = true;
+    }
+    if (!changed) { log('boot', '提示词暴露补丁: 已应用，跳过'); return; }
+    fs.writeFileSync(file, src, { encoding: 'utf8' });
+    log('boot', '提示词暴露补丁: 已把 ' + namespaces.join(', ') + ' 加入 settings 暴露白名单');
+  } catch (err) {
+    log('boot', '提示词暴露补丁失败: ' + err.message);
   }
 }
 
@@ -1470,6 +1634,7 @@ function boot() {
   createTray();
   syncCompanionPlugins();
   applyRuntimeFlashFix();
+  applyPromptExposeFix();
   createWindow();
   startAndShow()
     .then(() => {

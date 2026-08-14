@@ -5,12 +5,12 @@ import { stat } from "node:fs/promises";
 
 // DSH Desktop 配套终端（宿主侧）：
 // 在 webServer 上提供终端路由，为「终端」标签页提供流式 shell：
-//   GET /dsh-files/term/events?token=...&cwd=...   SSE（诊断/兼容用）
-//   GET /dsh-files/term/ws?token=...&cwd=...       WebSocket 升级（正式通道——
+//   GET /dsh-files/terminal-tab/events?token=...&cwd=...   SSE（诊断/兼容用）
+//   GET /dsh-files/terminal-tab/ws?token=...&cwd=...       WebSocket 升级（正式通道——
 //     浏览器对同一主机 HTTP/1.1 并发连接上限为 6，web UI 自身的长连接已占满，
 //     终端若用 SSE 会被排队永远连不上；WebSocket 升级连接不占该池）
-//   POST /dsh-files/term/input   {token, line}      兼容用（WS 内也可发命令）
-//   POST /dsh-files/term/close   {token}            终止并清理 shell
+//   POST /dsh-files/terminal-tab/input   {token, line}      兼容用（WS 内也可发命令）
+//   POST /dsh-files/terminal-tab/close   {token}            终止并清理 shell
 //
 // 设计要点：
 //  - 每个 token 一个持久 shell：Windows 为 PowerShell 自建 mini-REPL（显式
@@ -19,10 +19,10 @@ import { stat } from "node:fs/promises";
 //    最近 512KB 输出（snapshot），再接续流式输出；
 //  - 无原生依赖（普通管道，非 PTY）——交互式全屏程序（vim 等）不支持。
 
-const TERM_EVENTS = "/dsh-files/term/events";
-const TERM_WS = "/dsh-files/term/ws";
-const TERM_INPUT = "/dsh-files/term/input";
-const TERM_CLOSE = "/dsh-files/term/close";
+const TERM_EVENTS = "/dsh-files/terminal-tab/events";
+const TERM_WS = "/dsh-files/terminal-tab/ws";
+const TERM_INPUT = "/dsh-files/terminal-tab/input";
+const TERM_CLOSE = "/dsh-files/terminal-tab/close";
 
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const IDLE_KEEP_MS = 15 * 60 * 1000; // 断开后保留
@@ -326,7 +326,7 @@ async function ensureRecord(token, cwd) {
 // --- 路由 --------------------------------------------------------------------
 
 async function handleEventsRoute(req, res) {
-  console.log("[dsh-terminal] events request", req.method, "remote=" + (req.socket && req.socket.remoteAddress));
+  console.log("[dsh-terminal-tab] events request", req.method, "remote=" + (req.socket && req.socket.remoteAddress));
   if (req.method !== "GET") {
     res.writeHead(405, { allow: "GET" });
     res.end();
@@ -356,7 +356,7 @@ async function handleEventsRoute(req, res) {
 }
 
 async function handleWsUpgrade(req, socket, head) {
-  console.log("[dsh-terminal] ws request", "remote=" + (req.socket && req.socket.remoteAddress));
+  console.log("[dsh-terminal-tab] ws request", "remote=" + (req.socket && req.socket.remoteAddress));
   if (!isLoopback(req)) { socket.destroy(); return; }
   const key = req.headers["sec-websocket-key"];
   if (!key) {

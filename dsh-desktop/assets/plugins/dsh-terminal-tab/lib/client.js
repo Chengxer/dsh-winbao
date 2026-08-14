@@ -167,7 +167,7 @@ window.__ModuleLoader__.load({
 					const proto = window.location.protocol === "https:" ? "wss" : "ws";
 					ws = new WebSocket(
 						proto + "://" + window.location.host +
-						"/dsh-files/term/ws?token=" + encodeURIComponent(tokenRef.current) +
+						"/dsh-files/terminal-tab/ws?token=" + encodeURIComponent(tokenRef.current) +
 						"&cwd=" + encodeURIComponent(cur)
 					);
 				} catch (err) {
@@ -243,7 +243,7 @@ window.__ModuleLoader__.load({
 				tokenRef.current = newToken();
 				if (old) {
 					try {
-						fetch("/dsh-files/term/close", {
+						fetch("/dsh-files/terminal-tab/close", {
 							method: "POST",
 							headers: { "content-type": "application/json" },
 							body: JSON.stringify({ token: old }),
@@ -363,7 +363,7 @@ window.__ModuleLoader__.load({
 						children: [
 							status === "failed" && react_jsx_runtime.jsxs("div", {
 								className: "dsh-term-line dsh-term-fail",
-								children: ["无法建立连接：宿主路由 /dsh-files/term/events 无响应（session: ", sessionId || "?", "，目录: ", cwd, "）。", diag ? " " + diag : "", " 可点右上「重启」重试，或重启桌面端后重试。"]
+								children: ["无法建立连接：宿主路由 /dsh-files/terminal-tab/events 无响应（session: ", sessionId || "?", "，目录: ", cwd, "）。", diag ? " " + diag : "", " 可点右上「重启」重试，或重启桌面端后重试。"]
 							}),
 							lines.map((l, i) => react_jsx_runtime.jsx("div", {
 								key: i,

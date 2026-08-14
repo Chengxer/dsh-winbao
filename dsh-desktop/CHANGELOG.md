@@ -1,7 +1,32 @@
 # Changelog — DSH Desktop
 
 DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行时与 dsh CLI，
-一键启动 Web UI。版本路径：0.1.0（基础壳）→ 0.2.0（本版：伴侣插件体系 + 自更新 + 会话工具链）。
+一键启动 Web UI。
+
+## [0.3.0] — 2026-08-15
+
+### 新增
+- **第三方模型思考强度**（`assets/plugins/dsh-third-party-thinking`）：让接入的第三方
+  OpenAI 兼容模型（pi-ai 自定义 provider / openclaw-bridge 等）也能在模型选择器右下角
+  调整思考强度（off / high / max），与官方 DeepSeek 模型同一位置、同一交互。官方
+  DeepSeek 模型行为不受影响，已声明 reasoning 的第三方模型保留原生元数据。
+- **极简模式_win Agent 预设**：基于官方极简模式，将 bash 工具替换为 Windows PowerShell
+  （`@deepseek-ai/dsh-tool-pwsh`），Windows 用户可直接使用。
+- **自定义提示词「预览官方提示词」**：设置页自定义提示词区域新增按钮，点击显示官方
+  默认系统提示词的渲染结果（只读），方便对比修改。
+
+### 修复
+- **插件市场搜索崩溃**：非 npm 来源（GitHub / deepseekdocs）的搜索结果会触发
+  `Cannot read properties of null (reading 'version')`，已修复空值判断。
+- **会话浮窗内容空白**：拖出会话到独立窗口后，若服务端会话列表尚未同步目标会话，
+  会因 `unknown session` 导致浮窗空内容。现增加快照内会话存在性校验，确保目标会话
+  已在列表中再执行选中。
+
+### 优化
+- **会话完成通知去重**：主窗口在前台时不再弹通知，同一会话 30 秒内最多弹 1 次，
+  全局 15 秒内最多弹 1 次，避免连续刷屏。
+- **安装包继续瘦身**：在 0.2.3 语言包裁剪 + 冗余文件清理的基础上，进一步优化
+  after-pack 清理范围。
 
 ## [0.2.0] — 2026-08-14
 
@@ -67,3 +92,35 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
   回显」的新会话，使 `current` 瞬时变 `undefined`。桌面启动时
   （`applyRuntimeFlashFix`）幂等地对运行时打补丁——保留 baseline 缺席的本地会话，
   下一次 baseline 带上该会话后自动收敛为官方值。dsh 包更新后会在下次启动重新应用。
+
+## [0.2.3] — 2026-08-14
+
+### 优化（缩小安装体积、缩短安装时长）
+- **语言包裁剪**：`electron-builder.yml` 新增 `electronLanguages: [en-US, zh-CN]`，
+  移除 Electron 其余 53 个语言包（.pak，约 80MB）。不影响功能与体验——右键菜单、
+  DevTools 等界面语言随系统 locale 自动取 en-US/zh-CN。
+- **冗余文件清理**：`scripts/after-pack.js` 在打包后递归清理纯冗余文件
+  （源码映射 `*.map`、文档与许可 `README*/CHANGELOG*/LICENSE*/*.md`、TS 构建产物
+  `*.tsbuildinfo/*.d.ts` 等），覆盖 `resources/app/` 与自带 npm CLI
+  `resources/npm/`。绝不触碰任何运行时文件（`.js/.json/.node/.exe/.dll`），
+  功能与体验完整保留。
+
+### 说明
+- 0.2.3 为安装优化版，功能与 0.2.2 完全一致（含浮窗会话、自定义提示词、
+  咖啡二维码长条三项修复），仅体积与安装时长得到改善。
+
+## [0.2.2] — 2026-08-14
+
+### 修复
+- **自定义提示词设置不可用 / 无法输入**：官方 `dsh-host-apiproxy` 只把白名单里的
+  settings 命名空间暴露给浏览器端，`dsh-prompt` 默认不在白名单，导致设置页该栏只读
+  （显示「设置不可用」，无输入框）。新增 `applyPromptExposeFix()`，启动时幂等地把
+  `dsh-prompt` 追加进 `WEB_SETTINGS_NAMESPACES` 暴露白名单，使输入框可正常编辑保存；
+  dsh 包更新后会在下次启动重新应用。
+- **会话分屏浮窗内容为空 / 按键不响应**：浮窗早期会话服务未就绪时 `sessions.open()`
+  会抛 `unknown session`，首屏未选中任何会话导致内容空白。改为浮窗 preload 在页面
+  JS 运行前把目标会话预置进 `localStorage['dsh.sessions.current']`，应用一启动即带
+  目标会话首屏渲染（与正常恢复会话同一机制）；`sessions.open()` 保留作兜底。
+- **「请作者喝咖啡」展示优化**：由全屏遮罩 + 居中卡片改为点击 ⋯ 菜单后从右上角
+  （标题栏下方）展开的一条可关闭长条，两个收款码并排显示，支持 × 按钮与 Esc 关闭，
+  不再把二维码平铺到页面下方。

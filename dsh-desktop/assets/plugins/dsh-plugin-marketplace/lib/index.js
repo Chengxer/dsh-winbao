@@ -251,7 +251,7 @@ function toCard(record, byName) {
 		links: record.links || {},
 		stars: record.stars || 0,
 		category: record.category || "插件",
-		installed: hit === undefined ? null : { version: hit.version, isBundle: hit.isBundle, isClient: hit.isClient }
+		installed: hit == null ? null : { version: hit.version, isBundle: hit.isBundle, isClient: hit.isClient }
 	};
 }
 

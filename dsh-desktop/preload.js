@@ -53,6 +53,8 @@ const dshDesktop = {
   copyText: (text) => ipcRenderer.invoke('dsh:copy-text', { text }),
   // 赞助二维码：读取支付宝/微信收款码（data URI）。
   sponsorQr: () => ipcRenderer.invoke('dsh:sponsor-qr'),
+  // 赞助小窗：打开独立「请作者喝咖啡」窗口（主进程单例）。
+  sponsorWindow: () => ipcRenderer.invoke('chrome:sponsor-window'),
   // 会话浮窗（分屏）：主窗请求把某个会话弹出到独立窗口；浮窗关闭自身。
   floatWindow: {
     open: (sessionId) => ipcRenderer.invoke('chrome:float-window', { action: 'open', sessionId }),
@@ -69,6 +71,20 @@ const FLOAT_ARG = process.argv.find((a) => a.startsWith('--dsh-float='));
 const FLOAT_MODE = FLOAT_ARG ? { sessionId: FLOAT_ARG.slice('--dsh-float='.length) } : null;
 if (FLOAT_MODE) {
   contextBridge.exposeInMainWorld('__DSH_FLOAT__', FLOAT_MODE);
+  // 预置目标会话到 sessions 持久化，让 Web UI 一启动就选中目标会话。
+  // 这是比「启动后再 sessions.open()」更可靠的做法：会话服务在 boot 早期
+  // 尚未就绪时，open() 会抛 unknown session 导致浮窗空内容/假按键，
+  // 而预置持久化让应用默认就带着目标会话首屏渲染。
+  try {
+    const key = 'dsh.sessions.current';
+    const raw = localStorage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : {};
+    if (parsed && typeof parsed === 'object') {
+      parsed.sessionId = String(FLOAT_MODE.sessionId);
+      delete parsed.subagentAddress;
+      localStorage.setItem(key, JSON.stringify(parsed));
+    }
+  } catch (_e) { /* 忽略持久化失败 */ }
 }
 
 // 页面异常 → 主进程日志（desktop.log），便于排查插件空白视图。
@@ -83,6 +99,25 @@ window.addEventListener('unhandledrejection', (e) => {
 ipcRenderer.on('dsh:balance', (_e, data) => {
   try { window.dispatchEvent(new CustomEvent('dsh-balance-changed', { detail: data })); } catch {}
 });
+
+// 上报「当前观看的会话」ID → 主进程（用于抑制「正在看还在弹」的完成通知）。
+// 轮询读取 localStorage['dsh.sessions.current'].sessionId，仅在变化时发送。
+{
+  let lastReported = '';
+  const reportCurrentSession = () => {
+    try {
+      const raw = localStorage.getItem('dsh.sessions.current');
+      const parsed = raw ? JSON.parse(raw) : null;
+      const id = parsed && typeof parsed === 'object' ? String(parsed.sessionId || '') : '';
+      if (id && id !== lastReported) {
+        lastReported = id;
+        ipcRenderer.send('dsh:current-session', id);
+      }
+    } catch (_e) { /* 忽略；会话尚未就绪时无值，下次轮询再试 */ }
+  };
+  reportCurrentSession();
+  setInterval(reportCurrentSession, 1000);
+}
 
 // ---------------------------------------------------------------------------
 // Chrome DOM
@@ -146,31 +181,6 @@ const CHROME_CSS = `
   font-size:10.5px;cursor:pointer;font-family:inherit;line-height:16px}
 #${BAR_ID} .dch-copy:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));
   color:var(--dsw-alias-label-primary,#e6ecff)}
-#${BAR_ID} .dch-sponsor{position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483002;
-  display:flex;align-items:center;justify-content:center;
-  background:rgba(4,8,18,.55);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);
-  -webkit-app-region:no-drag;animation:dch-fade .15s ease-out}
-@keyframes dch-fade{from{opacity:0}to{opacity:1}}
-#${BAR_ID} .dch-sponsor-card{width:min(420px,88vw);max-height:86vh;overflow:auto;box-sizing:border-box;
-  padding:20px 22px 18px;border-radius:16px;
-  background:var(--dsw-alias-bg-layer-2,color-mix(in srgb,var(--dsw-alias-bg-base,#0b1220) 94%,white));
-  border:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.12));
-  box-shadow:0 20px 60px rgba(0,0,0,.55),0 4px 16px rgba(0,0,0,.4);
-  color:var(--dsw-alias-label-primary,#e6ecff);font-family:var(--dsw-font-family,"Segoe UI","Microsoft YaHei",system-ui,sans-serif)}
-#${BAR_ID} .dch-sponsor-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px}
-#${BAR_ID} .dch-sponsor-title{font-size:15px;font-weight:600}
-#${BAR_ID} .dch-sponsor-close{flex:none;width:28px;height:28px;display:grid;place-items:center;border:none;
-  border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary,#a9b8de);cursor:pointer;
-  font-size:16px;line-height:1;padding:0}
-#${BAR_ID} .dch-sponsor-close:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.09));
-  color:var(--dsw-alias-label-primary,#eef2ff)}
-#${BAR_ID} .dch-sponsor-sub{font-size:12px;color:var(--dsw-alias-label-tertiary,#8b9ac4);line-height:18px;margin-bottom:14px}
-#${BAR_ID} .dch-sponsor-codes{display:flex;gap:12px;justify-content:center}
-#${BAR_ID} .dch-sponsor-code{flex:1;min-width:0;text-align:center}
-#${BAR_ID} .dch-sponsor-code img{width:100%;max-width:150px;aspect-ratio:1/1;object-fit:contain;display:block;
-  margin:0 auto;border-radius:10px;background:#fff;padding:8px;box-sizing:border-box}
-#${BAR_ID} .dch-sponsor-code p{margin:8px 0 0;font-size:12px;color:var(--dsw-alias-label-secondary,#a9b8de)}
-#${BAR_ID} .dch-sponsor-empty{font-size:12px;color:var(--dsw-alias-label-tertiary,#8b9ac4);text-align:center;padding:16px 0}
 `;
 
 const GLYPHS = {
@@ -232,7 +242,7 @@ function renderMenu() {
         return;
       }
       closeMenu();
-      if (act === 'sponsor') { showSponsorPanel(); return; }
+      if (act === 'sponsor') { dshDesktop.sponsorWindow(); return; }
       dshDesktop.menu.action(act);
     });
   });
@@ -277,38 +287,6 @@ function setMaximized(isMax) {
   maxBtn.innerHTML = isMax ? GLYPHS.restore : GLYPHS.max;
   maxBtn.title = isMax ? '还原' : '最大化';
   maxBtn.setAttribute('aria-label', maxBtn.title);
-}
-
-let sponsorEl = null;
-
-function showSponsorPanel() {
-  if (sponsorEl) { sponsorEl.hidden = false; return; }
-  const overlay = document.createElement('div');
-  overlay.className = 'dch-sponsor';
-  overlay.setAttribute('role', 'dialog');
-  overlay.innerHTML = `
-    <div class="dch-sponsor-card">
-      <div class="dch-sponsor-head">
-        <div class="dch-sponsor-title">☕ 请作者喝咖啡</div>
-        <button class="dch-sponsor-close" title="关闭" aria-label="关闭">×</button>
-      </div>
-      <div class="dch-sponsor-sub">如果这个桌面客户端帮到了你，欢迎扫一扫支持一下作者，谢谢你的鼓励～</div>
-      <div class="dch-sponsor-codes">
-        <div class="dch-sponsor-code"><img alt="支付宝收款码" /><p>支付宝</p></div>
-        <div class="dch-sponsor-code"><img alt="微信收款码" /><p>微信</p></div>
-      </div>
-    </div>`;
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) { overlay.hidden = true; } });
-  overlay.querySelector('.dch-sponsor-close').addEventListener('click', () => { overlay.hidden = true; });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !overlay.hidden) { overlay.hidden = true; } }, { once: true });
-  document.body.appendChild(overlay);
-  dshDesktop.sponsorQr().then((r) => {
-    if (!r || !r.ok) { overlay.querySelector('.dch-sponsor-codes').innerHTML = '<div class="dch-sponsor-empty">未找到收款码资源</div>'; return; }
-    const imgs = overlay.querySelectorAll('.dch-sponsor-code img');
-    if (r.alipay) imgs[0].src = r.alipay;
-    if (r.wechat) imgs[1].src = r.wechat;
-  }).catch(() => {});
-  sponsorEl = overlay;
 }
 
 function injectFloatBar() {
@@ -691,11 +669,6 @@ body[data-m3-theme="m3"] #__dsh_desktop_chrome__ .dch-item {
 }
 body[data-m3-theme="m3"] #__dsh_desktop_chrome__ .dch-item:hover {
   background: color-mix(in srgb, var(--m3-on-surface) 8%, transparent);
-}
-body[data-m3-theme="m3"] #__dsh_desktop_chrome__ .dch-sponsor-card {
-  background: var(--m3-surface-container-high);
-  border: 1px solid var(--m3-outline-variant);
-  border-radius: var(--m3-shape-xl);
 }
 
 /* M3 shape adjustments for common elements */
