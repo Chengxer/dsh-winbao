@@ -15,6 +15,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 const BAR_ID = '__dsh_desktop_chrome__';
 const BAR_HEIGHT = 36;
+const FLOAT_BAR_ID = '__dsh_desktop_floatbar__';
+const FLOAT_BAR_HEIGHT = 24;
 
 // ---------------------------------------------------------------------------
 // Bridge (always exposed; the balance plugin reads it, the web UI keeps the
@@ -49,9 +51,25 @@ const dshDesktop = {
   openExternal: (url) => ipcRenderer.invoke('dsh:open-external', { url }),
   // 复制文本到剪贴板（更新源地址等）。
   copyText: (text) => ipcRenderer.invoke('dsh:copy-text', { text }),
+  // 赞助二维码：读取支付宝/微信收款码（data URI）。
+  sponsorQr: () => ipcRenderer.invoke('dsh:sponsor-qr'),
+  // 会话浮窗（分屏）：主窗请求把某个会话弹出到独立窗口；浮窗关闭自身。
+  floatWindow: {
+    open: (sessionId) => ipcRenderer.invoke('chrome:float-window', { action: 'open', sessionId }),
+    close: () => ipcRenderer.send('float:close'),
+  },
 };
 
 contextBridge.exposeInMainWorld('dshDesktop', dshDesktop);
+
+// 浮窗模式检测：preload 的 process.argv 由 webPreferences.additionalArguments 注入。
+// 浮窗内注入 window.__DSH_FLOAT__ = { sessionId }，供 dsh-float-window 插件识别；
+// 并注入一条更细的纯拖拽条（含关闭按钮），跳过完整自绘标题栏。
+const FLOAT_ARG = process.argv.find((a) => a.startsWith('--dsh-float='));
+const FLOAT_MODE = FLOAT_ARG ? { sessionId: FLOAT_ARG.slice('--dsh-float='.length) } : null;
+if (FLOAT_MODE) {
+  contextBridge.exposeInMainWorld('__DSH_FLOAT__', FLOAT_MODE);
+}
 
 // 页面异常 → 主进程日志（desktop.log），便于排查插件空白视图。
 window.addEventListener('error', (e) => {
@@ -128,6 +146,31 @@ const CHROME_CSS = `
   font-size:10.5px;cursor:pointer;font-family:inherit;line-height:16px}
 #${BAR_ID} .dch-copy:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));
   color:var(--dsw-alias-label-primary,#e6ecff)}
+#${BAR_ID} .dch-sponsor{position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483002;
+  display:flex;align-items:center;justify-content:center;
+  background:rgba(4,8,18,.55);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);
+  -webkit-app-region:no-drag;animation:dch-fade .15s ease-out}
+@keyframes dch-fade{from{opacity:0}to{opacity:1}}
+#${BAR_ID} .dch-sponsor-card{width:min(420px,88vw);max-height:86vh;overflow:auto;box-sizing:border-box;
+  padding:20px 22px 18px;border-radius:16px;
+  background:var(--dsw-alias-bg-layer-2,color-mix(in srgb,var(--dsw-alias-bg-base,#0b1220) 94%,white));
+  border:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.12));
+  box-shadow:0 20px 60px rgba(0,0,0,.55),0 4px 16px rgba(0,0,0,.4);
+  color:var(--dsw-alias-label-primary,#e6ecff);font-family:var(--dsw-font-family,"Segoe UI","Microsoft YaHei",system-ui,sans-serif)}
+#${BAR_ID} .dch-sponsor-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px}
+#${BAR_ID} .dch-sponsor-title{font-size:15px;font-weight:600}
+#${BAR_ID} .dch-sponsor-close{flex:none;width:28px;height:28px;display:grid;place-items:center;border:none;
+  border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary,#a9b8de);cursor:pointer;
+  font-size:16px;line-height:1;padding:0}
+#${BAR_ID} .dch-sponsor-close:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.09));
+  color:var(--dsw-alias-label-primary,#eef2ff)}
+#${BAR_ID} .dch-sponsor-sub{font-size:12px;color:var(--dsw-alias-label-tertiary,#8b9ac4);line-height:18px;margin-bottom:14px}
+#${BAR_ID} .dch-sponsor-codes{display:flex;gap:12px;justify-content:center}
+#${BAR_ID} .dch-sponsor-code{flex:1;min-width:0;text-align:center}
+#${BAR_ID} .dch-sponsor-code img{width:100%;max-width:150px;aspect-ratio:1/1;object-fit:contain;display:block;
+  margin:0 auto;border-radius:10px;background:#fff;padding:8px;box-sizing:border-box}
+#${BAR_ID} .dch-sponsor-code p{margin:8px 0 0;font-size:12px;color:var(--dsw-alias-label-secondary,#a9b8de)}
+#${BAR_ID} .dch-sponsor-empty{font-size:12px;color:var(--dsw-alias-label-tertiary,#8b9ac4);text-align:center;padding:16px 0}
 `;
 
 const GLYPHS = {
@@ -175,6 +218,8 @@ function renderMenu() {
     <button class="dch-item" data-act="open-browser">在浏览器中打开</button>
     <button class="dch-item" data-act="open-logs">打开日志目录</button>
     <div class="dch-sep"></div>
+    <button class="dch-item" data-act="sponsor">☕ 请作者喝咖啡</button>
+    <div class="dch-sep"></div>
     <button class="dch-item" data-act="about">关于 DSH Desktop</button>
     <button class="dch-item" data-danger="1" data-act="quit">退出</button>`;
   menuEl.querySelectorAll('.dch-item').forEach((item) => {
@@ -187,6 +232,7 @@ function renderMenu() {
         return;
       }
       closeMenu();
+      if (act === 'sponsor') { showSponsorPanel(); return; }
       dshDesktop.menu.action(act);
     });
   });
@@ -233,7 +279,66 @@ function setMaximized(isMax) {
   maxBtn.setAttribute('aria-label', maxBtn.title);
 }
 
+let sponsorEl = null;
+
+function showSponsorPanel() {
+  if (sponsorEl) { sponsorEl.hidden = false; return; }
+  const overlay = document.createElement('div');
+  overlay.className = 'dch-sponsor';
+  overlay.setAttribute('role', 'dialog');
+  overlay.innerHTML = `
+    <div class="dch-sponsor-card">
+      <div class="dch-sponsor-head">
+        <div class="dch-sponsor-title">☕ 请作者喝咖啡</div>
+        <button class="dch-sponsor-close" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <div class="dch-sponsor-sub">如果这个桌面客户端帮到了你，欢迎扫一扫支持一下作者，谢谢你的鼓励～</div>
+      <div class="dch-sponsor-codes">
+        <div class="dch-sponsor-code"><img alt="支付宝收款码" /><p>支付宝</p></div>
+        <div class="dch-sponsor-code"><img alt="微信收款码" /><p>微信</p></div>
+      </div>
+    </div>`;
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) { overlay.hidden = true; } });
+  overlay.querySelector('.dch-sponsor-close').addEventListener('click', () => { overlay.hidden = true; });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !overlay.hidden) { overlay.hidden = true; } }, { once: true });
+  document.body.appendChild(overlay);
+  dshDesktop.sponsorQr().then((r) => {
+    if (!r || !r.ok) { overlay.querySelector('.dch-sponsor-codes').innerHTML = '<div class="dch-sponsor-empty">未找到收款码资源</div>'; return; }
+    const imgs = overlay.querySelectorAll('.dch-sponsor-code img');
+    if (r.alipay) imgs[0].src = r.alipay;
+    if (r.wechat) imgs[1].src = r.wechat;
+  }).catch(() => {});
+  sponsorEl = overlay;
+}
+
+function injectFloatBar() {
+  if (document.getElementById(FLOAT_BAR_ID)) return;
+  const style = document.createElement('style');
+  style.textContent = `
+  #${FLOAT_BAR_ID}{position:fixed;top:0;left:0;right:0;height:${FLOAT_BAR_HEIGHT}px;z-index:2147483000;
+    display:flex;align-items:center;justify-content:flex-end;gap:2px;padding:0 6px 0 10px;
+    -webkit-app-region:drag;user-select:none;box-sizing:border-box;
+    background:color-mix(in srgb,var(--dsw-alias-bg-base,#0b1220) 70%,transparent);
+    border-bottom:1px solid color-mix(in srgb,var(--dsw-alias-border-l1,rgba(255,255,255,.09)) 50%,transparent)}
+  #${FLOAT_BAR_ID} button{width:26px;height:22px;display:grid;place-items:center;border:none;border-radius:7px;
+    background:transparent;color:var(--dsw-alias-label-secondary,#b8c5ea);cursor:pointer;padding:0;
+    -webkit-app-region:no-drag;outline:none;transition:background .12s,color .12s}
+  #${FLOAT_BAR_ID} button:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.09));
+    color:var(--dsw-alias-label-primary,#eef2ff)}
+  #${FLOAT_BAR_ID} button.df-close:hover{background:#e81123;color:#fff}`;
+  document.head.appendChild(style);
+  const layout = document.createElement('style');
+  layout.textContent = `body{box-sizing:border-box!important;padding-top:${FLOAT_BAR_HEIGHT}px!important}`;
+  document.head.appendChild(layout);
+  const bar = document.createElement('div');
+  bar.id = FLOAT_BAR_ID;
+  bar.innerHTML = `<button class="df-close" title="关闭" aria-label="关闭">${GLYPHS.close}</button>`;
+  document.body.appendChild(bar);
+  bar.querySelector('.df-close').addEventListener('click', () => dshDesktop.floatWindow.close());
+}
+
 function injectChrome() {
+  if (FLOAT_MODE) { injectFloatBar(); return; }
   if (document.getElementById(BAR_ID)) return;
   const style = document.createElement('style');
   style.textContent = CHROME_CSS;
@@ -296,4 +401,436 @@ if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', injectChrome);
 } else {
   injectChrome();
+}
+
+// ---------------------------------------------------------------------------
+// M3 (Material Design 3) 主题系统
+// 注入 M3 主题 CSS 并在设置页面的外观选项中添加第四个主题按钮
+// ---------------------------------------------------------------------------
+
+const M3_THEME_KEY = 'dsh-desktop-m3-theme';
+const M3_THEME_ATTR = 'data-m3-theme';
+let m3ThemeEnabled = false;
+let m3SettingsObserver = null;
+
+function m3LoadPreference() {
+  try { return localStorage.getItem(M3_THEME_KEY) === 'm3'; }
+  catch { return false; }
+}
+
+function m3SavePreference(enabled) {
+  try { localStorage.setItem(M3_THEME_KEY, enabled ? 'm3' : 'default'); } catch {}
+}
+
+function m3ApplyTheme(enabled) {
+  m3ThemeEnabled = enabled;
+  if (enabled) {
+    document.body.setAttribute(M3_THEME_ATTR, 'm3');
+    document.documentElement.setAttribute(M3_THEME_ATTR, 'm3');
+  } else {
+    document.body.removeAttribute(M3_THEME_ATTR);
+    document.documentElement.removeAttribute(M3_THEME_ATTR);
+  }
+  window.dispatchEvent(new CustomEvent('m3-theme-change', { detail: { enabled } }));
+}
+
+function m3ToggleTheme() {
+  const next = !m3ThemeEnabled;
+  m3SavePreference(next);
+  m3ApplyTheme(next);
+  m3UpdateAllButtons();
+  return next;
+}
+
+function m3GetThemeCSS() {
+  return `
+/* ===== M3 (Material Design 3) Theme for DSH ===== */
+
+:root {
+  --m3-primary-0: #000000;
+  --m3-primary-10: #21005D;
+  --m3-primary-20: #381E72;
+  --m3-primary-30: #4F378B;
+  --m3-primary-40: #6750A4;
+  --m3-primary-50: #7F67BE;
+  --m3-primary-60: #9A82DB;
+  --m3-primary-70: #B69DF8;
+  --m3-primary-80: #D0BCFF;
+  --m3-primary-90: #EADDFF;
+  --m3-primary-95: #F6EDFF;
+  --m3-primary-99: #FFFBFE;
+  --m3-primary-100: #FFFFFF;
+  --m3-secondary-40: #625B71;
+  --m3-secondary-80: #CCC2DC;
+  --m3-secondary-90: #E8DEF8;
+  --m3-tertiary-40: #7D5260;
+  --m3-tertiary-80: #EFB8C8;
+  --m3-error-40: #B3261E;
+  --m3-error-80: #F9DEDC;
+  --m3-neutral-10: #1C1B1F;
+  --m3-neutral-20: #313033;
+  --m3-neutral-40: #605D62;
+  --m3-neutral-60: #939094;
+  --m3-neutral-80: #CAC6CA;
+  --m3-neutral-90: #E6E0E9;
+  --m3-neutral-95: #F4EFF4;
+  --m3-neutral-99: #FFFBFE;
+  --m3-nv-30: #49454F;
+  --m3-nv-50: #79747E;
+  --m3-nv-60: #938F99;
+  --m3-nv-80: #CAC4D0;
+  --m3-nv-90: #E7E0EC;
+  --m3-primary: var(--m3-primary-40);
+  --m3-on-primary: var(--m3-primary-100);
+  --m3-primary-container: var(--m3-primary-90);
+  --m3-on-primary-container: var(--m3-primary-10);
+  --m3-secondary: var(--m3-secondary-40);
+  --m3-on-secondary: var(--m3-primary-100);
+  --m3-secondary-container: var(--m3-secondary-90);
+  --m3-on-secondary-container: #1D192B;
+  --m3-tertiary: var(--m3-tertiary-40);
+  --m3-on-tertiary: var(--m3-primary-100);
+  --m3-tertiary-container: #FFD8E4;
+  --m3-on-tertiary-container: #31111D;
+  --m3-error: var(--m3-error-40);
+  --m3-on-error: var(--m3-primary-100);
+  --m3-error-container: var(--m3-error-90);
+  --m3-on-error-container: #410E0B;
+  --m3-background: var(--m3-neutral-99);
+  --m3-on-background: var(--m3-neutral-10);
+  --m3-surface: var(--m3-neutral-99);
+  --m3-on-surface: var(--m3-neutral-10);
+  --m3-surface-variant: var(--m3-nv-90);
+  --m3-on-surface-variant: var(--m3-nv-30);
+  --m3-surface-container-lowest: #FFFFFF;
+  --m3-surface-container-low: var(--m3-neutral-95);
+  --m3-surface-container: #F3EDF7;
+  --m3-surface-container-high: #ECE6F0;
+  --m3-surface-container-highest: #E6E0E9;
+  --m3-outline: var(--m3-nv-50);
+  --m3-outline-variant: var(--m3-nv-80);
+  --m3-shape-xs: 4px;
+  --m3-shape-sm: 8px;
+  --m3-shape-md: 12px;
+  --m3-shape-lg: 16px;
+  --m3-shape-xl: 28px;
+  --m3-shape-full: 9999px;
+  --m3-motion-short: 150ms;
+  --m3-motion-medium: 250ms;
+  --m3-motion-long: 300ms;
+  --m3-easing-standard: cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* Dark Mode */
+body[data-m3-theme="m3"][data-ds-dark-theme] {
+  --m3-primary: var(--m3-primary-80);
+  --m3-on-primary: var(--m3-primary-20);
+  --m3-primary-container: var(--m3-primary-30);
+  --m3-on-primary-container: var(--m3-primary-90);
+  --m3-secondary: var(--m3-secondary-80);
+  --m3-on-secondary: #332D41;
+  --m3-secondary-container: #4A4458;
+  --m3-on-secondary-container: var(--m3-secondary-90);
+  --m3-tertiary: var(--m3-tertiary-80);
+  --m3-on-tertiary: #492532;
+  --m3-tertiary-container: #633B48;
+  --m3-on-tertiary-container: #FFD8E4;
+  --m3-error: #F2B8B5;
+  --m3-on-error: #601410;
+  --m3-error-container: #8C1D18;
+  --m3-on-error-container: #F9DEDC;
+  --m3-background: var(--m3-neutral-10);
+  --m3-on-background: var(--m3-neutral-90);
+  --m3-surface: var(--m3-neutral-10);
+  --m3-on-surface: var(--m3-neutral-90);
+  --m3-surface-variant: var(--m3-nv-30);
+  --m3-on-surface-variant: var(--m3-nv-80);
+  --m3-surface-container-lowest: #141218;
+  --m3-surface-container-low: #1D1B20;
+  --m3-surface-container: #211F26;
+  --m3-surface-container-high: #2B2930;
+  --m3-surface-container-highest: #36343B;
+  --m3-outline: var(--m3-nv-60);
+  --m3-outline-variant: var(--m3-nv-30);
+}
+
+/* DSW Variable Overrides - Light */
+body[data-m3-theme="m3"] {
+  --dsw-alias-bg-base: var(--m3-background);
+  --dsw-alias-bg-layer-1: var(--m3-surface-container-low);
+  --dsw-alias-bg-layer-2: var(--m3-surface-container);
+  --dsw-alias-bg-layer-3: var(--m3-surface-container-high);
+  --dsw-alias-bg-module-platform: var(--m3-surface-container-high);
+  --dsw-alias-border-l1: var(--m3-outline-variant);
+  --dsw-alias-border-l2: var(--m3-outline);
+  --dsw-alias-border-l3: var(--m3-outline);
+  --dsw-alias-label-primary: var(--m3-on-surface);
+  --dsw-alias-label-secondary: var(--m3-on-surface-variant);
+  --dsw-alias-label-tertiary: var(--m3-outline);
+  --dsw-alias-label-caption: var(--m3-outline);
+  --dsw-alias-brand-primary: var(--m3-primary);
+  --dsw-alias-brand-primary-new-color: var(--m3-primary);
+  --dsw-alias-button-primary-fill: var(--m3-primary);
+  --dsw-alias-button-primary-hover: color-mix(in srgb, var(--m3-primary) 88%, var(--m3-on-primary) 12%);
+  --dsw-alias-button-primary-label: var(--m3-on-primary);
+  --dsw-alias-button-ghost-active-border: var(--m3-outline);
+  --dsw-alias-button-ghost-active-fill: var(--m3-surface-container-high);
+  --dsw-alias-interactive-bg-hover: color-mix(in srgb, var(--m3-on-surface) 8%, transparent);
+  --dsw-alias-interactive-bg-hover-solid: var(--m3-surface-container-high);
+  --dsw-alias-interactive-bg-active: color-mix(in srgb, var(--m3-on-surface) 12%, transparent);
+  --dsw-alias-state-success-primary: #2E7D32;
+  --dsw-alias-state-success-secondary: #66BB6A;
+  --dsw-alias-state-success-tertiary: #C8E6C9;
+  --dsw-alias-state-error-primary: var(--m3-error);
+  --dsw-alias-state-warn-primary: #F57C00;
+  --dsw-alias-state-warn-secondary: #FFB74D;
+  --dsw-alias-state-warn-tertiary: #FFE0B2;
+  --dsw-alias-state-business-primary: var(--m3-tertiary);
+  --dsw-alias-state-business-tertiary: var(--m3-tertiary-container);
+  --dsw-specific-sidebar-fill: var(--m3-surface-container-low);
+  --dsw-specific-sidebar-nav-item-active: var(--m3-secondary-container);
+  --dsw-specific-sidebar-nav-item-active-accent: var(--m3-primary);
+  --dsw-specific-sidebar-nav-item-hover: var(--m3-surface-container);
+  --dsw-specific-input-major: var(--m3-surface-container-high);
+  --dsw-specific-login-input: var(--m3-surface-container);
+  --dsw-specific-bubble: var(--m3-primary-container);
+  --dsw-specific-bubble-highlight: var(--m3-secondary-container);
+  --dsw-specific-menu: var(--m3-surface-container-high);
+  --dsw-specific-selector: var(--m3-surface-container);
+  --dsw-alias-markdown-code-block: var(--m3-surface-container);
+  --dsw-alias-markdown-code-block-banner: var(--m3-surface-container-high);
+  --dsw-alias-markdown-inline-code: var(--m3-surface-container-high);
+  --dsw-alias-markdown-tag: var(--m3-surface-container-high);
+  --dsw-shadow-lv1: 0 1px 2px 0 rgba(0,0,0,.03), 0 1px 3px 0 rgba(0,0,0,.05);
+  --dsw-shadow-lv2: 0 2px 4px 0 rgba(0,0,0,.04), 0 4px 8px 0 rgba(0,0,0,.06);
+  --dsw-shadow-lv3: 0 4px 8px 0 rgba(0,0,0,.06), 0 8px 16px 0 rgba(0,0,0,.08);
+  transition: background-color var(--m3-motion-medium) var(--m3-easing-standard),
+              color var(--m3-motion-medium) var(--m3-easing-standard);
+}
+
+/* DSW Variable Overrides - Dark */
+body[data-m3-theme="m3"][data-ds-dark-theme] {
+  --dsw-alias-bg-base: var(--m3-background);
+  --dsw-alias-bg-layer-1: var(--m3-surface-container-low);
+  --dsw-alias-bg-layer-2: var(--m3-surface-container);
+  --dsw-alias-bg-layer-3: var(--m3-surface-container-high);
+  --dsw-alias-border-l1: var(--m3-outline-variant);
+  --dsw-alias-border-l2: var(--m3-outline);
+  --dsw-alias-label-primary: var(--m3-on-surface);
+  --dsw-alias-label-secondary: var(--m3-on-surface-variant);
+  --dsw-alias-label-tertiary: var(--m3-outline);
+  --dsw-alias-button-primary-fill: var(--m3-primary);
+  --dsw-alias-button-primary-hover: color-mix(in srgb, var(--m3-primary) 88%, var(--m3-on-primary) 12%);
+  --dsw-alias-button-primary-label: var(--m3-on-primary);
+  --dsw-alias-interactive-bg-hover: color-mix(in srgb, var(--m3-on-surface) 8%, transparent);
+  --dsw-alias-interactive-bg-hover-solid: var(--m3-surface-container-high);
+  --dsw-specific-sidebar-fill: var(--m3-surface-container-low);
+  --dsw-specific-sidebar-nav-item-active: var(--m3-secondary-container);
+  --dsw-specific-sidebar-nav-item-hover: var(--m3-surface-container);
+  --dsw-specific-bubble: var(--m3-primary-container);
+  --dsw-specific-input-major: var(--m3-surface-container-high);
+}
+
+/* M3 Theme Button in Settings */
+.m3-theme-option {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 10px 14px;
+  border: 2px solid var(--dsw-alias-border-l2, rgba(255,255,255,.12));
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-2, #1a1a2e);
+  color: var(--dsw-alias-label-primary, #fff);
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.2,0,0,1);
+  font-size: 12px; font-weight: 500;
+  font-family: var(--dsw-font-family, system-ui, sans-serif);
+  min-width: 64px;
+}
+.m3-theme-option:hover {
+  border-color: var(--m3-primary, #6750A4);
+  background: var(--dsw-alias-bg-layer-3, #2a2a3e);
+  transform: translateY(-1px);
+}
+.m3-theme-option.m3-theme-active {
+  border-color: var(--m3-primary, #6750A4);
+  background: color-mix(in srgb, var(--m3-primary, #6750A4) 12%, var(--dsw-alias-bg-layer-2, #1a1a2e));
+}
+.m3-theme-preview {
+  display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
+  gap: 2px; width: 36px; height: 36px; border-radius: 8px; overflow: hidden;
+}
+.m3-preview-primary { background: #6750A4; border-radius: 4px 0 0 0; }
+.m3-preview-secondary { background: #625B71; border-radius: 0 4px 0 0; }
+.m3-preview-tertiary { background: #7D5260; border-radius: 0 0 0 4px; }
+.m3-preview-surface { background: #FFFBFE; border-radius: 0 0 4px 0; }
+body[data-m3-theme="m3"] .m3-preview-surface { background: #1C1B1F; }
+.m3-theme-label { font-size: 11px; font-weight: 600; letter-spacing: 0.3px; }
+
+/* DSH Chrome M3 overrides */
+body[data-m3-theme="m3"] #__dsh_desktop_chrome__ {
+  background: color-mix(in srgb, var(--m3-surface-container-low) 85%, transparent);
+  backdrop-filter: blur(20px) saturate(1.3);
+  -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  border-bottom: 1px solid var(--m3-outline-variant);
+}
+body[data-m3-theme="m3"] #__dsh_desktop_chrome__ .dch-btn {
+  border-radius: var(--m3-shape-md);
+  transition: background-color var(--m3-motion-short) var(--m3-easing-standard);
+}
+body[data-m3-theme="m3"] #__dsh_desktop_chrome__ .dch-btn:hover {
+  background: color-mix(in srgb, var(--m3-on-surface) 8%, transparent);
+}
+body[data-m3-theme="m3"] #__dsh_desktop_chrome__ .dch-menu {
+  background: var(--m3-surface-container-high);
+  border: 1px solid var(--m3-outline-variant);
+  border-radius: var(--m3-shape-lg);
+  box-shadow: 0 4px 8px 0 rgba(0,0,0,.08), 0 12px 32px 0 rgba(0,0,0,.12);
+}
+body[data-m3-theme="m3"] #__dsh_desktop_chrome__ .dch-item {
+  border-radius: var(--m3-shape-md);
+  transition: background-color var(--m3-motion-short) var(--m3-easing-standard);
+}
+body[data-m3-theme="m3"] #__dsh_desktop_chrome__ .dch-item:hover {
+  background: color-mix(in srgb, var(--m3-on-surface) 8%, transparent);
+}
+body[data-m3-theme="m3"] #__dsh_desktop_chrome__ .dch-sponsor-card {
+  background: var(--m3-surface-container-high);
+  border: 1px solid var(--m3-outline-variant);
+  border-radius: var(--m3-shape-xl);
+}
+
+/* M3 shape adjustments for common elements */
+body[data-m3-theme="m3"] button { border-radius: var(--m3-shape-full); }
+body[data-m3-theme="m3"] input,
+body[data-m3-theme="m3"] textarea,
+body[data-m3-theme="m3"] select { border-radius: var(--m3-shape-md); }
+body[data-m3-theme="m3"] ::-webkit-scrollbar-thumb { border-radius: var(--m3-shape-full); }
+body[data-m3-theme="m3"] ::selection {
+  background: color-mix(in srgb, var(--m3-primary) 30%, transparent);
+  color: var(--m3-on-surface);
+}
+body[data-m3-theme="m3"] :focus-visible {
+  outline: 2px solid var(--m3-primary);
+  outline-offset: 2px;
+  border-radius: var(--m3-shape-sm);
+}
+`;
+}
+
+function m3InjectCSS() {
+  if (document.getElementById('m3-theme-inline-style')) return;
+  const style = document.createElement('style');
+  style.id = 'm3-theme-inline-style';
+  style.textContent = m3GetThemeCSS();
+  document.head.appendChild(style);
+}
+
+function m3CreateButton() {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'm3-theme-option';
+  btn.setAttribute('data-theme', 'm3');
+  btn.setAttribute('aria-pressed', String(m3ThemeEnabled));
+  btn.setAttribute('title', 'Material Design 3 (Material You)');
+  btn.innerHTML = `
+    <div class="m3-theme-preview">
+      <div class="m3-preview-primary"></div>
+      <div class="m3-preview-secondary"></div>
+      <div class="m3-preview-tertiary"></div>
+      <div class="m3-preview-surface"></div>
+    </div>
+    <span class="m3-theme-label">M3</span>
+  `;
+  btn.addEventListener('click', () => {
+    m3ToggleTheme();
+    m3UpdateAllButtons();
+  });
+  return btn;
+}
+
+function m3UpdateAllButtons() {
+  document.querySelectorAll('.m3-theme-option').forEach(btn => {
+    btn.setAttribute('aria-pressed', String(m3ThemeEnabled));
+    btn.classList.toggle('m3-theme-active', m3ThemeEnabled);
+  });
+}
+
+function m3FindAppearanceSection() {
+  const selectors = [
+    '[class*="appearance"]', '[class*="Appearance"]',
+    '[class*="theme-section"]', '[class*="themeSection"]',
+    '[data-section="appearance"]', '[data-testid="appearance"]',
+  ];
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (el) return el;
+  }
+  // 通过文本查找
+  const all = document.querySelectorAll('div, section, label, span');
+  for (const el of all) {
+    const txt = el.textContent || '';
+    if ((txt.includes('外观') || txt.includes('Appearance') || txt.includes('主题')) && txt.length < 20) {
+      const section = el.closest('[class*="section"], [class*="Section"], [class*="group"], [class*="Group"]') || el.parentElement?.parentElement;
+      if (section && section.querySelectorAll('button').length >= 2) return section;
+    }
+  }
+  return null;
+}
+
+function m3InjectSettingButton() {
+  if (document.querySelector('.m3-theme-option')) return false;
+  const section = m3FindAppearanceSection();
+  if (!section) return false;
+  
+  const buttons = section.querySelectorAll('button, [role="button"]');
+  if (buttons.length >= 2) {
+    const lastBtn = buttons[buttons.length - 1];
+    const m3Btn = m3CreateButton();
+    lastBtn.parentNode.insertBefore(m3Btn, lastBtn.nextSibling);
+    m3UpdateAllButtons();
+    return true;
+  }
+  return false;
+}
+
+function m3StartSettingsObserver() {
+  if (m3SettingsObserver) return;
+  m3SettingsObserver = new MutationObserver(() => {
+    m3InjectSettingButton();
+  });
+  m3SettingsObserver.observe(document.body, { childList: true, subtree: true });
+}
+
+function m3InitTheme() {
+  // 注入 CSS
+  m3InjectCSS();
+  
+  // 读取偏好
+  const saved = m3LoadPreference();
+  
+  // 应用主题
+  m3ApplyTheme(saved);
+  
+  // 监听设置页面
+  m3StartSettingsObserver();
+  
+  // 监听系统主题变化
+  if (window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+      if (m3ThemeEnabled) m3ApplyTheme(true);
+    });
+  }
+  
+  // 暴露 API
+  window.__m3Theme = {
+    isEnabled: () => m3ThemeEnabled,
+    toggle: m3ToggleTheme,
+    set: (v) => { m3SavePreference(v); m3ApplyTheme(v); m3UpdateAllButtons(); },
+  };
+}
+
+// 初始化 M3 主题
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', m3InitTheme);
+} else {
+  m3InitTheme();
 }

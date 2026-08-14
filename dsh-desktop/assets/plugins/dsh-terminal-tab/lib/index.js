@@ -459,7 +459,7 @@ async function handleCloseRoute(req, res) {
   sendJson(res, 200, { ok: true });
 }
 
-const name = "dsh-terminal";
+const name = "dsh-terminal-tab";
 const inject = ["webServer"];
 
 function apply(ctx) {

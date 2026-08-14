@@ -96,6 +96,12 @@ let balanceTimer = null;
 let restartingServer = false;
 
 // ---------------------------------------------------------------------------
+// 会话浮窗（分屏）：把会话弹出到独立窗口
+// ---------------------------------------------------------------------------
+const FLOAT_MAX = 8; // 浮窗总数上限，防资源滥用
+const floatWindows = new Set(); // BrowserWindow 集合
+
+// ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
 
@@ -198,7 +204,9 @@ function startServer() {
     }
     const out = fs.createWriteStream(path.join(logsDir, 'dsh-web.log'), { flags: 'a' });
     log('dsh', `启动: "${nodeBin}" "${bin}" web --host 127.0.0.1 --port 0`);
-    const proc = spawn(nodeBin, [bin, 'web', '--host', '127.0.0.1', '--port', '0'], {
+    // --use-system-ca: 让 dsh web 进程信任系统证书库（代理/MITM 场景下内置 node 的
+    // 默认 CA 无法验证，导致插件市场等对外 fetch 失败）。
+    const proc = spawn(nodeBin, ['--use-system-ca', bin, 'web', '--host', '127.0.0.1', '--port', '0'], {
       cwd: userDataDir,
       env: childEnv(),
       windowsHide: true,
@@ -406,6 +414,8 @@ function createWindow() {
 
   // 关闭 → 隐藏到托盘（可在 chrome 菜单关闭该行为）。
   mainWindow.on('close', (event) => {
+    // 主窗关闭（无论到托盘还是退出）时同步关闭会话浮窗。
+    closeAllFloatWindows();
     if (!forceQuit && IS_WIN && closeToTrayEnabled() && tray) {
       event.preventDefault();
       mainWindow.hide();
@@ -414,6 +424,100 @@ function createWindow() {
   });
 
   mainWindow.on('closed', () => { mainWindow = null; });
+}
+
+// ---------------------------------------------------------------------------
+// 会话浮窗：共享的 Web 守卫 + 浮窗创建/生命周期
+// ---------------------------------------------------------------------------
+
+// 本地 Web 地址判定（浮窗与主窗共用，杜绝异域/文件导航逃逸）。
+function isAllowedWebUrl(url) {
+  try {
+    const target = new URL(url);
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') return false;
+    if (webUrl) {
+      const base = new URL(webUrl);
+      return target.origin === base.origin;
+    }
+    return target.hostname === '127.0.0.1' || target.hostname === 'localhost' || target.hostname === '::1';
+  } catch {
+    return false;
+  }
+}
+
+// 给一个 webContents 挂上导航围栏 + 外部链接 + 异常日志守卫（浮窗使用）。
+function guardWebContents(wc) {
+  wc.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  const guardNavigation = (event, url) => {
+    if (isAllowedWebUrl(url)) return;
+    event.preventDefault();
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+  };
+  wc.on('will-navigate', guardNavigation);
+  wc.on('will-redirect', guardNavigation);
+  wc.on('console-message', (_e, level, message, line, sourceId) => {
+    if (level === 'error' || level === 'warning') {
+      log('float-page', `[${level}] ${message} (${sourceId || 'unknown'}:${line})`);
+    }
+  });
+  wc.on('render-process-gone', (_e, details) => {
+    log('float-page', `浮窗渲染进程异常退出: ${details.reason} (exitCode=${details.exitCode})`);
+  });
+}
+
+// 创建并登记一个会话浮窗。返回 BrowserWindow；失败返回 null。
+function createFloatWindow(sessionId, { title } = {}) {
+  if (!webUrl || floatWindows.size >= FLOAT_MAX) return null;
+  const win = new BrowserWindow({
+    width: 900,
+    height: 640,
+    minWidth: 480,
+    minHeight: 360,
+    show: false,
+    title: title || 'DSH 会话',
+    backgroundColor: '#0b1220',
+    icon: path.join(__dirname, 'assets', 'icon.png'),
+    // 与主窗一致的无边框；浮窗 preload 注入一条更细的纯拖拽条。
+    ...(IS_WIN ? { frame: false, roundedCorners: true } : {}),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
+      // 用 additionalArguments 而非 URL 参数，避免污染 Web UI 见到的地址；
+      // preload 从 process.argv 读取 --dsh-float=<sessionId>。
+      additionalArguments: ['--dsh-float=' + sessionId],
+    },
+  });
+  floatWindows.add(win);
+  win.loadURL(webUrl).catch((err) => log('float', '浮窗加载失败: ' + ((err && err.message) || err)));
+
+  // 窗口标题跟随会话（去掉通用前缀，保留会话相关标题）。
+  win.on('page-title-updated', (event) => {
+    event.preventDefault();
+    const raw = String(event.title || win.getTitle() || '');
+    const cleaned = raw.replace(/^DSH[·\-—\s/]*/i, '').trim();
+    win.setTitle(cleaned || 'DSH 会话');
+  });
+
+  win.once('ready-to-show', () => { if (!win.isDestroyed()) win.show(); });
+  win.on('closed', () => { floatWindows.delete(win); });
+  guardWebContents(win.webContents);
+
+  log('float', '已创建会话浮窗 sessionId=' + sessionId);
+  return win;
+}
+
+// 关闭全部浮窗（主窗关闭 / app 退出时调用）。
+function closeAllFloatWindows() {
+  for (const win of floatWindows) {
+    if (!win.isDestroyed()) win.destroy();
+  }
+  floatWindows.clear();
 }
 
 function fatal(title, err) {
@@ -704,12 +808,44 @@ function registerChromeIpc() {
     }
   });
 
+  // 会话浮窗：主窗请求把某个会话弹出到独立窗口（校验来源与数量上限）。
+  ipcMain.handle('chrome:float-window', (event, { action, sessionId } = {}) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'unauthorized' };
+    if (action !== 'open') return { ok: false, error: 'bad-action' };
+    if (!webUrl) return { ok: false, error: 'not-ready' };
+    if (typeof sessionId !== 'string' || !sessionId) return { ok: false, error: 'bad-session' };
+    if (floatWindows.size >= FLOAT_MAX) return { ok: false, error: 'too-many' };
+    const win = createFloatWindow(sessionId);
+    if (!win) return { ok: false, error: 'too-many' };
+    return { ok: true, id: win.id };
+  });
+
+  // 浮窗关闭：仅允许浮窗关闭自身（校验发送者属于某个浮窗）。
+  ipcMain.on('float:close', (event) => {
+    for (const win of floatWindows) {
+      if (!win.isDestroyed() && win.webContents === event.sender) { win.close(); break; }
+    }
+  });
+
   // 复制文本到剪贴板（菜单「更新源」复制按钮 / 关于对话框）。
   ipcMain.handle('dsh:copy-text', (event, { text } = {}) => {
     if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false };
     if (typeof text !== 'string' || !text || text.length > 2048) return { ok: false };
     clipboard.writeText(text);
     return { ok: true };
+  });
+
+  // 请作者喝咖啡：读取赞助二维码图片（支付宝 / 微信），以 data URI 返回给渲染进程。
+  ipcMain.handle('dsh:sponsor-qr', (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false };
+    const read = (name) => {
+      try {
+        const buf = fs.readFileSync(path.join(__dirname, 'assets', 'sponsor', name));
+        const mime = name.endsWith('.png') ? 'image/png' : 'image/jpeg';
+        return 'data:' + mime + ';base64,' + buf.toString('base64');
+      } catch { return ''; }
+    };
+    return { ok: true, alipay: read('sponsor-alipay.jpg'), wechat: read('sponsor-wechat.png') };
   });
 
   // preload 转发的页面异常（window.onerror / unhandledrejection）。
@@ -869,12 +1005,14 @@ async function refreshBalance() {
   } catch (err) {
     result = { ok: false, error: String((err && err.message) || err), balances: [] };
   }
-  // 按当前默认模型选择价格档（settings.json 可覆盖 balancePrices.<model>）。
+  // 按当前默认模型 + 当前时段（峰谷）计算有效单价；settings.json 的
+  // balancePrices.<model> 可整体覆盖该模型的单价。
   const model = balance.readActiveModel(home) || 'deepseek-v4-pro';
-  const table = result.prices || balance.DEFAULT_PRICES;
   const s = updater.loadSettings(updCtx());
   const override = s.balancePrices && s.balancePrices[model];
-  result.prices = { ...(table[model] || balance.FALLBACK_PRICES), ...(override || {}) };
+  result.prices = { ...balance.effectivePrice(model), ...(override || {}) };
+  result.model = model;
+  result.peak = balance.isPeakHour();
   balanceCache = result;
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('dsh:balance', result);
@@ -896,8 +1034,10 @@ const COMPANION_PLUGINS = [
   { id: 'balance', name: '@deepseek-ai/dsh-balance' },
   { id: 'file-changes', name: '@deepseek-ai/dsh-file-changes' },
   { id: 'client-file-changes', name: '@deepseek-ai/dsh-client-file-changes' },
-  { id: 'terminal', name: '@deepseek-ai/dsh-terminal' },
+  { id: 'terminal', name: '@deepseek-ai/dsh-terminal-tab' },
   { id: 'plugin-marketplace', name: '@deepseek-ai/dsh-plugin-marketplace' },
+  { id: 'float-window', name: '@deepseek-ai/dsh-float-window' },
+  { id: 'prompt-custom', name: '@deepseek-ai/dsh-prompt-custom' },
 ];
 
 function syncCompanionPlugins() {
@@ -923,7 +1063,19 @@ function syncCompanionPlugins() {
     try { patch = fs.readFileSync(patchFile, 'utf8'); } catch { patch = ''; }
     let changed = false;
     for (const p of COMPANION_PLUGINS) {
-      if (new RegExp('id:\\s*' + p.id + '\\b').test(patch)) continue;
+      // 该 id 在 patch 里已存在：若它现在的 name 与当前版本不一致（例如终端
+      // 包改名 @deepseek-ai/dsh-terminal → dsh-terminal-tab），就地改名为当前
+      // 值。否则旧名残留会让配套插件与 agent 内置终端重复注册路由、或加载
+      // 到已不属于本版本的包。只改 name 行，不动用户自己加的其它行。
+      const idNameRe = new RegExp('(id:\\s*' + p.id + '\\b[^\\n]*\\n\\s*name:\\s*\\x27)([^\\x27]*)(\\x27)');
+      const m = patch.match(idNameRe);
+      if (m) {
+        if (m[2] !== p.name) {
+          patch = patch.replace(idNameRe, '$1' + p.name + '$3');
+          changed = true;
+        }
+        continue;
+      }
       const block = `- insert:\n    - id: ${p.id}\n      name: '${p.name}'\n`;
       if (/^\s*\[\]\s*$/m.test(patch)) patch = patch.replace(/\[\]/m, block);
       else if (patch.trim() === '') patch = '# dsh web profile patch（由 DSH Desktop 维护）\n' + block;
@@ -936,6 +1088,30 @@ function syncCompanionPlugins() {
     }
   } catch (err) {
     log('boot', '同步配套插件失败: ' + err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// dsh web 运行时闪跳修复：官方 dsh-client-runtime 在会话列表刷新
+// （mergeOrderedBaseline）时会丢弃「本地已创建、宿主全量列表尚未回显」的
+// 新会话，使 current 瞬时变 undefined，UI 闪回「选择工作区/无会话」状态。
+// 这里幂等地把补丁写进运行时文件；dsh 包更新后本函数会在下次启动重新应用。
+// ---------------------------------------------------------------------------
+function applyRuntimeFlashFix() {
+  try {
+    const home = dshHome || path.join(os.homedir(), '.dsh');
+    const file = path.join(home, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-client-runtime', 'lib', 'client.js');
+    if (!fs.existsSync(file)) { log('boot', 'runtime 补丁: 未找到 dsh-client-runtime，跳过'); return; }
+    let src = fs.readFileSync(file, 'utf8');
+    const oldPat = '(value) => baselineByKey.get(keyOf(value))).filter((value) => value !== void 0);';
+    const newPat = '(value) => baselineByKey.get(keyOf(value)) ?? value).filter((value) => value !== void 0);';
+    if (src.includes(newPat)) { log('boot', 'runtime 补丁: 已应用，跳过'); return; }
+    if (!src.includes(oldPat)) { log('boot', 'runtime 补丁: 未匹配到目标代码（版本可能已变更），跳过'); return; }
+    src = src.replace(oldPat, newPat);
+    fs.writeFileSync(file, src, { encoding: 'utf8' });
+    log('boot', 'runtime 补丁: 已修复会话列表刷新闪跳（mergeOrderedBaseline 保留本地新会话）');
+  } catch (err) {
+    log('boot', 'runtime 补丁失败: ' + err.message);
   }
 }
 
@@ -964,7 +1140,14 @@ function shortcutIconPath() {
 }
 
 function maintainShortcuts() {
-  if (!app.isPackaged || !IS_WIN) return;
+  if (!IS_WIN) return;
+  // 仅对真正的打包产物维护快捷方式。本机 app.isPackaged 在 dev 下也恒为 true，
+  // 故用 resources 下是否存在 app/app.asar 判别：dev 的 electron 只有
+  // default_app.asar，从而避免把快捷方式改指向 node_modules 下的开发用 electron。
+  const bundled =
+    fs.existsSync(path.join(process.resourcesPath, 'app')) ||
+    fs.existsSync(path.join(process.resourcesPath, 'app.asar'));
+  if (!app.isPackaged || !bundled) return;
   try {
     const target = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
     const settings = updater.loadSettings(updCtx());
@@ -1023,6 +1206,29 @@ function warnTempRun() {
 // ---------------------------------------------------------------------------
 // 客户端自更新流程（更新 DSH Desktop 封装本身）
 // ---------------------------------------------------------------------------
+
+// 退出应用并启动客户端更新脚本。把“写脚本 + 派发 + 退出”收敛到一处，
+// 保证即使写脚本失败也一定退出应用，避免更新流程卡死导致“点安装没反应”。
+function quitForClientUpdate(ctx, pending) {
+  quitting = true;
+  forceQuit = true;
+  try {
+    killTree(serverProc);
+  } catch (err) {
+    log('client-update', '停止 dsh 服务失败: ' + err.message);
+  }
+  updater.abort();
+  if (sessionWatcher) sessionWatcher.stop();
+  let logFile = '';
+  try {
+    const applied = clientUpdater.applyUpdate(ctx, pending);
+    if (applied && applied.logFile) logFile = applied.logFile;
+  } catch (err) {
+    log('client-update', '启动更新脚本失败: ' + err.message);
+  }
+  log('client-update', '退出应用以应用更新' + (logFile ? '，日志: ' + logFile : ''));
+  setTimeout(() => app.exit(0), 400);
+}
 
 async function runClientUpdateFlow(manual) {
   if (quitting) return;
@@ -1116,13 +1322,7 @@ async function runClientUpdateFlow(manual) {
       cancelId: 1,
     });
     if (r2 === 0) {
-      quitting = true;
-      forceQuit = true;
-      killTree(serverProc);
-      updater.abort();
-      if (sessionWatcher) sessionWatcher.stop();
-      clientUpdater.applyUpdate(ctx, settings.pendingClientUpdate);
-      setTimeout(() => app.exit(0), 400);
+      quitForClientUpdate(ctx, settings.pendingClientUpdate);
     }
   } catch (err) {
     log('client-update', '更新失败: ' + err.message);
@@ -1164,13 +1364,7 @@ function offerPendingClientUpdate() {
     cancelId: 1,
   }).then(({ response }) => {
     if (response !== 0) return;
-    quitting = true;
-    forceQuit = true;
-    killTree(serverProc);
-    updater.abort();
-    if (sessionWatcher) sessionWatcher.stop();
-    clientUpdater.applyUpdate(ctx, pending);
-    setTimeout(() => app.exit(0), 400);
+    quitForClientUpdate(ctx, pending);
   });
 }
 
@@ -1275,6 +1469,7 @@ function boot() {
   registerChromeIpc();
   createTray();
   syncCompanionPlugins();
+  applyRuntimeFlashFix();
   createWindow();
   startAndShow()
     .then(() => {
@@ -1327,7 +1522,8 @@ if (!gotLock) {
   app.on('before-quit', () => {
     quitting = true;
     forceQuit = true;
-    log('boot', '正在退出，停止 dsh web 进程树…');
+    log('boot', '正在退出，销毁会话浮窗并停止 dsh web 进程树…');
+    closeAllFloatWindows();
     killTree(serverProc);
     updater.abort();
     if (sessionWatcher) sessionWatcher.stop();

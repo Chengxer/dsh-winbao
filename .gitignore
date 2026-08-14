@@ -27,3 +27,7 @@ Thumbs.db
 *.tmp
 updates/
 
+# Personal / internal (not for open source)
+支付二维码/
+.trae/
+

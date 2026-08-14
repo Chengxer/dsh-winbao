@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
 		let react = require("react");
 		let primitives = require("@deepseek-ai/dsh-client-ui-primitives");
 		//#region marketplace css
-		const css = ".pm_section{width:100%;max-width:760px;color:var(--dsw-alias-label-primary);flex-direction:column;gap:14px;display:flex}.pm_search{display:flex;align-items:center;gap:8px}.pm_search input{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);height:36px;flex:1;min-width:0;color:var(--dsw-alias-label-primary);font:inherit;border-radius:8px;outline:none;padding:0 12px;font-size:13px}.pm_search input::placeholder{color:var(--dsw-alias-label-tertiary)}.pm_search input:focus-visible{border-color:var(--dsw-alias-state-business-primary);box-shadow:0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent)}.pm_searchBtn{border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary);font:inherit;cursor:pointer;background:var(--dsw-alias-bg-layer-3);border-radius:8px;height:36px;padding:0 14px;font-size:13px}.pm_searchBtn:hover{border-color:var(--dsw-alias-label-dimmed)}.pm_searchBtn:disabled{opacity:.5;cursor:default}.pm_catalogHeading{display:flex;align-items:baseline;gap:7px;padding:0 2px;margin:0}.pm_catalogHeading h3{margin:0;font-size:13px;font-weight:600;line-height:20px}.pm_catalogHeading span{color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;font-size:12px}.pm_status{margin:0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}.pm_notice{margin:0;font-size:13px;line-height:20px}.pm_notice[data-kind=error]{color:var(--dsw-alias-state-error-primary)}.pm_notice[data-kind=success]{color:var(--dsw-alias-state-success-primary)}.pm_failure{color:var(--dsw-alias-state-error-primary);display:flex;align-items:center;gap:10px;margin:0;font-size:13px;line-height:20px}.pm_failure p{margin:0;flex:1;min-width:0}.pm_failure button{border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary);font:inherit;cursor:pointer;background:0 0;border-radius:6px;padding:4px 10px}.pm_restart{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:10px;display:flex;align-items:center;gap:10px;padding:10px 14px;font-size:13px}.pm_restart span{flex:1;color:var(--dsw-alias-label-secondary)}.pm_restart button{border:1px solid var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary);font:inherit;cursor:pointer;background:0 0;border-radius:8px;padding:5px 12px;font-size:13px}.pm_cards{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:10px;margin:0;padding:0;list-style:none;display:grid}.pm_card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:10px;min-width:0;padding:12px 14px;flex-direction:column;gap:6px;display:flex}.pm_card:hover{border-color:var(--dsw-alias-label-dimmed)}.pm_cardHead{justify-content:space-between;align-items:flex-start;gap:8px;display:flex}.pm_cardTitleWrap{flex-wrap:wrap;align-items:baseline;gap:6px;min-width:0;display:flex}.pm_cardName{font-size:13px;font-weight:600;line-height:18px;overflow-wrap:anywhere}.pm_cardVersion{color:var(--dsw-alias-label-tertiary);font-size:11px}.pm_installedBadge{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:1px 8px;font-size:11px;line-height:17px;white-space:nowrap}.pm_cardDesc{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:18px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.pm_cardMeta{align-items:center;gap:10px;margin-top:auto;font-size:11px;color:var(--dsw-alias-label-tertiary);display:flex}.pm_cardMeta a{color:var(--dsw-alias-state-business-primary);text-decoration:none}.pm_installBtn,.pm_dangerBtn{border:1px solid var(--dsw-alias-border-l2);font:inherit;cursor:pointer;border-radius:8px;padding:4px 12px;font-size:12px;line-height:18px;white-space:nowrap;background:0 0}.pm_installBtn{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary)}.pm_installBtn:hover{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent)}.pm_dangerBtn{color:var(--dsw-alias-label-secondary)}.pm_dangerBtn:hover{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary)}.pm_installBtn:disabled,.pm_dangerBtn:disabled{opacity:.5;cursor:default}.pm_installedList{margin:0;padding:0;list-style:none;flex-direction:column;gap:8px;display:flex}.pm_installedRow{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:10px;align-items:center;gap:10px;padding:10px 14px;display:flex}.pm_installedInfo{flex:1;min-width:0;flex-direction:column;gap:2px;display:flex}.pm_installedName{font-size:13px;font-weight:600;line-height:18px;overflow-wrap:anywhere}.pm_installedMeta{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}.pm_visuallyHidden{width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0;position:absolute}";
+		const css = ".pm_section{width:100%;max-width:760px;color:var(--dsw-alias-label-primary);flex-direction:column;gap:14px;display:flex}.pm_search{display:flex;align-items:center;gap:8px}.pm_search input{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);height:36px;flex:1;min-width:0;color:var(--dsw-alias-label-primary);font:inherit;border-radius:8px;outline:none;padding:0 12px;font-size:13px}.pm_search input::placeholder{color:var(--dsw-alias-label-tertiary)}.pm_search input:focus-visible{border-color:var(--dsw-alias-state-business-primary);box-shadow:0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary) 18%, transparent)}.pm_searchBtn{border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary);font:inherit;cursor:pointer;background:var(--dsw-alias-bg-layer-3);border-radius:8px;height:36px;padding:0 14px;font-size:13px}.pm_searchBtn:hover{border-color:var(--dsw-alias-label-dimmed)}.pm_searchBtn:disabled{opacity:.5;cursor:default}.pm_catalogHeading{display:flex;align-items:baseline;gap:7px;padding:0 2px;margin:0}.pm_catalogHeading h3{margin:0;font-size:13px;font-weight:600;line-height:20px}.pm_catalogHeading span{color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;font-size:12px}.pm_status{margin:0;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}.pm_notice{margin:0;font-size:13px;line-height:20px}.pm_notice[data-kind=error]{color:var(--dsw-alias-state-error-primary)}.pm_notice[data-kind=success]{color:var(--dsw-alias-state-success-primary)}.pm_failure{color:var(--dsw-alias-state-error-primary);display:flex;align-items:center;gap:10px;margin:0;font-size:13px;line-height:20px}.pm_failure p{margin:0;flex:1;min-width:0}.pm_failure button{border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary);font:inherit;cursor:pointer;background:0 0;border-radius:6px;padding:4px 10px}.pm_restart{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:10px;display:flex;align-items:center;gap:10px;padding:10px 14px;font-size:13px}.pm_restart span{flex:1;color:var(--dsw-alias-label-secondary)}.pm_restart button{border:1px solid var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary);font:inherit;cursor:pointer;background:0 0;border-radius:8px;padding:5px 12px;font-size:13px}.pm_cards{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:10px;margin:0;padding:0;list-style:none;display:grid}.pm_card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:10px;min-width:0;padding:12px 14px;flex-direction:column;gap:6px;display:flex}.pm_card:hover{border-color:var(--dsw-alias-label-dimmed)}.pm_cardHead{justify-content:space-between;align-items:flex-start;gap:8px;display:flex}.pm_cardTitleWrap{flex-wrap:wrap;align-items:baseline;gap:6px;min-width:0;display:flex}.pm_cardName{font-size:13px;font-weight:600;line-height:18px;overflow-wrap:anywhere}.pm_cardVersion{color:var(--dsw-alias-label-tertiary);font-size:11px}.pm_installedBadge{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:1px 8px;font-size:11px;line-height:17px;white-space:nowrap}.pm_cardDesc{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;line-height:18px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.pm_cardMeta{align-items:center;gap:10px;margin-top:auto;font-size:11px;color:var(--dsw-alias-label-tertiary);display:flex}.pm_cardMeta a{color:var(--dsw-alias-state-business-primary);text-decoration:none}.pm_installBtn,.pm_dangerBtn{border:1px solid var(--dsw-alias-border-l2);font:inherit;cursor:pointer;border-radius:8px;padding:4px 12px;font-size:12px;line-height:18px;white-space:nowrap;background:0 0}.pm_installBtn{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary)}.pm_installBtn:hover{background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent)}.pm_dangerBtn{color:var(--dsw-alias-label-secondary)}.pm_dangerBtn:hover{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary)}.pm_installBtn:disabled,.pm_dangerBtn:disabled{opacity:.5;cursor:default}.pm_installedList{margin:0;padding:0;list-style:none;flex-direction:column;gap:8px;display:flex}.pm_installedRow{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:10px;align-items:center;gap:10px;padding:10px 14px;display:flex}.pm_installedInfo{flex:1;min-width:0;flex-direction:column;gap:2px;display:flex}.pm_installedName{font-size:13px;font-weight:600;line-height:18px;overflow-wrap:anywhere}.pm_installedMeta{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}.pm_visuallyHidden{width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0;position:absolute}.pm_sourceTag{flex:none;font-size:10px;line-height:16px;padding:0 7px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-tertiary);white-space:nowrap}.pm_stars{color:var(--dsw-alias-label-secondary)}";
 		const tagId = "@deepseek-ai/dsh-plugin-marketplace/marketplace.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
 			const tag = document.createElement("style");
@@ -25,16 +25,17 @@ window.__ModuleLoader__.load({
 			cardVersion: "pm_cardVersion", installedBadge: "pm_installedBadge", cardDesc: "pm_cardDesc",
 			cardMeta: "pm_cardMeta", installBtn: "pm_installBtn", dangerBtn: "pm_dangerBtn",
 			installedList: "pm_installedList", installedRow: "pm_installedRow", installedInfo: "pm_installedInfo",
-			installedName: "pm_installedName", installedMeta: "pm_installedMeta", visuallyHidden: "pm_visuallyHidden"
+			installedName: "pm_installedName", installedMeta: "pm_installedMeta", visuallyHidden: "pm_visuallyHidden",
+			sourceTag: "pm_sourceTag", stars: "pm_stars"
 		};
 		//#endregion
 		//#region locales
 		const zh = {
 			tab: "插件市场",
 			search: "搜索插件",
-			searchPlaceholder: "搜索 npm 上的 dsh 插件（关键词 dsh-plugin）…",
+			searchPlaceholder: "跨源搜索 dsh 插件（npm / GitHub / deepseekdocs）…",
 			searchButton: "搜索",
-			searching: "正在搜索 npm 插件…",
+			searching: "正在跨源搜索插件…",
 			searchFailed: "搜索失败：",
 			retry: "重试",
 			catalog: "插件市场",
@@ -55,14 +56,15 @@ window.__ModuleLoader__.load({
 			restartConfirm: "重启会中断当前正在运行的会话（历史记录保留）。确定现在重启服务吗？",
 			restartNow: "立即重启服务",
 			openNpm: "npm",
+			openGitHub: "GitHub",
 			loadingInstalled: "正在读取已安装插件…"
 		};
 		const en = {
 			tab: "Marketplace",
 			search: "Search plugins",
-			searchPlaceholder: "Search dsh plugins on npm (keyword dsh-plugin)…",
+			searchPlaceholder: "Search dsh plugins across sources (npm / GitHub / deepseekdocs)…",
 			searchButton: "Search",
-			searching: "Searching npm…",
+			searching: "Searching across sources…",
 			searchFailed: "Search failed: ",
 			retry: "Retry",
 			catalog: "Marketplace",
@@ -83,6 +85,7 @@ window.__ModuleLoader__.load({
 			restartConfirm: "Restarting interrupts the running session (history is kept). Restart the service now?",
 			restartNow: "Restart service now",
 			openNpm: "npm",
+			openGitHub: "GitHub",
 			loadingInstalled: "Reading installed plugins…"
 		};
 		const NS = "settings.pluginMarketplace";
@@ -144,14 +147,18 @@ window.__ModuleLoader__.load({
 								className: s.cardTitleWrap,
 								children: [
 									(0, react_jsx_runtime.jsx)("strong", {
-										className: s.cardName,
-										title: item.name,
-										children: item.name
-									}),
-									(0, react_jsx_runtime.jsx)("span", {
-										className: s.cardVersion,
-										children: "v" + item.version
-									}),
+									className: s.cardName,
+									title: item.name,
+									children: item.name
+								}),
+								item.sourceLabel ? (0, react_jsx_runtime.jsx)("span", {
+									className: s.sourceTag,
+									children: item.sourceLabel
+								}) : null,
+								item.version ? (0, react_jsx_runtime.jsx)("span", {
+									className: s.cardVersion,
+									children: "v" + item.version
+								}) : null,
 									installedVersion !== null ? (0, react_jsx_runtime.jsxs)("span", {
 										className: s.installedBadge,
 										children: [t("installedTag"), " v", installedVersion]
@@ -178,18 +185,28 @@ window.__ModuleLoader__.load({
 						children: item.description
 					}) : null,
 					(0, react_jsx_runtime.jsxs)("div", {
-						className: s.cardMeta,
-						children: [
-							item.license ? (0, react_jsx_runtime.jsx)("span", { children: item.license }) : null,
-							item.date ? (0, react_jsx_runtime.jsx)("span", { children: item.date.slice(0, 10) }) : null,
-							item.links?.npm ? (0, react_jsx_runtime.jsx)("a", {
-								href: item.links.npm,
-								target: "_blank",
-								rel: "noreferrer noopener",
-								children: t("openNpm")
-							}) : null
-						]
-					})
+							className: s.cardMeta,
+							children: [
+								item.stars ? (0, react_jsx_runtime.jsx)("span", {
+									className: s.stars,
+									children: "★ " + item.stars
+								}) : null,
+								item.license ? (0, react_jsx_runtime.jsx)("span", { children: item.license }) : null,
+								item.date ? (0, react_jsx_runtime.jsx)("span", { children: item.date.slice(0, 10) }) : null,
+								item.links?.github ? (0, react_jsx_runtime.jsx)("a", {
+									href: item.links.github,
+									target: "_blank",
+									rel: "noreferrer noopener",
+									children: t("openGitHub")
+								}) : null,
+								item.links?.npm ? (0, react_jsx_runtime.jsx)("a", {
+									href: item.links.npm,
+									target: "_blank",
+									rel: "noreferrer noopener",
+									children: t("openNpm")
+								}) : null
+							]
+						})
 				]
 			});
 		}
@@ -317,10 +334,10 @@ window.__ModuleLoader__.load({
 						children: catalog.results.map((item) => (0, react_jsx_runtime.jsx)(ResultCard, {
 							t,
 							item,
-							busy: busy[item.name],
-							onInstall: () => doInstall(item.name),
+							busy: busy[item.spec || item.name],
+							onInstall: () => doInstall(item.spec || item.name),
 							onUninstall: () => doUninstall(item.name)
-						}, item.name))
+						}, item.spec || item.name))
 					}) : null,
 					(0, react_jsx_runtime.jsxs)("div", {
 						className: s.catalogHeading,

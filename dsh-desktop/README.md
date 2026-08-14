@@ -16,6 +16,7 @@
 - ✅ **DeepSeek 余额小部件**：对话底部统计栏内联显示「本轮 ¥X.XX · 余额 ¥Y.YY」（自动注入配套 dsh 客户端插件，点击跳转充值）
 - ✅ **文件更改追踪 + 一键还原**：详情面板新增「文件」标签页，聚合本会话 agent 修改过的全部文件（新建/修改/删除、行级 diff、逐文件或全部还原）；数据只读复用会话日志已持久化的 `tool/result.meta.diffs`，还原由桌面壳做内容精确匹配后替换，失败安全提示
 - ✅ **会话完成系统通知**：agent 任务跑完时弹 Windows 系统通知，点击回到窗口
+- ✅ **自定义注入提示词**：设置页可自定义官方内核注入的系统提示词（替换整体 / 追加到末尾，应用到 standard 完整 Agent 基准预设），新会话即刻生效
 
 ## 快速开始（成品用户）
 
@@ -53,6 +54,18 @@
 - 价格档默认：deepseek-chat 2/0.5/8、deepseek-reasoner 与 deepseek-v4-pro 4/1/16（¥/百万 token）；可在 `<数据目录>\settings.json` 的 `balancePrices.<model>` 覆盖。代理/镜像可用 `DEEPSEEK_API_BASE` 或 `DEEPSEEK_BALANCE_URL` 环境变量。
 - 纯浏览器打开 Web UI 时无桌面壳推送，小部件只显示「本轮」费用。
 
+## 自定义注入提示词
+
+- 入口：chrome 栏 ⋯ 菜单 → 设置 → 「自定义提示词」栏。
+- 官方内核每次为会话注入的系统人设（persona，standard 预设默认）为：
+  `You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.` 本功能可让用户用自定义文本整体替换或在其后追加。
+- **注入方式**（设置里可切换）：
+  - **追加到末尾（append）**：保留默认人设，在其后追加自定义文本。
+  - **替换整体（replace）**：用自定义文本整体替换默认人设。
+- **生效范围**：应用到 standard 完整 Agent 基准预设；设置保存后新创建会话即刻生效，运行中会话沿用注入时的提示词。
+- 自定义文本按原样注入，可用 `{{model}}` 等占位符；未启用或内容为空时回落为官方默认。
+- 配套 dsh 客户端插件（`assets/plugins/dsh-prompt-custom`）自动同步进 web profile，配置持久化到该 profile 的 `settings.yaml`（`dsh-prompt` 命名空间）。
+
 ## 快捷方式与托盘
 
 - **托盘**：点窗口关闭按钮默认隐藏到托盘并提示一次；托盘菜单可显示窗口 / 检查更新 / 开关会话通知 / 退出。chrome 菜单「关闭时最小化到托盘」可关闭该行为。
@@ -87,6 +100,14 @@
 - 通知标题优先使用会话标题（`session/title`），正文含工作目录与短会话 ID；点击通知回到主窗口。
 - 菜单「帮助 → 会话完成通知」可随时开关（持久化于数据目录 `settings.json`）。
 - Windows Toast 需要开始菜单快捷方式：安装版由安装器创建；便携版首次运行自动创建（指向原始 exe）。
+
+## 支持作者（请作者喝咖啡）
+
+如果这个桌面客户端帮到了你，欢迎扫码支持一下作者 ☕。入口在窗口左上角 ⋯ 菜单 →「请作者喝咖啡」。
+
+| 支付宝 | 微信 |
+| --- | --- |
+| ![支付宝收款码](assets/sponsor/sponsor-alipay.jpg) | ![微信收款码](assets/sponsor/sponsor-wechat.png) |
 
 ## 开发
 
@@ -163,6 +184,7 @@ dsh-desktop/
 ├── session-watcher.js    # 会话完成监听（zstd 多帧解码 + turn/end 检测）
 ├── preload.js            # 沙箱预加载（自绘玻璃标题栏 + 窗口控制/菜单 IPC + 余额事件桥）
 ├── assets/               # 加载页、更新进度页、图标、托盘图标、配套 dsh 插件
+│   ├── sponsor/          # 赞助收款码（支付宝 / 微信，「请作者喝咖啡」面板与本文档共用）
 │   └── plugins/          # dsh-balance（余额小部件）、dsh-file-changes（文件更改投影）、dsh-client-file-changes（「文件」视图）—— 自动同步进 web profile
 ├── scripts/
 │   ├── fetch-node.js     # 内置 node.exe 复制脚本

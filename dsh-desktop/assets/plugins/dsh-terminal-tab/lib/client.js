@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-	id: "@deepseek-ai/dsh-terminal",
+	id: "@deepseek-ai/dsh-terminal-tab",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
@@ -417,12 +417,12 @@ window.__ModuleLoader__.load({
 			".dsh-term-input input{flex:1;min-width:0;background:transparent;border:none;outline:none;color:#d4d4d4;font-family:inherit;font-size:12px;line-height:20px;padding:0}"
 		].join("");
 
-		const TAG = "@deepseek-ai/dsh-terminal/client.css";
+		const TAG = "@deepseek-ai/dsh-terminal-tab/client.css";
 		function ensureCss() {
 			if (typeof document === "undefined") return;
 			if (document.querySelector("style[data-plugin-css=" + JSON.stringify(TAG) + "]")) return;
 			const tag = document.createElement("style");
-			tag.dataset.plugin = "@deepseek-ai/dsh-terminal";
+			tag.dataset.plugin = "@deepseek-ai/dsh-terminal-tab";
 			tag.dataset.pluginCss = TAG;
 			tag.textContent = CSS;
 			document.head.appendChild(tag);

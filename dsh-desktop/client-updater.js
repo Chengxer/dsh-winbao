@@ -17,6 +17,10 @@
 //        若旧 exe 所在目录只读，则退化为直接启动新 exe（保留旧文件）。
 //      · 安装版：等 DSH Desktop 进程退出 → 以向导方式启动新 Setup 安装包
 //        （安装器会记录原安装目录并在完成后自动启动新版本）。
+//
+// 脚本全程写日志到 <userData>/updates/apply-update.log，并全部使用
+// System32 完整路径，避免应用 PATH 精简时 cmd/tasklist/find/ping/taskkill
+// 找不到导致更新脚本静默失败（“点安装没反应”的根因之一）。
 
 const https = require('node:https');
 const fs = require('node:fs');
@@ -248,68 +252,152 @@ async function downloadRelease(ctx, release, { onProgress } = {}) {
 
 // --- 应用更新（detached 脚本 + 主进程退出） ---------------------------------
 
+// 用完整路径找 cmd.exe（%ComSpec%），避免应用 PATH 精简时 spawn('cmd.exe') 报 ENOENT。
+function cmdExe() {
+  return process.env.ComSpec || path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe');
+}
+
+// 脚本顶部统一定义 System32 工具路径，避免脚本运行时依赖 PATH 精简的进程环境。
+const SYS = [
+  'set "PG=%SystemRoot%\\System32\\ping.exe"',
+].join('\r\n');
+
+// 便携版更新脚本（cmd）：仅依赖文件操作与 ping，在 detached 无控制台进程下
+// 工作正常（不依赖 tasklist/find 这类控制台程序输出）。
+function buildPortableCmd(logFile) {
+  return [
+    '@echo off',
+    SYS,
+    'set "LOG=%~1"',
+    'set "NEW=%~2"',
+    'set "OLD=%~3"',
+    'echo [%date% %time%] apply-update start (portable) >> "%LOG%"',
+    'echo [%date% %time%] new=%NEW% >> "%LOG%"',
+    'echo [%date% %time%] old=%OLD% >> "%LOG%"',
+    'set /a tries=0',
+    ':wait',
+    'set /a tries+=1',
+    'if %tries% gtr 300 goto failed',
+    '%PG% -n 2 127.0.0.1 >nul',
+    'if not exist "%OLD%" goto replace',
+    'copy /y "%OLD%" "%OLD%.bak" >nul 2>&1',
+    'if errorlevel 1 goto wait',
+    'del /f /q "%OLD%" >nul 2>&1',
+    'if exist "%OLD%" goto wait',
+    ':replace',
+    'copy /y "%NEW%" "%OLD%" >nul 2>&1',
+    'if errorlevel 1 goto failed',
+    'del "%NEW%" >nul 2>&1',
+    'echo [%date% %time%] replaced, relaunching >> "%LOG%"',
+    'start "" "%OLD%"',
+    'if exist "%OLD%.bak" del "%OLD%.bak" >nul 2>&1',
+    'del "%~f0" >nul 2>&1',
+    'exit /b 0',
+    ':failed',
+    // M3 修复：超时后先尽力复制回原位再启动，避免便携版从 updates 目录
+    // 直接启动导致新建 data 目录、丢失设置。
+    'echo [%date% %time%] timed out, restoring >> "%LOG%"',
+    'if exist "%OLD%.bak" copy /y "%OLD%.bak" "%OLD%" >nul 2>&1',
+    'if not exist "%OLD%" copy /y "%NEW%" "%OLD%" >nul 2>&1',
+    'if exist "%OLD%" (start "" "%OLD%") else (start "" "%NEW%")',
+    'if exist "%OLD%.bak" del "%OLD%.bak" >nul 2>&1',
+    'del "%~f0" >nul 2>&1',
+    'exit /b 0',
+  ].join('\r\n');
+}
+
+// 安装版更新脚本（PowerShell）。关键点：更新脚本以 detached 方式启动，运行在
+// 无控制台的进程里，此时 cmd 的 tasklist/find 等控制台程序输出会全部丢失，
+// 导致“等待应用退出 → 拉起安装器”这段静默卡死（“点安装无反应”的根因）。
+// PowerShell 走 .NET 流，Get-Process 进程检测与 Add-Content 写日志在 detached
+// 下均正常，因此安装版改用 PowerShell。
+function buildNsisPs1() {
+  return String.raw`param(
+  [Parameter(Mandatory=$true)][string]$Setup,
+  [Parameter(Mandatory=$true)][string]$ProcessName,
+  [Parameter(Mandatory=$true)][string]$LogFile
+)
+function Log($m) {
+  $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"), $m
+  Add-Content -LiteralPath $LogFile -Value $line
+}
+Log "apply-update start (nsis)"
+Log "setup=$Setup"
+Log "process=$ProcessName"
+$waitc = 0
+while ($true) {
+  $p = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue
+  if (-not $p) { break }
+  $waitc++
+  if ($waitc -gt 20) {
+    Log "app still running after grace, force kill"
+    Stop-Process -Name $ProcessName -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 3
+    break
+  }
+  Start-Sleep -Milliseconds 1500
+}
+Log "app exited, launching setup"
+try {
+  $sp = Start-Process -FilePath $Setup -Wait -PassThru -ErrorAction Stop
+  Log ("setup finished (err=" + $sp.ExitCode + ")")
+} catch {
+  Log ("setup launch failed: " + $_.Exception.Message)
+}
+Remove-Item -LiteralPath $Setup -Force -ErrorAction SilentlyContinue
+Log "apply-update done"
+`;
+}
+
+// 安装版更新入口用 cmd 包装器调用 PowerShell。实测：detached+stdio ignore 下
+// 直接 spawn powershell.exe 会静默退出、什么都不干；经 cmd 包装器调用则正常。
+// 参数经 cmd 位置参数（%~1..%~4）透传，避免在 .cmd 里内嵌含空格的路径。
+function buildNsisCmd() {
+  return [
+    '@echo off',
+    'set "PSEXE=%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"',
+    'if not exist "%PSEXE%" set "PSEXE=powershell.exe"',
+    'set "PS1=%~1"',
+    'set "SETUP=%~2"',
+    'set "PROC=%~3"',
+    'set "LOGF=%~4"',
+    '"%PSEXE%" -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -Setup "%SETUP%" -ProcessName "%PROC%" -LogFile "%LOGF%"',
+  ].join('\r\n');
+}
+
 function applyUpdate(ctx, pending) {
   const newExe = pending.path;
   const portable = isPortable();
   const oldExe = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
-  const exeBase = path.basename(oldExe);
-  const script = path.join(ctx.userDataDir, 'updates', 'apply-update.cmd');
-  const lines = ['@echo off'];
+  const procName = path.basename(oldExe, path.extname(oldExe)); // 如 "DSH Desktop"
+  const dir = path.join(ctx.userDataDir, 'updates');
+  const logFile = path.join(dir, 'apply-update.log');
+  fs.mkdirSync(dir, { recursive: true });
+  let script, child;
   if (portable) {
-    lines.push(
-      'set "NEW=%~1"',
-      'set "OLD=%~2"',
-      'set /a tries=0',
-      ':wait',
-      'set /a tries+=1',
-      'if %tries% gtr 300 goto failed',
-      'ping -n 2 127.0.0.1 >nul',
-      'if not exist "%OLD%" goto replace',
-      'copy /y "%OLD%" "%OLD%.bak" >nul 2>&1',
-      'if errorlevel 1 goto wait',
-      'del /f /q "%OLD%" >nul 2>&1',
-      'if exist "%OLD%" goto wait',
-      ':replace',
-      'copy /y "%NEW%" "%OLD%" >nul 2>&1',
-      'if errorlevel 1 goto failed',
-      'del "%NEW%" >nul 2>&1',
-      'start "" "%OLD%"',
-      'if exist "%OLD%.bak" del "%OLD%.bak" >nul 2>&1',
-      'del "%~f0" >nul 2>&1',
-      'exit /b 0',
-      ':failed',
-      // M3 修复：超时后先尽力复制回原位再启动，避免便携版从 updates 目录
-      // 直接启动导致新建 data 目录、丢失设置。
-      'if exist "%OLD%.bak" copy /y "%OLD%.bak" "%OLD%" >nul 2>&1',
-      'if not exist "%OLD%" copy /y "%NEW%" "%OLD%" >nul 2>&1',
-      'if exist "%OLD%" (start "" "%OLD%") else (start "" "%NEW%")',
-      'if exist "%OLD%.bak" del "%OLD%.bak" >nul 2>&1',
-      'del "%~f0" >nul 2>&1',
-      'exit /b 0'
-    );
+    script = path.join(dir, 'apply-update.cmd');
+    fs.writeFileSync(script, buildPortableCmd(logFile));
+    ctx.log('client-update', `启动便携版更新脚本: ${script}（新: ${newExe}，旧: ${oldExe}）日志: ${logFile}`);
+    child = spawn(cmdExe(), ['/c', script, logFile, newExe, oldExe], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
   } else {
-    lines.push(
-      'set "SETUP=%~1"',
-      'set "EXENAME=%~2"',
-      ':wait',
-      'ping -n 2 127.0.0.1 >nul',
-      'tasklist /fi "IMAGENAME eq %EXENAME%" 2>nul | find /i "%EXENAME%" >nul',
-      'if not errorlevel 1 goto wait',
-      'start /wait "" "%SETUP%"',
-      'del "%SETUP%" >nul 2>&1',
-      'del "%~f0" >nul 2>&1',
-      'exit /b 0'
-    );
+    const ps1 = path.join(dir, 'apply-update.ps1');
+    script = path.join(dir, 'apply-update.cmd');
+    fs.writeFileSync(ps1, buildNsisPs1(), 'utf8');
+    fs.writeFileSync(script, buildNsisCmd());
+    ctx.log('client-update', `启动安装版更新脚本: ${script}→${path.basename(ps1)}（安装包: ${newExe}，进程: ${procName}）日志: ${logFile}`);
+    child = spawn(cmdExe(), ['/c', script, ps1, newExe, procName, logFile], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
   }
-  fs.writeFileSync(script, lines.join('\r\n'));
-  ctx.log('client-update', `启动更新脚本: ${script}（新: ${newExe}，旧: ${oldExe}）`);
-  const child = spawn('cmd.exe', ['/c', script, newExe, portable ? oldExe : exeBase], {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-  });
+  child.on('error', (err) => ctx.log('client-update', '启动更新脚本失败: ' + err.message));
   child.unref();
-  return script;
+  return { script, logFile };
 }
 
 module.exports = { checkLatest, selectAsset, downloadRelease, applyUpdate, isPortable, resolveRepos, DEFAULT_REPOS };

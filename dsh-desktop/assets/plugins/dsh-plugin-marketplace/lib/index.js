@@ -178,9 +178,146 @@ function validName(value) {
 	return name;
 }
 
+/**
+ * Normalize an install spec from the wire: an npm package name, or a git
+ * source (`github:owner/repo#branch` / `git+https://github.com/owner/repo#branch`).
+ * @returns { {kind:"npm"|"github", spec:string, repo?:string} }
+ */
+function validSpec(value) {
+	const spec = String(value ?? "").trim();
+	if (/^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/.test(spec)) return { kind: "npm", spec };
+	const git = spec.match(/^(?:github:|git\+https:\/\/github\.com\/|https:\/\/github\.com\/)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)(?:#.+)?$/);
+	if (git) return { kind: "github", spec, repo: git[1] };
+	throw new Error(`不支持的插件来源 ${JSON.stringify(spec)}`);
+}
+
 /** First useful npm failure text (stderr wins, then stdout, then the code). */
 function npmFailure(run, verb) {
 	return (run.error || run.stderr || run.stdout || `npm ${verb} 失败 (exit ${run.code})`).trim().slice(0, 800);
+}
+
+// --- multi-source discovery (npm registry + GitHub topic + deepseekdocs) ----
+
+const GITHUB_SEARCH_URL = "https://api.github.com/search/repositories";
+const GITHUB_TOPIC = "dsh-plugin";
+const DEEPSEEKDOCS_ECOSYSTEM_URL = "https://deepseekdocs.com/ecosystem";
+const FETCH_TIMEOUT_MS = 15000;
+const SOURCE_LABELS = { npm: "npm", github: "GitHub", deepseekdocs: "deepseekdocs" };
+
+/** In-memory cache for remote catalog fetches (GitHub rate-limit / mirror cost). */
+const fetchCache = new Map();
+
+function fetchWithTimeout(url, headers) {
+	const ctrl = new AbortController();
+	const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+	return fetch(url, { headers, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+}
+
+async function fetchJson(url) {
+	const res = await fetchWithTimeout(url, { "User-Agent": "dsh-desktop-marketplace", Accept: "application/json" });
+	if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+	return await res.json();
+}
+
+async function fetchText(url) {
+	const res = await fetchWithTimeout(url, { "User-Agent": "dsh-desktop-marketplace", Accept: "text/html" });
+	if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+	return await res.text();
+}
+
+async function cachedFetch(key, ttlMs, fetcher) {
+	const hit = fetchCache.get(key);
+	if (hit && Date.now() - hit.at < hit.ttl) return hit.value;
+	const value = await fetcher();
+	fetchCache.set(key, { at: Date.now(), ttl: ttlMs, value });
+	return value;
+}
+
+/**
+ * Normalize a discovery record into a marketplace card, tagging the source and
+ * the installable spec (`spec` may be an npm name or a git source).
+ */
+function toCard(record, byName) {
+	const hit = record.source === "npm" ? byName.get(record.name) : null;
+	return {
+		name: record.name,
+		source: record.source,
+		sourceLabel: SOURCE_LABELS[record.source] || record.source,
+		spec: record.spec,
+		version: record.version || "",
+		description: record.description || "",
+		date: record.date || null,
+		license: record.license || "",
+		links: record.links || {},
+		stars: record.stars || 0,
+		category: record.category || "插件",
+		installed: hit === undefined ? null : { version: hit.version, isBundle: hit.isBundle, isClient: hit.isClient }
+	};
+}
+
+/** Query the GitHub `dsh-plugin` topic (official search API). Graceful on failure. */
+async function githubResults(query) {
+	return cachedFetch("github:" + (query || ""), 5 * 60 * 1000, async () => {
+		const terms = [`topic:${GITHUB_TOPIC}`];
+		if (query) terms.push(query);
+		const url = `${GITHUB_SEARCH_URL}?q=${encodeURIComponent(terms.join(" "))}&sort=updated&order=desc&per_page=25`;
+		const data = await fetchJson(url);
+		const items = Array.isArray(data && data.items) ? data.items : [];
+		return items
+			.filter((repo) => repo && typeof repo.full_name === "string")
+			.map((repo) => ({
+				name: repo.name,
+				source: "github",
+				spec: `github:${repo.full_name}#${repo.default_branch || "main"}`,
+				fullName: repo.full_name,
+				version: "",
+				description: repo.description || "",
+				date: repo.updated_at || null,
+				license: (repo.license && repo.license.spdx_id) || "",
+				links: { github: repo.html_url, homepage: repo.homepage || "" },
+				stars: repo.stargazers_count || 0,
+				category: "插件"
+			}));
+	});
+}
+
+/**
+ * Fetch the deepseekdocs ecosystem page (a curated mirror of the dsh-plugin
+ * topic) and extract GitHub repo references. Best-effort: never breaks the
+ * marketplace if the page structure changes or the site is unreachable.
+ */
+async function deepseekDocsResults(query) {
+	return cachedFetch("deepseekdocs:ecosystem", 15 * 60 * 1000, async () => {
+		const html = await fetchText(DEEPSEEKDOCS_ECOSYSTEM_URL);
+		const seen = new Set();
+		const out = [];
+		const pattern = /github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)/g;
+		let m;
+		while ((m = pattern.exec(html)) !== null) {
+			const full = m[1];
+			if (seen.has(full)) continue;
+			seen.add(full);
+			out.push({
+				name: full.split("/")[1],
+				source: "deepseekdocs",
+				spec: `github:${full}#main`,
+				fullName: full,
+				version: "",
+				description: "",
+				date: null,
+				license: "",
+				links: { github: `https://github.com/${full}` },
+				stars: 0,
+				category: "插件"
+			});
+			if (out.length >= 50) break;
+		}
+		return out;
+	}).then((all) => {
+		if (!query) return all;
+		const q = query.toLowerCase();
+		return all.filter((r) => r.name.toLowerCase().includes(q) || r.fullName.toLowerCase().includes(q));
+	});
 }
 
 class PluginMarketplaceGateway extends TypertRemoteService {
@@ -201,11 +338,16 @@ class PluginMarketplaceGateway extends TypertRemoteService {
 	}
 
 	/**
-	 * Search the configured npm registry for dsh plugins.
-	 * @param query - optional free-text terms combined with keywords:dsh-plugin.
+	 * Search for dsh plugins across every configured source: the npm registry
+	 * (keyword dsh-plugin), the GitHub `dsh-plugin` topic, and the deepseekdocs
+	 * curated mirror. Results are tagged with their source and a `spec` that
+	 * `installPlugin` accepts (npm name or `github:owner/repo#branch`).
+	 * @param query - optional free-text filter.
 	 */
 	async search(query) {
 		const text = String(query ?? "").trim();
+
+		// Source 1: npm registry (keywords:dsh-plugin).
 		const terms = text.length > 0 ? `keywords:dsh-plugin ${text}` : "keywords:dsh-plugin";
 		const run = await runNpm(["search", "--json", "--searchlimit=25", terms], SEARCH_TIMEOUT_MS);
 		if (run.code !== 0) throw new Error(npmFailure(run, "search"));
@@ -215,24 +357,36 @@ class PluginMarketplaceGateway extends TypertRemoteService {
 		} catch {
 			throw new Error("npm search 返回了无法解析的结果");
 		}
-		const rows = Array.isArray(parsed) ? parsed : [];
 		const installed = snapshot();
 		const byName = new Map(installed.plugins.map((plugin) => [plugin.name, plugin]));
-		return {
-			query: text,
-			results: rows.filter((row) => row !== null && typeof row === "object" && typeof row.name === "string" && row.name.length > 0).map((row) => {
-				const hit = byName.get(row.name);
-				return {
-					name: row.name,
-					version: typeof row.version === "string" ? row.version : "",
-					description: typeof row.description === "string" ? row.description : "",
-					date: typeof row.date === "string" ? row.date : null,
-					license: typeof row.license === "string" ? row.license : "",
-					links: row.links !== null && typeof row.links === "object" ? row.links : {},
-					installed: hit === undefined ? null : { version: hit.version, isBundle: hit.isBundle, isClient: hit.isClient }
-				};
-			})
-		};
+		const npmList = (Array.isArray(parsed) ? parsed : [])
+			.filter((row) => row !== null && typeof row === "object" && typeof row.name === "string" && row.name.length > 0)
+			.map((row) => toCard({
+				name: row.name,
+				source: "npm",
+				spec: row.name,
+				version: typeof row.version === "string" ? row.version : "",
+				description: typeof row.description === "string" ? row.description : "",
+				date: typeof row.date === "string" ? row.date : null,
+				license: typeof row.license === "string" ? row.license : "",
+				links: row.links !== null && typeof row.links === "object" ? row.links : {}
+			}, byName));
+
+		// Source 2 & 3: GitHub topic + deepseekdocs mirror (deduped by repo).
+		// 任一源失败都不影响整体：各自独立熔断，返回空数组。
+		const [githubList, mirrorList] = await Promise.all([
+			githubResults(text).catch(() => []),
+			deepseekDocsResults(text).catch(() => [])
+		]);
+		const seenRepos = new Set();
+		const externalList = [];
+		for (const record of [...githubList, ...mirrorList]) {
+			if (seenRepos.has(record.fullName)) continue;
+			seenRepos.add(record.fullName);
+			externalList.push(toCard(record, byName));
+		}
+
+		return { query: text, results: [...npmList, ...externalList] };
 	}
 
 	/** The profile's currently installed user plugins. */
@@ -241,31 +395,40 @@ class PluginMarketplaceGateway extends TypertRemoteService {
 	}
 
 	/**
-	 * Install one npm package into the web profile and activate it: bundles
-	 * join dsh.profile.bundles, everything else gets a loader row.
-	 * @param packageName - exact npm package name from the search results.
+	 * Install a plugin into the web profile and activate it: bundles join
+	 * dsh.profile.bundles, everything else gets a loader row.
+	 * @param spec - either an exact npm package name or a git source
+	 *   (`github:owner/repo#branch`), as returned in a search result's `spec`.
 	 */
-	async installPlugin(packageName) {
-		const name = validName(packageName);
-		const run = await runNpm(["install", "--save", "--no-fund", "--no-audit", name], INSTALL_TIMEOUT_MS);
-		if (run.code !== 0) return { ok: false, name, error: npmFailure(run, "install") };
+	async installPlugin(spec) {
+		const resolved = validSpec(spec);
+		const before = snapshot();
+		const run = await runNpm(["install", "--save", "--no-fund", "--no-audit", resolved.spec], INSTALL_TIMEOUT_MS);
+		if (run.code !== 0) return { ok: false, name: resolved.spec, error: npmFailure(run, "install") };
 		const after = snapshot();
-		const entry = after.plugins.find((plugin) => plugin.name === name);
-		if (entry === undefined) return { ok: false, name, error: "安装命令成功，但未在 profile 依赖中找到该包（git/别名规格不受支持）" };
+		// npm 源按包名直接定位；git 源在安装后才知道解析出的包名，取“新增”的那个。
+		let entry;
+		if (resolved.kind === "npm") {
+			entry = after.plugins.find((plugin) => plugin.name === resolved.spec);
+		} else {
+			const beforeNames = new Set(before.plugins.map((plugin) => plugin.name));
+			entry = after.plugins.find((plugin) => !beforeNames.has(plugin.name));
+		}
+		if (entry === undefined) return { ok: false, name: resolved.spec, error: "安装命令成功，但未在 profile 依赖中找到该包（git/别名规格不受支持）" };
 		let rowsAdded = false;
 		if (entry.isBundle) {
 			const manifest = readJson(manifestPath());
 			manifest.dsh ??= {};
 			manifest.dsh.profile ??= {};
 			manifest.dsh.profile.bundles ??= [];
-			if (!manifest.dsh.profile.bundles.includes(name)) {
-				manifest.dsh.profile.bundles.push(name);
+			if (!manifest.dsh.profile.bundles.includes(entry.name)) {
+				manifest.dsh.profile.bundles.push(entry.name);
 				writeFileSync(manifestPath(), JSON.stringify(manifest, null, 2) + "\n");
 			}
 		} else {
-			rowsAdded = ensureRow(name);
+			rowsAdded = ensureRow(entry.name);
 		}
-		return { ok: true, name, version: entry.version, isBundle: entry.isBundle, isClient: entry.isClient, rowsAdded, needsRestart: true };
+		return { ok: true, name: entry.name, version: entry.version, isBundle: entry.isBundle, isClient: entry.isClient, rowsAdded, needsRestart: true };
 	}
 
 	/**

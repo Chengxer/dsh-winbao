@@ -14,7 +14,7 @@ window.__ModuleLoader__.load({
 		 * window "dsh-balance-changed" 事件（detail = { ok, balances, prices }）；
 		 * 纯浏览器环境（无桌面壳）时只显示“本轮费用”，价格用内置默认档。
 		 */
-		const FALLBACK_PRICES = { cacheMiss: 2, cacheHit: 0.5, output: 8 };
+		const FALLBACK_PRICES = { cacheMiss: 3, cacheHit: 0.1, output: 9 };
 
 		function money(value) {
 			const v = Number(value) || 0;
@@ -73,7 +73,7 @@ window.__ModuleLoader__.load({
 			if (usageKnown) parts.push("本轮 ¥" + money(sessionCost(usage, prices)));
 			if (hasBalance) parts.push("余额 ¥" + money(primary.total));
 			const title = hasBalance
-				? `${primary.currency} 余额 ¥${money(primary.total)}（充值 ¥${money(primary.toppedUp)} · 赠送 ¥${money(primary.granted)}）；本轮费用按 token 用量估算（¥/百万 token：命中 ${prices?.cacheHit ?? FALLBACK_PRICES.cacheHit} / 未命中 ${prices?.cacheMiss ?? FALLBACK_PRICES.cacheMiss} / 输出 ${prices?.output ?? FALLBACK_PRICES.output}），点击前往充值`
+				? `${primary.currency} 余额 ¥${money(primary.total)}（充值 ¥${money(primary.toppedUp)} · 赠送 ¥${money(primary.granted)}）；本轮费用按 token 用量估算（¥/百万 token：命中 ${prices?.cacheHit ?? FALLBACK_PRICES.cacheHit} / 未命中 ${prices?.cacheMiss ?? FALLBACK_PRICES.cacheMiss} / 输出 ${prices?.output ?? FALLBACK_PRICES.output}${data.model ? " · " + data.model : ""}${typeof data.peak === "boolean" ? (data.peak ? " · 高峰价" : " · 空闲价") : ""}），点击前往充值`
 				: "本轮费用按 token 用量估算；未读取到 DeepSeek API Key，无法显示余额";
 			return react_jsx_runtime.jsx("a", {
 				className: "dsh-balance-dock",

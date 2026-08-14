@@ -13,14 +13,66 @@ const path = require('node:path');
 
 const DEFAULT_BASE = 'https://api.deepseek.com';
 
-// 各模型价格（¥/百万 token，官方定价档；deepseek-v4-pro 尚无公开定价，
-// 暂按 reasoner 档估算，可在 settings.json 的 balancePrices 中覆盖）。
-const DEFAULT_PRICES = {
-  'deepseek-chat': { cacheMiss: 2, cacheHit: 0.5, output: 8 },
-  'deepseek-reasoner': { cacheMiss: 4, cacheHit: 1, output: 16 },
-  'deepseek-v4-pro': { cacheMiss: 4, cacheHit: 1, output: 16 },
+// ---------------------------------------------------------------------------
+// 模型价格（¥/百万 token）。官方定价：
+// https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
+//
+// 2026-08-17 00:00（北京时间）起采用“峰谷定价”：高峰时段
+// （北京时间 9:00-12:00、14:00-18:00）为全价，空闲时段为高峰的一半。
+// 在此之前为旧版固定价。示意图：
+//   deepseek-v4-flash  高峰 3.0 / 0.10 / 9.0   空闲 1.5 / 0.05 / 4.5
+//   deepseek-v4-pro    高峰 9.0 / 0.30 / 27.0  空闲 4.5 / 0.15 / 13.5
+// 字段：{ cacheMiss 输入未命中, cacheHit 输入命中, output 输出 }。
+// ---------------------------------------------------------------------------
+
+// 高峰全价（2026-08-17 起生效）。
+const PEAK_PRICES = {
+  'deepseek-v4-flash': { cacheMiss: 3, cacheHit: 0.1, output: 9 },
+  'deepseek-v4-pro': { cacheMiss: 9, cacheHit: 0.3, output: 27 },
+  // 旧模型名别名：deepseek-chat 对应 v4-flash，deepseek-reasoner 对应 v4-pro。
+  'deepseek-chat': { cacheMiss: 3, cacheHit: 0.1, output: 9 },
+  'deepseek-reasoner': { cacheMiss: 9, cacheHit: 0.3, output: 27 },
 };
-const FALLBACK_PRICES = { cacheMiss: 2, cacheHit: 0.5, output: 8 };
+
+// 2026-08-17 前的旧版固定价（历史结算参考）。
+const LEGACY_PRICES = {
+  'deepseek-v4-flash': { cacheMiss: 1, cacheHit: 0.02, output: 2 },
+  'deepseek-v4-pro': { cacheMiss: 3, cacheHit: 0.025, output: 6 },
+  'deepseek-chat': { cacheMiss: 1, cacheHit: 0.02, output: 2 },
+  'deepseek-reasoner': { cacheMiss: 3, cacheHit: 0.025, output: 6 },
+};
+
+// 峰谷定价生效节点：2026-08-17 00:00 北京时间 = 2026-08-16 16:00 UTC。
+const PEAK_PRICING_SINCE_UTC = Date.UTC(2026, 7, 16, 16, 0, 0);
+
+// 兜底档（deepseek-v4-flash 高峰价）。
+const FALLBACK_PRICES = { cacheMiss: 3, cacheHit: 0.1, output: 9 };
+
+// 兼容旧引用：DEFAULT_PRICES 即高峰全价表。
+const DEFAULT_PRICES = PEAK_PRICES;
+
+// 当前（或指定时刻）是否处于高峰时段（北京时间 9:00-12:00、14:00-18:00）。
+function isPeakHour(date) {
+  const d = date ? new Date(date) : new Date();
+  const hour = new Date(d.getTime() + 8 * 3600 * 1000).getUTCHours();
+  return (hour >= 9 && hour < 12) || (hour >= 14 && hour < 18);
+}
+
+// 某模型在指定时刻的“有效单价”（已含旧版→峰谷切换与高峰/低谷换算）。
+function effectivePrice(model, date) {
+  const key = String(model || '').trim() || 'deepseek-v4-flash';
+  const now = date ? new Date(date) : new Date();
+  if (now.getTime() < PEAK_PRICING_SINCE_UTC) {
+    return { ...(LEGACY_PRICES[key] || FALLBACK_PRICES) };
+  }
+  const peak = PEAK_PRICES[key] || PEAK_PRICES['deepseek-v4-flash'];
+  if (isPeakHour(now)) return { ...peak };
+  return {
+    cacheMiss: peak.cacheMiss / 2,
+    cacheHit: peak.cacheHit / 2,
+    output: peak.output / 2,
+  };
+}
 
 function readApiKey(dshHome) {
   const envKey = process.env.DEEPSEEK_API_KEY;
@@ -92,10 +144,19 @@ async function queryBalance(dshHome) {
           toppedUp: Number(b.topped_up_balance) || 0,
         }))
       : [];
-    return { ok: true, isAvailable: !!data.is_available, balances, prices: DEFAULT_PRICES };
+    return { ok: true, isAvailable: !!data.is_available, balances };
   } catch (err) {
-    return { ok: false, error: String((err && err.message) || err), balances: [], prices: DEFAULT_PRICES };
+    return { ok: false, error: String((err && err.message) || err), balances: [] };
   }
 }
 
-module.exports = { queryBalance, readActiveModel, DEFAULT_PRICES, FALLBACK_PRICES };
+module.exports = {
+  queryBalance,
+  readActiveModel,
+  effectivePrice,
+  isPeakHour,
+  PEAK_PRICES,
+  LEGACY_PRICES,
+  DEFAULT_PRICES,
+  FALLBACK_PRICES,
+};
