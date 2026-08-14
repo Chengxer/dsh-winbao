@@ -147,6 +147,14 @@ window.__ModuleLoader__.load({
 				if (sessions.list && typeof sessions.list.getSnapshot === "function") {
 					const snap = sessions.list.getSnapshot();
 					if (snap && typeof snap === "object") {
+						// DEBUG: 打印快照顶层键，排查浮窗空白问题
+						if (!selectTarget._debugged) {
+							selectTarget._debugged = true;
+							console.log("[dsh-float-window] snap keys:", Object.keys(snap), "targetId:", targetId);
+							if (snap.byId) console.log("[dsh-float-window] snap.byId keys:", Object.keys(snap.byId).slice(0, 5));
+							if (Array.isArray(snap.items)) console.log("[dsh-float-window] snap.items sample:", snap.items.slice(0, 3).map((i) => i && i.id));
+							if (Array.isArray(snap.summaries)) console.log("[dsh-float-window] snap.summaries sample:", snap.summaries.slice(0, 3).map((s) => s && s.id));
+						}
 						let found = false;
 						if (snap.byId && typeof snap.byId === "object" && snap.byId[targetId]) {
 							found = true;
@@ -155,7 +163,10 @@ window.__ModuleLoader__.load({
 						} else if (Array.isArray(snap.summaries)) {
 							found = snap.summaries.some((s) => s && String(s.id) === targetId);
 						}
-						if (!found) return false;
+						if (!found) {
+							console.log("[dsh-float-window] target session not found in snap, retrying...");
+							return false;
+						}
 					}
 				}
 				try {

@@ -784,11 +784,12 @@ const lastNotifyAt = new Map(); // sessionId -> timestamp (per-session rate-limi
 let lastGlobalNotifyAt = 0; // 全局限流：短时间窗口内至多一条，避免多会话同时完成刷屏
 
 function onSessionTurnEnd(info) {
-  if (!notifyOnTurnEnd || quitting) return;
+  log('notify', 'DEBUG turn detected: ' + JSON.stringify({ sid: info.sessionId, title: info.title, notifyOnTurnEnd, quitting, vis: mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible(), foc: mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused(), curSid: currentSessionId }));
+  if (!notifyOnTurnEnd || quitting) { log('notify', 'DEBUG skip: notifyOnTurnEnd=' + notifyOnTurnEnd + ' quitting=' + quitting); return; }
   // 主窗可见且聚焦：用户正在操作，不弹通知打扰。最小化/隐藏时不拦截。
-  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && mainWindow.isFocused()) return;
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && mainWindow.isFocused()) { log('notify', 'DEBUG skip: window visible+focused'); return; }
   // 正处于当前观看的会话：用户在盯着它，不需要再弹完成通知。
-  if (currentSessionId && info.sessionId && currentSessionId === info.sessionId) return;
+  if (currentSessionId && info.sessionId && currentSessionId === info.sessionId) { log('notify', 'DEBUG skip: current session match'); return; }
   const now = Date.now();
   const last = lastNotifyAt.get(info.sessionId) || 0;
   if (now - last < 30000) return; // 同一会话：30s 内至多一条
@@ -1677,6 +1678,23 @@ if (!gotLock) {
   app.quit();
 } else {
   app.setAppUserModelId('com.deepseek.dsh.desktop');
+  // GPU 进程崩溃是最常见的 Electron 静默退出原因（无日志、无弹窗）。
+  // 禁用硬件加速可规避大多数显卡驱动兼容性问题，对 DSH 这种文本为主
+  // 的应用无明显性能影响。若需排查，注释掉此行并观察崩溃日志。
+  app.disableHardwareAcceleration();
+  // GPU / 渲染进程崩溃日志：即使无法恢复，至少留下痕迹供排查。
+  app.on('gpu-process-crashed', (_e, killed) => {
+    const ts = new Date().toISOString();
+    try { const lp = path.join(app.getPath('userData'), 'logs', 'desktop.log'); fs.mkdirSync(path.dirname(lp), { recursive: true }); fs.appendFileSync(lp, `[${ts}] [crash] GPU 进程崩溃 (killed=${killed})\n`); } catch {}
+  });
+  app.on('render-process-gone', (_e, wc, details) => {
+    const ts = new Date().toISOString();
+    try { const lp = path.join(app.getPath('userData'), 'logs', 'desktop.log'); fs.mkdirSync(path.dirname(lp), { recursive: true }); fs.appendFileSync(lp, `[${ts}] [crash] 渲染进程崩溃: ${details.reason} (exitCode=${details.exitCode})\n`); } catch {}
+  });
+  app.on('child-process-gone', (_e, details) => {
+    const ts = new Date().toISOString();
+    try { const lp = path.join(app.getPath('userData'), 'logs', 'desktop.log'); fs.mkdirSync(path.dirname(lp), { recursive: true }); fs.appendFileSync(lp, `[${ts}] [crash] 子进程崩溃: type=${details.type} reason=${details.reason} (exitCode=${details.exitCode})\n`); } catch {}
+  });
   app.on('second-instance', () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
