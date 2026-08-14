@@ -1376,7 +1376,13 @@ const COMPANION_PLUGINS = [
   { id: 'conversation-tweaks', name: '@deepseek-ai/dsh-conversation-tweaks' },
   { id: 'prompt-custom', name: '@deepseek-ai/dsh-prompt-custom' },
   { id: 'third-party-thinking', name: '@deepseek-ai/dsh-third-party-thinking' },
+  { id: 'dsh-vision', name: '@dsh-external/dsh-vision' },
 ];
+
+function companionDirName(p) {
+  const slash = p.name.indexOf('/');
+  return slash >= 0 ? p.name.slice(slash + 1) : p.name;
+}
 
 function removeStaleCompanionPlugins(profileModules, expectedDirs) {
   let entries;
@@ -1407,14 +1413,18 @@ function syncCompanionPlugins() {
     const profileDir = path.join(home, 'profiles', 'web');
     const profileModules = path.join(profileDir, 'node_modules', '@deepseek-ai');
     fs.mkdirSync(profileModules, { recursive: true });
-    const expectedDirs = new Set(COMPANION_PLUGINS.map((p) => p.name.slice('@deepseek-ai/'.length)));
+    const expectedDirs = new Set(COMPANION_PLUGINS.map(companionDirName));
     removeStaleCompanionPlugins(profileModules, expectedDirs);
     for (const p of COMPANION_PLUGINS) {
-      const src = path.join(__dirname, 'assets', 'plugins', p.name.slice('@deepseek-ai/'.length));
+      const rel = companionDirName(p);
+      const src = path.join(__dirname, 'assets', 'plugins', rel);
       if (!fs.existsSync(path.join(src, 'package.json'))) continue;
-      const dest = path.join(profileModules, p.name.slice('@deepseek-ai/'.length));
+      // @deepseek-ai 与 @dsh-external 两种 scope 都按包名落到 profile 的
+      // node_modules 下；配套包自身的依赖由 dsh 的 profiles/node_modules
+      // fallback（healProfilesModuleFallback）解析。
+      const dest = path.join(profileModules, '..', p.name);
       fs.mkdirSync(path.join(dest, 'lib'), { recursive: true });
-      for (const f of ['package.json', 'lib/index.js', 'lib/client.js']) {
+      for (const f of ['package.json', 'lib/index.js', 'lib/client.js', 'lib/vlm.js', 'dsh.plugin.json']) {
         const sf = path.join(src, f);
         if (fs.existsSync(sf)) fs.copyFileSync(sf, path.join(dest, f));
       }

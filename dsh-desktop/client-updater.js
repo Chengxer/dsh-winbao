@@ -378,7 +378,12 @@ function applyUpdate(ctx, pending) {
     script = path.join(dir, 'apply-update.cmd');
     fs.writeFileSync(script, buildPortableCmd(logFile));
     ctx.log('client-update', `启动便携版更新脚本: ${script}（新: ${newExe}，旧: ${oldExe}）日志: ${logFile}`);
-    child = spawn(cmdExe(), ['/c', script, logFile, newExe, oldExe], {
+    // 关键：cmd /c 会把带引号且含空格的批处理路径剥掉首尾引号，
+    // 导致 "C:\...\DSH Desktop\updates\apply-update.cmd" 被当成
+    // "C:\...\DSH" 去执行并静默失败（“点击后重启、无安装界面”的根因）。
+    // 因此把 cwd 切到 updates 目录，/c 只传不含空格的脚本文件名。
+    child = spawn(cmdExe(), ['/d', '/c', path.basename(script), logFile, newExe, oldExe], {
+      cwd: dir,
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
@@ -389,7 +394,9 @@ function applyUpdate(ctx, pending) {
     fs.writeFileSync(ps1, buildNsisPs1(), 'utf8');
     fs.writeFileSync(script, buildNsisCmd());
     ctx.log('client-update', `启动安装版更新脚本: ${script}→${path.basename(ps1)}（安装包: ${newExe}，进程: ${procName}）日志: ${logFile}`);
-    child = spawn(cmdExe(), ['/c', script, ps1, newExe, procName, logFile], {
+    // 同便携版：/c 的第一个参数不能是含空格的完整路径，否则脚本根本不执行。
+    child = spawn(cmdExe(), ['/d', '/c', path.basename(script), path.basename(ps1), newExe, procName, logFile], {
+      cwd: dir,
       detached: true,
       stdio: 'ignore',
       windowsHide: true,

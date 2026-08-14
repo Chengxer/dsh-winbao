@@ -3,6 +3,14 @@
 DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行时与 dsh CLI，
 一键启动 Web UI。
 
+
+## [0.3.2] — 2026-08-15
+
+### 新增
+- **内置识图插件 `dsh-vision`**（`assets/plugins/dsh-vision`）：为纯文本 DeepSeek 注册 `view_image` 工具，把图片与问题转发给任意 OpenAI 兼容 VLM 端点（默认智谱免费 `glm-4.6v-flash`，可换通义 qwen3-vl / Ollama 本地 / 未来 DeepSeek 官方识图 API），答案以文本返回；无需 API key 时按插件配置或 `DSH_VISION_API_KEY` 等环境变量取用。
+
+### 修复
+- **客户端自更新“点击重启后无任何反应”**：安装版/便携版更新脚本原来以含空格的完整路径作为 `cmd /c` 的第一个参数，会被 cmd 剥掉引号而静默失败；现在把工作目录切到 `updates` 并只传脚本文件名，更新安装器可正常拉起。
 ## [0.3.1] — 2026-08-15
 
 ### 新增
