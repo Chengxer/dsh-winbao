@@ -97,7 +97,9 @@ class SessionWatcher {
   }
 
   start(intervalMs = 2000) {
-    this.scan();
+    // 性能修复：首扫延后一拍（先让窗口绘制），且分批处理，
+    // 避免启动时主进程被大量会话日志的全量解码卡死。
+    setImmediate(() => this.scan(4));
     this.timer = setInterval(() => this.scan(), intervalMs);
     if (this.timer.unref) this.timer.unref();
   }
@@ -126,12 +128,38 @@ class SessionWatcher {
     }
   }
 
-  scan() {
+  scan(maxChanged = Infinity) {
     let any = false;
+    let changed = 0;
     for (const file of this.listLogs()) {
-      try { any = this.process(file) || any; } catch (err) { this.log('watch', '处理失败 ' + file + ': ' + err.message); }
+      try {
+        const grew = this.process(file);
+        if (grew) {
+          any = true;
+          changed += 1;
+          if (changed >= maxChanged) break;
+        }
+      } catch (err) { this.log('watch', '处理失败 ' + file + ': ' + err.message); }
     }
     return any;
+  }
+
+  /** 读取文件自 offset 起的尾部字节（增量读取，避免每次全量读盘）。 */
+  readTail(file, offset, size) {
+    const len = size - offset;
+    const tail = Buffer.allocUnsafe(len);
+    const fd = fs.openSync(file, 'r');
+    try {
+      let pos = 0;
+      while (pos < len) {
+        const n = fs.readSync(fd, tail, pos, len - pos, offset + pos);
+        if (n <= 0) break;
+        pos += n;
+      }
+      return tail.subarray(0, pos);
+    } finally {
+      fs.closeSync(fd);
+    }
   }
 
   process(file) {
@@ -142,32 +170,50 @@ class SessionWatcher {
       rec = { size: 0, consumed: 0, header: null, title: null, baseline: false, hasTurnEvents: false };
       this.files.set(file, rec);
     }
-    if (st.size === rec.size) return false;
+    if (st.size <= rec.consumed && rec.baseline) return false; // 无新字节
 
-    let buf;
-    try { buf = fs.readFileSync(file); } catch { return false; }
-
-    // Session header from the first frame (first sight only).
-    if (!rec.header) {
-      const { frames } = scanZstdFrames(buf);
-      if (frames.length > 0) {
-        try {
-          const text = decodeFrame(buf.subarray(frames[0].start, frames[0].end));
-          const firstLine = text.split('\n')[0];
-          const h = JSON.parse(firstLine);
-          if (h && h.type === 'session') rec.header = h;
-        } catch { /* keep null; retry next poll */ }
-      }
+    // 文件被截断/重写（如 repair 脚本）→ 重新基线。
+    if (st.size < rec.consumed) {
+      rec.consumed = 0; rec.header = null; rec.title = null; rec.baseline = false; rec.hasTurnEvents = false;
     }
 
-    const { frames } = scanZstdFrames(buf);
+    const first = !rec.baseline;
+    const readFrom = rec.consumed;
+    let tail;
+    try { tail = this.readTail(file, readFrom, st.size); } catch { return false; }
+
+    // 尾部不是帧边界（被重写/拼接异常）→ 归零重新基线。
+    if (!first && tail.length >= 4 && tail.readUInt32LE(0) !== ZSTD_MAGIC) {
+      rec.consumed = 0; rec.header = null; rec.title = null; rec.baseline = false; rec.hasTurnEvents = false;
+      return this.process(file);
+    }
+
+    const { frames, tornStart } = scanZstdFrames(tail);
+
+    // 首次见到该会话（基线）：只解析头部与最后一帧边界，不逐帧解码历史——
+    // 历史事件本就不触发通知，跳过全量解压可避免启动卡顿。
+    if (first) {
+      if (frames.length > 0) {
+        try {
+          const text = decodeFrame(tail.subarray(frames[0].start, frames[0].end));
+          const h = JSON.parse(text.split('\n')[0]);
+          if (h && h.type === 'session') rec.header = h;
+        } catch { /* 头部损坏则下次重试 */ }
+        rec.consumed = readFrom + frames[frames.length - 1].end;
+      }
+      // 没有完整帧则不推进（tornStart 提示未写满）。
+      rec.baseline = true;
+      rec.size = st.size;
+      return true; // 计为"做了重活"（供分批限流）
+    }
+
+    // 增量：只解码 consumed 之后的新完整帧。
     let turnEnds = 0;
     let assistantMessages = 0;
-    let consumed = rec.consumed;
-    for (const { start, end } of frames) {
-      if (start < consumed) continue;
+    let consumed = readFrom;
+    for (const f of frames) {
       let text;
-      try { text = decodeFrame(buf.subarray(start, end)); } catch { break; }
+      try { text = decodeFrame(tail.subarray(f.start, f.end)); } catch { break; }
       for (const line of text.split('\n')) {
         if (!line) continue;
         for (const ev of expandRow(line)) {
@@ -178,23 +224,15 @@ class SessionWatcher {
           if (ev.type === 'assistant/message') assistantMessages += 1;
         }
       }
-      consumed = end;
+      consumed = readFrom + f.end;
     }
     rec.consumed = consumed;
     rec.size = st.size;
 
-    // Baseline: events that existed before first sight are historical —
-    // never toast for them; only LIVE completions notify.
-    // Sessions that emit turn/start|turn/end (current format) notify on
-    // turn/end (the definitive run-finished marker, incl. goal sessions).
-    // Older logs without turn events fall back to assistant/message.
-    const live = rec.baseline;
-    rec.baseline = true;
-    let count = 0;
-    if (rec.hasTurnEvents) count = turnEnds;
-    else count = assistantMessages;
-    if (live && count > 0) this.emit(rec, count);
-    return count > 0;
+    // 通知语义：会话出现 turn 事件后按 turn/end 计数，否则按 assistant/message 兜底。
+    const count = rec.hasTurnEvents ? turnEnds : assistantMessages;
+    if (count > 0) this.emit(rec, count);
+    return count > 0 || consumed > readFrom;
   }
 
   emit(rec, count) {
