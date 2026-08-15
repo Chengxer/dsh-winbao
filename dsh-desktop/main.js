@@ -25,6 +25,7 @@ const os = require('node:os');
 const updater = require('./updater');
 const clientUpdater = require('./client-updater');
 const balance = require('./balance');
+const wslBackend = require('./wsl-backend');
 const { SessionWatcher, scanZstdFrames } = require('./session-watcher');
 const { RendererRecovery } = require('./renderer-recovery');
 const zlib = require('node:zlib');
@@ -98,6 +99,7 @@ let balanceCache = null;
 let balanceTimer = null;
 let restartingServer = false;
 let trayRecoveryTimer = null;
+let backendMode = 'local'; // local | wsl（WSL 托管后端见 wsl-backend.js）
 let recovery = null; // 渲染进程崩溃/挂起自恢复状态机（renderer-recovery.js）
 let crashDumpsDir = "";
 let pickerBrowseOverlay = null; // koffi 预检失败时注入的目录选择器降级 overlay
@@ -313,13 +315,28 @@ function dshBin() {
   return require.resolve('@deepseek-ai/dsh/lib/bin.js');
 }
 
-function dshVersion() { return updater.activeVersion(updCtx()) || '未知'; }
+function dshVersion() {
+  if (isWslMode()) return wslBackend.activeVersion() || '未知';
+  return updater.activeVersion(updCtx()) || '未知';
+}
 
 function dshVersionSource() {
+  if (isWslMode()) return 'WSL 托管（' + wslBackend.installDirLinux() + '）';
   return updater.overlayVersion(updCtx()) ? '用户目录（已更新）' : '内置';
 }
 
 function killTree(proc) {
+  // WSL 托管模式：进程在 WSL 里，经 pid 文件发 SIGTERM（绝不 wsl --terminate，
+  // 那会杀掉整个发行版）；pid 丢失时兜底杀掉 wsl.exe 转发进程。
+  if (isWslMode()) {
+    wslBackend.stop().catch((err) => log('killTree', '停止 WSL dsh 失败: ' + String(err && err.message || err)));
+    if (proc && proc.pid) {
+      setTimeout(() => {
+        try { if (proc.exitCode === null) proc.kill(); } catch {}
+      }, 1500);
+    }
+    return;
+  }
   if (!proc || !proc.pid) return;
   try {
     if (IS_WIN) {
@@ -638,18 +655,90 @@ function chooseStableWebPort() {
 }
 
 // ---------------------------------------------------------------------------
+// 后端模式（配置优先级：环境变量 > settings.json）：
+//   local —— 启动内置 dsh（默认，行为不变）
+//   wsl   —— 壳经 wsl.exe 在 WSL 内安装/更新/运行自己的 dsh（见 wsl-backend.js），
+//            agent 自更新、插件同步、运行时补丁全部闭环。
+// 环境变量：DSH_DESKTOP_BACKEND=local|wsl
+//           DSH_DESKTOP_WSL_DISTRO / DSH_DESKTOP_WSL_DIR（wsl）
+// settings.json：backend / wslDistro / wslInstallDir
+// ---------------------------------------------------------------------------
+function resolveBackendConfig() {
+  const s = updater.loadSettings(updCtx());
+  const want = String(process.env.DSH_DESKTOP_BACKEND || s.backend || '').trim().toLowerCase();
+  if (want === 'remote') {
+    // remote 附加模式已移除（如需连接外部已运行的 dsh，用 WSL 托管或浏览器直开）。
+    log('boot', 'settings.backend=remote 已不再支持，回落为 local 模式');
+  }
+  backendMode = want === 'wsl' ? 'wsl' : 'local';
+  if (backendMode === 'wsl') {
+    // 解析发行版/安装目录并探活；失败抛错（boot 的 catch 会弹失败框）。
+    wslBackend.configure({
+      distro: String(process.env.DSH_DESKTOP_WSL_DISTRO || s.wslDistro || '').trim(),
+      installDir: String(process.env.DSH_DESKTOP_WSL_DIR || s.wslInstallDir || '').trim(),
+      log,
+    });
+  }
+  return { mode: backendMode };
+}
+
+function isWslMode() { return backendMode === 'wsl'; }
+
+// 各模式下的 DSH_HOME 落点（Windows 视角）：
+//   local → Windows 的 DSH_HOME
+//   wsl   → WSL 安装目录的 UNC 等价路径（供会话通知/余额/插件同步直读 WSL 文件）
+function effectiveDshHome() {
+  if (isWslMode()) return wslBackend.uncHome();
+  return dshHome || path.join(os.homedir(), '.dsh');
+}
+
+// 设置页「WSL 后端」用的状态快照：当前 local 模式（未配置过）或 force 时，
+// 按已保存的 wslDistro/wslInstallDir 做一次探测；失败不抛错，错误进 status。
+function wslStatusSnapshot(opts = {}) {
+  if (!wslBackend.isConfigured() || opts.force) {
+    try {
+      const s = updater.loadSettings(updCtx());
+      wslBackend.configure({
+        distro: String(s.wslDistro || '').trim(),
+        installDir: String(s.wslInstallDir || '').trim(),
+        log,
+      });
+    } catch (err) {
+      return {
+        configured: false,
+        lastError: String((err && err.message) || err),
+      };
+    }
+  }
+  return wslBackend.status();
+}
+
+// ---------------------------------------------------------------------------
 // dsh web server lifecycle
 // ---------------------------------------------------------------------------
 
 async function startServer(unsafePortRetries = 4, overlays = []) {
+  // M1 修复：重入前先终结旧进程，避免孤儿 harness 同时写同一 DSH_HOME
+  // （wsl 模式经 pid 文件终止 WSL 内进程，local 模式 taskkill 进程树）。
+  if (serverProc && !serverProc.killed && !quitting) {
+    log('dsh', 'startServer 重入：先终结旧进程再启动');
+    killTree(serverProc);
+    serverProc = null;
+  }
+  if (isWslMode()) {
+    // WSL 托管模式：经 wsl.exe 在 WSL 内启动 dsh web（仍 --port 0 由 WSL 内 OS
+    // 分配；稳定端口持久化只作用于本地 spawn）。受限端口重启走同一递归。
+    if (!wslBackend.isReady()) {
+      return Promise.reject(new Error('WSL 托管后端未就绪: ' + wslBackend.lastError()));
+    }
+    const out = fs.createWriteStream(path.join(logsDir, 'dsh-web.log'), { flags: 'a' });
+    log('dsh', `WSL 托管模式：在 ${wslBackend.installDirLinux()}/agent 内启动 dsh web`);
+    const proc = wslBackend.spawnServer();
+    serverProc = proc;
+    return watchServerProc(proc, out, { expectedPort: null, unsafePortRetries, overlays });
+  }
   const webPort = await chooseStableWebPort();
   return new Promise((resolve, reject) => {
-    // M1 修复：重入前先终结旧进程，避免孤儿 harness 同时写同一 DSH_HOME。
-    if (serverProc && !serverProc.killed && !quitting) {
-      log('dsh', 'startServer 重入：先终结旧进程再启动');
-      killTree(serverProc);
-      serverProc = null;
-    }
     const nodeBin = nodeExe();
     const bin = dshBin();
     if (!fs.existsSync(nodeBin)) {
@@ -672,6 +761,16 @@ async function startServer(unsafePortRetries = 4, overlays = []) {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     serverProc = proc;
+    watchServerProc(proc, out, { expectedPort: webPort, unsafePortRetries, overlays }).then(resolve, reject);
+  });
+}
+
+// 等待 dsh web 子进程 stdout 出现就绪 URL 行；进程提前退出 / 启动超时则拒绝。
+// 退出时若服务已就绪过（webUrl 已设）且非主动重启，弹「DSH 服务已停止」对话框。
+// opts.expectedPort 为 null（WSL 托管）时不参与稳定端口持久化；受限端口重启
+// 两种模式共用（WSL 下经 killTree → pid 文件终止后递归重起）。
+function watchServerProc(proc, out, opts = {}) {
+  return new Promise((resolve, reject) => {
     let settled = false;
     let handedOff = false; // 受限端口重启：本实例的退出不再影响外层 Promise/弹窗
     let bootTimer = null;
@@ -692,16 +791,16 @@ async function startServer(unsafePortRetries = 4, overlays = []) {
         } else {
           blocked = restrictedPortOf(m[1]);
         }
-        if (blocked && unsafePortRetries > 0) {
+        if (blocked && opts.unsafePortRetries > 0) {
           // 端口命中 Chromium 受限列表：结束该实例重启换端口（有上限）。
           // 标记 handedOff，本实例的 exit 事件不得提前 reject 外层 Promise
           // 或弹出「服务已停止」对话框，结果交由递归重启决定。
           handedOff = true;
-          log('dsh', `端口 ${blocked} 属于 Chromium 受限端口（ERR_UNSAFE_PORT），重启服务换端口（剩余重试 ${unsafePortRetries} 次）`);
+          log('dsh', `端口 ${blocked} 属于 Chromium 受限端口（ERR_UNSAFE_PORT），重启服务换端口（剩余重试 ${opts.unsafePortRetries} 次）`);
           killTree(proc);
           setTimeout(() => {
             if (quitting) return finish(reject, new Error('应用正在退出'));
-            startServer(unsafePortRetries - 1, overlays).then(
+            startServer(opts.unsafePortRetries - 1, opts.overlays).then(
               (url) => finish(resolve, url),
               (err) => finish(reject, err)
             );
@@ -711,7 +810,7 @@ async function startServer(unsafePortRetries = 4, overlays = []) {
         // 稳定端口：若 dsh 最终监听端口与请求的不同（极端兜底），以实际为准并保存。
         try {
           const actual = Number(new URL(m[1]).port) || 0;
-          if (actual > 0 && actual !== webPort) {
+          if (opts.expectedPort != null && actual > 0 && actual !== opts.expectedPort) {
             const settings = updater.loadSettings(updCtx());
             settings.webPort = actual;
             updater.saveSettings(updCtx(), settings);
@@ -789,7 +888,28 @@ function startAndShow(overlays = []) {
     });
 }
 
-function handleBootFailure(err, overlays = []) {
+async function handleBootFailure(err, overlays = []) {
+  if (isWslMode() && await wslBackend.hasPrevious()) {
+    showBox({
+      type: 'error',
+      title: 'DeepSeek Harness 启动失败',
+      message: 'WSL 内更新后的 agent 无法启动。',
+      detail: (err && err.message || String(err)) + '\n\n可回退到 WSL 内的上一版本继续使用。',
+      buttons: ['回退到上一版本并重试', '重试', '退出'],
+      defaultId: 0,
+      cancelId: 2,
+    }).then(({ response }) => {
+      if (response === 0) {
+        wslBackend.rollback().catch(() => {});
+        startAndShow(overlays).catch((e2) => fatal('DeepSeek Harness 启动失败', e2));
+      } else if (response === 1) {
+        startAndShow(overlays).catch((e2) => handleBootFailure(e2, overlays));
+      } else {
+        app.quit();
+      }
+    });
+    return;
+  }
   const ov = updater.overlayBinPath(updCtx());
   if (ov && fs.existsSync(ov)) {
     showBox({
@@ -1321,7 +1441,7 @@ async function runUpdateFlow(manual) {
     }
     return;
   }
-  const current = updater.activeVersion(ctx);
+  const current = isWslMode() ? (wslBackend.activeVersion() || '0.0.0') : updater.activeVersion(ctx);
   const settings = updater.loadSettings(ctx);
   if (updater.compareVersions(latest, current) <= 0) {
     if (manual) {
@@ -1341,7 +1461,7 @@ async function runUpdateFlow(manual) {
     type: 'info',
     title: '发现新版本',
     message: `官方 @deepseek-ai/dsh 发布了新版本：${latest}`,
-    detail: `当前版本：${current}\n\n是否立即更新？\n· 从 npm 官方源下载新版本及其依赖（首次约 250MB）\n· 更新期间界面保持可用，完成后重启应用生效\n· 失败会自动保留当前版本`,
+    detail: `当前版本：${current}\n\n是否立即更新？\n· 从 npm 官方源下载新版本及其依赖（首次约 250MB）\n· 更新期间界面保持可用，完成后重启应用生效\n· 失败会自动保留当前版本` + (isWslMode() ? '\n· WSL 托管模式：安装在 ' + wslBackend.installDirLinux() + '/agent' : ''),
     buttons: ['立即更新', '跳过此版本', '稍后'],
     defaultId: 0,
     cancelId: 2,
@@ -1357,7 +1477,13 @@ async function runUpdateFlow(manual) {
   updateBusy = true;
   const progressWin = showUpdateWindow(latest);
   try {
-    await updater.applyUpdate(ctx, latest);
+    if (isWslMode()) {
+      // WSL 托管：检查复用 Windows 侧 npm（纯 registry 查询），安装走 WSL 内
+      // npm（staging + 原子切换，语义与本地模式一致）。
+      await wslBackend.applyUpdate(latest, (line) => log('update', 'wsl: ' + line));
+    } else {
+      await updater.applyUpdate(ctx, latest);
+    }
     const { response: r2 } = await showBox({
       type: 'info',
       title: '更新完成',
@@ -1469,7 +1595,7 @@ async function showAbout() {
     type: 'info',
     title: '关于 DSH Desktop',
     message: 'DSH Desktop ' + APP_VERSION,
-    detail: 'DeepSeek Harness 桌面客户端\n\nagent 版本：' + dshVersion() + '（' + dshVersionSource() + '）\n数据目录：' + userDataDir + '\nDSH_HOME：' + (dshHome || '（dsh 默认）') +
+    detail: 'DeepSeek Harness 桌面客户端\n\nagent 版本：' + dshVersion() + '（' + dshVersionSource() + '）\n数据目录：' + userDataDir + '\nDSH_HOME：' + (isWslMode() ? 'WSL：' + wslBackend.installDirLinux() : (dshHome || '（dsh 默认）')) +
       '\n\n项目仓库：\n  GitHub: ' + urls.github + '\n  Gitee:  ' + urls.gitee,
     buttons: ['复制 GitHub 地址', '复制 Gitee 地址', '确定'],
   });
@@ -1499,6 +1625,7 @@ function registerChromeIpc() {
       iconDataUri,
       repoUrls: urls,
       staticPort: previewStaticPort,
+      mode: isWslMode() ? 'wsl' : 'local',
     };
   });
 
@@ -1751,6 +1878,62 @@ function registerChromeIpc() {
       return { ok: false, error: String((err && err.message) || err) };
     }
   });
+
+  // -------------------------------------------------------------------------
+  // WSL 后端配置（设置页 dsh-wsl-settings 插件消费）：
+  //   get     —— 当前后端模式 + 已保存的 wslDistro/wslInstallDir + WSL 探测状态
+  //   save    —— 校验并持久化到 settings.json（重启应用生效）
+  //   recheck —— 用已保存配置重新探测 WSL，返回最新状态
+  // -------------------------------------------------------------------------
+  ipcMain.handle('dsh:wsl-config', async (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return null;
+    const s = updater.loadSettings(updCtx());
+    return {
+      backend: backendMode,
+      wslDistro: String(s.wslDistro || ''),
+      wslInstallDir: String(s.wslInstallDir || ''),
+      status: wslStatusSnapshot(),
+    };
+  });
+
+  ipcMain.handle('dsh:wsl-config-save', async (event, { cfg } = {}) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'unauthorized' };
+    if (!cfg || typeof cfg !== 'object') return { ok: false, error: 'bad-payload' };
+    const backend = String(cfg.backend || '').trim().toLowerCase();
+    if (backend !== 'local' && backend !== 'wsl') return { ok: false, error: '后端模式必须是 local 或 wsl' };
+    const wslDistro = String(cfg.wslDistro || '').trim();
+    const wslInstallDir = String(cfg.wslInstallDir || '').trim();
+    if (wslInstallDir && !wslInstallDir.startsWith('/') && !wslInstallDir.startsWith('~')) {
+      return { ok: false, error: 'WSL 安装目录必须是 WSL 内绝对路径（以 / 或 ~ 开头）' };
+    }
+    if (/\s/.test(wslInstallDir)) return { ok: false, error: 'WSL 安装目录不能包含空白字符' };
+    // 目标为 wsl 时预检一次，让用户在重启前就能发现配置问题。
+    if (backend === 'wsl') {
+      try {
+        wslBackend.configure({ distro: wslDistro, installDir: wslInstallDir, log });
+      } catch (err) {
+        return { ok: false, error: String((err && err.message) || err) };
+      }
+    }
+    const s = updater.loadSettings(updCtx());
+    s.backend = backend;
+    if (wslDistro) s.wslDistro = wslDistro; else delete s.wslDistro;
+    if (wslInstallDir) s.wslInstallDir = wslInstallDir; else delete s.wslInstallDir;
+    updater.saveSettings(updCtx(), s);
+    log('wsl-config', '已保存后端配置: ' + JSON.stringify({ backend, wslDistro, wslInstallDir }));
+    return { ok: true, restartRequired: true };
+  });
+
+  ipcMain.handle('dsh:wsl-recheck', async (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return null;
+    const s = updater.loadSettings(updCtx());
+    return {
+      backend: backendMode,
+      wslDistro: String(s.wslDistro || ''),
+      wslInstallDir: String(s.wslInstallDir || ''),
+      status: wslStatusSnapshot({ force: true }),
+    };
+  });
 }
 
 let trayHintShown = false;
@@ -1831,7 +2014,7 @@ async function refreshBalance() {
     }
     return result;
   }
-  const home = dshHome || path.join(os.homedir(), '.dsh');
+  const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
   let result;
   try {
     result = await balance.queryBalance(home);
@@ -1876,6 +2059,7 @@ const COMPANION_PLUGINS = [
   { id: 'super-injector', name: '@dsh-external/dsh-super-injector' },
   { id: 'prompt-custom', name: '@deepseek-ai/dsh-prompt-custom' },
   { id: 'third-party-thinking', name: '@deepseek-ai/dsh-third-party-thinking' },
+  { id: 'wsl-settings', name: '@deepseek-ai/dsh-wsl-settings' },
   { id: 'dsh-vision', name: '@dsh-external/dsh-vision' },
 ];
 
@@ -1933,7 +2117,8 @@ function removeLegacyMarketplace(profileWebModules, profileDir) {
 function syncCompanionPlugins() {
   if (!IS_WIN) return;
   try {
-    const home = dshHome || path.join(os.homedir(), '.dsh');
+    const home = effectiveDshHome();
+    if (!home) { log('boot', 'DSH_HOME 未解析，跳过配套插件同步'); return; }
     const profileDir = path.join(home, 'profiles', 'web');
     const profileModules = path.join(profileDir, 'node_modules', '@deepseek-ai');
     fs.mkdirSync(profileModules, { recursive: true });
@@ -2076,12 +2261,20 @@ function syncCompanionPlugins() {
 // 这里幂等地把补丁写进运行时文件；dsh 包更新后本函数会在下次启动重新应用。
 // ---------------------------------------------------------------------------
 function applyRuntimeFlashFix() {
-  // 覆盖三处运行副本：profile fallback（即内置 app 副本）、内置 app 副本、更新 overlay。
-  const targets = [
-    path.join(dshHome || path.join(os.homedir(), '.dsh'), 'profiles', 'node_modules', '@deepseek-ai', 'dsh-client-runtime', 'lib', 'client.js'),
-    path.join(__dirname, 'node_modules', '@deepseek-ai', 'dsh-client-runtime', 'lib', 'client.js'),
-    path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh-client-runtime', 'lib', 'client.js'),
-  ];
+  // 覆盖运行副本：profile fallback、内置 app 副本、更新 overlay；
+  // wsl 托管模式目标换成 WSL 安装目录（profile fallback + agent，经 UNC 写穿，
+  // fallback 符号链接未创建时由 agent 直连目标兜底）。
+  const wslHome = effectiveDshHome();
+  const targets = isWslMode()
+    ? [
+        path.join(wslHome, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-client-runtime', 'lib', 'client.js'),
+        path.join(wslHome, 'agent', 'node_modules', '@deepseek-ai', 'dsh-client-runtime', 'lib', 'client.js'),
+      ]
+    : [
+        path.join(dshHome || path.join(os.homedir(), '.dsh'), 'profiles', 'node_modules', '@deepseek-ai', 'dsh-client-runtime', 'lib', 'client.js'),
+        path.join(__dirname, 'node_modules', '@deepseek-ai', 'dsh-client-runtime', 'lib', 'client.js'),
+        path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh-client-runtime', 'lib', 'client.js'),
+      ];
   const oldPat = '(value) => baselineByKey.get(keyOf(value))).filter((value) => value !== void 0);';
   const newPat = '(value) => baselineByKey.get(keyOf(value)) ?? value).filter((value) => value !== void 0);';
   for (const file of targets) {
@@ -2110,11 +2303,19 @@ function applyRuntimeFlashFix() {
 //   - 用户更新过的 agent overlay（部分用户看不见插件设置的根因：overlay 副本从未被补）
 // ---------------------------------------------------------------------------
 function applyPromptExposeFix() {
-  const targets = [
-    path.join(dshHome || path.join(os.homedir(), '.dsh'), 'profiles', 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js'),
-    path.join(__dirname, 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js'),
-    path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js'),
-  ];
+  // 覆盖运行副本：profile fallback、内置 app 副本、更新 overlay；
+  // wsl 托管模式目标换成 WSL 安装目录（profile fallback + agent，经 UNC 写穿）。
+  const wslHome = effectiveDshHome();
+  const targets = isWslMode()
+    ? [
+        path.join(wslHome, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js'),
+        path.join(wslHome, 'agent', 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js'),
+      ]
+    : [
+        path.join(dshHome || path.join(os.homedir(), '.dsh'), 'profiles', 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js'),
+        path.join(__dirname, 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js'),
+        path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js'),
+      ];
   const namespaces = ['dsh-prompt', 'dsh-third-party-thinking', 'dsh-vision', 'dsh-conversation-tweaks'];
   for (const file of targets) {
     if (!file || !fs.existsSync(file)) continue;
@@ -2803,6 +3004,9 @@ async function boot() {
   // DSH_HOME: respect an explicit override; otherwise let dsh use its own
   // default (~/.dsh), so the desktop app shares config/sessions with the CLI.
   dshHome = process.env.DSH_HOME || '';
+  // 后端模式（local/wsl）：读取环境变量 / settings.json。wsl 模式在此
+  // 解析发行版/安装目录并探活 node/npm，失败抛错（boot 的 catch 弹失败框）。
+  resolveBackendConfig();
   fs.mkdirSync(logsDir, { recursive: true });
   if (dshHome) fs.mkdirSync(dshHome, { recursive: true });
   desktopLog = fs.createWriteStream(path.join(logsDir, 'desktop.log'), { flags: 'a' });
@@ -2823,6 +3027,9 @@ async function boot() {
     log('crash', 'crashReporter 初始化失败: ' + err.message);
   }
   log('boot', `DSH Desktop ${APP_VERSION}  userData=${userDataDir}  dshHome=${dshHome || '(dsh 默认)'}  agent=${dshVersion()}(${dshVersionSource()})`);
+  if (isWslMode()) {
+    log('boot', `WSL 托管模式已启用：发行版=${wslBackend.distroName()} 安装目录=${wslBackend.installDirLinux()}（UNC: ${wslBackend.uncHome()}）`);
+  }
 
   // 运行状态/看门狗：先读取上一次运行是否干净退出，再写入本次状态。
   const uncleanPrev = detectUncleanPreviousRun();
@@ -2837,27 +3044,44 @@ async function boot() {
   // 托盘图标被 explorer 重启等外部因素清掉后，周期性自愈。
   trayRecoveryTimer = setInterval(ensureTray, 30 * 1000);
   if (uncleanPrev) notifyUncleanRestart(uncleanPrev);
-  // 先修复 profile fallback 联接再同步/补丁依赖文件：EPERM 环境下补丁写不进去。
   const home = dshHome || process.env.DSH_HOME || require('node:path').join(require('node:os').homedir(), '.dsh');
-  await repairProfileFallback(home);
-  syncCompanionPlugins();
-  applyRuntimeFlashFix();
-  applyPromptExposeFix();
-  applyImageSendFix();
-  initRendererRecovery();
-  createWindow();
-  wireWindowRecovery();
-  startHeartbeatLoop();
-  setupTestChannel();
-  if (runKoffiPreflight()) clearAutoPickerBrowseOverlay();
-  else enablePickerBrowseOverlay();
+  if (isWslMode()) {
+    // WSL 托管模式：先建窗口显示加载页（首次 npm 安装可能耗时数分钟），
+    // 确保 WSL 内 agent 安装完成后再同步配套插件/补丁（经 UNC 写入 WSL profile）。
+    // 跳过 repairProfileFallback（WSL 内的 dsh 首次启动会自行 heal）与 koffi
+    // 目录选择器 overlay（只作用于本地内置 dsh）。
+    initRendererRecovery();
+    createWindow();
+    wireWindowRecovery();
+    startHeartbeatLoop();
+    setupTestChannel();
+    await wslBackend.ensureInstalled();
+    syncCompanionPlugins();
+    applyRuntimeFlashFix();
+    applyPromptExposeFix();
+    applyImageSendFix();
+  } else {
+    // 先修复 profile fallback 联接再同步/补丁依赖文件：EPERM 环境下补丁写不进去。
+    await repairProfileFallback(home);
+    syncCompanionPlugins();
+    applyRuntimeFlashFix();
+    applyPromptExposeFix();
+    applyImageSendFix();
+    initRendererRecovery();
+    createWindow();
+    wireWindowRecovery();
+    startHeartbeatLoop();
+    setupTestChannel();
+    if (runKoffiPreflight()) clearAutoPickerBrowseOverlay();
+    else enablePickerBrowseOverlay();
+  }
   startAndShow()
     .then(() => {
       // Session-completion notifications: watch dsh session logs under the
       // effective DSH_HOME (same config the CLI uses).
       const s = updater.loadSettings(updCtx());
       notifyOnTurnEnd = s.notifyOnTurnEnd !== false;
-      const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+      const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
       sessionWatcher = new SessionWatcher({
         sessionsDir: path.join(home, 'sessions'),
         log,
