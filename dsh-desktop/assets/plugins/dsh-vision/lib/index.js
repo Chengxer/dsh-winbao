@@ -42,15 +42,19 @@ const TEXT_OUTPUT = {
 };
 export function apply(ctx, config) {
     liveConfig = () => config || {};
-    installSettingsSection(ctx, NS, Config, config || {}, {
-        setSource: (source) => {
-            liveConfig = source;
-        },
-        onChange: () => {
+    // settings 已在本插件 inject 中声明，apply 时服务必在；直接同步注册并
+    // try/catch：存储的 dsh-vision 配置节非法会让 register() 抛异常 → 插件
+    // fiber 失败 → dsh fail-loud 启动崩溃。降级为组合配置继续运行（不阻断启动）。
+    try {
+        const scope = ctx.settings.register(NS, Config, { base: config || {} });
+        liveConfig = () => scope.get();
+        scope.watch(() => {
             const cfg = liveConfig() || {};
             console.log("[dsh-vision] settings updated: " + JSON.stringify({ baseURL: cfg.baseURL, model: cfg.model, apiKey: cfg.apiKey ? "***" : "" }));
-        }
-    });
+        });
+    } catch (error) {
+        console.warn("[dsh-vision] settings section unavailable (invalid stored config); falling back to composition config: " + ((error && error.message) || error));
+    }
     // 每次调用都从热配置计算，设置页保存后无需重启服务即可生效。
     const current = () => {
         const cfg = liveConfig() || {};

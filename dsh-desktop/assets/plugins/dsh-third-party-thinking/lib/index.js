@@ -117,15 +117,19 @@ function wrapAdapter(adapter) {
 
 function apply(ctx, config) {
 	liveConfig = () => config || {};
-	installSettingsSection(ctx, NS, Config, config || {}, {
-		setSource: (source) => {
-			liveConfig = source;
-		},
-		onChange: () => {
+	// settings 已在本插件 inject 中声明，apply 时服务必在；直接同步注册并
+	// try/catch：存储的 dsh-third-party-thinking 配置节非法会让 register()
+	// 抛异常 → 插件 fiber 失败 → dsh fail-loud 启动崩溃。降级为组合配置继续运行。
+	try {
+		const scope = ctx.settings.register(NS, Config, { base: config || {} });
+		liveConfig = () => scope.get();
+		scope.watch(() => {
 			const cfg = liveConfig() || {};
 			console.log("[dsh-third-party-thinking] settings updated: " + JSON.stringify({ enabled: cfg.enabled, wireField: cfg.wireField }));
-		}
-	});
+		});
+	} catch (error) {
+		console.warn("[dsh-third-party-thinking] settings section unavailable (invalid stored config); falling back to composition config: " + ((error && error.message) || error));
+	}
 
 	// 枚举 ctx.llm.adapters，为每个非原生 reasoning 适配器注入目录与 wire 包装。
 	const applyWrap = () => {

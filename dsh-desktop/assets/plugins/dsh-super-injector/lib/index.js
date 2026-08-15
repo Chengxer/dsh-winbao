@@ -770,7 +770,19 @@ export function apply(ctx, config) {
                         if (attempt <= 3) {
                             try {
                                 mkdirSync(dirname(patchFile), { recursive: true });
-                                appendFileSync(patchFile, `\n# super-injector heal ${Date.now()}\n`);
+                                                                // 修复「顶层 [] + 列表条目混存」（同一 YAML 文档两个顶层值）：
+                                // 该形态会在下次 dsh 启动时炸掉整个 profile 装配
+                                // （failed to parse overlay）。注入器在场时顺手修复，注释
+                                // touch 本身是安全的（不会破坏 YAML）。
+                                try {
+                                    const raw = readFileSync(patchFile, 'utf8');
+                                    if (/^\s*\[\]\s*$/m.test(raw) && /^\s*-\s+(?:id|insert)\s*:/m.test(raw)) {
+                                        writeFileSync(patchFile, raw.replace(/^\s*\[\]\s*$\n?/m, ''), 'utf8');
+                                        auditLog('heal-fix-patch', '移除与列表混存的顶层 []');
+                                    }
+                                }
+                                catch { /* 修复失败不阻塞 heal */ }
+appendFileSync(patchFile, `\n# super-injector heal ${Date.now()}\n`);
                                 // 给 include.refresh 一个窗口，然后验证官方 entry 是否复活
                                 await new Promise((r) => globalThis.setTimeout(r, 3000));
                                 let officialAlive = false;
@@ -2573,7 +2585,7 @@ export function apply(ctx, config) {
     }));
     safeRegister(defineTool({
         name: 'dev_fix_patch',
-        description: 'profile patch 修复：扫描 ~/.dsh/profiles/*/cordis.patch.yml，按 entry id 去重（同 id 保留最后一条，备份原文件）——修复 "duplicate loader entry id" 启动崩溃（手动 patch 两次/重复安装造成）。--check 只查不写',
+        description: 'profile patch 修复：扫描 ~/.dsh/profiles/*/cordis.patch.yml，按 entry id 去重（同 id 保留最后一条，备份原文件）——修复 "duplicate loader entry id" 启动崩溃（手动 patch 两次/重复安装造成）；同时修复「顶层 [] 与列表条目混存」导致的 YAML 解析崩溃（failed to parse overlay）。--check 只查不写',
         parameters: {
             profile: { type: 'string', description: '只修指定 profile（缺省全部）' },
             check: { type: 'boolean', description: '只检查不写入' },
@@ -2627,14 +2639,19 @@ export function apply(ctx, config) {
                     }
                     kept.push(b.text);
                 }
-                if (!dup.length) {
-                    out.push(`[${profile}] 健康：无重复 id`);
+                                    // 双顶层值检测：孤立 `[]` 行 + 列表条目并存（用户报障的
+                    // "failed to parse overlay ... end of the stream" 崩溃根因）。
+                    const mixedTop = /^\s*\[\]\s*$/m.test(content) && /^\s*-\s+(?:id|insert)\s*:/m.test(content);
+if (!dup.length && !mixedTop) {
+                    out.push(`[${profile}] 健康：无重复 id 且无顶层 [] 混存`);
                     continue;
                 }
                 fixedAny = true;
                 for (const rec of dup)
                     out.push(`[${profile}] 修复：id "${rec.id}" 重复，删除 ${rec.count} 条（保留最后一条）`);
-                if (args.check)
+                                    if (mixedTop)
+                        out.push(`[${profile}] 修复：顶层 [] 与列表条目混存（同一文档两个顶层值 → 解析必炸），已移除 []`);
+if (args.check)
                     continue;
                 const bak = patchFile + '.bak-' + Date.now();
                 try {

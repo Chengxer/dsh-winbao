@@ -96,15 +96,19 @@ async function handlePreviewRoute(ctx, req, res) {
 
 function apply(ctx, config) {
 	liveConfig = () => config || {};
-	installSettingsSection(ctx, NS, Config, config || {}, {
-		setSource: (source) => {
-			liveConfig = source;
-		},
-		onChange: () => {
+	// settings 已在本插件 inject 中声明，apply 时服务必在；直接同步注册并
+	// try/catch：存储的 dsh-prompt 配置节非法会让 register() 抛异常 → 插件
+	// fiber 失败 → dsh fail-loud 启动崩溃。降级为组合配置继续运行（不阻断启动）。
+	try {
+		const scope = ctx.settings.register(NS, Config, { base: config || {} });
+		liveConfig = () => scope.get();
+		scope.watch(() => {
 			const cfg = liveConfig() || {};
 			console.log("[dsh-prompt-custom] settings updated: " + JSON.stringify({ enabled: cfg.enabled, mode: cfg.mode }));
-		}
-	});
+		});
+	} catch (error) {
+		console.warn("[dsh-prompt-custom] settings section unavailable (invalid stored config); falling back to composition config: " + ((error && error.message) || error));
+	}
 
 	// 每个 agent 创建时，向 agent 作用域注册提示词节。
 	// 注册随 agent 纤维自动销毁，无泄漏。

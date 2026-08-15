@@ -779,6 +779,7 @@ async function startServer(unsafePortRetries = 4, overlays = []) {
     await killTree(serverProc);
     serverProc = null;
   }
+  healProfilePatch();
   if (isWslMode()) {
     // WSL 托管模式：经 wsl.exe 在 WSL 内启动 dsh web（仍 --port 0 由 WSL 内 OS
     // 分配；稳定端口持久化只作用于本地 spawn）。受限端口重启走同一递归。
@@ -963,6 +964,52 @@ async function restartService() {
   }
 }
 
+async // 探测 overlay agent 本身能否运行（--version 快速退出 0 即视为可运行）。
+// 用于区分「更新包坏了」与「其它原因（profile patch / 配置损坏等）导致的启动
+// 失败」，避免把后者误判为更新问题、诱导用户回退一个健康的新版本。
+function probeOverlayAgent(bin) {
+  return new Promise((resolve) => {
+    const nodeBin = nodeExe();
+    if (!fs.existsSync(nodeBin) || !fs.existsSync(bin)) return resolve(false);
+    let child;
+    try {
+      child = spawn(nodeBin, [bin, '--version'], {
+        windowsHide: true,
+        stdio: 'ignore',
+        timeout: 15000,
+      });
+    } catch {
+      return resolve(false);
+    }
+    child.on('error', () => resolve(false));
+    child.on('exit', (code) => resolve(code === 0));
+  });
+}
+
+// 从 dsh-web.log 尾部扫描 settings 文档损坏的报错行（settings.yaml 整体无法
+// 解析/非 map 时报 `settings-file: ...`，settings 服务起不来 → 一批插件 fiber
+// 失败 → dsh web 退出）。返回损坏文件路径与该行。
+function scanWebLogForSettingsFailure() {
+  try {
+    const file = path.join(logsDir, 'dsh-web.log');
+    if (!fs.existsSync(file)) return null;
+    const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+    const hit = lines.slice(-400).reverse().find((l) => l.includes('settings-file:'));
+    if (!hit) return null;
+    const m = hit.match(/settings-file: (?:invalid document at )?([^\n]+)/);
+    if (!m) return null;
+    let filePath = m[1].trim();
+    const mapIdx = filePath.indexOf(' must be a map');
+    if (mapIdx >= 0) filePath = filePath.slice(0, mapIdx);
+    else {
+      const idx = filePath.lastIndexOf(':');
+      if (idx > 1) filePath = filePath.slice(0, idx);
+    }
+    return { filePath, line: hit.trim() };
+  } catch {
+    return null;
+  }
+}
 async function handleBootFailure(err, overlays = []) {
   if (isWslMode() && await wslBackend.hasPrevious()) {
     showBox({
@@ -987,25 +1034,31 @@ async function handleBootFailure(err, overlays = []) {
   }
   const ov = updater.overlayBinPath(updCtx());
   if (ov && fs.existsSync(ov)) {
-    showBox({
-      type: 'error',
-      title: 'DeepSeek Harness 启动失败',
-      message: '更新后的 agent 无法启动。',
-      detail: (err && err.message || String(err)) + logTailSnippet() + '\n\n可回退到内置版本继续使用。',
-      buttons: ['回退到内置版本并重试', '重试', '退出'],
-      defaultId: 0,
-      cancelId: 2,
-    }).then(({ response }) => {
-      if (response === 0) {
-        updater.rollback(updCtx());
-        startAndShow(overlays).catch((e2) => fatal('DeepSeek Harness 启动失败', e2));
-      } else if (response === 1) {
-        startAndShow(overlays).catch((e2) => handleBootFailure(e2, overlays));
-      } else {
-        app.quit();
-      }
-    });
-    return;
+    // 先探测 overlay 本身能否运行。可运行 → 启动失败另有原因（如损坏的
+    // cordis.patch.yml，现在已在启动前自愈），不归咎于更新，走通用失败弹窗。
+    const runs = await probeOverlayAgent(ov);
+    if (!runs) {
+      showBox({
+        type: 'error',
+        title: 'DeepSeek Harness 启动失败',
+        message: '更新后的 agent 无法启动。',
+        detail: (err && err.message || String(err)) + logTailSnippet() + '\n\n可回退到内置版本继续使用。',
+        buttons: ['回退到内置版本并重试', '重试', '退出'],
+        defaultId: 0,
+        cancelId: 2,
+      }).then(({ response }) => {
+        if (response === 0) {
+          updater.rollback(updCtx());
+          startAndShow(overlays).catch((e2) => fatal('DeepSeek Harness 启动失败', e2));
+        } else if (response === 1) {
+          startAndShow(overlays).catch((e2) => handleBootFailure(e2, overlays));
+        } else {
+          app.quit();
+        }
+      });
+      return;
+    }
+    log('boot', 'overlay agent 可运行（--version 正常），启动失败不归咎于更新');
   }
   // EPERM/symlink 自愈（客户手册场景）：先于插件安全模式处理。
   if (!epermRepairAttempted && dshWebLogHasEpermSymlink()) {
@@ -1025,6 +1078,35 @@ async function handleBootFailure(err, overlays = []) {
     notifySafeBoot(failedIds);
     const next = [...overlays, safeOverlay];
     return startAndShow(next).catch((e2) => handleBootFailure(e2, next));
+  }
+  // settings.yaml 整体损坏（settings 服务起不来）时给出「备份并重置」的一键
+  // 恢复（用户同意才动文件），而不是让用户面对无从下手的失败弹窗。
+  const settingsFail = scanWebLogForSettingsFailure();
+  if (settingsFail && fs.existsSync(settingsFail.filePath)) {
+    showBox({
+      type: 'error',
+      title: 'DeepSeek Harness 启动失败',
+      message: '检测到 settings 配置文件损坏。',
+      detail: (err && err.message || String(err)) + '\n\n' + settingsFail.line + '\n\n可备份并重置该文件后重试（原文件保留为 .broken-<时间戳> 备份）。',
+      buttons: ['备份并重置 settings 后重试', '重试', '退出'],
+      defaultId: 0,
+      cancelId: 2,
+    }).then(({ response }) => {
+      if (response === 0) {
+        try {
+          fs.renameSync(settingsFail.filePath, settingsFail.filePath + '.broken-' + Date.now());
+          log('boot', 'settings 已备份并重置: ' + settingsFail.filePath);
+        } catch (e) {
+          log('boot', 'settings 备份重置失败: ' + e.message);
+        }
+        startAndShow(overlays).catch((e2) => handleBootFailure(e2, overlays));
+      } else if (response === 1) {
+        startAndShow(overlays).catch((e2) => handleBootFailure(e2, overlays));
+      } else {
+        app.quit();
+      }
+    });
+    return;
   }
   fatal('DeepSeek Harness 启动失败', err);
 }
@@ -1565,6 +1647,8 @@ async function runUpdateFlow(manual) {
       applyPromptExposeFix();
       applyImageSendFix();
       applyVisionKeyFix();
+      applyProfilePatchGuard();
+      applySettingsSectionGuard();
     }
     const { response: r2 } = await showBox({
       type: 'info',
@@ -2184,9 +2268,79 @@ function removeLegacyMarketplace(profileWebModules, profileDir) {
   } catch {}
 }
 
+// ---------------------------------------------------------------------------
+// profile patch 自愈：cordis.patch.yml 损坏（典型：顶层 `[]` 与 `- insert:` 列表
+// 混存——同一 YAML 文档两个顶层值）会让 dsh web 装配 profile 时抛 YAMLException
+// 并以 exit 1 退出，桌面端「启动失败」。每次启动 dsh web 前调用本函数：
+//   1. 顶层孤立 `[]` 与列表条目混存 → 移除 `[]` 行（修复为单一顶层列表）；
+//   2. 仍无法解析（其它损坏形态）→ 备份为 cordis.patch.yml.broken-<ts> 并重置为
+//      最小合法文件，日志告警，备份保留用户内容供恢复。健康文件零写入（幂等）。
+// ---------------------------------------------------------------------------
+function profilePatchFile() {
+  const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
+  return path.join(home, 'profiles', 'web', 'cordis.patch.yml');
+}
+
+/** 原子写入（临时文件 + rename），避免与 dsh 的 HMR 观察者撕裂读。 */
+function writePatchAtomic(file, content) {
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, content, 'utf8');
+  fs.renameSync(tmp, file);
+}
+
+// 惰性加载 js-yaml（随内置 dsh 存在于 resources/app/node_modules，传递依赖）；
+// 缺失时静默降级为仅做结构化修复（不阻断启动）。
+let dshYamlDialect = null;
+let dshYamlTried = false;
+function loadDshYamlDialect() {
+  if (dshYamlTried) return dshYamlDialect;
+  dshYamlTried = true;
+  try {
+    const yaml = require('js-yaml');
+    // 与 dsh 相同的 entry-list 方言：`!!js` 表达式是合法标量。
+    const jsType = new yaml.Type('tag:yaml.org,2002:js', {
+      kind: 'scalar',
+      resolve: (data) => typeof data === 'string',
+      construct: (data) => ({ __jsExpr: data }),
+    });
+    dshYamlDialect = { load: (content) => yaml.load(content, { schema: yaml.JSON_SCHEMA.extend(jsType) }) };
+  } catch {
+    dshYamlDialect = null;
+  }
+  return dshYamlDialect;
+}
+
+function healProfilePatch() {
+  try {
+    const file = profilePatchFile();
+    if (!fs.existsSync(file)) return;
+    let text = fs.readFileSync(file, 'utf8');
+    const bareArray = /^\s*\[\]\s*$/m.test(text);
+    const hasEntries = /^\s*-\s+(?:id|insert)\s*:/m.test(text);
+    if (bareArray && hasEntries) {
+      text = text.replace(/^\s*\[\]\s*$\n?/m, '');
+      writePatchAtomic(file, text);
+      log('boot', 'profile patch 自愈: 移除了与列表混存的顶层 []（cordis.patch.yml）');
+    }
+    const yaml = loadDshYamlDialect();
+    if (!yaml) return;
+    let parsed;
+    let error = null;
+    try { parsed = yaml.load(text); } catch (err) { error = err; }
+    if (error || !Array.isArray(parsed)) {
+      const backup = file + '.broken-' + Date.now();
+      try { fs.renameSync(file, backup); } catch { fs.copyFileSync(file, backup); }
+      fs.writeFileSync(file, '# recovered by DSH Desktop: 原内容无法解析，已备份到\n# ' + backup + '\n[]\n', 'utf8');
+      log('boot', 'profile patch 自愈: 解析失败（' + String((error && error.message) || '顶层非数组') + '），已备份到 ' + backup + ' 并重置为最小文件');
+    }
+  } catch (err) {
+    log('boot', 'profile patch 自愈失败: ' + err.message);
+  }
+}
 function syncCompanionPlugins() {
   if (!IS_WIN) return;
   try {
+    healProfilePatch();
     const home = effectiveDshHome();
     if (!home) { log('boot', 'DSH_HOME 未解析，跳过配套插件同步'); return; }
     const profileDir = path.join(home, 'profiles', 'web');
@@ -2586,6 +2740,117 @@ function applyVisionKeyFix() {
       log('boot', '识图密钥补丁: 已修复 apiKey 被脱敏截断 ' + file);
     } catch (err) {
       log('boot', '识图密钥补丁失败(' + file + '): ' + err.message);
+    }
+  }
+}
+// ---------------------------------------------------------------------------
+// dsh 装配层防护：profile 自有的 cordis.patch.yml 属于用户数据，dsh 官方设计是
+// 「补丁文件损坏必须启动失败」（fail loud）。但该文件损坏会让桌面端永久无法
+// 启动。这里像 applyRuntimeFlashFix 一样幂等地改写 @deepseek-ai/dsh-app-boot：
+// 把 loadProfile 对 profile patch 的严格加载替换为「解析失败 → 备份 + 重置为
+// 空列表并继续启动」的自愈加载；CLI 等其它入口同样受益。dsh 更新后本函数会在
+// 下次启动重新应用。
+// ---------------------------------------------------------------------------
+function applyProfilePatchGuard() {
+  const guardMarker = 'function loadUserPatchLayer';
+  const callSite = '\t\tpatches: options.userLayer !== false && existsSync(patchPath) ? loadOverlayPatches(binName, patchPath) : []';
+  const callReplacement = '\t\tpatches: loadUserPatchLayer(binName, patchPath, options)';
+  const insertAfter = '\treturn parsePatchList(binName, file, content, "overlay");\n}';
+  const injected =
+    '/** dsh-desktop guard: the profile\'s own patch layer is user-owned data; a broken file must not brick\n' +
+    ' * the surface. Back the broken file up, reset the layer to an empty list, and boot without it.\n' +
+    ' */\n' +
+    'function loadUserPatchLayer(binName, patchPath, options) {\n' +
+    '\tif (options.userLayer === false || !existsSync(patchPath)) return [];\n' +
+    '\ttry {\n' +
+    '\t\treturn loadOverlayPatches(binName, patchPath);\n' +
+    '\t} catch (error) {\n' +
+    '\t\ttry {\n' +
+    '\t\t\tconst backup = `${patchPath}.broken-${Date.now()}`;\n' +
+    '\t\t\twriteFileSync(backup, readFileSync(patchPath, "utf8"));\n' +
+    '\t\t\twriteFileSync(patchPath, "# recovered by dsh: the previous content failed to parse and was moved to\\n# " + backup + "\\n[]\\n");\n' +
+    '\t\t} catch {}\n' +
+    '\t\tprocess.stderr.write(`${binName}: ${patchPath} failed to parse (${String(error?.message ?? error)}); the broken file was moved aside and the profile booted without its patch layer\\n`);\n' +
+    '\t\treturn [];\n' +
+    '\t}\n' +
+    '}';
+  const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
+  const candidates = [
+    path.join(__dirname, 'node_modules', '@deepseek-ai', 'dsh-app-boot', 'lib', 'index.js'),
+    path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh-app-boot', 'lib', 'index.js'),
+    path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-app-boot', 'lib', 'index.js'),
+    path.join(home, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-app-boot', 'lib', 'index.js'),
+  ];
+  for (const file of candidates) {
+    if (!fs.existsSync(file)) continue;
+    try {
+      let src = fs.readFileSync(file, 'utf8');
+      if (src.includes(guardMarker)) continue; // 已应用（幂等）
+      if (!src.includes(callSite) || !src.includes(insertAfter)) {
+        log('boot', 'profile patch 防护: ' + file + ' 锚点未匹配（dsh 版本可能已变化），跳过');
+        continue;
+      }
+      src = src.replace(callSite, callReplacement);
+      src = src.replace(insertAfter, insertAfter + '\n\n' + injected);
+      fs.writeFileSync(file, src, { encoding: 'utf8' });
+      log('boot', 'profile patch 防护: 已注入自愈加载到 ' + file);
+    } catch (err) {
+      log('boot', 'profile patch 防护失败: ' + err.message);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// dsh-settings 注册防护：settings.yaml 中某命名空间的存储配置节非法（非对象或
+// 字段类型错误，常见于手改文件）时，installSettingsSection 里的 register() 会
+// 抛异常 → 消费插件 fiber 失败 → dsh fail-loud 启动崩溃。这里幂等地改写
+// @deepseek-ai/dsh-settings：register 失败改为告警 + 回退组合配置，命名空间
+// 本次启动不可用但不阻断启动。dsh 更新后本函数会在下次启动重新应用。
+// ---------------------------------------------------------------------------
+function applySettingsSectionGuard() {
+  const guardMarker = 'dsh-desktop guard: an invalid stored section must not brick';
+  const anchor = '\t\tconst scope = sctx.settings.register(ns, schema, {';
+  const guarded =
+    '\t\tlet scope;\n' +
+    '\t\ttry {\n' +
+    '\t\t\tscope = sctx.settings.register(ns, schema, {\n' +
+    '\t\t\t\tbase: entry,\n' +
+    '\t\t\t\t...hooks.validate === void 0 ? {} : { validate: hooks.validate }\n' +
+    '\t\t\t});\n' +
+    '\t\t} catch (error) {\n' +
+    '\t\t\t// dsh-desktop guard: an invalid stored section must not brick the consumer\n' +
+    '\t\t\t// fiber (fail-loud boot). Fall back to the composition config; the\n' +
+    '\t\t\t// namespace simply stays unavailable until the stored section is fixed.\n' +
+    '\t\t\tsctx.logger.warn("settings: registration for \\"%s\\" failed; falling back to the composition config this boot", ns);\n' +
+    '\t\t\tsctx.logger.warn(error);\n' +
+    '\t\t\ttry {\n' +
+    '\t\t\t\thooks.setSource(() => entry);\n' +
+    '\t\t\t\thooks.onChange();\n' +
+    '\t\t\t} catch {}\n' +
+    '\t\t\treturn;\n' +
+    '\t\t}\n' +
+    '\t\thooks.setSource(() => scope.get());';
+  const candidates = [
+    path.join(__dirname, 'node_modules', '@deepseek-ai', 'dsh-settings', 'lib', 'index.js'),
+    path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh-settings', 'lib', 'index.js'),
+    path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-settings', 'lib', 'index.js'),
+    path.join(home, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-settings', 'lib', 'index.js'),
+  ];
+  for (const file of candidates) {
+    if (!fs.existsSync(file)) continue;
+    try {
+      let src = fs.readFileSync(file, 'utf8');
+      if (src.includes(guardMarker)) continue; // 已应用（幂等）
+      if (!src.includes(anchor)) {
+        log('boot', 'settings 注册防护: ' + file + ' 锚点未匹配（dsh 版本可能已变化），跳过');
+        continue;
+      }
+      const from2 = '\t\tconst scope = sctx.settings.register(ns, schema, {\n\t\t\tbase: entry,\n\t\t\t...hooks.validate === void 0 ? {} : { validate: hooks.validate }\n\t\t});\n\t\thooks.setSource(() => scope.get());';
+      src = src.replace(from2, guarded);
+      fs.writeFileSync(file, src, { encoding: 'utf8' });
+      log('boot', 'settings 注册防护: 已注入到 ' + file);
+    } catch (err) {
+      log('boot', 'settings 注册防护失败: ' + err.message);
     }
   }
 }
@@ -3181,6 +3446,8 @@ async function boot() {
     applyPromptExposeFix();
     applyImageSendFix();
     applyVisionKeyFix();
+    applyProfilePatchGuard();
+    applySettingsSectionGuard();
   } else {
     // 先修复 profile fallback 联接再同步/补丁依赖文件：EPERM 环境下补丁写不进去。
     await repairProfileFallback(home);
@@ -3189,6 +3456,8 @@ async function boot() {
     applyPromptExposeFix();
     applyImageSendFix();
     applyVisionKeyFix();
+    applyProfilePatchGuard();
+    applySettingsSectionGuard();
     initRendererRecovery();
     createWindow();
     wireWindowRecovery();
