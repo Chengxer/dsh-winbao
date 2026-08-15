@@ -2831,6 +2831,7 @@ function applySettingsSectionGuard() {
     '\t\t\treturn;\n' +
     '\t\t}\n' +
     '\t\thooks.setSource(() => scope.get());';
+  const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
   const candidates = [
     path.join(__dirname, 'node_modules', '@deepseek-ai', 'dsh-settings', 'lib', 'index.js'),
     path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh-settings', 'lib', 'index.js'),
