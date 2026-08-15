@@ -1,7 +1,7 @@
 {
   "name": "dsh-desktop",
   "productName": "DSH Desktop",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "DeepSeek Harness (dsh) 开箱即用的 Windows 桌面客户端：内置 dsh CLI 与 Node 运行时，一键启动 Web UI",
   "main": "main.js",
   "author": "DSH Desktop",
@@ -11,6 +11,8 @@
     "start": "node scripts/install-minimal-win-preset.js && node scripts/patch-event-vocabulary.js node_modules/@deepseek-ai/dsh-session && node scripts/patch-deps.js && electron .",
     "fetch-node": "node scripts/fetch-node.js",
     "pack": "node scripts/patch-portable-template.js && node scripts/patch-deps.js && electron-builder --dir",
+    "predist": "node scripts/check-syntax.js",
+    "prepack": "node scripts/check-syntax.js",
     "dist": "node scripts/patch-portable-template.js && node scripts/patch-deps.js && electron-builder --win",
     "fetch-npm": "node scripts/fetch-npm.js",
     "fetch-runtime": "node scripts/fetch-node.js && node scripts/fetch-npm.js",

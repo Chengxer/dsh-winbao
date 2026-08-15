@@ -4,6 +4,12 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 一键启动 Web UI。
 
 
+
+## [0.3.8] — 2026-08-15
+
+### 修复
+- **安装后启动即报 `ReferenceError: async is not defined`**：`main.js` 中 `async` 关键字与 `probeOverlayAgent` 函数声明被注释行拆开，导致主进程模块加载失败。已重接 `async function`；新增 `scripts/check-syntax.js` 并接入 `prepack` / `predist`，打包前强制做入口 JS 语法检查与「async/await 关键字与声明被拆开」模式扫描，此类坏包无法再打包。
+
 ## [0.3.6] — 2026-08-15
 
 > 注意：Zat-DSH Engine 市场替换与客户端更新闭环修复已合入 main，但本版本尚未发布；

@@ -964,10 +964,10 @@ async function restartService() {
   }
 }
 
-async // 探测 overlay agent 本身能否运行（--version 快速退出 0 即视为可运行）。
+// 探测 overlay agent 本身能否运行（--version 快速退出 0 即视为可运行）。
 // 用于区分「更新包坏了」与「其它原因（profile patch / 配置损坏等）导致的启动
 // 失败」，避免把后者误判为更新问题、诱导用户回退一个健康的新版本。
-function probeOverlayAgent(bin) {
+async function probeOverlayAgent(bin) {
   return new Promise((resolve) => {
     const nodeBin = nodeExe();
     if (!fs.existsSync(nodeBin) || !fs.existsSync(bin)) return resolve(false);
