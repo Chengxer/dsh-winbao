@@ -19,6 +19,7 @@ const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
 const http = require('node:http');
+const net = require('node:net');
 const os = require('node:os');
 
 const updater = require('./updater');
@@ -98,7 +99,7 @@ let balanceTimer = null;
 let restartingServer = false;
 let trayRecoveryTimer = null;
 let recovery = null; // 渲染进程崩溃/挂起自恢复状态机（renderer-recovery.js）
-let crashDumpsDir = '';
+let crashDumpsDir = "";
 
 // ---------------------------------------------------------------------------
 // 会话浮窗（分屏）：把会话弹出到独立窗口
@@ -353,18 +354,22 @@ function childEnv() {
   return env;
 }
 
+// 对话框串行化：服务启动失败/更新/错误弹窗不会同时叠成多个，
+// 避免「重启后连续弹出多个启动失败窗口」。
+let boxChain = Promise.resolve();
 function showBox(opts) {
-  if (mainWindow && !mainWindow.isDestroyed()) return dialog.showMessageBox(mainWindow, opts);
-  return dialog.showMessageBox(opts);
+  const run = () => {
+    if (mainWindow && !mainWindow.isDestroyed()) return dialog.showMessageBox(mainWindow, opts);
+    return dialog.showMessageBox(opts);
+  };
+  const p = boxChain.then(run, run);
+  boxChain = p.then(() => {}, () => {});
+  return p;
 }
 
-// ---------------------------------------------------------------------------
-// dsh web server lifecycle
-// ---------------------------------------------------------------------------
-
-// Chromium 限制端口（net::ERR_UNSAFE_PORT）。dsh web / 预览服务用 --port 0
-// 随机选端口，可能命中这些端口导致页面永远无法加载（实测命中过 4045）。
-// 命中时自动重启服务换端口，而不是让用户面对无法加载的窗口。
+// 选择一个尽量稳定的 127.0.0.1 端口并保存到 settings.json。
+// Web UI 的部分偏好（如左侧会话分组方式）存在 localStorage，而
+// localStorage 按 origin 隔离；每次 --port 0 都会换 origin，导致偏好丢失。
 const CHROMIUM_RESTRICTED_PORTS = new Set([
   1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79,
   87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137,
@@ -388,11 +393,49 @@ function restrictedPortOf(url) {
 // 强制视为受限端口（6000），端到端验证「重启换端口」交接路径。
 let testForceUnsafeOnce = process.env.DSH_DESKTOP_TEST_FORCE_UNSAFE === '1';
 
-function startServer() {
-  return startServerWithRetries(4);
+function chooseStableWebPort() {
+  return new Promise((resolve) => {
+    const settings = updater.loadSettings(updCtx());
+    const preferred = Number(settings.webPort) || 0;
+    const save = (port) => {
+      settings.webPort = port;
+      updater.saveSettings(updCtx(), settings);
+      resolve(port);
+    };
+    const tryPort = (port, done) => {
+      const probe = net.createServer();
+      const finish = (ok) => {
+        probe.removeAllListeners();
+        probe.close(() => done(ok));
+      };
+      probe.once('error', () => finish(false));
+      probe.listen(port, '127.0.0.1', () => finish(true));
+    };
+    const pickFree = (retriesLeft = 5) => {
+      const probe = net.createServer();
+      probe.once('error', () => {
+        if (retriesLeft > 0) pickFree(retriesLeft - 1);
+        else save(0);
+      });
+      probe.listen(0, '127.0.0.1', () => {
+        const port = probe.address().port;
+        probe.close(() => {
+          if (CHROMIUM_RESTRICTED_PORTS.has(port) && retriesLeft > 0) pickFree(retriesLeft - 1);
+          else save(port);
+        });
+      });
+    };
+    if (preferred && !CHROMIUM_RESTRICTED_PORTS.has(preferred)) tryPort(preferred, (ok) => ok ? save(preferred) : pickFree());
+    else pickFree();
+  });
 }
 
-function startServerWithRetries(unsafePortRetries) {
+// ---------------------------------------------------------------------------
+// dsh web server lifecycle
+// ---------------------------------------------------------------------------
+
+async function startServer(unsafePortRetries = 4) {
+  const webPort = await chooseStableWebPort();
   return new Promise((resolve, reject) => {
     // M1 修复：重入前先终结旧进程，避免孤儿 harness 同时写同一 DSH_HOME。
     if (serverProc && !serverProc.killed && !quitting) {
@@ -409,10 +452,10 @@ function startServerWithRetries(unsafePortRetries) {
       ));
     }
     const out = fs.createWriteStream(path.join(logsDir, 'dsh-web.log'), { flags: 'a' });
-    log('dsh', `启动: "${nodeBin}" "${bin}" web --host 127.0.0.1 --port 0`);
+    log('dsh', `启动: "${nodeBin}" "${bin}" web --host 127.0.0.1 --port ${webPort}`);
     // --use-system-ca: 让 dsh web 进程信任系统证书库（代理/MITM 场景下内置 node 的
     // 默认 CA 无法验证，导致插件市场等对外 fetch 失败）。
-    const proc = spawn(nodeBin, ['--use-system-ca', bin, 'web', '--host', '127.0.0.1', '--port', '0'], {
+    const proc = spawn(nodeBin, ['--use-system-ca', bin, 'web', '--host', '127.0.0.1', '--port', String(webPort)], {
       cwd: userDataDir,
       env: childEnv(),
       windowsHide: true,
@@ -448,13 +491,22 @@ function startServerWithRetries(unsafePortRetries) {
           killTree(proc);
           setTimeout(() => {
             if (quitting) return finish(reject, new Error('应用正在退出'));
-            startServerWithRetries(unsafePortRetries - 1).then(
+            startServer(unsafePortRetries - 1).then(
               (url) => finish(resolve, url),
               (err) => finish(reject, err)
             );
           }, 600);
           return;
         }
+        // 稳定端口：若 dsh 最终监听端口与请求的不同（极端兜底），以实际为准并保存。
+        try {
+          const actual = Number(new URL(m[1]).port) || 0;
+          if (actual > 0 && actual !== webPort) {
+            const settings = updater.loadSettings(updCtx());
+            settings.webPort = actual;
+            updater.saveSettings(updCtx(), settings);
+          }
+        } catch {}
         finish(resolve, m[1]);
       }
     };
@@ -517,9 +569,7 @@ function startAndShow() {
     .then((url) => {
       webUrl = url;
       log('boot', 'Web UI 就绪: ' + url);
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        return mainWindow.loadURL(url).then(() => url);
-      }
+      if (mainWindow && !mainWindow.isDestroyed()) return mainWindow.loadURL(url).then(() => url);
       return url;
     });
 }
@@ -615,10 +665,17 @@ function createWindow(opts = {}) {
   mainWindow.webContents.on('will-navigate', guardNavigation);
   mainWindow.webContents.on('will-redirect', guardNavigation);
 
-  // 渲染进程错误捕获：插件/页面异常统一落到 desktop.log，便于排查空白视图。
-  win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
-    if (level === 'error' || level === 'warning') {
-      log('page', `[${level}] ${message} (${sourceId || 'unknown'}:${line})`);
+  // 高频重复的 warning/error 会变成同步磁盘写入，明显拖慢渲染。
+  // 同一签名 5 秒内只落一条日志。
+  const pageConsoleThrottle = new Map();
+  win.webContents.on("console-message", (_e, level, message, line, sourceId) => {
+    if (level === "error" || level === "warning") {
+      const key = `${level}:${message}:${sourceId || "unknown"}:${line}`;
+      const now = Date.now();
+      if (now - (pageConsoleThrottle.get(key) || 0) < 5000) return;
+      if (pageConsoleThrottle.size > 500) pageConsoleThrottle.clear();
+      pageConsoleThrottle.set(key, now);
+      log("page", `[${level}] ${message} (${sourceId || "unknown"}:${line})`);
     }
   });
   // 渲染进程崩溃/挂起的自恢复由 renderer-recovery.js 统一接管
@@ -739,7 +796,6 @@ function startHeartbeatLoop() {
   setInterval(() => { if (recovery) recovery.checkHeartbeats(); }, 15000).unref();
 }
 
-// ---------------------------------------------------------------------------
 // 会话浮窗：共享的 Web 守卫 + 浮窗创建/生命周期
 // ---------------------------------------------------------------------------
 
@@ -836,7 +892,7 @@ function createFloatWindow(sessionId, { title } = {}) {
     }
   });
   guardWebContents(win.webContents);
-  if (recovery) recovery.attach(win, 'float');
+  if (recovery) recovery.attach(win, "float");
 
   log('float', '已创建会话浮窗 sessionId=' + sessionId);
   return win;
@@ -1154,6 +1210,17 @@ function setCloseToTray(v) {
   updater.saveSettings(updCtx(), s);
 }
 
+function balanceDockEnabled() {
+  const s = updater.loadSettings(updCtx());
+  return s.showBalanceDock !== false;
+}
+
+function setBalanceDock(v) {
+  const s = updater.loadSettings(updCtx());
+  s.showBalanceDock = !!v;
+  updater.saveSettings(updCtx(), s);
+}
+
 function repoUrls() {
   const repos = clientUpdater.resolveRepos();
   return {
@@ -1194,12 +1261,59 @@ function registerChromeIpc() {
       agentSource: dshVersionSource(),
       notifyOnTurnEnd,
       closeToTray: s.closeToTray !== false,
+      showBalanceDock: s.showBalanceDock !== false,
       iconDataUri,
       repoUrls: urls,
       staticPort: previewStaticPort,
     };
   });
 
+  ipcMain.on('dsh:renderer-heartbeat', (event) => {
+    if (recovery) recovery.noteHeartbeat(event.sender.id);
+  });
+
+  // 恢复页面（assets/recovery.html）的三个按钮。全部校验来源必须是主窗。
+  ipcMain.handle('chrome:recovery-state', (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return null;
+    return {
+      appVersion: APP_VERSION,
+      logsDir,
+      crashDumpsDir,
+      state: recovery ? recovery.stateOf(mainWindow) : null,
+    };
+  });
+
+  ipcMain.handle('chrome:recovery-reload', async (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'unauthorized' };
+    // 服务进程已退出时先重启服务（可能换新端口），再恢复加载。
+    if (!serverProc || serverProc.exitCode !== null || serverProc.killed) {
+      try {
+        await startAndShow();
+      } catch (err) {
+        return { ok: false, error: String((err && err.message) || err) };
+      }
+    }
+    recovery.retryNow(mainWindow);
+    return { ok: true };
+  });
+
+  ipcMain.handle('chrome:recovery-restart', (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'unauthorized' };
+    log('recovery', '用户在恢复页面选择重启客户端');
+    quitting = true;
+    forceQuit = true;
+    markCleanExit();
+    killTree(serverProc);
+    app.relaunch();
+    app.exit(0);
+    return { ok: true };
+  });
+
+  ipcMain.handle('chrome:recovery-open-logs', (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'unauthorized' };
+    shell.openPath(logsDir);
+    return { ok: true };
+  });
   ipcMain.handle('chrome:window', (event, { action } = {}) => {
     if (!mainWindow || event.sender !== mainWindow.webContents) return null;
     switch (action) {
@@ -1213,10 +1327,10 @@ function registerChromeIpc() {
 
   ipcMain.handle('chrome:menu', async (event, { action } = {}) => {
     if (!mainWindow || event.sender !== mainWindow.webContents) {
-      return { notifyOnTurnEnd, closeToTray: closeToTrayEnabled() };
+      return { notifyOnTurnEnd, closeToTray: closeToTrayEnabled(), showBalanceDock: balanceDockEnabled() };
     }
     switch (action) {
-      case 'reload': reloadMainWindow(); break;
+        case 'reload': reloadMainWindow(); break;
       case 'devtools': mainWindow.webContents.toggleDevTools(); break;
       case 'fullscreen': mainWindow.setFullScreen(!mainWindow.isFullScreen()); break;
       case 'open-browser': if (webUrl) shell.openExternal(webUrl); break;
@@ -1231,10 +1345,15 @@ function registerChromeIpc() {
         break;
       }
       case 'toggle-close-to-tray': setCloseToTray(!closeToTrayEnabled()); break;
+      case 'toggle-balance': {
+        setBalanceDock(!balanceDockEnabled());
+        refreshBalance().catch(() => {});
+        break;
+      }
       case 'about': showAbout(); break;
       case 'quit': forceQuit = true; app.quit(); break;
     }
-    return { notifyOnTurnEnd, closeToTray: closeToTrayEnabled() };
+    return { notifyOnTurnEnd, closeToTray: closeToTrayEnabled(), showBalanceDock: balanceDockEnabled() };
   });
 
   // 插件市场：原地重启 dsh web 服务（安装/卸载插件后生效，窗口重载到新端口）。
@@ -1398,54 +1517,6 @@ function registerChromeIpc() {
       return { ok: false, error: String((err && err.message) || err) };
     }
   });
-
-  // renderer 心跳（preload 每 5s 上报）：用于「挂起无 unresponsive 事件」兜底判定。
-  ipcMain.on('dsh:renderer-heartbeat', (event) => {
-    if (recovery) recovery.noteHeartbeat(event.sender.id);
-  });
-
-  // 恢复页面（assets/recovery.html）的三个按钮。全部校验来源必须是主窗。
-  ipcMain.handle('chrome:recovery-state', (event) => {
-    if (!mainWindow || event.sender !== mainWindow.webContents) return null;
-    return {
-      appVersion: APP_VERSION,
-      logsDir,
-      crashDumpsDir,
-      state: recovery ? recovery.stateOf(mainWindow) : null,
-    };
-  });
-
-  ipcMain.handle('chrome:recovery-reload', async (event) => {
-    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'unauthorized' };
-    // 服务进程已退出时先重启服务（可能换新端口），再恢复加载。
-    if (!serverProc || serverProc.exitCode !== null || serverProc.killed) {
-      try {
-        await startAndShow();
-      } catch (err) {
-        return { ok: false, error: String((err && err.message) || err) };
-      }
-    }
-    recovery.retryNow(mainWindow);
-    return { ok: true };
-  });
-
-  ipcMain.handle('chrome:recovery-restart', (event) => {
-    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'unauthorized' };
-    log('recovery', '用户在恢复页面选择重启客户端');
-    quitting = true;
-    forceQuit = true;
-    markCleanExit();
-    killTree(serverProc);
-    app.relaunch();
-    app.exit(0);
-    return { ok: true };
-  });
-
-  ipcMain.handle('chrome:recovery-open-logs', (event) => {
-    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'unauthorized' };
-    shell.openPath(logsDir);
-    return { ok: true };
-  });
 }
 
 let trayHintShown = false;
@@ -1518,6 +1589,14 @@ function createTray() {
 // ---------------------------------------------------------------------------
 
 async function refreshBalance() {
+  if (!balanceDockEnabled()) {
+    const result = { ok: false, disabled: true, balances: [], prices: {}, error: 'balance dock disabled' };
+    balanceCache = result;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('dsh:balance', result);
+    }
+    return result;
+  }
   const home = dshHome || path.join(os.homedir(), '.dsh');
   let result;
   try {
@@ -1558,6 +1637,7 @@ const COMPANION_PLUGINS = [
   { id: 'plugin-marketplace', name: '@deepseek-ai/dsh-plugin-marketplace' },
   { id: 'float-window', name: '@deepseek-ai/dsh-float-window' },
   { id: 'conversation-tweaks', name: '@deepseek-ai/dsh-conversation-tweaks' },
+  { id: 'super-injector', name: '@dsh-external/dsh-super-injector' },
   { id: 'prompt-custom', name: '@deepseek-ai/dsh-prompt-custom' },
   { id: 'third-party-thinking', name: '@deepseek-ai/dsh-third-party-thinking' },
   { id: 'dsh-vision', name: '@dsh-external/dsh-vision' },
@@ -1599,26 +1679,51 @@ function syncCompanionPlugins() {
     fs.mkdirSync(profileModules, { recursive: true });
     const expectedDirs = new Set(COMPANION_PLUGINS.map(companionDirName));
     removeStaleCompanionPlugins(profileModules, expectedDirs);
+
+    const bundleNames = new Set();
+    const copyFiles = ['package.json', 'lib/index.js', 'lib/client.js', 'lib/vlm.js', 'dsh.plugin.json', 'cordis.patch.yml'];
     for (const p of COMPANION_PLUGINS) {
       const rel = companionDirName(p);
       const src = path.join(__dirname, 'assets', 'plugins', rel);
       if (!fs.existsSync(path.join(src, 'package.json'))) continue;
+      let pkg = {};
+      try { pkg = JSON.parse(fs.readFileSync(path.join(src, 'package.json'), 'utf8')); } catch {}
+      const isBundle = !!(pkg && pkg.dsh && pkg.dsh.bundle && pkg.dsh.bundle.patch);
       // @deepseek-ai 与 @dsh-external 两种 scope 都按包名落到 profile 的
       // node_modules 下；配套包自身的依赖由 dsh 的 profiles/node_modules
       // fallback（healProfilesModuleFallback）解析。
       const dest = path.join(profileModules, '..', p.name);
       fs.mkdirSync(path.join(dest, 'lib'), { recursive: true });
-      for (const f of ['package.json', 'lib/index.js', 'lib/client.js', 'lib/vlm.js', 'dsh.plugin.json']) {
+      for (const f of copyFiles) {
         const sf = path.join(src, f);
         if (fs.existsSync(sf)) fs.copyFileSync(sf, path.join(dest, f));
       }
+      // Bundle 插件不写 patch 行：dsh 在启动时读取 profile 的
+      // dsh.profile.bundles 并应用包内 cordis.patch.yml。
+      if (isBundle) bundleNames.add(p.name);
     }
-    // 注册到 profile 的 patch 层（幂等）。
+
+    const manifestFile = path.join(profileDir, 'package.json');
+    let manifest = {};
+    try { manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8')); } catch { manifest = { name: 'dsh-profile-web', private: true }; }
+    manifest.dsh ??= {};
+    manifest.dsh.profile ??= {};
+    manifest.dsh.profile.bundles ??= [];
+    for (const name of bundleNames) {
+      if (!manifest.dsh.profile.bundles.includes(name)) {
+        manifest.dsh.profile.bundles.push(name);
+        fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\n');
+        log('boot', '已把 bundle 插件加入 web profile bundles: ' + name);
+      }
+    }
+
+    // 非 bundle 插件注册到 profile 的 patch 层（幂等）。
     const patchFile = path.join(profileDir, 'cordis.patch.yml');
     let patch = '';
     try { patch = fs.readFileSync(patchFile, 'utf8'); } catch { patch = ''; }
     let changed = false;
     for (const p of COMPANION_PLUGINS) {
+      if (bundleNames.has(p.name)) continue;
       // 该 id 在 patch 里已存在：若它现在的 name 与当前版本不一致（例如终端
       // 包改名 @deepseek-ai/dsh-terminal → dsh-terminal-tab），就地改名为当前
       // 值。否则旧名残留会让配套插件与 agent 内置终端重复注册路由、或加载
@@ -1645,9 +1750,7 @@ function syncCompanionPlugins() {
   } catch (err) {
     log('boot', '同步配套插件失败: ' + err.message);
   }
-}
-
-// ---------------------------------------------------------------------------
+}// ---------------------------------------------------------------------------
 // dsh web 运行时闪跳修复：官方 dsh-client-runtime 在会话列表刷新
 // （mergeOrderedBaseline）时会丢弃「本地已创建、宿主全量列表尚未回显」的
 // 新会话，使 current 瞬时变 undefined，UI 闪回「选择工作区/无会话」状态。
@@ -1686,7 +1789,7 @@ function applyPromptExposeFix() {
     let src = fs.readFileSync(file, 'utf8');
     // 幂等地把配套命名空间追加进 WEB_SETTINGS_NAMESPACES 数组（数组以 "\n];" 收尾）。
     // 逐个检查缺失项，缺失就在数组收尾前插入，避免对已应用过的中间态失配。
-    const namespaces = ['dsh-prompt', 'dsh-third-party-thinking'];
+    const namespaces = ['dsh-prompt', 'dsh-third-party-thinking', 'dsh-vision', 'dsh-conversation-tweaks'];
     let changed = false;
     for (const ns of namespaces) {
       if (src.includes('"' + ns + '"')) continue;
@@ -1801,6 +1904,17 @@ function quitForClientUpdate(ctx, pending) {
   quitting = true;
   forceQuit = true;
   markCleanExit();
+  // 立即清除待安装标记：更新脚本一旦启动就由它负责完成。
+  // 否则脚本失败/被安全软件拦截时，用户手动打开旧版本会反复弹出同一个更新框。
+  try {
+    const s = updater.loadSettings(ctx);
+    if (s.pendingClientUpdate && s.pendingClientUpdate.path === pending.path) {
+      s.pendingClientUpdate = null;
+      updater.saveSettings(ctx, s);
+    }
+  } catch (err) {
+    log('client-update', '清理待安装标记失败: ' + err.message);
+  }
   try {
     killTree(serverProc);
   } catch (err) {
@@ -2043,12 +2157,6 @@ function startPreviewStaticServer() {
   server.on("error", (err) => log("boot", "预览静态服务失败: " + err.message));
 }
 
-// ---------------------------------------------------------------------------
-// 集成测试控制通道：仅在 DSH_DESKTOP_TEST=1 时启用。
-// 测试 harness 向 DSH_DESKTOP_TEST_DIR/test-control.json 写入命令，
-// 本进程轮询执行并把结果写入 test-status.json。renderer 崩溃时页面不可用，
-// 因此选择文件通道而非 IPC，保证任何时刻都能下达命令。
-// ---------------------------------------------------------------------------
 function setupTestChannel() {
   const dir = process.env.DSH_DESKTOP_TEST_DIR;
   if (!process.env.DSH_DESKTOP_TEST || !dir) return;
@@ -2160,6 +2268,12 @@ async function boot() {
 
   userDataDir = app.getPath('userData');
   logsDir = path.join(userDataDir, 'logs');
+  // DSH_HOME: respect an explicit override; otherwise let dsh use its own
+  // default (~/.dsh), so the desktop app shares config/sessions with the CLI.
+  dshHome = process.env.DSH_HOME || '';
+  fs.mkdirSync(logsDir, { recursive: true });
+  if (dshHome) fs.mkdirSync(dshHome, { recursive: true });
+  desktopLog = fs.createWriteStream(path.join(logsDir, 'desktop.log'), { flags: 'a' });
   // 崩溃取证（Issue #9）：把 Crashpad minidump 固定到数据目录并保留，
   // 用于后续定位 0xC0000005 的底层来源（不联网上传）。
   crashDumpsDir = path.join(userDataDir, 'crash-dumps');
@@ -2176,12 +2290,6 @@ async function boot() {
   } catch (err) {
     log('crash', 'crashReporter 初始化失败: ' + err.message);
   }
-  // DSH_HOME: respect an explicit override; otherwise let dsh use its own
-  // default (~/.dsh), so the desktop app shares config/sessions with the CLI.
-  dshHome = process.env.DSH_HOME || '';
-  fs.mkdirSync(logsDir, { recursive: true });
-  if (dshHome) fs.mkdirSync(dshHome, { recursive: true });
-  desktopLog = fs.createWriteStream(path.join(logsDir, 'desktop.log'), { flags: 'a' });
   log('boot', `DSH Desktop ${APP_VERSION}  userData=${userDataDir}  dshHome=${dshHome || '(dsh 默认)'}  agent=${dshVersion()}(${dshVersionSource()})`);
 
   // 运行状态/看门狗：先读取上一次运行是否干净退出，再写入本次状态。
@@ -2281,8 +2389,8 @@ if (!gotLock) {
     closeAllFloatWindows();
     killTree(serverProc);
     updater.abort();
-    if (sessionWatcher) sessionWatcher.stop();
     if (recovery) recovery.dispose();
+    if (sessionWatcher) sessionWatcher.stop();
     if (balanceTimer) clearInterval(balanceTimer);
     if (trayRecoveryTimer) { clearInterval(trayRecoveryTimer); trayRecoveryTimer = null; }
     if (tray) { try { tray.destroy(); } catch {} tray = null; }

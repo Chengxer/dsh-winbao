@@ -110,7 +110,7 @@ window.__ModuleLoader__.load({
 			descriptors: [
 				descriptor("search", ["query"]),
 				descriptor("installed", []),
-				descriptor("installPlugin", ["packageName"]),
+				descriptor("installPlugin", ["spec"]),
 				descriptor("uninstallPlugin", ["packageName"])
 			]
 		};

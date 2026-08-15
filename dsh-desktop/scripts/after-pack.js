@@ -27,6 +27,7 @@ require('./patch-portable-template');
 // the session reader — otherwise "history unavailable ... unknown to this
 // harness and not marked ignorable" breaks session history loading.
 const { patchDshSessionVocabulary } = require('./patch-event-vocabulary');
+const { installBuiltinPresets } = require('./install-minimal-win-preset');
 
 // Regexes for files that are safe to delete (pure metadata / dev artifacts).
 const DROP_BASENAME = /^(LICENSE.*|README.*|CHANGELOG.*|HISTORY.*|COPYING.*|NOTICE.*|AUTHORS.*|SECURITY.*|CONTRIBUTING.*|\.gitignore|\.npmignore|\.editorconfig|\.eslintrc.*|\.prettierrc.*|\.babelrc.*)$/i;
@@ -93,5 +94,14 @@ module.exports = async function afterPack(context) {
     console.log(`afterPack: session event vocabulary ${changed > 0 ? `patched (+${changed} types)` : 'already up to date'}`);
   } else {
     console.warn('afterPack: bundled dsh-session not found — vocabulary patch skipped');
+  }
+
+  // Ship the desktop's minimal_win preset in the bundled dsh CLI (idempotent).
+  const dshPkgDir = path.join(appOutDir, 'resources', 'app', 'node_modules', '@deepseek-ai', 'dsh');
+  if (fs.existsSync(path.join(dshPkgDir, 'package.json'))) {
+    const presetDirs = installBuiltinPresets(dshPkgDir);
+    console.log(`afterPack: builtin presets installed (${presetDirs.length}): ${presetDirs.map((p) => path.basename(p)).join(", ")}`);
+  } else {
+    console.warn('afterPack: bundled dsh package not found — minimal-win preset skipped');
   }
 };

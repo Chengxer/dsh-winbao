@@ -4,7 +4,7 @@
 
 - ✅ **免安装 Node**：内置独立的 Node 运行时与 npm CLI，目标机器无需安装 Node.js
 - ✅ **内置 dsh CLI**：完整打包 `@deepseek-ai/dsh` 及其全部插件，离线可用
-- ✅ **一键启动**：双击即启动 `dsh web`，自动挑空闲端口，就绪后加载到原生窗口
+- ✅ **一键启动**：双击即启动 `dsh web`，优先复用上次保存的端口（被占用时自动换新端口），就绪后加载到原生窗口；稳定 origin 让左侧会话分组等界面偏好能跨重启记住
 - ✅ **风格化无边框窗口**：无原生标题栏/菜单栏，自绘 36px 玻璃栏（圆角图标 + 拖拽 + ⋯ 菜单 + 窗口控制），Win11 原生圆角；快捷键 Ctrl+R / F12 / F11 保留
 - ✅ **系统托盘常驻**：点关闭默认隐藏到托盘（可关闭），托盘菜单提供显示/检查更新/退出
 - ✅ **退出即清理**：退出应用自动结束 dsh 进程树，不留孤儿进程
@@ -18,8 +18,8 @@
 - ✅ **会话完成系统通知**：agent 任务跑完时弹 Windows 系统通知，点击回到窗口
 - ✅ **自定义注入提示词**：设置页可自定义官方内核注入的系统提示词（替换整体 / 追加到末尾，应用到 standard 完整 Agent 基准预设），新会话即刻生效
 
-- ✅ **隐藏对话输出**：设置 → 通用设置 →「隐藏对话输出」，隐藏模型长篇文字，只保留工具调用、文件操作与结果等重要信息
-- ✅ **会话导航滑轨**：对话右侧的虚化滑轨长度随会话变化；悬停时在鼠标位置显示垂直短横线预览，点击才跳转
+ - ✅ **隐藏对话输出**：设置 → 通用设置 →「隐藏对话输出」，隐藏大量工具调用、工具结果与思考过程，每一轮的最终总结输出仍然显示
+ - ✅ **会话导航滑轨**：对话右侧的虚化滑轨长度随会话变化；每条用户输入在滑轨上以圆点标出位置，悬停时在鼠标位置显示垂直短横线预览，点击才跳转
 - ✅ **便携版解压缓存**：首次解压后缓存到 `%TEMP%\dsh-desktop-portable`，同版本再次启动直接复用，避免 Defender 扫描 2.4 万文件导致分钟级冷启动
 - ✅ **启动自愈与看门狗**：自动修复 profile 符号链接损坏导致的 `dsh web` 退出码 1；主进程异常退出时自动拉起应用并发送恢复通知
 
@@ -47,7 +47,7 @@
 
 - 启动 60 秒后及此后每 12 小时，自动查询上游仓库的最新 release（**GitHub Releases → Gitee Releases 双源回退**；可用环境变量 `DSH_DESKTOP_RELEASE_API` 指向自定义镜像 API），比较当前版本。
 - 发现新版本时弹窗询问：**立即更新 / 跳过此版本 / 稍后**；同意后带进度条下载安装包（便携版选 `*-portable-x64.exe`，安装版选 `Setup-*-x64.exe`；Gitee 因单文件 100MB 限制拆分的 `.part1/.part2` 分片会自动按序下载并合并），下载到 `<数据目录>\updates\`。
-- 确认重启后：**便携版**用 detached 脚本等待旧 exe 解锁 → 备份 → 原地替换 → 自动启动新版本（只读目录自动退化为直接启动新 exe）；**安装版**等待进程退出后以向导方式启动新安装包。失败自动保留当前版本，下次启动继续提示待安装更新。
+- 确认重启后：**便携版**用 detached 脚本等待旧 exe 解锁 → 备份 → 原地替换 → 自动启动新版本（只读目录自动退化为直接启动新 exe）；**安装版**等待进程退出后以向导方式启动新安装包，安装完成后如果新版没有自动运行，脚本会从卸载注册表定位并显式启动新版本。启动更新脚本时会清除待安装标记，更新失败不会在下次启动反复弹同一个更新框。
 - 菜单入口：chrome 栏 ⋯ 菜单 →「检查客户端更新…」；托盘菜单同样可用。跳过版本记录在 `settings.json`（`skipClientVersion`）。
 - **更新源可见可复制**：⋯ 菜单内「更新源」区块与「关于 DSH Desktop」对话框展示两个项目仓库地址（GitHub / Gitee），一键复制到剪贴板。
 - 链路自检：`node scripts/check-client-latest.js [--download]`（可设 `DSH_DESKTOP_RELEASE_API` / `PORTABLE_EXECUTABLE_DIR`）。
@@ -57,6 +57,7 @@
 - 桌面端读取 `~/.dsh/.credentials.yaml` 的 `DEEPSEEK_API_KEY`（或环境变量），调用 `https://api.deepseek.com/user/balance`，每 15 分钟刷新，通过 preload 推送到 Web UI。
 - 配套 dsh 客户端插件（`assets/plugins/dsh-balance`）在每次启动时自动同步进 web profile 并注册到 `conversation.composer.dock`，在对话底部统计栏内联显示：**本轮 ¥X.XX · 余额 ¥Y.YY**（本轮费用按 token 用量 × 价格档估算，缓存命中/未命中/输出分别计价）。
 - 价格档默认：deepseek-chat 2/0.5/8、deepseek-reasoner 与 deepseek-v4-pro 4/1/16（¥/百万 token）；可在 `<数据目录>\settings.json` 的 `balancePrices.<model>` 覆盖。代理/镜像可用 `DEEPSEEK_API_BASE` 或 `DEEPSEEK_BALANCE_URL` 环境变量。
+- 不需要余额提示时：chrome 栏 ⋯ 菜单 →「显示余额/本轮费用」取消勾选，整个 dock 会隐藏（第三方中转/非官方直连用户推荐关闭）。
 - 纯浏览器打开 Web UI 时无桌面壳推送，小部件只显示「本轮」费用。
 
 ## 自定义注入提示词
@@ -69,7 +70,30 @@
   - **替换整体（replace）**：用自定义文本整体替换默认人设。
 - **生效范围**：应用到 standard 完整 Agent 基准预设；设置保存后新创建会话即刻生效，运行中会话沿用注入时的提示词。
 - 自定义文本按原样注入，可用 `{{model}}` 等占位符；未启用或内容为空时回落为官方默认。
-- 配套 dsh 客户端插件（`assets/plugins/dsh-prompt-custom`）自动同步进 web profile，配置持久化到该 profile 的 `settings.yaml`（`dsh-prompt` 命名空间）。
+
+## 识图插件（dsh-vision）
+
+- 设置 →「识图插件（view_image）」：填写任意 OpenAI 兼容 VLM 的 **API 地址 / 密钥 / 模型 / 备用模型**，保存后热生效。
+- 默认智谱免费 `glm-4.6v-flash`；也支持通义 qwen3-vl、Ollama 本地（`http://localhost:11434/v1`，无需密钥）等。
+- 配置也可通过环境变量：`DSH_VISION_API_KEY`（兼容 `ZHIPUAI_API_KEY` / `DASHSCOPE_API_KEY`）。
+- 会话中直接让模型调用 `view_image`：支持本地图片路径、http(s) URL 和 data URL。
+
+## 第三方模型思考强度
+
+- 设置 →「第三方模型思考强度」。
+- **默认关闭**：避免向百炼等严格校验请求体的第三方 API 注入 `reasoning_effort` 导致接口报错。
+- 仅当 provider 支持时才开启；字段名可改为 provider 要求的名称，留空表示只显示档位、不注入参数。
+
+## 稳定性与兼容性（0.3.3）
+
+ - **渲染进程崩溃自动恢复**：`render-process-gone` 后指数退避重载（0.8s 起步，封顶 15s），连续失败第 3 次重建 BrowserWindow（保持隐藏/托盘状态）；超过上限显示本地恢复页（重新加载 / 重启客户端 / 打开日志）并通知；稳定存活 30s 才清零计数
+- **渲染心跳与假死恢复**：preload 每 5 秒上报心跳，主进程 30 秒未收到则恢复；`unresponsive` 15 秒后同样恢复。
+- **会话历史兼容**：打包时 `afterPack` 自动修补内置 `@deepseek-ai/dsh-session` 事件词汇表，接受 dsh-agent-teams / dsh-message-edit / dsh-web-search-exa 的事件，修复 `SessionFormatUnsupportedError`。
+- **极简模式_win**：内置 `minimal-win` Agent 预设（`pwsh` + `str_replace_editor`），打包时自动写入内置 dsh CLI。
+- **dsh-routing-suite**：`dsh-super-injector` 作为 bundle 插件内置并同步进 web profile，提供 `dev_*` 注入/热重载/自愈工具；`router-standard` 预设内置写入 dsh CLI。
+- **dsh-anchored-standard**：内置 `anchored-standard` 与 `zero-anchored-standard` 两个实验性预设，打包时写入 dsh CLI 的 agent-presets。
+
+
 
 ## 快捷方式与托盘
 
@@ -139,7 +163,7 @@ npm run dist                   # 构建 portable + NSIS 安装包，输出到 di
 │  · 官方更新 (updater.js) → 用户同意后安装 overlay          │
 │  · spawn vendor|resources 里的 node.exe                   │
 └──────────────┬───────────────────────────────────────────┘
-               │  dsh web --host 127.0.0.1 --port 0
+               │  dsh web --host 127.0.0.1 --port <上次保存的端口>
                ▼
        内置 node.exe + @deepseek-ai/dsh
        路径解析：用户目录 overlay > 内置包
@@ -156,7 +180,7 @@ npm run dist                   # 构建 portable + NSIS 安装包，输出到 di
 | `asar: false` | dsh 依赖 sharp / node-pty / koffi 等原生模块，必须以真实文件落盘 |
 | 内置独立 node.exe + npm | 预编译原生模块 ABI 与安装时的 Node 版本绑定；Electron 内嵌 Node ABI 不同。内置同版本 node.exe 零配置保证一致，npm 用于官方更新。注意：electron-builder 复制 extraResources 时会剥掉嵌套 node_modules，npm 自己的依赖由 \`afterPack\` 钩子原样补拷（scripts/after-pack.js） |
 | `npmRebuild: false` | 绝不为 Electron 重编译原生模块，否则内置 node.exe 反而加载不了 |
-| `--port 0` + 解析 stdout | 由 OS 分配空闲端口，避免端口冲突；本机回环绑定不对外暴露 |
+| 稳定复用上次端口 + 解析 stdout | 优先复用 settings.json 中的 `webPort`，保持 origin 稳定以持久化 Web UI 的 localStorage 偏好（如会话分组）；被占用时自动换新端口 |
 | 退出时 `taskkill /T /F` | dsh 会派生 pwsh 等子进程，按进程树整体回收 |
 | 更新走 overlay + staging 原子切换 | 更新失败零风险；便携版（资源每次从 exe 解压）也能持久更新 |
 | 通知读会话日志而非 UI 协议 | 持久化格式是官方稳定接口；UI 的私有 RPC/SSE 协议随版本变化，容易失效 |
@@ -176,8 +200,9 @@ npm run dist                   # 构建 portable + NSIS 安装包，输出到 di
 - **首次启动慢**：dsh 首次引导 profile 需要数秒到数十秒，属正常现象。
 - **更新下载慢**：设置环境变量 `NPM_CONFIG_REGISTRY=https://registry.npmmirror.com` 后重启应用。
 - **收不到通知**：确认菜单「会话完成通知」已勾选；便携版确认开始菜单里存在「DSH Desktop」快捷方式（首次运行自动创建，勿删除）；检查 Windows「通知与操作」设置里应用通知未被禁用。
-- **历史会话打不开（`SessionFormatUnsupportedError: ... unknown to this harness and not marked ignorable`）**：dsh-agent-teams / dsh-message-edit / dsh-web-search-exa 等插件写入的自定义会话事件不在内置核心的事件词汇表内导致。无需重装，一条命令修复：`npx dsh-session-history-fix`（幂等，可重复运行；改完重启应用即可）。本仓库 PR #10 已把该补丁集成到打包流程，合入后的新版本开箱即修。
-- **端口被占**：应用自动使用空闲端口，无需手动处理。
+- **历史会话打不开（`SessionFormatUnsupportedError: ... unknown to this harness and not marked ignorable`）**：dsh-agent-teams / dsh-message-edit / dsh-web-search-exa 等插件写入的自定义会话事件不在内置核心的事件词汇表内导致。v0.3.3 起打包时已自动修补内置 `@deepseek-ai/dsh-session`；旧版本无需重装，一条命令修复：`npx dsh-session-history-fix`（幂等，可重复运行；改完重启应用即可）。
+- **如何手动安装第三方插件**：推荐在设置页「插件市场」搜索并安装（支持 npm 包名和 `github:owner/repo#分支`）；安装完成后点「立即重启服务」。如果本机另装了 dsh CLI，也可以执行 `dsh plugin --profile web add <包名或 github 源>`，效果相同。
+- **端口被占**：应用会复用上次保存的端口；若该端口被其他程序占用，会自动选新端口并保存，无需手动处理。注意：端口变化会导致该次启动的界面本地偏好（如会话分组）重新初始化，正常重启不会发生。
 
 ## 目录结构
 
@@ -189,15 +214,18 @@ dsh-desktop/
 ├── balance.js            # DeepSeek 账户余额查询（主进程）
 ├── session-watcher.js    # 会话完成监听（zstd 多帧解码 + turn/end 检测）
 ├── preload.js            # 沙箱预加载（自绘玻璃标题栏 + 窗口控制/菜单 IPC + 余额事件桥）
-├── assets/               # 加载页、更新进度页、图标、托盘图标、配套 dsh 插件
+恢复页
 │   ├── sponsor/          # 赞助收款码（支付宝 / 微信，「请作者喝咖啡」面板与本文档共用）
-│   └── plugins/          # dsh-balance（余额小部件）、dsh-file-changes（文件更改投影）、dsh-client-file-changes（「文件」视图）—— 自动同步进 web profile
+│   ├── agent-presets/    # minimal-win / router-standard / anchored-standard / zero-anchored-standard 内置预设
+│   └── plugins/          # dsh-balance / dsh-file-changes / dsh-vision / dsh-super-injector 等，启动时自动同步进 web profile
 ├── scripts/
 │   ├── fetch-node.js     # 内置 node.exe 复制脚本
 │   ├── fetch-npm.js      # 内置 npm CLI 复制脚本
 │   ├── build-icon.ps1    # 生成应用图标（透明圆角蒙版）+ 托盘图标
 │   ├── check-latest.js   # agent 更新链路测试工具
 │   ├── check-client-latest.js # 客户端更新链路测试工具
+│   ├── patch-event-vocabulary.js # dsh-session 事件词汇表补丁（afterPack 自动调用）
+│   ├── install-minimal-win-preset.js # 内置 minimal-win 预设安装（npm start / afterPack 调用）
 │   ├── test-watcher.js   # 通知检测单测
 │   └── inspect-session.js# 会话日志解析工具
 ├── build/icon.png        # electron-builder 图标源

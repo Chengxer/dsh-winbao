@@ -27,6 +27,7 @@ files:
   - balance.js
   - session-watcher.js
   - preload.js
+  - renderer-recovery.js
   - watchdog.js
   - assets/**/*
   - package.json
@@ -63,6 +64,7 @@ nsis:
   artifactName: DSH-Desktop-Setup-${version}-${arch}.${ext}
   oneClick: false
   perMachine: false
+  runAfterFinish: true
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: always
   createStartMenuShortcut: true
