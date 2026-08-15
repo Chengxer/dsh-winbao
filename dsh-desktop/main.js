@@ -66,10 +66,16 @@ function fileRoots() {
 
 function isUnderFileRoots(p) {
   const resolved = path.resolve(p);
-  return fileRoots().some((r) => {
+  const check = () => fileRoots().some((r) => {
     const rp = path.resolve(r);
     return resolved === rp || resolved.startsWith(rp + path.sep);
   });
+  if (check()) return true;
+  // 缓存可能滞后于新会话：5 分钟 TTL 内新建的会话，其 cwd 尚未进入缓存。
+  // 首次判定不通过时强制刷新一次再判，避免误拒新会话的项目文件（预览/还原/打开）。
+  // 刷新后的缓存再保持 5 分钟，攻击性探测最多触发每 5 分钟一次重扫。
+  fileRootsCache.at = 0;
+  return check();
 }
 
 const IS_WIN = process.platform === 'win32';
@@ -290,6 +296,9 @@ process.on('exit', (code) => {
     fs.mkdirSync(path.dirname(lp), { recursive: true });
     fs.appendFileSync(lp, line);
   } catch {}
+  // 兜底：无论走哪条退出路径（含 app.exit 与异常退出），都同步终结 dsh
+  // 进程树，兑现「退出即清理、不留孤儿进程」。正常退出路径此时已是空操作。
+  killTreeSync(serverProc);
 });
 
 function nodeExe() {
@@ -325,40 +334,82 @@ function dshVersionSource() {
   return updater.overlayVersion(updCtx()) ? '用户目录（已更新）' : '内置';
 }
 
-function killTree(proc) {
-  // WSL 托管模式：进程在 WSL 里，经 pid 文件发 SIGTERM（绝不 wsl --terminate，
-  // 那会杀掉整个发行版）；pid 丢失时兜底杀掉 wsl.exe 转发进程。
+// ---------------------------------------------------------------------------
+// dsh 进程树终结
+//
+// Windows 下 taskkill 不带 /F 只能向 GUI 进程发送 WM_CLOSE，对 node.exe 这类
+// 控制台进程完全无效（实测报错 "can only be terminated forcefully"）。旧实现
+// 「先优雅（无 /F）、1.5s 后再 /F 强杀」对 dsh web 从未优雅成功过：实际生效的
+// 始终是 1.5s 后的 /F。由此产生两个真实缺陷：
+//   1. 原地重启（插件市场）：优雅尝试无效，旧进程在「探测端口」时仍存活并
+//      占着端口 → chooseStableWebPort 探测失败 → 换新端口 → origin 漂移 →
+//      localStorage（会话分组/主题/隐藏输出等偏好）全部丢失；
+//   2. 退出路径：主进程退出耗时通常远小于 1.5s（本机实测约 300ms），计时器
+//      随主进程消亡永不触发，进程树清理完全依赖 Electron 的隐式行为，无任何保证。
+// 因此拆分为两个 API：
+//   · killTree —— 异步：立即以 /T /F 终结进程树并等待直接子进程 exit（3s
+//     超时兜底）。供「原地重启」路径使用，调用方必须在探测端口前等待其完成。
+//   · killTreeSync —— 同步强杀：供应用退出路径使用，保证主进程退出前
+//     dsh 进程树已被终结，不依赖计时器或 Electron 隐式行为。
+// 两处最终都是 /T /F 强杀，与旧实现实际生效的终结方式一致；只移除了无效的
+// 优雅等待与竞态窗口，不改变「dsh 最终收到强杀」这一既有事实。
+// ---------------------------------------------------------------------------
+function killTreeSync(proc) {
+  if (!proc || !proc.pid || proc.exitCode !== null || proc.signalCode !== null) return;
+  // WSL 托管模式：WSL 内进程经 pid 文件发 SIGTERM（绝不 wsl --terminate）；
+  // 同步退出路径只能触发 stop 并强杀 wsl.exe 转发进程，不等待 WSL 内退出。
   if (isWslMode()) {
     wslBackend.stop().catch((err) => log('killTree', '停止 WSL dsh 失败: ' + String(err && err.message || err)));
-    if (proc && proc.pid) {
-      setTimeout(() => {
-        try { if (proc.exitCode === null) proc.kill(); } catch {}
-      }, 1500);
-    }
+    try { proc.kill(); } catch {}
     return;
   }
-  if (!proc || !proc.pid) return;
   try {
     if (IS_WIN) {
-      // M2 修复：先优雅（无 /F）给进程收尾机会（避免撕裂 session.jsonl.zstd），
-      // 短等待后仍存活再强杀。
-      spawn('taskkill', ['/pid', String(proc.pid), '/T'], { windowsHide: true, stdio: 'ignore' });
-      const pid = proc.pid;
-      setTimeout(() => {
-        try {
-          const query = 'tasklist /FI "PID eq ' + pid + '" /FO CSV /NH';
-          const alive = require('node:child_process').execSync(query, { encoding: 'utf8', windowsHide: true });
-          if (alive.includes(String(pid))) {
-            spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-          }
-        } catch { /* 进程已退出或查询失败 */ }
-      }, 1500);
+      spawnSync('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 10000 });
     } else {
-      try { process.kill(-proc.pid, 'SIGTERM'); } catch { proc.kill('SIGTERM'); }
+      try { process.kill(-proc.pid, 'SIGKILL'); } catch { try { proc.kill('SIGKILL'); } catch {} }
     }
   } catch (err) {
     log('killTree', String(err));
   }
+}
+
+async function killTree(proc) {
+  // WSL 托管模式：等待 WSL 内进程按 pid 文件真正退出后再进入端口探测；
+  // pid 丢失时兜底杀掉 wsl.exe 转发进程。
+  if (isWslMode()) {
+    try { await wslBackend.stop(); } catch (err) { log('killTree', '停止 WSL dsh 失败: ' + String(err && err.message || err)); }
+    if (proc && proc.pid && proc.exitCode === null) {
+      try { proc.kill(); } catch {}
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return;
+  }
+  return new Promise((resolve) => {
+    if (!proc || !proc.pid || proc.exitCode !== null || proc.signalCode !== null) return resolve();
+    const finish = () => {
+      proc.removeListener('exit', finish);
+      resolve();
+    };
+    proc.once('exit', finish);
+    if (!IS_WIN) {
+      // 非 Windows：保持原有语义（SIGTERM），等待进程退出（超时兜底）。
+      try { process.kill(-proc.pid, 'SIGTERM'); } catch { try { proc.kill('SIGTERM'); } catch {} }
+      const timer = setTimeout(finish, 3000);
+      if (timer.unref) timer.unref();
+      return;
+    }
+    try {
+      spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+    } catch (err) {
+      log('killTree', String(err));
+      finish();
+      return;
+    }
+    // 兜底：taskkill 异常或进程未按时退出时，不得让重启流程永久挂起。
+    const timer = setTimeout(finish, 3000);
+    if (timer.unref) timer.unref();
+  });
 }
 
 // Environment for the dsh child: drop harness/session leftovers so the
@@ -718,11 +769,14 @@ function wslStatusSnapshot(opts = {}) {
 // ---------------------------------------------------------------------------
 
 async function startServer(unsafePortRetries = 4, overlays = []) {
-  // M1 修复：重入前先终结旧进程，避免孤儿 harness 同时写同一 DSH_HOME
-  // （wsl 模式经 pid 文件终止 WSL 内进程，local 模式 taskkill 进程树）。
+  // M1 修复：重入前先终结旧进程并等待其真正退出，避免孤儿 harness 同时写
+  // 同一 DSH_HOME。等待必须在端口探测之前完成：taskkill /F 异步生效，若旧
+  // 进程仍占着端口，chooseStableWebPort 会探测失败并换新端口，导致 origin
+  // 漂移（localStorage 偏好丢失）。旧的「先选端口、后杀进程」顺序正是
+  // 插件市场每次重启都换端口的根因。
   if (serverProc && !serverProc.killed && !quitting) {
     log('dsh', 'startServer 重入：先终结旧进程再启动');
-    killTree(serverProc);
+    await killTree(serverProc);
     serverProc = null;
   }
   if (isWslMode()) {
@@ -886,6 +940,27 @@ function startAndShow(overlays = []) {
       if (mainWindow && !mainWindow.isDestroyed()) return mainWindow.loadURL(url).then(() => url);
       return url;
     });
+}
+
+// 插件市场式原地重启：终结旧 dsh web 进程树并等待其真正退出，再重新启动。
+// 等待是必需的：taskkill /F 异步生效，旧进程退出前仍占着端口，端口探测会
+// 失败并换新端口（origin 漂移 → localStorage 偏好丢失）。集成测试通道的
+// 'restart-service' 命令与 chrome:restart-service IPC 共用本函数。
+async function restartService() {
+  if (!serverProc || restartingServer) return { ok: false, error: 'not-running' };
+  log('service', '请求重启 dsh web 服务');
+  restartingServer = true;
+  try {
+    await killTree(serverProc);
+    const url = await startAndShow();
+    log('service', 'dsh web 服务已重启: ' + url);
+    return { ok: true, url };
+  } catch (err) {
+    log('service', '重启失败: ' + ((err && err.message) || err));
+    return { ok: false, error: String((err && err.message) || err) };
+  } finally {
+    restartingServer = false;
+  }
 }
 
 async function handleBootFailure(err, overlays = []) {
@@ -1375,6 +1450,7 @@ function fatal(title, err) {
   if (!mainWindow || mainWindow.isDestroyed()) {
     dialog.showErrorBox(title, detail);
     markCleanExit();
+    killTreeSync(serverProc); // app.exit 不触发 before-quit，这里保证进程树被终结
     app.exit(1);
     return;
   }
@@ -1496,7 +1572,7 @@ async function runUpdateFlow(manual) {
     if (r2 === 0) {
       quitting = true;
       markCleanExit();
-      killTree(serverProc);
+      killTreeSync(serverProc);
       app.relaunch();
       app.exit(0);
     }
@@ -1664,7 +1740,7 @@ function registerChromeIpc() {
     quitting = true;
     forceQuit = true;
     markCleanExit();
-    killTree(serverProc);
+    killTreeSync(serverProc);
     app.relaunch();
     app.exit(0);
     return { ok: true };
@@ -1718,23 +1794,11 @@ function registerChromeIpc() {
   });
 
   // 插件市场：原地重启 dsh web 服务（安装/卸载插件后生效，窗口重载到新端口）。
+  // 测试通道 'restart-service' 复用同一实现，保证集成测试覆盖真实 IPC 路径。
   ipcMain.handle('chrome:restart-service', async (event, payload = {}) => {
     if (payload?.intent !== 'restart-service') return { ok: false, error: 'missing-intent' };
     if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'unauthorized' };
-    if (!serverProc || restartingServer) return { ok: false, error: 'not-running' };
-    log('service', '请求重启 dsh web 服务');
-    restartingServer = true;
-    try {
-      killTree(serverProc);
-      const url = await startAndShow();
-      log('service', 'dsh web 服务已重启: ' + url);
-      return { ok: true, url };
-    } catch (err) {
-      log('service', '重启失败: ' + ((err && err.message) || err));
-      return { ok: false, error: String((err && err.message) || err) };
-    } finally {
-      restartingServer = false;
-    }
+    return restartService();
   });
 
   // 会话浮窗：主窗请求把某个会话弹出到独立窗口（校验来源与数量上限）。
@@ -2605,7 +2669,7 @@ function quitForClientUpdate(ctx, pending) {
     log('client-update', '清理待安装标记失败: ' + err.message);
   }
   try {
-    killTree(serverProc);
+    killTreeSync(serverProc);
   } catch (err) {
     log('client-update', '停止 dsh 服务失败: ' + err.message);
   }
@@ -2854,6 +2918,15 @@ function startPreviewStaticServer() {
       res.end();
       return;
     }
+    // H2/H3 文件围栏：与 dsh:file-open / dsh:file-revert 一致，只允许读取
+    // 「会话 cwd」之下的项目文件。否则本服务会成为任意本地文件读取通道：
+    // 预览 iframe 与本服务同源（allow-same-origin），可读取并外传
+    // settings / 凭据等敏感文件（实测 C:\Windows、userData 等均可读出）。
+    if (!isUnderFileRoots(p)) {
+      res.writeHead(403);
+      res.end();
+      return;
+    }
     try {
       const st = fs.statSync(p);
       if (!st.isFile()) {
@@ -2930,7 +3003,7 @@ function setupTestChannel() {
     'kill-server-silent': () => {
       // 模拟插件市场式原地重启的前半程：退出处理器不弹窗。
       // 不置空 serverProc：让 isServerAlive() 依据真实退出状态，
-      // 优雅终止完成（exit 事件）后自然变为 false。
+      // 强杀完成（exit 事件）后自然变为 false。
       restartingServer = true;
       killTree(serverProc);
     },
@@ -2943,6 +3016,8 @@ function setupTestChannel() {
         restartingServer = false;
       }
     },
+    // 与 chrome:restart-service IPC 完全一致的路径（供集成测试复现端口稳定性）。
+    'restart-service': () => restartService(),
     'reload-main': () => {
       if (!mainWindow || mainWindow.isDestroyed()) throw new Error('no main window');
       mainWindow.reload();
@@ -3147,7 +3222,7 @@ if (!gotLock) {
     markCleanExit();
     log('boot', '正在退出，销毁会话浮窗并停止 dsh web 进程树…');
     closeAllFloatWindows();
-    killTree(serverProc);
+    killTreeSync(serverProc);
     updater.abort();
     if (recovery) recovery.dispose();
     if (sessionWatcher) sessionWatcher.stop();

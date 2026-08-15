@@ -20,6 +20,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const http = require('node:http');
+const zlib = require('node:zlib');
 const { spawn, execFileSync } = require('node:child_process');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
@@ -331,6 +333,64 @@ SCENARIOS['server-restart'] = async (t) => {
   await t.waitFor('界面已稳定', 120000, '服务重启后恢复稳定');
   const st = await t.state();
   t.assert(sameUrl(st.url, st.webUrl), `应加载到新端口的 Web UI，实际=${st.url}`);
+  const q = await t.quitAndCheck();
+  t.assert(q.exit.code === 0 && q.cleanExit === true, '干净退出');
+};
+
+SCENARIOS['restart-service'] = async (t) => {
+  // 复现 chrome:restart-service（插件市场原地重启）的完整路径：
+  // killTree 后立即 startAndShow。断言重启前后端口不变（稳定 origin）。
+  await t.waitFor('boot-ready', 240000, 'Web UI 就绪');
+  await t.waitFor('界面已稳定', 60000, '稳定期完成');
+  const portOf = (u) => { try { return new URL(u).port || ''; } catch { return ''; } };
+  const before = await t.state();
+  const portBefore = portOf(before.webUrl);
+  t.assert(portBefore, '启动后应取得 web 端口');
+  const st = await t.send('restart-service', undefined, 120000);
+  t.assert(st.ok, '重启命令应成功: ' + JSON.stringify(st));
+  await t.waitFor('dsh web 服务已重启', 120000, '服务重启完成');
+  await t.waitFor('界面已稳定', 120000, '重启后稳定');
+  const after = await t.state();
+  t.assert(sameUrl(after.url, after.webUrl), '重启后主窗应加载新 webUrl');
+  const portAfter = portOf(after.webUrl);
+  t.assert(portAfter === portBefore, `服务重启应复用原端口（稳定 origin），实际 ${portBefore} -> ${portAfter}`);
+  const q = await t.quitAndCheck();
+  t.assert(q.exit.code === 0 && q.cleanExit === true, '干净退出');
+};
+
+SCENARIOS['preview-fence'] = async (t) => {
+  // 预览静态服务必须与 dsh:file-open / dsh:file-revert 共用同一文件围栏：
+  // 只允许读取「会话 cwd」之下的项目文件，杜绝任意本地文件读取。
+  await t.waitFor('boot-ready', 240000, 'Web UI 就绪');
+  const log = fs.readFileSync(t.desktopLog, 'utf8');
+  const m = /预览静态服务已启动: http:\/\/127\.0\.0\.1:(\d+)/.exec(log);
+  t.assert(m, '预览静态服务端口应出现在日志');
+  const base = 'http://127.0.0.1:' + Number(m[1]);
+  const enc = (p) => String(p).replace(/\\/g, '/').split('/').filter(Boolean).map(encodeURIComponent).join('/');
+  const get = (p) => new Promise((resolve, reject) => {
+    const req = http.get(base + '/' + enc(p), { timeout: 5000 }, (res) => { res.resume(); resolve(res.statusCode); });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('preview get timeout')); });
+  });
+  // 1) 会话根之外：DSH_HOME 与 userData 的文件必须被拒绝。
+  const secret = path.join(t.dshHome, 'secret-marker.txt');
+  fs.writeFileSync(secret, 'PREVIEW_LEAK_MARKER');
+  t.assert(await get(secret) === 403, '会话根之外（DSH_HOME）文件应 403');
+  t.assert(await get(path.join(t.userData, 'settings.json')) === 403, '会话根之外（userData）文件应 403');
+  // 2) 会话 cwd 之内：先被拒（无会话）→ 创建会话日志后立即可读。
+  //    第二次请求同时验证「文件围栏缓存刷新」：第一次请求已把空根集写入
+  //    5 分钟缓存，若缓存不刷新，新会话的项目文件会被误拒。
+  const proj = path.join(t.dir, 'proj');
+  fs.mkdirSync(proj, { recursive: true });
+  const file = path.join(proj, 'index.html');
+  fs.writeFileSync(file, '<h1>hello</h1>');
+  t.assert(await get(file) === 403, '无会话时项目文件也应 403');
+  const header = { type: 'session', version: 0, id: 'sess-preview', createdAt: Date.now(), cwd: proj, delegationDepth: 0 };
+  const frame = zlib.zstdCompressSync(Buffer.from(JSON.stringify(header) + '\n'));
+  const sessDir = path.join(t.dshHome, 'sessions', 'sess-preview');
+  fs.mkdirSync(sessDir, { recursive: true });
+  fs.writeFileSync(path.join(sessDir, 'session.jsonl.zstd'), frame);
+  t.assert(await get(file) === 200, '会话 cwd 内文件应可预览（缓存应刷新）');
   const q = await t.quitAndCheck();
   t.assert(q.exit.code === 0 && q.cleanExit === true, '干净退出');
 };
