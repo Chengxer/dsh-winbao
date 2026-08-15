@@ -4,6 +4,8 @@
 
 把 [@deepseek-ai/dsh](https://www.npmjs.com/package/@deepseek-ai/dsh)（DeepSeek Harness）封装为开箱即用的 Windows 桌面客户端。
 
+> 🚀 **一页看全**：打开 [`landing/index.html`](landing/index.html) 宣发落地页（深色科技风，单文件可托管到 Gitee/GitHub Pages 分享），或在 [GitHub](https://github.com/myYangyunfan/dsh_desktop)/[Gitee](https://gitee.com/my-yang-yunfan/dsh_desktop) 仓库内直接浏览。
+
 ---
 
 ## 下载安装
