@@ -29,6 +29,7 @@ files:
   - preload.js
   - renderer-recovery.js
   - profile-manifest.js
+  - profile-patch-heal.js
   - wsl-backend.js
   - watchdog.js
   - assets/**/*
