@@ -2148,6 +2148,138 @@ function applyPromptExposeFix() {
 }
 
 // ---------------------------------------------------------------------------
+// 文本模型自动识图补丁：官方 apiproxy 在 session.prompt 入口检查模型是否支持
+// image 输入，不支持就直接拒绝。本补丁复用已安装的 dsh-vision 插件配置
+// （设置 → 识图插件（view_image）的 VLM baseURL/model/apiKey），把图片转述为
+// 详细文字（含 OCR）后再发送，文本模型也能“看图”。幂等，覆盖三处运行副本。
+// ---------------------------------------------------------------------------
+function applyImageSendFix() {
+  const targets = [
+    path.join(dshHome || path.join(os.homedir(), '.dsh'), 'profiles', 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js'),
+    path.join(__dirname, 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js'),
+    path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js'),
+  ];
+  const HELPER_MARKER = 'async function describeImagesWithVision(ctx, content)';
+  const HELPER_ANCHOR = '/** Validate one prompt as a batch before publishing any durable image object. */';
+  const HELPER = `
+/** DSH Desktop: reuse the dsh-vision VLM config to describe images as text so text-only models can "see" them. */
+async function describeImagesWithVision(ctx, content) {
+	const settings = ctx.get("settings");
+	let vision = null;
+	if (settings !== void 0 && typeof settings.describe === "function") {
+		try {
+			const descriptor = settings.describe({ redactSecrets: true }).find((candidate) => String(candidate.ns) === "dsh-vision");
+			if (descriptor !== void 0 && descriptor.value !== void 0 && typeof descriptor.value === "object") vision = descriptor.value;
+		} catch {}
+	}
+	if (vision === null || typeof vision.baseURL !== "string" || vision.baseURL.trim() === "" || typeof vision.model !== "string" || vision.model.trim() === "") {
+		throw new Error("未配置识图服务：请到 设置 → 识图插件（view_image） 填写 VLM 接口地址与模型");
+	}
+	const apiKey = typeof vision.apiKey === "string" ? vision.apiKey.trim() : "";
+	const endpoint = vision.baseURL.replace(/\\/+$/, "") + "/chat/completions";
+	const out = [];
+	let imageNo = 0;
+	for (const part of content) {
+		if (part.type !== "image") {
+			if (part.type === "text") out.push(part);
+			continue;
+		}
+		imageNo += 1;
+		const dataUrl = \`data:\${part.mediaType};base64,\${part.data}\`;
+		const payload = {
+			model: vision.model,
+			stream: false,
+			messages: [
+				{ role: "system", content: "You are an image understanding assistant. Describe the image in exhaustive detail and transcribe every visible text (OCR). If it is a UI, document, table, chart or code, preserve its structure. Answer in Chinese unless the user's language clearly differs." },
+				{ role: "user", content: [
+					{ type: "text", text: "请把这张图片完整转述为文字：包含画面内容、结构与全部可见文字（逐字 OCR）。" },
+					{ type: "image_url", image_url: { url: dataUrl } }
+				] }
+			]
+		};
+		const headers = { "content-type": "application/json" };
+		if (apiKey !== "") headers.authorization = "Bearer " + apiKey;
+		const response = await fetch(endpoint, {
+			method: "POST",
+			headers,
+			body: JSON.stringify(payload),
+			signal: AbortSignal.timeout(120000)
+		});
+		if (!response.ok) {
+			const bodyText = await response.text().catch(() => "");
+			throw new Error("识图服务返回 HTTP " + response.status + "：" + bodyText.slice(0, 400));
+		}
+		const data = await response.json();
+		const description = data && data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : "";
+		if (typeof description !== "string" || description.trim() === "") throw new Error("识图服务未返回有效文字描述");
+		out.push({ type: "text", text: "[图片" + imageNo + "] " + description.trim() });
+	}
+	return out;
+}
+`;
+  const GATE_MARKER = 'if (modelInfo.inputModalities !== void 0 && !modelInfo.inputModalities.includes("image")) return err(request, {';
+  const GATE_NEW = `if (modelInfo.inputModalities !== void 0 && !modelInfo.inputModalities.includes("image")) {
+							try {
+								admittedContent = await describeImagesWithVision(ctx, content);
+							} catch (error) {
+								return err(request, {
+									code: "attachment-error",
+									message: \`图片自动转述失败：\${error instanceof Error ? error.message : String(error)}。请在 设置 → 识图插件（view_image） 配置 VLM 后重试。\`,
+									details: { reason: "IMAGE_DESCRIPTION_FAILED" }
+								});
+							}
+						}`;
+
+  for (const file of targets) {
+    if (!file || !fs.existsSync(file)) continue;
+    try {
+      let src = fs.readFileSync(file, 'utf8');
+      if (src.includes(HELPER_MARKER)) {
+        log('boot', '识图发送补丁: 已应用，跳过 ' + file);
+        continue;
+      }
+      // 1) 插入转述 helper（此后所有索引必须基于插入后的 src 重新计算）
+      const anchorIdx = src.indexOf(HELPER_ANCHOR);
+      if (anchorIdx === -1) {
+        log('boot', '识图发送补丁: 未找到 helper 插入锚点（版本可能已变更），跳过 ' + file);
+        continue;
+      }
+      src = src.slice(0, anchorIdx) + HELPER + '\n' + src.slice(anchorIdx);
+      // 2) prompt 入口：声明 admittedContent
+      const hasImageIdx = src.indexOf('const hasImage = content.some((part) => part.type === "image");');
+      if (hasImageIdx === -1) {
+        log('boot', '识图发送补丁: 未找到 hasImage 入口（版本可能已变更），跳过 ' + file);
+        continue;
+      }
+      src = src.slice(0, hasImageIdx) + 'let admittedContent = content;\n\t\t\t\t' + src.slice(hasImageIdx);
+      // 3) 把“模型不支持图片”的直接拒绝替换为自动转述
+      const gateIdx = src.indexOf(GATE_MARKER);
+      if (gateIdx === -1) {
+        log('boot', '识图发送补丁: 未找到模型图片门槛（版本可能已变更），跳过 ' + file);
+        continue;
+      }
+      const gateEnd = src.indexOf('});', gateIdx);
+      if (gateEnd === -1) {
+        log('boot', '识图发送补丁: 图片门槛收尾异常，跳过 ' + file);
+        continue;
+      }
+      src = src.slice(0, gateIdx) + GATE_NEW + src.slice(gateEnd + 3);
+      // 4) durablePromptContent 使用转述后的内容（从门槛之后查找调用点，避免命中函数定义）
+      const callIdx = src.indexOf('durablePromptContent(ctx, content)', gateIdx);
+      if (callIdx === -1) {
+        log('boot', '识图发送补丁: 未找到 durablePromptContent 调用，跳过 ' + file);
+        continue;
+      }
+      src = src.slice(0, callIdx) + 'durablePromptContent(ctx, admittedContent)' + src.slice(callIdx + 'durablePromptContent(ctx, content)'.length);
+      fs.writeFileSync(file, src, { encoding: 'utf8' });
+      log('boot', '识图发送补丁: 已启用文本模型图片自动转述 ' + file);
+    } catch (err) {
+      log('boot', '识图发送补丁失败(' + file + '): ' + err.message);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 快捷方式维护：修复「没有桌面快捷方式 / 快捷方式指向的文件消失」，
 // 并让快捷方式图标跟随图标设计更新（.lnk 单独指定 icon.ico）。
 // ---------------------------------------------------------------------------
@@ -2711,6 +2843,7 @@ async function boot() {
   syncCompanionPlugins();
   applyRuntimeFlashFix();
   applyPromptExposeFix();
+  applyImageSendFix();
   initRendererRecovery();
   createWindow();
   wireWindowRecovery();

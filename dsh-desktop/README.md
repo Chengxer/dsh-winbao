@@ -77,6 +77,7 @@
 - 默认智谱免费 `glm-4.6v-flash`；也支持通义 qwen3-vl、Ollama 本地（`http://localhost:11434/v1`，无需密钥）等。
 - 配置也可通过环境变量：`DSH_VISION_API_KEY`（兼容 `ZHIPUAI_API_KEY` / `DASHSCOPE_API_KEY`）。
 - 会话中直接让模型调用 `view_image`：支持本地图片路径、http(s) URL 和 data URL。
+- **文本模型也能发送图片**：发送入口检测到当前模型不支持图片输入时，自动复用本插件配置的 VLM 把图片转述为详细文字（含逐字 OCR）后再发送；模型支持图片时仍走原生图片通道。转述服务未配置/调用失败时会给出明确提示，不会静默丢图。
 
 ## 第三方模型思考强度
 

@@ -15,6 +15,7 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 - **Gitee 分片合并脚本重写**：`scripts/fix-merge-bat.cjs` 生成 CRLF + ASCII 提示的 merge.bat，修复 `set FAILED` / `pause` 被 echo 吞掉的问题；README 下载说明同步修正
 - **插件市场整体替换为 [Zat-DSH Engine](https://github.com/mishibeikejie/zat-dsh-engine)（MIT）**：移除旧 `@deepseek-ai/dsh-plugin-marketplace` 的同步副本与 patch 条目，新增 `zat-dsh-engine` bundle（社区目录 / 双语简介 / 一键安装更新卸载启停 / 网络自适应 / 自更新）；`zod` 转为显式依赖随包分发
 - **新增内置 bundle 插件**：`dsh-better-sidebar`（[omdsh-dev/DSH-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar)，MIT，VSCode 式侧边栏工作台）与 `harness-pet`（[cakeni/harness-pet](https://github.com/cakeni/harness-pet)，MIT，桌面宠物）；`syncCompanionPlugins` 支持递归同步 `lib/assets/src` 目录，并为 profile 补齐 `schemastery / cosmokit / @standard-schema/spec` 内置依赖
+- **文本模型自动识图**：`dsh-host-apiproxy` 发送入口在模型不支持图片输入时，自动复用已安装 `dsh-vision` 的 VLM 配置把图片转述为文字（含 OCR）后再发送；支持图片的模型仍走原生通道
 - **第三方许可文档**：新增 `docs/attributions.md` 与 README「第三方组件与许可」，明确 Zat-DSH Engine、dsh、koffi、Electron、React、zod 等 MIT 组件来源
 
 ### 修复
