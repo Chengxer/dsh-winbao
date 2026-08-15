@@ -22,7 +22,7 @@
  *
  * COMPACTION (local addition): a compaction rewrites the whole surface, so the
  * first post-compaction request is a "second first request". Promotion is
- * epoch-aware (see preset/compaction-epoch.mjs): after `compaction/end` the
+ * epoch-aware (see _preset/compaction-epoch.mjs): after `compaction/end` the
  * session falls back to a controlled phase — the shells plus `compactionTools`
  * (a core work set, default none) — until a NEW durable assistant message
  * exists past that boundary. The zero-tool anchor applies ONLY to the very
@@ -45,7 +45,7 @@
  *    so a bug can never brick every request of a session.
  */
 
-import { createEpochPromotion } from '../preset/compaction-epoch.mjs'
+import { createEpochPromotion } from '../_preset/compaction-epoch.mjs'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'zero-tool-bootstrap'

@@ -1559,6 +1559,12 @@ async function runUpdateFlow(manual) {
       await wslBackend.applyUpdate(latest, (line) => log('update', 'wsl: ' + line));
     } else {
       await updater.applyUpdate(ctx, latest);
+      // 新 overlay 已就位：立即重打运行时补丁（全部幂等），否则「稍后重启」后再
+      // 点「重启 dsh web 服务」会用未修复的新版本启动（识图发送、设置暴露等回归）。
+      applyRuntimeFlashFix();
+      applyPromptExposeFix();
+      applyImageSendFix();
+      applyVisionKeyFix();
     }
     const { response: r2 } = await showBox({
       type: 'info',
@@ -2431,7 +2437,15 @@ function applyImageSendFix() {
 async function describeImagesWithVision(ctx, content) {
 	const settings = ctx.get("settings");
 	let vision = null;
-	if (settings !== void 0 && typeof settings.describe === "function") {
+	if (settings !== void 0 && typeof settings.get === "function") {
+		// dsh-desktop fix: read the resolved HOST-side value (settings.get), not the
+		// redacted wire snapshot. redactSecrets strips role('secret') fields, so
+		// describe({redactSecrets:true}) drops apiKey and every keyed VLM endpoint
+		// answers 401 — image sends failed for configured users.
+		const resolved = settings.get("dsh-vision");
+		if (resolved !== void 0 && typeof resolved === "object") vision = resolved;
+	}
+	if (vision === null && settings !== void 0 && typeof settings.describe === "function") {
 		try {
 			const descriptor = settings.describe({ redactSecrets: true }).find((candidate) => String(candidate.ns) === "dsh-vision");
 			if (descriptor !== void 0 && descriptor.value !== void 0 && typeof descriptor.value === "object") vision = descriptor.value;
@@ -2544,6 +2558,37 @@ async function describeImagesWithVision(ctx, content) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 图片自动转述 apiKey 修复：官方 apiproxy 内置的 describeImagesWithVision 用
+// settings.describe({ redactSecrets: true }) 读 dsh-vision 配置——redactSecrets
+// 会把 role('secret') 的 apiKey 整字段删除，带密钥校验的 VLM 端点必然 401，
+// prompt 被拒、客户端提示「图片发送失败」。这里幂等改写为先读 settings.get()
+// 的宿主侧未脱敏解析值（保留 apiKey），describe 快照降级为回退。dsh 更新后
+// 本函数会在下次启动重新应用。
+// ---------------------------------------------------------------------------
+function applyVisionKeyFix() {
+  const guardMarker = 'dsh-desktop fix: read the resolved HOST-side value';
+  const from = '\tlet vision = null;\n\tif (settings !== void 0 && typeof settings.describe === "function") {\n\t\ttry {\n\t\t\tconst descriptor = settings.describe({ redactSecrets: true }).find((candidate) => String(candidate.ns) === "dsh-vision");\n\t\t\tif (descriptor !== void 0 && descriptor.value !== void 0 && typeof descriptor.value === "object") vision = descriptor.value;\n\t\t} catch {}\n\t}';
+  const to = '\tlet vision = null;\n\tif (settings !== void 0 && typeof settings.get === "function") {\n\t\t// dsh-desktop fix: read the resolved HOST-side value (settings.get), not the\n\t\t// redacted wire snapshot. redactSecrets strips role(\'secret\') fields, so\n\t\t// describe({redactSecrets:true}) drops apiKey and every keyed VLM endpoint\n\t\t// answers 401 — image sends failed for configured users.\n\t\tconst resolved = settings.get("dsh-vision");\n\t\tif (resolved !== void 0 && typeof resolved === "object") vision = resolved;\n\t}\n\tif (vision === null && settings !== void 0 && typeof settings.describe === "function") {\n\t\ttry {\n\t\t\tconst descriptor = settings.describe({ redactSecrets: true }).find((candidate) => String(candidate.ns) === "dsh-vision");\n\t\t\tif (descriptor !== void 0 && descriptor.value !== void 0 && typeof descriptor.value === "object") vision = descriptor.value;\n\t\t} catch {}\n\t}';
+  const targets = [
+    path.join(dshHome || path.join(os.homedir(), '.dsh'), 'profiles', 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js'),
+    path.join(__dirname, 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js'),
+    path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js'),
+  ];
+  for (const file of targets) {
+    if (!file || !fs.existsSync(file)) continue;
+    try {
+      let src2 = fs.readFileSync(file, 'utf8');
+      if (src2.includes(guardMarker)) { log('boot', '识图密钥补丁: 已应用，跳过 ' + file); continue; }
+      if (!src2.includes(from)) { log('boot', '识图密钥补丁: 锚点未匹配（版本可能已变化），跳过 ' + file); continue; }
+      src2 = src2.replace(from, to);
+      fs.writeFileSync(file, src2, { encoding: 'utf8' });
+      log('boot', '识图密钥补丁: 已修复 apiKey 被脱敏截断 ' + file);
+    } catch (err) {
+      log('boot', '识图密钥补丁失败(' + file + '): ' + err.message);
+    }
+  }
+}
 // ---------------------------------------------------------------------------
 // 快捷方式维护：修复「没有桌面快捷方式 / 快捷方式指向的文件消失」，
 // 并让快捷方式图标跟随图标设计更新（.lnk 单独指定 icon.ico）。
@@ -3135,6 +3180,7 @@ async function boot() {
     applyRuntimeFlashFix();
     applyPromptExposeFix();
     applyImageSendFix();
+    applyVisionKeyFix();
   } else {
     // 先修复 profile fallback 联接再同步/补丁依赖文件：EPERM 环境下补丁写不进去。
     await repairProfileFallback(home);
@@ -3142,6 +3188,7 @@ async function boot() {
     applyRuntimeFlashFix();
     applyPromptExposeFix();
     applyImageSendFix();
+    applyVisionKeyFix();
     initRendererRecovery();
     createWindow();
     wireWindowRecovery();

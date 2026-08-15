@@ -18,6 +18,12 @@
 //   v4-flash-godmode-opencode-go   -> Router Flash (opencode-go)
 //   warmupbetter                   -> Warmup Better
 //   warmupbetter-replay            -> Warmup Better Replay
+//
+// `_preset` is NOT a preset slot: it is the shared module directory that
+// zero-anchored-standard and whoami-standard reference via `../_preset/*.mjs`.
+// It starts with an underscore so preset discovery (PRESET_ID ^[a-z0-9][a-z0-9-]*$)
+// skips it instead of reporting a broken roster row, and this script copies it
+// alongside the preset slots without treating it as one.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -45,13 +51,31 @@ function installBuiltinPreset(dshPackageDir, id) {
   return dest;
 }
 
+/** Shared-module directory inside the preset root (not a preset slot). */
+const SHARED_PRESET_DIR = '_preset';
+
 /** Install all bundled presets. Returns the destination directories. */
 function installBuiltinPresets(dshPackageDir) {
-  const ids = fs.readdirSync(presetsSourceDir(), { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
+  const presetRoot = presetsSourceDir();
+  const ids = fs.readdirSync(presetRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name !== SHARED_PRESET_DIR)
     .map((entry) => entry.name)
     .sort();
-  return ids.map((id) => installBuiltinPreset(dshPackageDir, id));
+  const dests = ids.map((id) => installBuiltinPreset(dshPackageDir, id));
+
+  // Copy the shared `_preset` modules referenced by zero/whoami rows and
+  // imports (`../_preset/*.mjs`). It is deliberately not installed as a preset
+  // slot: discovery would otherwise report it as a broken roster row.
+  const sharedSrc = path.join(presetRoot, SHARED_PRESET_DIR);
+  if (fs.existsSync(sharedSrc)) {
+    const sharedDest = path.join(dshPackageDir, 'config', 'agent-presets', SHARED_PRESET_DIR);
+    fs.mkdirSync(sharedDest, { recursive: true });
+    for (const entry of fs.readdirSync(sharedSrc, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      fs.copyFileSync(path.join(sharedSrc, entry.name), path.join(sharedDest, entry.name));
+    }
+  }
+  return dests;
 }
 
 /** Backward-compatible wrapper used by after-pack and older callers. */
