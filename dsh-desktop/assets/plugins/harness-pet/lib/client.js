@@ -1550,9 +1550,11 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 		});
 		let dragStart;
 		let dragged = false;
+		let longPressFired = false;
 		pet.addEventListener("pointerdown", (event) => {
 			if (event.button !== 0) return;
 			dragged = false;
+			longPressFired = false;
 			dragStart = {
 				pointerX: event.clientX,
 				pointerY: event.clientY,
@@ -1562,7 +1564,7 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 			};
 			longPressTimer = setTimeout(() => {
 				longPressTimer = void 0;
-				if (!dragged) togglePanel();
+				if (!dragged) { longPressFired = true; togglePanel(); }
 			}, 550);
 		});
 		pet.addEventListener("pointermove", (event) => {
@@ -1604,7 +1606,7 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 		};
 		pet.addEventListener("pointerup", finishDrag);
 		pet.addEventListener("pointercancel", finishDrag);
-		pet.addEventListener("click", () => {
+		pet.addEventListener("click", (event) => {
 			if (dragged) {
 				dragged = false;
 				return;
@@ -1613,6 +1615,13 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 			interactionUntil = interactionStartedAt + 700;
 			render(interactionStartedAt);
 			pet.blur();
+			// 单击要有可见反馈：卡片被关闭时重新弹出；卡片可见时切换「继续跟进」
+			// 输入框。双击的第二下 click（detail>1）不重复处理，交给 dblclick。
+			if (!longPressFired && event.detail <= 1) {
+				if (dialog.hidden) setDialogVisible(true);
+				else setFollowupOpen(!followupOpen);
+			}
+			longPressFired = false;
 			if (interactionTimer !== void 0) clearTimeout(interactionTimer);
 			interactionTimer = setTimeout(() => {
 				interactionUntil = 0;
