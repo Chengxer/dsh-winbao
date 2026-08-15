@@ -325,6 +325,7 @@ function buildNsisPs1() {
   return String.raw`param(
   [Parameter(Mandatory=$true)][string]$Setup,
   [Parameter(Mandatory=$true)][string]$ProcessName,
+  [Parameter(Mandatory=$true)][string]$OldExe,
   [Parameter(Mandatory=$true)][string]$LogFile
 )
 function Log($m) {
@@ -396,14 +397,29 @@ if (-not $launched -and $setupSucceeded) {
     if ($appExe) {
       Log "installer did not launch app; starting $appExe"
       Start-Process -FilePath $appExe -ErrorAction Stop
+      $launched = $true
     } else {
-      Log "installer did not launch app and installed exe was not found; user will need to start it manually"
+      Log "installer did not launch app and installed exe was not found"
     }
   } catch {
     Log ("post-install launch check failed: " + $_.Exception.Message)
   }
 } elseif (-not $setupSucceeded) {
-  Log "setup did not complete; leaving app startup to the user"
+  Log "setup did not complete"
+}
+# 兜底：无论安装器成功还是失败/被取消，都不要让用户面对「点了立即重启，
+# 应用却消失了」。找不到新版本时就重新拉起旧版本，保留可见状态。
+if (-not $launched) {
+  if (Test-Path -LiteralPath $OldExe) {
+    Log ("restarting previous build: " + $OldExe)
+    try {
+      Start-Process -FilePath $OldExe -ErrorAction Stop
+    } catch {
+      Log ("previous build launch failed: " + $_.Exception.Message)
+    }
+  } else {
+    Log "previous build not found; user will need to start the app manually"
+  }
 }
 Remove-Item -LiteralPath $Setup -Force -ErrorAction SilentlyContinue
 Log "apply-update done"
@@ -421,8 +437,9 @@ function buildNsisCmd() {
     'set "PS1=%~1"',
     'set "SETUP=%~2"',
     'set "PROC=%~3"',
-    'set "LOGF=%~4"',
-    '"%PSEXE%" -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -Setup "%SETUP%" -ProcessName "%PROC%" -LogFile "%LOGF%"',
+    'set "OLD=%~4"',
+    'set "LOGF=%~5"',
+    '"%PSEXE%" -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -Setup "%SETUP%" -ProcessName "%PROC%" -OldExe "%OLD%" -LogFile "%LOGF%"',
   ].join('\r\n');
 }
 
@@ -454,9 +471,9 @@ function applyUpdate(ctx, pending) {
     script = path.join(dir, 'apply-update.cmd');
     fs.writeFileSync(ps1, buildNsisPs1(), 'utf8');
     fs.writeFileSync(script, buildNsisCmd());
-    ctx.log('client-update', `启动安装版更新脚本: ${script}→${path.basename(ps1)}（安装包: ${newExe}，进程: ${procName}）日志: ${logFile}`);
+    ctx.log('client-update', `启动安装版更新脚本: ${script}→${path.basename(ps1)}（安装包: ${newExe}，进程: ${procName}，旧版: ${oldExe}）日志: ${logFile}`);
     // 同便携版：/c 的第一个参数不能是含空格的完整路径，否则脚本根本不执行。
-    child = spawn(cmdExe(), ['/d', '/c', path.basename(script), path.basename(ps1), newExe, procName, logFile], {
+    child = spawn(cmdExe(), ['/d', '/c', path.basename(script), path.basename(ps1), newExe, procName, oldExe, logFile], {
       cwd: dir,
       detached: true,
       stdio: 'ignore',

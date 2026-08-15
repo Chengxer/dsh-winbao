@@ -4,9 +4,27 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 一键启动 Web UI。
 
 
-## [未发布] — Issue #9 渲染进程崩溃自恢复（PR #12 已并入）
+## [0.3.5] — 2026-08-15（插件市场替换为 Zat-DSH Engine）
+
+### 新增
+- **插件市场整体替换为 [Zat-DSH Engine](https://github.com/mishibeikejie/zat-dsh-engine)（MIT）**：移除旧 `@deepseek-ai/dsh-plugin-marketplace` 的同步副本与 patch 条目，新增 `zat-dsh-engine` bundle（社区目录 / 双语简介 / 一键安装更新卸载启停 / 网络自适应 / 自更新）；`zod` 转为显式依赖随包分发
+- **第三方许可文档**：新增 `docs/attributions.md` 与 README「第三方组件与许可」，明确 Zat-DSH Engine、dsh、koffi、Electron、React、zod 等 MIT 组件来源
 
 ### 修复
+- **客户端更新「点了立即重启仍弹出有待安装的更新」**：待安装标记原子写盘 + 回读校验；每次重启安装记录 `clientUpdateAttempt`，启动识别「客户端更新未完成」并支持重试 / 打开日志 / 24h 稍后；NSIS 更新脚本在安装器失败或被取消时自动拉起旧版本
+
+## [0.3.4] — 2026-08-15（BUG 修复版）
+
+### 修复
+- **koffi 3.1.3/3.1.4 win32-x64 预编译二进制损坏**（目录选择器 worker 无消息退出、部分客户机器启动即崩）：`package.json` overrides 锁定 `koffi@3.1.5`（上游已回退 Windows 原生编译）；新增 `scripts/koffi-preflight.cjs`，启动前用内置 Node 做 FFI 冒烟，失败自动注入 browse 目录选择器 overlay
+- **目录选择器 worker 崩溃后报错无任何诊断信息**：新增 `scripts/patch-deps.js`（postinstall / pack / dist 幂等补丁），worker 无消息退出时把真实 exit code / signal 带进错误文案
+- **启动项配置生成错误导致整体打不开**：`dsh web` 退出码 1 时自动解析 `dsh-web.log` 中加载失败的 patch 插件 id，写入 `safe-boot.overlay.yml`（`dsh web --patch`）禁用后自动重试，不修改用户 patch 文件，并弹系统通知
+- **EPERM: operation not permitted, symlink 导致退出码 1**：检测到 `profiles/node_modules` 目录联接创建被拒时，自动改名备份半成品缓存、重跑官方 `healProfilesModuleFallback` 重建联接并重试启动，不再需要客户手动按手册操作
+- **部分用户设置页看不到插件设置（视图/识图/思考强度等）**：`dsh-host-apiproxy` 设置命名空间白名单补丁改为同时覆盖内置 app、profile fallback 与**更新后的 agent overlay** 三处副本，并锚定 `WEB_SETTINGS_NAMESPACES` 数组自身收尾插入；启动顺序调整为先修复 profile 联接再应用补丁
+- **启动失败弹窗缺少日志内容**：失败对话框与「服务已停止」对话框附带 `dsh-web.log` 最近日志，客户截图即可定位
+- **syncCompanionPlugins 覆盖用户禁用**：patch 中 id 已存在（含用户手写 disabled 条目）时不再自动重插，避免重复 id 与「禁用后又被加回来」
+- **全新 DSH_HOME 首次启动必失败（退出码 1，插件树无法激活）**：`syncCompanionPlugins` 在 dsh 初始化 profile 之前预写 manifest 时，只写入 bundle 插件导致核心 bundles（dsh-base / dsh-web-app）缺失。现改为以实际将运行的 dsh 包为锚点实测可解析后，先写核心 bundles 再追加 bundle 插件；解析不到则不写 manifest，交由 dsh 自行初始化（PR #14）
+- **客户端更新「点了立即重启仍弹出有待安装的更新」**：待安装标记改为原子写盘 + 回读校验；每次重启安装都记录 `clientUpdateAttempt`，下次启动若仍是旧版本则识别为「客户端更新未完成」，提供重试安装 / 打开 `apply-update.log` / 稍后（24h 不再打扰）；NSIS 更新脚本在安装器失败或被取消时自动拉起旧版本，避免“重启后应用消失”
 - **渲染进程崩溃后永久黑屏/白屏（0xC0000005）**：新增 `renderer-recovery.js` 自恢复状态机，主窗与会话浮窗统一接管：
   - `render-process-gone`（crashed/killed/oom）→ 指数退避自动重载（首次 0.8s，上限 15s + 抖动）
   - 连续失败第 3 次 → 主窗销毁重建 BrowserWindow（保持隐藏/托盘状态）；浮窗直接关闭

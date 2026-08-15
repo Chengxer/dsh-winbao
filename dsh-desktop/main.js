@@ -15,7 +15,7 @@
 // installed for. We deliberately never rebuild them against Electron.
 
 const { app, BrowserWindow, Menu, Tray, shell, dialog, Notification, ipcMain, clipboard, crashReporter } = require('electron');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
 const http = require('node:http');
@@ -100,6 +100,8 @@ let restartingServer = false;
 let trayRecoveryTimer = null;
 let recovery = null; // 渲染进程崩溃/挂起自恢复状态机（renderer-recovery.js）
 let crashDumpsDir = "";
+let pickerBrowseOverlay = null; // koffi 预检失败时注入的目录选择器降级 overlay
+let epermRepairAttempted = false; // EPERM/symlink 自愈每次运行只尝试一次
 
 // ---------------------------------------------------------------------------
 // 会话浮窗（分屏）：把会话弹出到独立窗口
@@ -354,6 +356,211 @@ function childEnv() {
   return env;
 }
 
+// ---------------------------------------------------------------------------
+// koffi 预检与目录选择器降级：koffi 3.1.3/3.1.4 的 win32-x64 预编译二进制在
+// 部分 Windows 机器上会在 load 时原生崩溃（0xC0000005），目录选择器 worker
+// 会无消息退出。启动前用内置 node 在子进程里做一次 FFI 冒烟；失败则注入
+// browse 后端 overlay，让客户机器不再卡在 native 目录选择器上。
+// ---------------------------------------------------------------------------
+function koffiPreflightScript() {
+  return path.join(__dirname, 'scripts', 'koffi-preflight.cjs');
+}
+
+function pickerBrowseOverlayPath() {
+  return path.join(userDataDir, 'picker-browse.overlay.yml');
+}
+
+function runKoffiPreflight() {
+  if (!IS_WIN) return true;
+  const script = koffiPreflightScript();
+  if (!fs.existsSync(script)) {
+    log('preflight', 'koffi 预检脚本不存在，跳过（视为通过）');
+    return true;
+  }
+  try {
+    const r = spawnSync(nodeExe(), [script], { timeout: 20000, windowsHide: true, encoding: 'utf8' });
+    const output = String((r.stdout || '') + (r.stderr || '')).trim();
+    if (r.error) {
+      log('preflight', 'koffi 预检无法执行: ' + r.error.message);
+      return false;
+    }
+    if (r.status === 0) {
+      log('preflight', 'koffi 预检通过');
+      return true;
+    }
+    log('preflight', `koffi 预检失败（退出码 0x${(r.status >>> 0).toString(16)}）: ${output.slice(0, 400)}`);
+    return false;
+  } catch (err) {
+    log('preflight', 'koffi 预检异常: ' + err.message);
+    return false;
+  }
+}
+
+const PICKER_BROWSE_OVERLAY_MARKER = '# DSH-DESKTOP-AUTO: picker browse fallback';
+
+function enablePickerBrowseOverlay() {
+  const file = pickerBrowseOverlayPath();
+  const content = [
+    PICKER_BROWSE_OVERLAY_MARKER,
+    '# koffi 预检未通过：禁用 native 目录选择器，改用浏览器内 browse 选择器。',
+    '- id: directory-picker',
+    '  disabled: true',
+    '- insert:',
+    '    - id: directory-picker-browse',
+    "      name: '@deepseek-ai/dsh-host-directory-picker-browse'",
+    '    - id: directory-picker-browse-client',
+    "      name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'",
+    '',
+  ].join('\n');
+  try {
+    let prev = '';
+    try { prev = fs.readFileSync(file, 'utf8'); } catch {}
+    if (prev === content) {
+      pickerBrowseOverlay = file;
+      return;
+    }
+    fs.writeFileSync(file, content);
+    pickerBrowseOverlay = file;
+    log('preflight', '已启用目录选择器降级 overlay: ' + file);
+  } catch (err) {
+    log('preflight', '写入目录选择器降级 overlay 失败: ' + err.message);
+  }
+}
+
+function clearAutoPickerBrowseOverlay() {
+  const file = pickerBrowseOverlayPath();
+  try {
+    if (!fs.existsSync(file)) return;
+    const text = fs.readFileSync(file, 'utf8');
+    if (!text.includes(PICKER_BROWSE_OVERLAY_MARKER)) return;
+    fs.rmSync(file, { force: true });
+    if (pickerBrowseOverlay === file) pickerBrowseOverlay = null;
+    log('preflight', 'koffi 预检已恢复，移除目录选择器降级 overlay');
+  } catch (err) {
+    log('preflight', '移除目录选择器降级 overlay 失败: ' + err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 安全启动：dsh web 退出码 1 且日志含 plugin tree 加载失败时，解析出失败的
+// patch 插件 id，写入 --patch overlay 禁用后重试。overlay 不修改用户 patch。
+// ---------------------------------------------------------------------------
+function dshWebLogPath() {
+  return path.join(logsDir, 'dsh-web.log');
+}
+
+function readDshWebLogTail(maxLines = 80) {
+  try {
+    const text = fs.readFileSync(dshWebLogPath(), 'utf8');
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    return lines.slice(-maxLines).join('\n');
+  } catch {
+    return '';
+  }
+}
+
+function logTailSnippet(maxLines = 20) {
+  const tail = readDshWebLogTail(maxLines);
+  return tail ? '\n\n最近日志：\n' + tail : '';
+}
+
+function parseFailedLoaderIds(text) {
+  const ids = new Set();
+  const re = /failed to apply loader entry\s+([A-Za-z0-9_-]+)\s*\(/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m[1] !== 'include') ids.add(m[1]);
+  }
+  return [...ids];
+}
+
+function profilePatchIds() {
+  const patchFile = path.join(dshHome || path.join(os.homedir(), '.dsh'), 'profiles', 'web', 'cordis.patch.yml');
+  const ids = new Set();
+  try {
+    const text = fs.readFileSync(patchFile, 'utf8');
+    const re = /(?:^|\n)\s*-\s*id:\s*([A-Za-z0-9_-]+)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) ids.add(m[1]);
+  } catch {}
+  return [...ids];
+}
+
+function findFailedPatchPlugins() {
+  const failed = parseFailedLoaderIds(readDshWebLogTail(120));
+  const known = new Set(profilePatchIds());
+  return failed.filter((id) => known.has(id));
+}
+
+function safeBootOverlayPath() {
+  return path.join(userDataDir, 'safe-boot.overlay.yml');
+}
+
+function ensureSafeBootOverlay(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return null;
+  const file = safeBootOverlayPath();
+  const existing = new Set();
+  try {
+    const text = fs.readFileSync(file, 'utf8');
+    const re = /(?:^|\n)\s*-\s*id:\s*([A-Za-z0-9_-]+)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) existing.add(m[1]);
+  } catch {}
+  const merged = [...new Set([...existing, ...ids])];
+  const content = [
+    '# DSH Desktop 安全启动 overlay（自动生成）：以下插件启动失败，已被自动禁用。',
+    '# 修复插件后可删除本文件恢复。',
+    ...merged.map((id) => `- id: ${id}\n  disabled: true`),
+    '',
+  ].join('\n');
+  try {
+    fs.writeFileSync(file, content);
+    log('boot', '已生成安全启动 overlay（禁用: ' + merged.join(', ') + '）: ' + file);
+    return file;
+  } catch (err) {
+    log('boot', '写入安全启动 overlay 失败: ' + err.message);
+    return null;
+  }
+}
+
+function notifySafeBoot(ids) {
+  try {
+    const n = new Notification({
+      title: 'DSH Desktop 安全模式',
+      body: '检测到启动配置错误，已自动禁用问题插件：' + ids.join(', ') + '。修复后可删除 ' + safeBootOverlayPath(),
+      icon: path.join(__dirname, 'assets', 'icon.png'),
+    });
+    n.show();
+  } catch (err) {
+    log('boot', '安全模式通知失败: ' + err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// EPERM/symlink 自愈：部分 Windows 环境下 profiles/node_modules 的目录联接
+// 创建被拒绝（EPERM），或上次失败留下半成品实体目录。这里只处理自动生成的
+// profiles/node_modules：改名备份后重跑官方 healProfilesModuleFallback 重建
+// 联接，绝不触碰 profiles/web、会话与设置。
+// ---------------------------------------------------------------------------
+function dshWebLogHasEpermSymlink() {
+  const tail = readDshWebLogTail(300);
+  return /EPERM: operation not permitted, symlink[\s\S]{0,500}profiles[\\/]node_modules/i.test(tail);
+}
+
+function backupAndRebuildProfileModules(home) {
+  const modules = path.join(home, 'profiles', 'node_modules');
+  if (!fs.existsSync(modules)) return true;
+  const backup = `${modules}.backup-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  try {
+    fs.renameSync(modules, backup);
+    log('boot', 'EPERM/symlink 自愈：已将 profiles/node_modules 改名备份为 ' + backup);
+    return true;
+  } catch (err) {
+    log('boot', 'EPERM/symlink 自愈：改名备份失败 ' + err.message);
+    return false;
+  }
+}
+
 // 对话框串行化：服务启动失败/更新/错误弹窗不会同时叠成多个，
 // 避免「重启后连续弹出多个启动失败窗口」。
 let boxChain = Promise.resolve();
@@ -434,7 +641,7 @@ function chooseStableWebPort() {
 // dsh web server lifecycle
 // ---------------------------------------------------------------------------
 
-async function startServer(unsafePortRetries = 4) {
+async function startServer(unsafePortRetries = 4, overlays = []) {
   const webPort = await chooseStableWebPort();
   return new Promise((resolve, reject) => {
     // M1 修复：重入前先终结旧进程，避免孤儿 harness 同时写同一 DSH_HOME。
@@ -455,7 +662,10 @@ async function startServer(unsafePortRetries = 4) {
     log('dsh', `启动: "${nodeBin}" "${bin}" web --host 127.0.0.1 --port ${webPort}`);
     // --use-system-ca: 让 dsh web 进程信任系统证书库（代理/MITM 场景下内置 node 的
     // 默认 CA 无法验证，导致插件市场等对外 fetch 失败）。
-    const proc = spawn(nodeBin, ['--use-system-ca', bin, 'web', '--host', '127.0.0.1', '--port', String(webPort)], {
+    const patchArgs = overlays
+      .filter((p) => typeof p === 'string' && p && fs.existsSync(p))
+      .flatMap((p) => ['--patch', p]);
+    const proc = spawn(nodeBin, ['--use-system-ca', bin, 'web', '--host', '127.0.0.1', '--port', String(webPort), ...patchArgs], {
       cwd: userDataDir,
       env: childEnv(),
       windowsHide: true,
@@ -491,7 +701,7 @@ async function startServer(unsafePortRetries = 4) {
           killTree(proc);
           setTimeout(() => {
             if (quitting) return finish(reject, new Error('应用正在退出'));
-            startServer(unsafePortRetries - 1).then(
+            startServer(unsafePortRetries - 1, overlays).then(
               (url) => finish(resolve, url),
               (err) => finish(reject, err)
             );
@@ -527,7 +737,7 @@ async function startServer(unsafePortRetries = 4) {
           type: 'error',
           title: 'DSH 服务已停止',
           message: 'DeepSeek Harness 服务意外退出。',
-          detail: `日志文件：${path.join(logsDir, 'dsh-web.log')}`,
+          detail: '日志文件：' + path.join(logsDir, 'dsh-web.log') + logTailSnippet(),
           buttons: ['重新启动', '退出'],
           defaultId: 0,
           cancelId: 1,
@@ -563,8 +773,13 @@ function waitUntilUp(url, timeoutMs = 120000) {
   });
 }
 
-function startAndShow() {
-  return startServer()
+function startAndShow(overlays = []) {
+  const merged = [];
+  if (pickerBrowseOverlay && fs.existsSync(pickerBrowseOverlay)) merged.push(pickerBrowseOverlay);
+  for (const p of overlays) {
+    if (typeof p === 'string' && p && fs.existsSync(p) && !merged.includes(p)) merged.push(p);
+  }
+  return startServer(4, merged)
     .then(waitUntilUp)
     .then((url) => {
       webUrl = url;
@@ -574,30 +789,49 @@ function startAndShow() {
     });
 }
 
-function handleBootFailure(err) {
+function handleBootFailure(err, overlays = []) {
   const ov = updater.overlayBinPath(updCtx());
   if (ov && fs.existsSync(ov)) {
     showBox({
       type: 'error',
       title: 'DeepSeek Harness 启动失败',
       message: '更新后的 agent 无法启动。',
-      detail: (err && err.message || String(err)) + '\n\n可回退到内置版本继续使用。',
+      detail: (err && err.message || String(err)) + logTailSnippet() + '\n\n可回退到内置版本继续使用。',
       buttons: ['回退到内置版本并重试', '重试', '退出'],
       defaultId: 0,
       cancelId: 2,
     }).then(({ response }) => {
       if (response === 0) {
         updater.rollback(updCtx());
-        startAndShow().catch((e2) => fatal('DeepSeek Harness 启动失败', e2));
+        startAndShow(overlays).catch((e2) => fatal('DeepSeek Harness 启动失败', e2));
       } else if (response === 1) {
-        startAndShow().catch((e2) => handleBootFailure(e2));
+        startAndShow(overlays).catch((e2) => handleBootFailure(e2, overlays));
       } else {
         app.quit();
       }
     });
-  } else {
-    fatal('DeepSeek Harness 启动失败', err);
+    return;
   }
+  // EPERM/symlink 自愈（客户手册场景）：先于插件安全模式处理。
+  if (!epermRepairAttempted && dshWebLogHasEpermSymlink()) {
+    epermRepairAttempted = true;
+    const home = dshHome || process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+    if (backupAndRebuildProfileModules(home)) {
+      return repairProfileFallback(home).then(() =>
+        startAndShow(overlays).catch((e2) => handleBootFailure(e2, overlays))
+      );
+    }
+  }
+  // 启动配置自愈：解析日志中加载失败的 patch 插件并写入安全 overlay 重试，
+  // 让客户机器遇到「启动项配置生成错误」时也能打开应用。
+  const failedIds = findFailedPatchPlugins();
+  const safeOverlay = ensureSafeBootOverlay(failedIds);
+  if (safeOverlay && !overlays.includes(safeOverlay)) {
+    notifySafeBoot(failedIds);
+    const next = [...overlays, safeOverlay];
+    return startAndShow(next).catch((e2) => handleBootFailure(e2, next));
+  }
+  fatal('DeepSeek Harness 启动失败', err);
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,7 +1251,7 @@ function createSponsorWindow() {
 
 function fatal(title, err) {
   log('fatal', title + ': ' + ((err && (err.stack || err.message)) || err));
-  const detail = '错误：' + ((err && err.message) || err) + '\n\n日志目录：' + logsDir;
+  const detail = '错误：' + ((err && err.message) || err) + logTailSnippet() + '\n\n日志目录：' + logsDir;
   if (!mainWindow || mainWindow.isDestroyed()) {
     dialog.showErrorBox(title, detail);
     markCleanExit();
@@ -1634,7 +1868,7 @@ const COMPANION_PLUGINS = [
   { id: 'file-changes', name: '@deepseek-ai/dsh-file-changes' },
   { id: 'client-file-changes', name: '@deepseek-ai/dsh-client-file-changes' },
   { id: 'terminal', name: '@deepseek-ai/dsh-terminal-tab' },
-  { id: 'plugin-marketplace', name: '@deepseek-ai/dsh-plugin-marketplace' },
+  { id: 'plugin-market', name: 'zat-dsh-engine' },
   { id: 'float-window', name: '@deepseek-ai/dsh-float-window' },
   { id: 'conversation-tweaks', name: '@deepseek-ai/dsh-conversation-tweaks' },
   { id: 'super-injector', name: '@dsh-external/dsh-super-injector' },
@@ -1670,6 +1904,30 @@ function removeStaleCompanionPlugins(profileModules, expectedDirs) {
   }
 }
 
+function removeLegacyMarketplace(profileWebModules, profileDir) {
+  // v0.3.5 起插件市场整体切换为 zat-dsh-engine（MIT）：
+  // 清理旧版 @deepseek-ai/dsh-plugin-marketplace 的同步副本与 patch 行。
+  const oldPkg = path.join(profileWebModules, '@deepseek-ai', 'dsh-plugin-marketplace');
+  try {
+    if (fs.existsSync(oldPkg)) {
+      fs.rmSync(oldPkg, { recursive: true, force: true });
+      log('boot', '已移除旧插件市场包: @deepseek-ai/dsh-plugin-marketplace');
+    }
+  } catch (err) {
+    log('boot', '移除旧插件市场包失败: ' + err.message);
+  }
+  const patchFile = path.join(profileDir, 'cordis.patch.yml');
+  try {
+    let patch = fs.readFileSync(patchFile, 'utf8');
+    const before = patch;
+    patch = patch.replace(/^\s*-\s*insert:\s*$\n^\s*-\s*id:\s*plugin-marketplace\s*$\n^\s*name:\s*['"]@deepseek-ai\/dsh-plugin-marketplace['"]\s*$\n?/gm, '');
+    if (patch !== before) {
+      fs.writeFileSync(patchFile, patch);
+      log('boot', '已从 cordis.patch.yml 移除旧插件市场条目');
+    }
+  } catch {}
+}
+
 function syncCompanionPlugins() {
   if (!IS_WIN) return;
   try {
@@ -1679,9 +1937,14 @@ function syncCompanionPlugins() {
     fs.mkdirSync(profileModules, { recursive: true });
     const expectedDirs = new Set(COMPANION_PLUGINS.map(companionDirName));
     removeStaleCompanionPlugins(profileModules, expectedDirs);
+    removeLegacyMarketplace(path.join(profileDir, 'node_modules'), profileDir);
 
     const bundleNames = new Set();
-    const copyFiles = ['package.json', 'lib/index.js', 'lib/client.js', 'lib/vlm.js', 'dsh.plugin.json', 'cordis.patch.yml'];
+    const copyFiles = [
+      'package.json', 'cordis.patch.yml', 'LICENSE', 'README.md', 'README.zh.md',
+      'lib/index.js', 'lib/client.js', 'lib/vlm.js', 'lib/typert.host.js', 'lib/typert.host.d.ts',
+      'dsh.plugin.json',
+    ];
     for (const p of COMPANION_PLUGINS) {
       const rel = companionDirName(p);
       const src = path.join(__dirname, 'assets', 'plugins', rel);
@@ -1706,10 +1969,37 @@ function syncCompanionPlugins() {
     const manifestFile = path.join(profileDir, 'package.json');
     let manifest = {};
     try { manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8')); } catch { manifest = { name: 'dsh-profile-web', private: true }; }
-    manifest.dsh ??= {};
-    manifest.dsh.profile ??= {};
-    manifest.dsh.profile.bundles ??= [];
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) manifest = { name: 'dsh-profile-web', private: true };
+    if (!manifest.dsh || typeof manifest.dsh !== 'object') manifest.dsh = {};
+    if (!manifest.dsh.profile || typeof manifest.dsh.profile !== 'object') manifest.dsh.profile = {};
+    // 全新 profile（dsh 尚未初始化）时 manifest 不存在、也没有 bundles。
+    // 此时壳层不能凭空新建只含自己 bundle 的 manifest：那会顶替 dsh 的
+    // 初始化，profile 里没有提供核心服务的插件，插件树无法激活，
+    // 全新 DSH_HOME 首次启动必然失败。
+    // 处理：核心 bundles 必须在安装中实测可解析（与 dsh-app-boot 的
+    // PROFILE_TEMPLATES.web 同名）才写入；解析不到（模板未来改名）则不写
+    // manifest，交由 dsh 自行初始化，bundle 插件留待下一次启动注册。
+    let bundlesUsable = Array.isArray(manifest.dsh.profile.bundles);
+    if (!bundlesUsable) {
+      const coreBundles = [];
+      // 以「实际将运行的 dsh 包」（内置或用户目录 overlay）为解析锚点，
+      // 确保写入的模板与真正启动的 dsh 版本一致；解析不到则不写。
+      const installAnchor = path.dirname(dshPackageJson());
+      for (const name of ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']) {
+        try {
+          require.resolve(name + '/package.json', { paths: [installAnchor] });
+          coreBundles.push(name);
+        } catch { /* 该 dsh 安装中缺失，交由 dsh 初始化 */ }
+      }
+      if (coreBundles.length === 2) {
+        manifest.dsh.profile.bundles = coreBundles;
+        bundlesUsable = true;
+      } else {
+        log('boot', 'dsh 出厂核心 bundles 未在安装中解析到，跳过 manifest 预写，交由 dsh 初始化');
+      }
+    }
     for (const name of bundleNames) {
+      if (!bundlesUsable) break;
       if (!manifest.dsh.profile.bundles.includes(name)) {
         manifest.dsh.profile.bundles.push(name);
         fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\n');
@@ -1737,6 +2027,11 @@ function syncCompanionPlugins() {
         }
         continue;
       }
+      // 尊重用户已有配置：id 只要出现过（例如用户手写的 disabled 条目）就不再
+      // 自动插入，避免「禁用后下次启动又被加回来」或同 id 重复条目导致 loader 报错。
+      if (new RegExp('(?:^|\\n)\\s*-?\\s*id\\s*:\\s*' + p.id + '\\b').test('\n' + patch)) {
+        continue;
+      }
       const block = `- insert:\n    - id: ${p.id}\n      name: '${p.name}'\n`;
       if (/^\s*\[\]\s*$/m.test(patch)) patch = patch.replace(/\[\]/m, block);
       else if (patch.trim() === '') patch = '# dsh web profile patch（由 DSH Desktop 维护）\n' + block;
@@ -1757,52 +2052,74 @@ function syncCompanionPlugins() {
 // 这里幂等地把补丁写进运行时文件；dsh 包更新后本函数会在下次启动重新应用。
 // ---------------------------------------------------------------------------
 function applyRuntimeFlashFix() {
-  try {
-    const home = dshHome || path.join(os.homedir(), '.dsh');
-    const file = path.join(home, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-client-runtime', 'lib', 'client.js');
-    if (!fs.existsSync(file)) { log('boot', 'runtime 补丁: 未找到 dsh-client-runtime，跳过'); return; }
-    let src = fs.readFileSync(file, 'utf8');
-    const oldPat = '(value) => baselineByKey.get(keyOf(value))).filter((value) => value !== void 0);';
-    const newPat = '(value) => baselineByKey.get(keyOf(value)) ?? value).filter((value) => value !== void 0);';
-    if (src.includes(newPat)) { log('boot', 'runtime 补丁: 已应用，跳过'); return; }
-    if (!src.includes(oldPat)) { log('boot', 'runtime 补丁: 未匹配到目标代码（版本可能已变更），跳过'); return; }
-    src = src.replace(oldPat, newPat);
-    fs.writeFileSync(file, src, { encoding: 'utf8' });
-    log('boot', 'runtime 补丁: 已修复会话列表刷新闪跳（mergeOrderedBaseline 保留本地新会话）');
-  } catch (err) {
-    log('boot', 'runtime 补丁失败: ' + err.message);
+  // 覆盖三处运行副本：profile fallback（即内置 app 副本）、内置 app 副本、更新 overlay。
+  const targets = [
+    path.join(dshHome || path.join(os.homedir(), '.dsh'), 'profiles', 'node_modules', '@deepseek-ai', 'dsh-client-runtime', 'lib', 'client.js'),
+    path.join(__dirname, 'node_modules', '@deepseek-ai', 'dsh-client-runtime', 'lib', 'client.js'),
+    path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh-client-runtime', 'lib', 'client.js'),
+  ];
+  const oldPat = '(value) => baselineByKey.get(keyOf(value))).filter((value) => value !== void 0);';
+  const newPat = '(value) => baselineByKey.get(keyOf(value)) ?? value).filter((value) => value !== void 0);';
+  for (const file of targets) {
+    if (!file || !fs.existsSync(file)) continue;
+    try {
+      let src = fs.readFileSync(file, 'utf8');
+      if (src.includes(newPat)) { log('boot', 'runtime 补丁: 已应用，跳过 ' + file); continue; }
+      if (!src.includes(oldPat)) { log('boot', 'runtime 补丁: 未匹配到目标代码（版本可能已变更），跳过 ' + file); continue; }
+      src = src.replace(oldPat, newPat);
+      fs.writeFileSync(file, src, { encoding: 'utf8' });
+      log('boot', 'runtime 补丁: 已修复会话列表刷新闪跳 ' + file);
+    } catch (err) {
+      log('boot', 'runtime 补丁失败(' + file + '): ' + err.message);
+    }
   }
 }
 
 // ---------------------------------------------------------------------------
 // dsh-host-apiproxy 设置暴露补丁：官方代理只把少数命名空间暴露给浏览器端
-// 配置客户端（WEB_SETTINGS_NAMESPACES 白名单）。我们配套的 dsh-prompt-custom
-// 插件注册了「自定义提示词」命名空间 dsh-prompt，默认不在白名单里，导致设置页
-// 该栏只读（显示「设置不可用」）。这里幂等地把 dsh-prompt 追加进白名单；
-// dsh 包更新后本函数会在下次启动重新应用。
+// 配置客户端（WEB_SETTINGS_NAMESPACES 白名单）。我们配套的 dsh-prompt-custom /
+// dsh-third-party-thinking / dsh-vision / dsh-conversation-tweaks 等设置节
+// 依赖这些命名空间暴露，否则设置页对应栏目显示「设置不可用」甚至消失。
+// 这里幂等地把命名空间追加进白名单，并同时覆盖三处运行副本：
+//   - profile fallback（即内置 app 副本，通过 junction 写穿）
+//   - 内置 app node_modules
+//   - 用户更新过的 agent overlay（部分用户看不见插件设置的根因：overlay 副本从未被补）
 // ---------------------------------------------------------------------------
 function applyPromptExposeFix() {
-  try {
-    const home = dshHome || path.join(os.homedir(), '.dsh');
-    const file = path.join(home, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js');
-    if (!fs.existsSync(file)) { log('boot', '提示词暴露补丁: 未找到 dsh-host-apiproxy，跳过'); return; }
-    let src = fs.readFileSync(file, 'utf8');
-    // 幂等地把配套命名空间追加进 WEB_SETTINGS_NAMESPACES 数组（数组以 "\n];" 收尾）。
-    // 逐个检查缺失项，缺失就在数组收尾前插入，避免对已应用过的中间态失配。
-    const namespaces = ['dsh-prompt', 'dsh-third-party-thinking', 'dsh-vision', 'dsh-conversation-tweaks'];
-    let changed = false;
-    for (const ns of namespaces) {
-      if (src.includes('"' + ns + '"')) continue;
-      const closeIdx = src.indexOf('\n];');
-      if (closeIdx === -1) { log('boot', '提示词暴露补丁: 未匹配到设置命名空间数组收尾，跳过'); return; }
-      src = src.slice(0, closeIdx) + ',\n\t"' + ns + '"' + src.slice(closeIdx);
-      changed = true;
+  const targets = [
+    path.join(dshHome || path.join(os.homedir(), '.dsh'), 'profiles', 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js'),
+    path.join(__dirname, 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js'),
+    path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh-host-apiproxy', 'lib', 'index.js'),
+  ];
+  const namespaces = ['dsh-prompt', 'dsh-third-party-thinking', 'dsh-vision', 'dsh-conversation-tweaks'];
+  for (const file of targets) {
+    if (!file || !fs.existsSync(file)) continue;
+    try {
+      let src = fs.readFileSync(file, 'utf8');
+      const declIdx = src.indexOf('const WEB_SETTINGS_NAMESPACES = [');
+      if (declIdx === -1) {
+        log('boot', '提示词暴露补丁: 未找到 WEB_SETTINGS_NAMESPACES（版本可能已变更），跳过 ' + file);
+        continue;
+      }
+      // 只认声明之后最近的 `];`，避免插进文件里其它数组。
+      const closeIdx = src.indexOf('];', declIdx);
+      if (closeIdx === -1) {
+        log('boot', '提示词暴露补丁: 未匹配到命名空间数组收尾，跳过 ' + file);
+        continue;
+      }
+      const arrText = src.slice(declIdx, closeIdx);
+      const missing = namespaces.filter((ns) => !arrText.includes('"' + ns + '"'));
+      if (missing.length === 0) {
+        log('boot', '提示词暴露补丁: 已应用，跳过 ' + file);
+        continue;
+      }
+      const block = ',\n' + missing.map((ns) => '\t"' + ns + '"').join(',\n') + '\n';
+      src = src.slice(0, closeIdx) + block + src.slice(closeIdx);
+      fs.writeFileSync(file, src, { encoding: 'utf8' });
+      log('boot', '提示词暴露补丁: 已把 ' + missing.join(', ') + ' 加入设置白名单 ' + file);
+    } catch (err) {
+      log('boot', '提示词暴露补丁失败(' + file + '): ' + err.message);
     }
-    if (!changed) { log('boot', '提示词暴露补丁: 已应用，跳过'); return; }
-    fs.writeFileSync(file, src, { encoding: 'utf8' });
-    log('boot', '提示词暴露补丁: 已把 ' + namespaces.join(', ') + ' 加入 settings 暴露白名单');
-  } catch (err) {
-    log('boot', '提示词暴露补丁失败: ' + err.message);
   }
 }
 
@@ -1904,14 +2221,29 @@ function quitForClientUpdate(ctx, pending) {
   quitting = true;
   forceQuit = true;
   markCleanExit();
-  // 立即清除待安装标记：更新脚本一旦启动就由它负责完成。
-  // 否则脚本失败/被安全软件拦截时，用户手动打开旧版本会反复弹出同一个更新框。
+  // 无条件清除待安装标记并记录一次安装尝试：更新脚本一旦启动就由它负责完成。
+  // 若脚本失败 / 被安全软件拦截，下次启动会依据 clientUpdateAttempt 识别为
+  // 「更新未完成」，而不是再次弹出同一个「有待安装的客户端更新」。
   try {
     const s = updater.loadSettings(ctx);
-    if (s.pendingClientUpdate && s.pendingClientUpdate.path === pending.path) {
-      s.pendingClientUpdate = null;
-      updater.saveSettings(ctx, s);
+    s.pendingClientUpdate = null;
+    s.pendingClientVersion = null;
+    s.clientUpdateSnoozeUntil = null;
+    s.clientUpdateAttempt = {
+      version: pending && pending.version ? pending.version : null,
+      at: Date.now(),
+      appVersion: APP_VERSION,
+    };
+    updater.saveSettings(ctx, s);
+    // 回读校验：清理必须真正落盘，否则重启后旧标记会再次触发待安装弹窗。
+    const verify = updater.loadSettings(ctx);
+    if (verify.pendingClientUpdate) {
+      verify.pendingClientUpdate = null;
+      verify.clientUpdateAttempt = s.clientUpdateAttempt;
+      updater.saveSettings(ctx, verify);
+      log('client-update', '待安装标记清理第一次未生效，已重试并回读确认');
     }
+    log('client-update', '待安装标记已清理' + (updater.loadSettings(ctx).pendingClientUpdate ? '（仍存在，需人工检查 settings.json）' : ''));
   } catch (err) {
     log('client-update', '清理待安装标记失败: ' + err.message);
   }
@@ -2049,12 +2381,51 @@ function offerPendingClientUpdate() {
   if (!pending || !pending.path) return;
   if (!fs.existsSync(pending.path)) {
     settings.pendingClientUpdate = null;
+    settings.clientUpdateAttempt = null;
     updater.saveSettings(ctx, settings);
     return;
   }
   if (updater.compareVersions(pending.version, APP_VERSION) <= 0) {
     settings.pendingClientUpdate = null;
+    settings.clientUpdateAttempt = null;
+    settings.clientUpdateSnoozeUntil = null;
     updater.saveSettings(ctx, settings);
+    return;
+  }
+  // 用户选过「稍后」后，24 小时内不再重复弹同一个待安装提示。
+  const snoozeUntil = Number(settings.clientUpdateSnoozeUntil) || 0;
+  if (snoozeUntil > Date.now()) return;
+  // 上一轮已点过「立即重启」但当前仍是旧版本 → 更新没有安装成功。
+  // 不再用「有待安装」的文案循环打扰，改为明确告知并允许重试/看日志/稍后。
+  const attempt = settings.clientUpdateAttempt;
+  const failedBefore = !!(attempt && attempt.version === pending.version && attempt.appVersion === APP_VERSION);
+  if (failedBefore) {
+    const applyLog = path.join(userDataDir, 'updates', 'apply-update.log');
+    showBox({
+      type: 'warning',
+      title: '客户端更新未完成',
+      message: `DSH Desktop v${pending.version} 尚未安装成功（当前仍为 v${APP_VERSION}）。`,
+      detail: '已下载的安装包仍保留在数据目录的 updates 文件夹中，可以重试安装。\n\n安装脚本日志：' + applyLog,
+      buttons: ['重试安装', '打开日志', '稍后'],
+      defaultId: 0,
+      cancelId: 2,
+    }).then(({ response }) => {
+      if (response === 0) {
+        const s = updater.loadSettings(ctx);
+        s.clientUpdateSnoozeUntil = null;
+        updater.saveSettings(ctx, s);
+        quitForClientUpdate(ctx, pending);
+        return;
+      }
+      if (response === 1) {
+        shell.openPath(applyLog).catch((err) => log('client-update', '打开更新日志失败: ' + err.message));
+        return;
+      }
+      const s = updater.loadSettings(ctx);
+      s.clientUpdateSnoozeUntil = Date.now() + 24 * 60 * 60 * 1000;
+      updater.saveSettings(ctx, s);
+      log('client-update', '用户暂缓处理未完成的客户端更新 ' + pending.version + '（24h）');
+    });
     return;
   }
   showBox({
@@ -2066,7 +2437,12 @@ function offerPendingClientUpdate() {
     defaultId: 0,
     cancelId: 1,
   }).then(({ response }) => {
-    if (response !== 0) return;
+    if (response !== 0) {
+      const s = updater.loadSettings(ctx);
+      s.clientUpdateSnoozeUntil = Date.now() + 24 * 60 * 60 * 1000;
+      updater.saveSettings(ctx, s);
+      return;
+    }
     quitForClientUpdate(ctx, pending);
   });
 }
@@ -2305,6 +2681,9 @@ async function boot() {
   // 托盘图标被 explorer 重启等外部因素清掉后，周期性自愈。
   trayRecoveryTimer = setInterval(ensureTray, 30 * 1000);
   if (uncleanPrev) notifyUncleanRestart(uncleanPrev);
+  // 先修复 profile fallback 联接再同步/补丁依赖文件：EPERM 环境下补丁写不进去。
+  const home = dshHome || process.env.DSH_HOME || require('node:path').join(require('node:os').homedir(), '.dsh');
+  await repairProfileFallback(home);
   syncCompanionPlugins();
   applyRuntimeFlashFix();
   applyPromptExposeFix();
@@ -2313,8 +2692,8 @@ async function boot() {
   wireWindowRecovery();
   startHeartbeatLoop();
   setupTestChannel();
-  const home = dshHome || process.env.DSH_HOME || require('node:path').join(require('node:os').homedir(), '.dsh');
-  await repairProfileFallback(home);
+  if (runKoffiPreflight()) clearAutoPickerBrowseOverlay();
+  else enablePickerBrowseOverlay();
   startAndShow()
     .then(() => {
       // Session-completion notifications: watch dsh session logs under the

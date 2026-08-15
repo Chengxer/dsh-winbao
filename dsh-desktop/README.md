@@ -84,7 +84,32 @@
 - **默认关闭**：避免向百炼等严格校验请求体的第三方 API 注入 `reasoning_effort` 导致接口报错。
 - 仅当 provider 支持时才开启；字段名可改为 provider 要求的名称，留空表示只显示档位、不注入参数。
 
-## 稳定性与兼容性（0.3.3）
+## 插件市场（Zat-DSH Engine）
+
+- v0.3.5 起，设置 → 插件 →「插件市场」由 **[Zat-DSH Engine](https://github.com/mishibeikejie/zat-dsh-engine)**（MIT License）完全提供，替换旧版内置市场。
+- **社区全量目录**：实时搜索 GitHub `dsh-plugin` 主题下的 1700+ 社区插件，12 个分类，中英双语介绍（内置 999 条中文简介，新插件由当前模型即时翻译）。
+- **一键安装 / 更新 / 卸载 / 启停**：基于官方 `dsh plugin` profile 机制（底层 pnpm），多插件仓库支持图形化选择；安装前冲突检测 + 健康报告 + 失败自动回滚 + 最近已知可用备份。
+- **网络自适应**：系统代理 → 直连 → `gh-proxy.com` 镜像 → 内置 fetch 兜底，无需 VPN。
+- **自带自更新**：市场自身发现新版本时在标题旁显示更新按钮。
+- 该插件随桌面端打包在 `assets/plugins/zat-dsh-engine`（含 LICENSE 与双语 README），启动时自动同步为 web profile bundle。
+
+## 稳定性与兼容性（0.3.5）
+
+### v0.3.5
+
+- **插件市场整体替换为 Zat-DSH Engine（MIT）**：移除旧 `@deepseek-ai/dsh-plugin-marketplace` 的同步副本与 patch 条目，新增 `zat-dsh-engine` bundle；`zod` 作为显式依赖随包分发。
+- **客户端更新「立即重启后仍提示待安装」闭环修复**：settings 原子写 + 回读校验、记录安装尝试、启动识别「客户端更新未完成」并支持重试/日志/稍后；NSIS 脚本失败或取消时自动拉起旧版本。
+
+### v0.3.4 修复版
+
+- **目录选择器（选择工作区 / 添加文件夹）崩溃**：根因是 koffi 3.1.3/3.1.4 win32-x64 预编译二进制损坏。本版锁定 `koffi@3.1.5`（上游已回退 Windows 原生编译），并在每次启动前做 FFI 预检；预检失败自动降级为浏览器内 browse 目录选择器，不再弹「无法打开文件夹」。
+- **`directory picker failed: ... worker exited before reporting a result` 报错无信息**：目录选择器 worker 无消息退出时，错误文案现在带真实 exit code / signal。
+- **DeepSeek Harness 启动失败（dsh web 退出码 1）**：插件树加载失败时自动解析问题插件、写入安全 overlay 并重试（不修改用户配置）；`EPERM: operation not permitted, symlink` 场景自动改名备份并重建 profile 目录联接；启动失败弹窗直接附带 `dsh-web.log` 最近日志。
+- **部分用户设置页看不到插件设置（识图 / 自定义提示词 / 思考强度 / 插件市场）**：设置命名空间白名单补丁现在覆盖内置 app、profile fallback 与 agent 更新 overlay 三处运行副本，更新过 agent 的机器也会正常显示。
+- **伴侣插件同步**：patch 中已存在（含用户手动 disabled）的条目不再被自动重插，避免重复 id 与「禁用后又被加回来」。
+- **全新 DSH_HOME 首次启动失败（退出码 1）**：`syncCompanionPlugins` 不再预写只含 bundle 插件的 profile manifest；全新环境先写入经实测可解析的 dsh 出厂核心 bundles（dsh-base / dsh-web-app）再追加 bundle 插件，解析不到则交由 dsh 自行初始化。
+
+### 既有稳定性能力
 
  - **渲染进程崩溃自动恢复**：`render-process-gone` 后指数退避重载（0.8s 起步，封顶 15s），连续失败第 3 次重建 BrowserWindow（保持隐藏/托盘状态）；超过上限显示本地恢复页（重新加载 / 重启客户端 / 打开日志）并通知；稳定存活 30s 才清零计数
 - **渲染心跳与假死恢复**：preload 每 5 秒上报心跳，主进程 30 秒未收到则恢复；`unresponsive` 15 秒后同样恢复。
@@ -201,7 +226,11 @@ npm run dist                   # 构建 portable + NSIS 安装包，输出到 di
 - **更新下载慢**：设置环境变量 `NPM_CONFIG_REGISTRY=https://registry.npmmirror.com` 后重启应用。
 - **收不到通知**：确认菜单「会话完成通知」已勾选；便携版确认开始菜单里存在「DSH Desktop」快捷方式（首次运行自动创建，勿删除）；检查 Windows「通知与操作」设置里应用通知未被禁用。
 - **历史会话打不开（`SessionFormatUnsupportedError: ... unknown to this harness and not marked ignorable`）**：dsh-agent-teams / dsh-message-edit / dsh-web-search-exa 等插件写入的自定义会话事件不在内置核心的事件词汇表内导致。v0.3.3 起打包时已自动修补内置 `@deepseek-ai/dsh-session`；旧版本无需重装，一条命令修复：`npx dsh-session-history-fix`（幂等，可重复运行；改完重启应用即可）。
-- **如何手动安装第三方插件**：推荐在设置页「插件市场」搜索并安装（支持 npm 包名和 `github:owner/repo#分支`）；安装完成后点「立即重启服务」。如果本机另装了 dsh CLI，也可以执行 `dsh plugin --profile web add <包名或 github 源>`，效果相同。
+- **无法打开文件夹（`directory picker failed: ... win32 folder dialog worker exited...`）**：v0.3.4 已根治（koffi@3.1.5 + 启动预检自动降级 browse 选择器）。旧版本请升级到 0.3.4。
+- **启动失败（`dsh web 启动失败（退出码 1）`）**：v0.3.4 会自动进入安全模式或自愈并重试，弹窗内直接显示最近日志。日志出现 `plugin tree failed to load` = 插件配置不兼容（自动禁用问题插件）；出现 `EPERM ... symlink` = 目录联接被拒（自动备份重建）；日志戛然而止且退出码 `3221225477`（0xC0000005）= koffi 原生崩溃（0.3.4 已换修复版）。
+- **设置页看不到插件设置（识图插件 / 自定义提示词 / 思考强度 / 插件市场）**：v0.3.4 已修复 agent 更新后白名单丢失的问题；仍不可见时重启应用一次，必要时查看 `desktop.log` 中「提示词暴露补丁」记录。
+- **客户端更新点了「立即重启」后仍提示有待安装的更新**：v0.3.4 起会识别「客户端更新未完成」并提供重试安装 / 打开更新日志；若反复出现，把 `%APPDATA%\DSH Desktop\updates\apply-update.log` 发给技术支持。
+- **如何手动安装第三方插件**：推荐在设置页「插件市场」（Zat-DSH Engine）搜索并安装（支持 npm 包名、`github:owner/repo#分支` 与镜像源）；安装完成后按提示重启服务。如果本机另装了 dsh CLI，也可以执行 `dsh plugin --profile web add <包名或 github 源>`，效果相同。
 - **端口被占**：应用会复用上次保存的端口；若该端口被其他程序占用，会自动选新端口并保存，无需手动处理。注意：端口变化会导致该次启动的界面本地偏好（如会话分组）重新初始化，正常重启不会发生。
 
 ## 目录结构
@@ -217,7 +246,7 @@ dsh-desktop/
 恢复页
 │   ├── sponsor/          # 赞助收款码（支付宝 / 微信，「请作者喝咖啡」面板与本文档共用）
 │   ├── agent-presets/    # minimal-win / router-standard / anchored-standard / zero-anchored-standard 内置预设
-│   └── plugins/          # dsh-balance / dsh-file-changes / dsh-vision / dsh-super-injector 等，启动时自动同步进 web profile
+│   └── plugins/          # dsh-balance / dsh-file-changes / dsh-vision / zat-dsh-engine / dsh-super-injector 等，启动时自动同步进 web profile
 ├── scripts/
 │   ├── fetch-node.js     # 内置 node.exe 复制脚本
 │   ├── fetch-npm.js      # 内置 npm CLI 复制脚本
@@ -233,6 +262,11 @@ dsh-desktop/
 ├── electron-builder.yml  # 打包配置
 └── dist/                 # 构建产物
 ```
+
+## 第三方组件与许可
+
+本项目使用了大量 MIT 开源项目，完整清单与许可文本见 [docs/attributions.md](docs/attributions.md)。
+主要组件：[@deepseek-ai/dsh](https://www.npmjs.com/package/@deepseek-ai/dsh)（MIT）、[Zat-DSH Engine](https://github.com/mishibeikejie/zat-dsh-engine)（MIT）、[koffi](https://koffi.dev)（MIT）、Electron / Chromium / Node.js（各组件许可随包分发）等。`zat-dsh-engine` 的 LICENSE 与双语 README 随安装包一并分发于 `assets/plugins/zat-dsh-engine/`。
 
 ## License
 
