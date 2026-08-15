@@ -1869,6 +1869,8 @@ const COMPANION_PLUGINS = [
   { id: 'client-file-changes', name: '@deepseek-ai/dsh-client-file-changes' },
   { id: 'terminal', name: '@deepseek-ai/dsh-terminal-tab' },
   { id: 'plugin-market', name: 'zat-dsh-engine' },
+  { id: 'better-sidebar', name: 'dsh-better-sidebar' },
+  { id: 'harness-pet', name: 'harness-pet' },
   { id: 'float-window', name: '@deepseek-ai/dsh-float-window' },
   { id: 'conversation-tweaks', name: '@deepseek-ai/dsh-conversation-tweaks' },
   { id: 'super-injector', name: '@dsh-external/dsh-super-injector' },
@@ -1945,6 +1947,19 @@ function syncCompanionPlugins() {
       'lib/index.js', 'lib/client.js', 'lib/vlm.js', 'lib/typert.host.js', 'lib/typert.host.d.ts',
       'dsh.plugin.json',
     ];
+    // 配套插件引用了不在 dsh 核心依赖闭包里的 npm 包时（例如 dsh-better-sidebar
+    // 使用的 schemastery / cosmokit），把内置副本一并落到 profile web node_modules，
+    // 保证 bundle 的宿主端能在 profile 内解析到这些依赖。
+    const vendorDeps = ['schemastery', 'cosmokit', '@standard-schema/spec'];
+    for (const name of vendorDeps) {
+      const sdir = path.join(__dirname, 'node_modules', name);
+      if (!fs.existsSync(sdir)) continue;
+      try {
+        fs.cpSync(sdir, path.join(profileDir, 'node_modules', name), { recursive: true, force: true });
+      } catch (err) {
+        log('boot', '同步内置依赖 ' + name + ' 失败: ' + err.message);
+      }
+    }
     for (const p of COMPANION_PLUGINS) {
       const rel = companionDirName(p);
       const src = path.join(__dirname, 'assets', 'plugins', rel);
@@ -1960,6 +1975,15 @@ function syncCompanionPlugins() {
       for (const f of copyFiles) {
         const sf = path.join(src, f);
         if (fs.existsSync(sf)) fs.copyFileSync(sf, path.join(dest, f));
+      }
+      // 完整同步插件自带的 lib/assets/src 目录：第三方插件（如
+      // dsh-better-sidebar 的懒加载 chunk、harness-pet 的动画素材）不都落在
+      // 固定文件清单里，递归复制保证打包产物与资源随插件一起进 profile。
+      for (const sub of ['lib', 'assets', 'src']) {
+        const sdir = path.join(src, sub);
+        if (fs.existsSync(sdir)) {
+          fs.cpSync(sdir, path.join(dest, sub), { recursive: true, force: true });
+        }
       }
       // Bundle 插件不写 patch 行：dsh 在启动时读取 profile 的
       // dsh.profile.bundles 并应用包内 cordis.patch.yml。

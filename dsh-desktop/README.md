@@ -93,6 +93,16 @@
 - **自带自更新**：市场自身发现新版本时在标题旁显示更新按钮。
 - 该插件随桌面端打包在 `assets/plugins/zat-dsh-engine`（含 LICENSE 与双语 README），启动时自动同步为 web profile bundle。
 
+## 侧边栏工作台（dsh-better-sidebar）
+
+- [omdsh-dev/DSH-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar)（MIT）内置：会话隔离的 VSCode 式右侧边栏（资源管理器 / 编辑器 / 终端 / Git / 浏览器），并开放服务供其他插件注册边栏页与文件查看器。
+- 以 bundle 形式随桌面端分发（`assets/plugins/dsh-better-sidebar`，含 LICENSE、预编译 lib 与源码）；启动时自动同步进 web profile。
+
+## 桌面宠物（harness-pet）
+
+- [cakeni/harness-pet](https://github.com/cakeni/harness-pet)（MIT）内置：会话旁的鲸鱼小宠物，素材与归因随包分发（`assets/plugins/harness-pet`）。
+- 同样以 bundle 形式自动同步进 web profile。
+
 ## 稳定性与兼容性（0.3.4，0.3.5 开发中）
 
 ### 未发布（0.3.5 开发中，暂缓）
@@ -247,7 +257,7 @@ dsh-desktop/
 恢复页
 │   ├── sponsor/          # 赞助收款码（支付宝 / 微信，「请作者喝咖啡」面板与本文档共用）
 │   ├── agent-presets/    # 8 个内置预设（minimal-win / router-standard / anchored-standard / zero-anchored-standard / whoami-standard / v4-flash-godmode-opencode-go / warmupbetter / warmupbetter-replay）
-│   └── plugins/          # dsh-balance / dsh-file-changes / dsh-vision / zat-dsh-engine / dsh-super-injector 等，启动时自动同步进 web profile
+│   └── plugins/          # dsh-balance / dsh-file-changes / dsh-vision / zat-dsh-engine / dsh-better-sidebar / harness-pet / dsh-super-injector 等，启动时自动同步进 web profile
 ├── scripts/
 │   ├── fetch-node.js     # 内置 node.exe 复制脚本
 │   ├── fetch-npm.js      # 内置 npm CLI 复制脚本
