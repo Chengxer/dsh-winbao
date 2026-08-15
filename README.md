@@ -16,13 +16,15 @@
 
    **便携版**（免安装，双击即用，可放 U 盘）：
    - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.3/DSH-Desktop-0.3.3-portable-x64.exe.part1)（~95 MB）
-   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.3/DSH-Desktop-0.3.3-portable-x64.exe.part2)（~31 MB）
+   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.3/DSH-Desktop-0.3.3-portable-x64.exe.part2)（~22 MB）
 
    **安装版**（安装到系统，创建桌面/开始菜单快捷方式）：
    - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.3/DSH-Desktop-Setup-0.3.3-x64.exe.part1)（~95 MB）
-   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.3/DSH-Desktop-Setup-0.3.3-x64.exe.part2)（~32 MB）
+   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.3/DSH-Desktop-Setup-0.3.3-x64.exe.part2)（~22 MB）
 
 2. 下载 [merge.bat](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.3/merge.bat)，放到同一文件夹，双击运行即可自动合并出 exe。
+
+   merge.bat 说明：脚本使用纯英文提示 + Windows 标准 CRLF 行尾，不依赖代码页切换；合并完成后窗口会停在 `pause` 等待按键，不会一闪而过。若出现 `[MISSING]` / `[FAILED]`，请确认分片下载完整后重试。
 
    不想用 merge.bat？在 CMD 中手动合并：
 

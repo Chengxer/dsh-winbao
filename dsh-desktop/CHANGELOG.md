@@ -4,7 +4,11 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 一键启动 Web UI。
 
 
-## [0.3.5] — 2026-08-15（插件市场替换为 Zat-DSH Engine）
+## [未发布]（0.3.5 开发中，暂缓发布）
+
+> 注意：Zat-DSH Engine 市场替换与客户端更新闭环修复已合入 main，但本版本尚未发布；
+> Gitee 分片合并脚本（merge.bat）已重写为 CRLF + ASCII 提示，修复换行符丢失导致
+> `set FAILED` / `pause` 失效的问题。发布前请重新执行打包并核验全部文档链接。
 
 ### 新增
 - **插件市场整体替换为 [Zat-DSH Engine](https://github.com/mishibeikejie/zat-dsh-engine)（MIT）**：移除旧 `@deepseek-ai/dsh-plugin-marketplace` 的同步副本与 patch 条目，新增 `zat-dsh-engine` bundle（社区目录 / 双语简介 / 一键安装更新卸载启停 / 网络自适应 / 自更新）；`zod` 转为显式依赖随包分发

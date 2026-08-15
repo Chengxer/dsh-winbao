@@ -25,13 +25,15 @@ A ready-to-use Windows desktop client wrapping [@deepseek-ai/dsh](https://www.np
 
    **Portable** (no install, double-click to run, USB-friendly):
    - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.3/DSH-Desktop-0.3.3-portable-x64.exe.part1) (~95 MB)
-   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.3/DSH-Desktop-0.3.3-portable-x64.exe.part2) (~31 MB)
+   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.3/DSH-Desktop-0.3.3-portable-x64.exe.part2) (~22 MB)
 
    **Setup** (installs to system, creates desktop/start menu shortcuts):
    - [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.3/DSH-Desktop-Setup-0.3.3-x64.exe.part1) (~95 MB)
-   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.3/DSH-Desktop-Setup-0.3.3-x64.exe.part2) (~32 MB)
+   - [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.3/DSH-Desktop-Setup-0.3.3-x64.exe.part2) (~22 MB)
 
 2. Download [merge.bat](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.3/merge.bat), place it in the same folder, and double-click to automatically merge the exe.
+
+   merge.bat notes: it uses ASCII messages and Windows-standard CRLF line endings only (no code-page switching), so it works on any locale. The window stays open at `pause` after merging. If you see `[MISSING]` / `[FAILED]`, re-download the parts and run it again.
 
    Prefer manual merge? Run this in CMD:
 
