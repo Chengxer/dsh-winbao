@@ -148,7 +148,11 @@ export function sessionMode(session) {
 
 export function extractText(data) {
   if (!data) return ''
-  const content = Array.isArray(data.content) ? data.content : []
+  // 防御性解包：插件/工具生成的 user/message 偶有 `data.message` 嵌套形状
+  // （如注入器 startIngest 的 seed），直接读 data.content 会得到空串 →
+  // 构建/修复任务被误判 weak（router-standard issue #1）。
+  const payload = data && typeof data.message === 'object' && data.message !== null ? data.message : data
+  const content = Array.isArray(payload.content) ? payload.content : []
   return content.map((c) => (typeof c === 'string' ? c : (c.text ?? ''))).join(' ')
 }
 

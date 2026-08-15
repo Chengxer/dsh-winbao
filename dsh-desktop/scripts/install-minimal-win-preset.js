@@ -10,10 +10,14 @@
 //
 // Preset directory ids must match [a-z0-9-]+ (the user-facing name lives in
 // each preset.yml). Current set:
-//   minimal-win             -> 极简模式_win
-//   router-standard         -> Router Standard (experimental)
-//   anchored-standard       -> Anchored Standard (experimental)
-//   zero-anchored-standard  -> Zero-Anchored Standard (experimental)
+//   minimal-win                    -> 极简模式_win
+//   router-standard                -> Router Standard (experimental)
+//   anchored-standard              -> Anchored Standard (experimental)
+//   zero-anchored-standard         -> Zero-Anchored Standard (experimental)
+//   whoami-standard                -> Whoami Standard (experimental)
+//   v4-flash-godmode-opencode-go   -> Router Flash (opencode-go)
+//   warmupbetter                   -> Warmup Better
+//   warmupbetter-replay            -> Warmup Better Replay
 
 const fs = require('node:fs');
 const path = require('node:path');

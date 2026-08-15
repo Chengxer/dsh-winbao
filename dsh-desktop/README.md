@@ -114,9 +114,10 @@
  - **渲染进程崩溃自动恢复**：`render-process-gone` 后指数退避重载（0.8s 起步，封顶 15s），连续失败第 3 次重建 BrowserWindow（保持隐藏/托盘状态）；超过上限显示本地恢复页（重新加载 / 重启客户端 / 打开日志）并通知；稳定存活 30s 才清零计数
 - **渲染心跳与假死恢复**：preload 每 5 秒上报心跳，主进程 30 秒未收到则恢复；`unresponsive` 15 秒后同样恢复。
 - **会话历史兼容**：打包时 `afterPack` 自动修补内置 `@deepseek-ai/dsh-session` 事件词汇表，接受 dsh-agent-teams / dsh-message-edit / dsh-web-search-exa 的事件，修复 `SessionFormatUnsupportedError`。
-- **极简模式_win**：内置 `minimal-win` Agent 预设（`pwsh` + `str_replace_editor`），打包时自动写入内置 dsh CLI。
-- **dsh-routing-suite**：`dsh-super-injector` 作为 bundle 插件内置并同步进 web profile，提供 `dev_*` 注入/热重载/自愈工具；`router-standard` 预设内置写入 dsh CLI。
-- **dsh-anchored-standard**：内置 `anchored-standard` 与 `zero-anchored-standard` 两个实验性预设，打包时写入 dsh CLI 的 agent-presets。
+- **内置 Agent 预设（8 个）**：`minimal-win`、`router-standard`、`anchored-standard`、`zero-anchored-standard`、`whoami-standard`、`v4-flash-godmode-opencode-go`、`warmupbetter`、`warmupbetter-replay`，打包时自动写入内置 dsh CLI；详细来源与许可见 [docs/agent-presets.md](docs/agent-presets.md)。
+- **dsh-routing-suite**：`router-standard`（官方 API flash 方案）与 `dsh-super-injector` 的 `dev_*` 注入/热重载/自愈工具一并内置。
+- **dsh-anchored-standard**：`anchored-standard` / `zero-anchored-standard` / `whoami-standard`（官方 API pro 方案）三个实验性预设一并内置。
+- **opencode-go 预设**：`v4-flash-godmode-opencode-go`（flash）与 `warmupbetter` / `warmupbetter-replay`（pro）内置。
 
 
 
@@ -245,7 +246,7 @@ dsh-desktop/
 ├── preload.js            # 沙箱预加载（自绘玻璃标题栏 + 窗口控制/菜单 IPC + 余额事件桥）
 恢复页
 │   ├── sponsor/          # 赞助收款码（支付宝 / 微信，「请作者喝咖啡」面板与本文档共用）
-│   ├── agent-presets/    # minimal-win / router-standard / anchored-standard / zero-anchored-standard 内置预设
+│   ├── agent-presets/    # 8 个内置预设（minimal-win / router-standard / anchored-standard / zero-anchored-standard / whoami-standard / v4-flash-godmode-opencode-go / warmupbetter / warmupbetter-replay）
 │   └── plugins/          # dsh-balance / dsh-file-changes / dsh-vision / zat-dsh-engine / dsh-super-injector 等，启动时自动同步进 web profile
 ├── scripts/
 │   ├── fetch-node.js     # 内置 node.exe 复制脚本

@@ -25,6 +25,17 @@ DSH Desktop 集成了大量开源组件。本文件汇总主要第三方项目�
 - 数据：社区目录实时来自 GitHub `dsh-plugin` 主题；内置 999 条中文简介与分类数据已编译进 `lib/index.js`。
 - 修改说明：本仓库按上游 release 原样打包，未做代码改动；运行时由 `syncCompanionPlugins` 同步为 web profile bundle。
 
+## 内置 Agent 预设（第三方预设来源）
+
+详见 [docs/agent-presets.md](agent-presets.md)。主要上游：
+
+| 预设 | 上游 | 许可证 |
+|---|---|---|
+| `router-standard` | [yjh051108/dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite) / [dsh-router-standard](https://github.com/yjh051108/dsh-router-standard) | MIT |
+| `anchored-standard`、`zero-anchored-standard`、`whoami-standard` | [xiaobright/dsh-anchored-standard](https://github.com/xiaobright/dsh-anchored-standard) | MIT |
+| `v4-flash-godmode-opencode-go` | [SheberDavid/v4-flash-godmode-opencode-go](https://github.com/SheberDavid/v4-flash-godmode-opencode-go) | ⚠️ 上游无 LICENSE，分发前需确认 |
+| `warmupbetter`、`warmupbetter-replay` | [0liveiraaa/myDshPresets](https://github.com/0liveiraaa/myDshPresets) | 上游附 `LICENSE.deepseek-harness`（MIT 文本），建议与作者确认 |
+
 ## 其他说明
 
 - 所有 npm 依赖的许可证均可通过各包目录内的 `LICENSE` 文件核验；electron-builder 在打包时会保留这些文件。

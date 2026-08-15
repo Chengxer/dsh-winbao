@@ -1,6 +1,10 @@
-# The `zero-anchored-standard` experimental preset: Standard capabilities with
-# the Minimal mode system-prompt condition used by the V4 trajectory
-# evaluation, plus a zero-tool anchor turn.
+# The `whoami-standard` experimental preset: Standard capabilities with the
+# Minimal mode system-prompt condition used by the V4 trajectory evaluation,
+# plus a whoami anchor turn.
+#
+# Whatever the user's first message is, the first model request sees only the
+# fixed "你是谁" prompt on an EMPTY tool surface; the real message is deferred
+# to the next turn, when the promoted resident catalog is already unlocked.
 #
 # This file is an AGENT-PLANE composition. The roster mounts it ONCE under a
 # standing scope; every session naming it joins by scope parentage, so the
@@ -51,11 +55,11 @@
   name: ../preset/dev-tool-search.mjs
 
 # V4 Pro conditions strongly on the API tool catalog. The first top-level
-# model request therefore carries ZERO tools: `anchor-turn` seeds a fixed user
-# message, this bootstrap strips the whole catalog, and the first reasoning
-# chain follows the zero-injection "we" trajectory. After that assistant
-# response is durable, later step assemblies narrow to the minimal RESIDENT
-# set (shells + str_replace_editor + the discovery tools + explicitly
+# model request therefore carries ZERO tools: `whoami-turn` seeds the fixed
+# "你是谁" user message, this bootstrap strips the whole catalog, and the
+# model's self-introduction reply is the promotion signal. After that
+# assistant response is durable, later step assemblies narrow to the minimal
+# RESIDENT set (shells + str_replace_editor + the discovery tools + explicitly
 # unlocked tools) instead of the full Standard dump — the post-promotion
 # regression fix. Subagents always see the full catalog.
 #
@@ -75,15 +79,17 @@
     suppressedContextSources: [agent-instructions, skill-catalog]
     compactionTools: [read, write, edit, glob, grep, todo_write, ask_user_question]
 
-# Seed the fixed zero-tool anchor turn when the first user message arrives:
-# the anchor is prepended ahead of it, so the first real model request has no
-# tools (we chain) and the real input then arrives with the full Standard
-# catalog already unlocked. Anchoring on first message — not session creation —
-# keeps the blank-session preset switcher usable.
-- id: anchor-turn
-  name: ./anchor-turn.mjs
+# Seed the whoami anchor turn when the first user message arrives: the anchor
+# is prepended to the `next-turn` inbox queue ahead of the real message, and
+# dsh claims exactly ONE `next-turn` message per turn, so the first real model
+# request sees only "你是谁" with no tools, while the real input is claimed by
+# the NEXT turn — with the promoted resident catalog already unlocked.
+# Anchoring on first message — not session creation — keeps the blank-session
+# preset switcher usable. The anchor text is configurable via `text`.
+- id: whoami-turn
+  name: ./whoami-turn.mjs
   config:
-    text: This round is a test. Tools are not open yet; all tools will open next round.
+    text: 你是谁
 
 # ── shell ───────────────────────────────────────────────────────────────────
 

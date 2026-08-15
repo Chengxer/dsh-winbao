@@ -1,6 +1,17 @@
-# The `zero-anchored-standard` experimental preset: Standard capabilities with
-# the Minimal mode system-prompt condition used by the V4 trajectory
-# evaluation, plus a zero-tool anchor turn.
+# The `router-standard` experimental preset: task-aware reasoning-mode routing.
+#
+# One preset, two reasoning modes, chosen from the session's first user
+# message before the first model request:
+#
+#   spec  (Specification-first, plan-collective)  — maintenance/fix tasks.
+#         persona: minimal RL-aligned sentence; core: read/edit/glob/grep.
+#   react (Reactive-execution, doer)              — greenfield/build tasks.
+#         persona: hands-on doer, no ceremony;    core: read/write/edit.
+#
+# After the first durable tool/call the full Standard catalog is exposed and
+# the router stops touching anything. Mode derives from durable session
+# events, so resume/reload keeps it. `dev_router_status` / `dev_router_override`
+# expose the routing to the agent itself for self-optimization.
 #
 # This file is an AGENT-PLANE composition. The roster mounts it ONCE under a
 # standing scope; every session naming it joins by scope parentage, so the
@@ -21,69 +32,24 @@
 
 # ── identity ────────────────────────────────────────────────────────────────
 
-# Keep this text byte-identical to the Minimal preset. `complete` prevents the
-# Harness identity and per-tool guidance from changing the system prompt, while
-# runtime-context suppression leaves task and repository rules to user messages
-# and explicit file reads. Tool schemas and their runtime enforcement remain.
+# The router plugin replaces `sections` and clears `contexts` on the first
+# assembly, so this row is the fallback persona only (never `complete`).
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
     text: You are a helpful software engineer assistant.
-    complete: true
-    includeRuntimeContext: false
 
-# Instruction FILES are NOT injected (replaces dsh-agent-instructions, local
-# addition): the full AGENTS.md/CLAUDE.md digest is a large injected block
-# that perturbs the trajectory even after promotion. Instead, after promotion
-# ONE short hint is injected once per session — "these instruction files
-# exist; read them before acting" — and the model reads the files itself via
-# the filesystem tools when relevant.
-- id: instruction-hint
-  name: ../preset/instruction-hint.mjs
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
   config:
-    promoteOn: assistant-message
+    maxBytes: 65536
 
-# On-demand tool discovery (the tool-search pattern, local addition): the
-# promoted catalog keeps a minimal resident set; heavier Standard tools
-# (web_search, subagent, workflow, …) are unlocked on demand via
-# dev_tool_search.
-- id: dev-tool-search
-  name: ../preset/dev-tool-search.mjs
-
-# V4 Pro conditions strongly on the API tool catalog. The first top-level
-# model request therefore carries ZERO tools: `anchor-turn` seeds a fixed user
-# message, this bootstrap strips the whole catalog, and the first reasoning
-# chain follows the zero-injection "we" trajectory. After that assistant
-# response is durable, later step assemblies narrow to the minimal RESIDENT
-# set (shells + str_replace_editor + the discovery tools + explicitly
-# unlocked tools) instead of the full Standard dump — the post-promotion
-# regression fix. Subagents always see the full catalog.
-#
-# The same phase gate suppresses AUTO-INJECTED context (`suppressedContextSources`,
-# default `['skill-catalog', 'agent-instructions']`) while the session is
-# un-promoted — same reasoning as the anchored variant (issue #6: 0/9 anchored
-# with the skill catalog present vs ~81% without).
-#
-# COMPACTION (local addition): after `compaction/end` the session falls back
-# to the controlled phase — shells + `compactionTools` — until a NEW durable
-# assistant message exists past the boundary (epoch-aware, see
-# preset/compaction-epoch.mjs). The zero-tool anchor applies ONLY to the very
-# first request; post-compaction the model is mid-task and keeps working.
-- id: zero-tool-bootstrap
-  name: ./zero-tool-bootstrap.mjs
-  config:
-    suppressedContextSources: [agent-instructions, skill-catalog]
-    compactionTools: [read, write, edit, glob, grep, todo_write, ask_user_question]
-
-# Seed the fixed zero-tool anchor turn when the first user message arrives:
-# the anchor is prepended ahead of it, so the first real model request has no
-# tools (we chain) and the real input then arrives with the full Standard
-# catalog already unlocked. Anchoring on first message — not session creation —
-# keeps the blank-session preset switcher usable.
-- id: anchor-turn
-  name: ./anchor-turn.mjs
-  config:
-    text: This round is a test. Tools are not open yet; all tools will open next round.
+# Task-aware reasoning-mode router: classifies the first user message and
+# injects the matching persona + first-turn core tool set; after the first
+# durable tool/call, exposes the full Standard catalog.
+- id: router-bootstrap
+  name: ./router-bootstrap.mjs
+  config: {}
 
 # ── shell ───────────────────────────────────────────────────────────────────
 
@@ -102,18 +68,6 @@
   name: '@deepseek-ai/dsh-tool-pwsh'
   disabled: !!js process.platform !== 'win32'
 
-# Windows-only `bash` tool (see preset/custom-bash.mjs): the official bash
-# needs a PTY, and DSH's PTY backend is linux/darwin-only. This row presents
-# the SAME tool name (`bash`) with a Minimal-compatible description but spawns
-# Git Bash through the ordinary cross-platform subprocess seam. `bashPath`
-# defaults to `bash` on PATH; point it at Git Bash explicitly when the WSL
-# shim would otherwise be picked up.
-- id: custom-bash
-  name: ../preset/custom-bash.mjs
-  disabled: !!js process.platform !== 'win32'
-  config:
-    bashPath: 'C:\Program Files\Git\bin\bash.exe'
-
 # ── filesystem ──────────────────────────────────────────────────────────────
 
 # Both register into the host `tools` registry and provide nothing, so
@@ -125,29 +79,6 @@
   name: '@deepseek-ai/dsh-tool-fs-search'
   config:
     sampleOverCapGlobResults: false
-
-# The Minimal preset's second tool: `str_replace_editor` over a bare local
-# filesystem, byte-identical in configuration to the official `minimal`
-# preset's `filesystem` group (and to the anchored preset's copy). It is part
-# of the promoted resident set. The editor's own realm shadows the host's
-# sandboxed `fs` provider only inside this group, so the standard `read`/
-# `write`/`edit` tools keep the sandboxed fs while the editor uses the local
-# one.
-- id: bootstrap-filesystem
-  name: cordis:group
-  group: true
-  isolate:
-    fs: true
-  config:
-    - id: fs-local
-      name: '@deepseek-ai/dsh-fs-local'
-      config:
-        cwd: !!js process.env.DSH_CWD ?? process.cwd()
-
-    - id: str-replace-editor
-      name: '@deepseek-ai/dsh-tool-str-replace-editor'
-      config:
-        maxOutputChars: 16000
 
 # ── background jobs ────────────────────────────────────────────────────────
 
@@ -165,17 +96,14 @@
 
 # The skill REGISTRY lives in the host composition and is layered per scope:
 # these rows register into THIS preset's layer of it, so they need no realm.
-# `skill-filesystem` contributes local-root discovery for agents on this
-# preset. The full skill CATALOG injection (`dsh-tool-skill`, the ~9KB
-# `<available_skills>` reminder) is REMOVED (local addition): it perturbs the
-# trajectory (issue #6). Instead `skill-search` exposes two small on-demand
-# tools — skill_search (list matching summaries) and skill_load (inject one
-# skill's full instructions) — the tool-search pattern.
+# `skill-filesystem` contributes local-root discovery for agents on this preset, and
+# `tool-skill` gives them the catalog and loader; the merged catalog also
+# carries whatever the deployment registered globally (repository plugins).
 - id: skill-filesystem
   name: '@deepseek-ai/dsh-skill-filesystem'
 
-- id: skill-search
-  name: ../preset/skill-search.mjs
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
 
 # ── goals ───────────────────────────────────────────────────────────────────
 
