@@ -1649,6 +1649,7 @@ async function runUpdateFlow(manual) {
       applyVisionKeyFix();
       applyProfilePatchGuard();
       applySettingsSectionGuard();
+  applyWorkspaceSearchRailFix();
     }
     const { response: r2 } = await showBox({
       type: 'info',
@@ -2855,6 +2856,43 @@ function applySettingsSectionGuard() {
   }
 }
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// dsh-client-ui-workspace 搜索栏修复：侧边栏收起（rail）时点「搜索会话」会
+// 先 expandSidebar() 再 setSearchExpanded(true)。React 状态提交后，宽侧边栏
+// 新挂的 document click 监听会捕获同一个 click（旧 rail 按钮已不在 searchRoot
+// 内），立即把 searchExpanded 复位为 false——表现为「只是切到对话，搜索框没
+// 展开」。这里幂等地给监听加 searchOnExpand 宽限，并补进依赖数组。
+// ---------------------------------------------------------------------------
+function applyWorkspaceSearchRailFix() {
+  const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
+  const guardMarker = 'dsh-desktop fix: rail search expansion';
+  const oldGuard = '\t\t\t\tif (!wide || !searchExpanded) return;';
+  const newGuard = '\t\t\t\tif (!wide || !searchExpanded || searchOnExpand) return; // ' + guardMarker;
+  const oldDeps = '\t\t\t}, [\n\t\t\t\tnormalizedQuery,\n\t\t\t\twide,\n\t\t\t\tsearchExpanded\n\t\t\t]);';
+  const newDeps = '\t\t\t}, [\n\t\t\t\tnormalizedQuery,\n\t\t\t\twide,\n\t\t\t\tsearchExpanded,\n\t\t\t\tsearchOnExpand\n\t\t\t]);';
+  const candidates = [
+    path.join(__dirname, 'node_modules', '@deepseek-ai', 'dsh-client-ui-workspace', 'lib', 'client.js'),
+    path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh-client-ui-workspace', 'lib', 'client.js'),
+    path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-client-ui-workspace', 'lib', 'client.js'),
+    path.join(home, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-client-ui-workspace', 'lib', 'client.js'),
+  ];
+  for (const file of candidates) {
+    if (!file || !fs.existsSync(file)) continue;
+    try {
+      let src = fs.readFileSync(file, 'utf8');
+      if (src.includes(guardMarker)) { log('boot', 'workspace 搜索栏修复: 已应用，跳过 ' + file); continue; }
+      if (!src.includes(oldGuard) || !src.includes(oldDeps)) {
+        log('boot', 'workspace 搜索栏修复: 锚点未匹配（dsh 版本可能已变化），跳过 ' + file);
+        continue;
+      }
+      src = src.replace(oldGuard, newGuard).replace(oldDeps, newDeps);
+      fs.writeFileSync(file, src, { encoding: 'utf8' });
+      log('boot', 'workspace 搜索栏修复: 已注入到 ' + file);
+    } catch (err) {
+      log('boot', 'workspace 搜索栏修复失败(' + file + '): ' + err.message);
+    }
+  }
+}
 // 快捷方式维护：修复「没有桌面快捷方式 / 快捷方式指向的文件消失」，
 // 并让快捷方式图标跟随图标设计更新（.lnk 单独指定 icon.ico）。
 // ---------------------------------------------------------------------------
@@ -3448,6 +3486,7 @@ async function boot() {
     applyVisionKeyFix();
     applyProfilePatchGuard();
     applySettingsSectionGuard();
+  applyWorkspaceSearchRailFix();
   } else {
     // 先修复 profile fallback 联接再同步/补丁依赖文件：EPERM 环境下补丁写不进去。
     await repairProfileFallback(home);
@@ -3458,6 +3497,7 @@ async function boot() {
     applyVisionKeyFix();
     applyProfilePatchGuard();
     applySettingsSectionGuard();
+  applyWorkspaceSearchRailFix();
     initRendererRecovery();
     createWindow();
     wireWindowRecovery();
