@@ -4,7 +4,7 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 一键启动 Web UI。
 
 
-## [未发布]（0.3.5 开发中，暂缓发布）
+## [0.3.6] — 2026-08-15
 
 > 注意：Zat-DSH Engine 市场替换与客户端更新闭环修复已合入 main，但本版本尚未发布；
 > Gitee 分片合并脚本（merge.bat）已重写为 CRLF + ASCII 提示，修复换行符丢失导致

@@ -87,7 +87,7 @@
 
 ## 插件市场（Zat-DSH Engine）
 
-- **下一版本（0.3.5 开发中，尚未发布）**：设置 → 插件 →「插件市场」由 **[Zat-DSH Engine](https://github.com/mishibeikejie/zat-dsh-engine)**（MIT License）完全提供，替换旧版内置市场。
+- **v0.3.6 起**：设置 → 插件 →「插件市场」由 **[Zat-DSH Engine](https://github.com/mishibeikejie/zat-dsh-engine)**（MIT License）完全提供，替换旧版内置市场。
 - **社区全量目录**：实时搜索 GitHub `dsh-plugin` 主题下的 1700+ 社区插件，12 个分类，中英双语介绍（内置 999 条中文简介，新插件由当前模型即时翻译）。
 - **一键安装 / 更新 / 卸载 / 启停**：基于官方 `dsh plugin` profile 机制（底层 pnpm），多插件仓库支持图形化选择；安装前冲突检测 + 健康报告 + 失败自动回滚 + 最近已知可用备份。
 - **网络自适应**：系统代理 → 直连 → `gh-proxy.com` 镜像 → 内置 fetch 兜底，无需 VPN。
@@ -104,9 +104,9 @@
 - [cakeni/harness-pet](https://github.com/cakeni/harness-pet)（MIT）内置：会话旁的鲸鱼小宠物，素材与归因随包分发（`assets/plugins/harness-pet`）。
 - 同样以 bundle 形式自动同步进 web profile。
 
-## 稳定性与兼容性（0.3.4，0.3.5 开发中）
+## 稳定性与兼容性（0.3.6）
 
-### 未发布（0.3.5 开发中，暂缓）
+### v0.3.6
 
 - **插件市场整体替换为 Zat-DSH Engine（MIT）**：移除旧 `@deepseek-ai/dsh-plugin-marketplace` 的同步副本与 patch 条目，新增 `zat-dsh-engine` bundle；`zod` 作为显式依赖随包分发。
 - **客户端更新「立即重启后仍提示待安装」闭环修复**：settings 原子写 + 回读校验、记录安装尝试、启动识别「客户端更新未完成」并支持重试/日志/稍后；NSIS 脚本失败或取消时自动拉起旧版本。
