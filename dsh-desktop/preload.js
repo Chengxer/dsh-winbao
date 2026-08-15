@@ -338,6 +338,9 @@ function injectFloatBar() {
   const layout = document.createElement('style');
   layout.textContent = `body{box-sizing:border-box!important;padding-top:${FLOAT_BAR_HEIGHT}px!important}`;
   document.head.appendChild(layout);
+    // 向页面声明浮窗拖拽条高度：fixed 定位的侧边栏（dsh-better-sidebar）读取
+    // 该属性自动下移顶部标签条，body padding 只对普通流内容生效。
+    document.documentElement.setAttribute('data-dsh-title-bar-height', String(FLOAT_BAR_HEIGHT));
   const bar = document.createElement('div');
   bar.id = FLOAT_BAR_ID;
   bar.innerHTML = `<button class="df-close" title="关闭" aria-label="关闭">${GLYPHS.close}</button>`;
@@ -353,6 +356,9 @@ function injectChrome() {
   document.head.appendChild(style);
 
   // 内容区整体下移，避免遮挡 Web UI 顶部。
+    // 向页面声明自绘标题栏高度：fixed 定位的侧边栏（dsh-better-sidebar）读取
+    // 该属性自动下移顶部标签条，body padding 只对普通流内容生效。
+    document.documentElement.setAttribute('data-dsh-title-bar-height', String(BAR_HEIGHT));
   const layout = document.createElement('style');
   layout.textContent = `body{box-sizing:border-box!important;padding-top:${BAR_HEIGHT}px!important}`;
   document.head.appendChild(layout);
