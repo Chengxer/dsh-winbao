@@ -65,10 +65,16 @@ function fileRoots() {
 
 function isUnderFileRoots(p) {
   const resolved = path.resolve(p);
-  return fileRoots().some((r) => {
+  const check = () => fileRoots().some((r) => {
     const rp = path.resolve(r);
     return resolved === rp || resolved.startsWith(rp + path.sep);
   });
+  if (check()) return true;
+  // 缓存可能滞后于新会话：5 分钟 TTL 内新建的会话，其 cwd 尚未进入缓存。
+  // 首次判定不通过时强制刷新一次再判，避免误拒新会话的项目文件（预览/还原/打开）。
+  // 刷新后的缓存再保持 5 分钟，攻击性探测最多触发每 5 分钟一次重扫。
+  fileRootsCache.at = 0;
+  return check();
 }
 
 const IS_WIN = process.platform === 'win32';
@@ -2550,6 +2556,15 @@ function startPreviewStaticServer() {
       res.end();
       return;
     }
+    // H2/H3 文件围栏：与 dsh:file-open / dsh:file-revert 一致，只允许读取
+    // 「会话 cwd」之下的项目文件。否则本服务会成为任意本地文件读取通道：
+    // 预览 iframe 与本服务同源（allow-same-origin），可读取并外传
+    // settings / 凭据等敏感文件（实测 C:\Windows、userData 等均可读出）。
+    if (!isUnderFileRoots(p)) {
+      res.writeHead(403);
+      res.end();
+      return;
+    }
     try {
       const st = fs.statSync(p);
       if (!st.isFile()) {
@@ -2639,6 +2654,8 @@ function setupTestChannel() {
         restartingServer = false;
       }
     },
+    // 与 chrome:restart-service IPC 完全一致的路径（供集成测试复现端口稳定性）。
+    'restart-service': () => restartService(),
     'reload-main': () => {
       if (!mainWindow || mainWindow.isDestroyed()) throw new Error('no main window');
       mainWindow.reload();
