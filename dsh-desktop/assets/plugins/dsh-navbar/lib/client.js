@@ -41,7 +41,7 @@ window.__ModuleLoader__.load({
 					style.id = STYLE_ID;
 					style.textContent = `
 [data-dsh-navbar] {
-  position: fixed; top: 50%; transform: translateY(-50%); z-index: 900;
+  position: fixed; top: 50%; transform: translateY(-50%); z-index: 950;
   display: flex; flex-direction: column; gap: 10px; padding: 8px;
   border-radius: 12px; font-family: system-ui;
   max-height: calc(100vh - 32px); overflow-y: auto;
@@ -155,6 +155,10 @@ window.__ModuleLoader__.load({
 					const flow = flowOf();
 					if (flow === null) return;
 					const right = flow.getBoundingClientRect().right;
+					// 布局重排瞬间（会话切换 / 侧栏折叠动画中）flow 的 rect 可能是
+					// 0 或 NaN：此时移动 bar 会把它钉到错误位置（视觉上"消失"）。
+					// 保留原位，等 observer 在布局稳定后再次触发 position。
+					if (!Number.isFinite(right) || right <= 0) return;
 					const next = Math.round(Math.min(right + 12, window.innerWidth - bar.offsetWidth - 8));
 					const nextLeft = `${Math.max(8, next)}px`;
 					if (bar.style.left !== nextLeft) bar.style.left = nextLeft;
@@ -431,13 +435,15 @@ window.__ModuleLoader__.load({
 						return;
 					}
 					bindIO();
+					// 任何非 bar/preview 自身的 DOM 变化都触发重渲染：
+					// 侧栏折叠/展开、better-sidebar 面板开关、浮窗出现等兄弟节点
+					// 布局变化同样会改变对话流的几何位置，只响应 flow 内部变化
+					// 会让 bar 停在旧位置（视觉上"消失"）。schedule 自带 rAF 节流。
 					for (const m of mutations) {
 						if (m.target === bar || bar.contains(m.target)) continue;
 						if (m.target === preview || preview.contains(m.target)) continue;
-						if (flow !== null && (m.target === flow || flow.contains(m.target))) {
-							schedule();
-							return;
-						}
+						schedule();
+						return;
 					}
 				});
 				observer.observe(body, {
