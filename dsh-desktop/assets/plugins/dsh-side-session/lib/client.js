@@ -45,8 +45,8 @@ window.__ModuleLoader__.load({
     // ------------------------------------------------------------------
     var store = {
       mode: "1",
-      carrier: "float", // 仅浮窗形态（按用户要求移除侧栏样式）
-      expanded: false, // 默认收起；footer 图标 / Ctrl+Shift+S 唤起（不自动弹窗）
+      carrier: "float", // 仅浮窗形态
+      expanded: false, // 不自动弹出：由 footer 图标 / Ctrl+Shift+S / 斜杠命令唤起（符合 SPEC）
       sessionId: "",
       context: null,
       thread: [],
@@ -89,9 +89,9 @@ window.__ModuleLoader__.load({
     var pluginSettings = {
       mode: "1",
       apiKey: "",
-      model: "deepseek-v4-flash",
+      model: "deepseek-chat",
       endpoint: "https://api.deepseek.com",
-      panelWidth: 380,
+      contextLength: "2",
     };
 
     function applySettingsSnapshot() {
@@ -102,9 +102,9 @@ window.__ModuleLoader__.load({
           pluginSettings = {
             mode: String(v.mode || "1"),
             apiKey: v.apiKey || "",
-            model: v.model || "deepseek-v4-flash",
+            model: v.model || "deepseek-chat",
             endpoint: v.endpoint || "https://api.deepseek.com",
-            panelWidth: Number(v.panelWidth) || 380,
+            contextLength: String(v.contextLength || "2"),
           };
           if (getState().mode !== pluginSettings.mode) setState({ mode: pluginSettings.mode });
         }
@@ -138,19 +138,33 @@ window.__ModuleLoader__.load({
     // ------------------------------------------------------------------
     // 上下文获取
     // ------------------------------------------------------------------
+    var lastFingerprint = "";
     function fetchContext(sessionId) {
       if (!sessionId) return;
-      fetch("/api/dsh-side-session/context?sessionId=" + encodeURIComponent(sessionId))
+      // 先轮询轻量 meta（计数+指纹），内容变化才拉全量 → 避免大 JSON 每 2s 传输解析
+      fetch("/api/dsh-side-session/context?sessionId=" + encodeURIComponent(sessionId) + "&meta=1")
         .then(function (r) {
           return r.ok ? r.json() : null;
         })
-        .then(function (data) {
-          if (data && data.sessionId === getState().sessionId) setState({ context: data });
+        .then(function (m) {
+          if (!m || m.sessionId !== getState().sessionId) return;
+          var fp = String(m.updatedAt || 0) + ":" + String(m.msgs || 0) + ":" + String(m.files || 0) + ":" + String(m.title || "");
+          if (fp === lastFingerprint) return; // 无变化：不重拉、不重渲染
+          lastFingerprint = fp;
+          fetch("/api/dsh-side-session/context?sessionId=" + encodeURIComponent(sessionId))
+            .then(function (r) {
+              return r.ok ? r.json() : null;
+            })
+            .then(function (data) {
+              if (data && data.sessionId === getState().sessionId) setState({ context: data });
+            })
+            .catch(function () {});
         })
         .catch(function () {});
     }
     function loadContext(sessionId) {
       if (!sessionId) return;
+      lastFingerprint = "";
       setState({ sessionId: String(sessionId), context: null });
       fetchContext(sessionId);
     }
@@ -269,6 +283,15 @@ window.__ModuleLoader__.load({
       }
     }
 
+    var abortController = null;
+    function stopStreaming() {
+      if (abortController) {
+        try { abortController.abort(); } catch (e) {}
+        abortController = null;
+      }
+      setState({ streaming: false });
+    }
+
     function ask(question) {
       var s = getState();
       if (s.streaming || !question || !question.trim()) return;
@@ -298,10 +321,12 @@ window.__ModuleLoader__.load({
         if (state.context.provider) body.provider = state.context.provider;
         if (state.context.model) body.model = state.context.model;
       }
+      abortController = new AbortController();
       fetch("/api/dsh-side-session/ask", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
+        signal: abortController.signal,
       })
         .then(function (r) {
           if (!r.ok) {
@@ -317,9 +342,14 @@ window.__ModuleLoader__.load({
           return readSSE(r, appendAssistant);
         })
         .then(function () {
+          abortController = null;
           setState({ streaming: false });
         })
-        .catch(fail);
+        .catch(function (err) {
+          abortController = null;
+          if (err && err.name === "AbortError") { setState({ streaming: false }); return; }
+          fail(err);
+        });
     }
 
     function clearThread() {
@@ -564,6 +594,10 @@ window.__ModuleLoader__.load({
       ".dss-send:active{transform:scale(.94)}",
       ".dss-send:disabled{opacity:.45;cursor:default}",
       ".dss-send svg{width:15px;height:15px}",
+      ".dss-stop{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:50%;border:1px solid var(--dsw-alias-border-l2);flex:none;background:transparent;color:var(--dsw-alias-state-error-primary,#e5484d);cursor:pointer;transition:opacity .15s,transform .1s}",
+      ".dss-stop:hover{opacity:.8}",
+      ".dss-stop:active{transform:scale(.94)}",
+      ".dss-stop svg{width:15px;height:15px}",
       // —— 浮窗缩放手柄 ——
       ".dss-resize{position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;z-index:5}",
       ".dss-resize:after{content:'';position:absolute;right:4px;bottom:4px;width:7px;height:7px;",
@@ -585,6 +619,9 @@ window.__ModuleLoader__.load({
       "border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1));outline:none;font-family:inherit}",
       ".dss-set-input:focus,.dss-set-select:focus{border-color:var(--dsw-alias-state-business-primary,#4176e6)}",
       ".dss-set-hint{font-size:11px;color:var(--dsw-alias-label-tertiary,#6b7280);line-height:1.5}",
+      ".dss-set-apply{align-self:flex-start;padding:5px 16px;border-radius:8px;font-size:12px;border:none;cursor:pointer;background:var(--dsw-alias-state-business-primary,#4176e6);color:#fff;transition:opacity .15s,transform .1s}",
+      ".dss-set-apply:hover{opacity:.88}",
+      ".dss-set-apply:active{transform:scale(.96)}",
     ].join("");
 
     function ensureCss() {
@@ -711,11 +748,30 @@ window.__ModuleLoader__.load({
                 }, 10);
               },
               onKeyDown: onKeyDown,
-              onCopy: function () {},
-              onCut: function () {},
-              onPaste: function () {},
             })
           ),
+          s.streaming
+            ? h(
+                "button",
+                {
+                  className: "dss-stop",
+                  onClick: stopStreaming,
+                  title: "停止回答",
+                  "aria-label": "停止回答",
+                },
+                h(
+                  "svg",
+                  {
+                    viewBox: "0 0 24 24",
+                    fill: "none",
+                    stroke: "currentColor",
+                    "stroke-width": "2",
+                    "stroke-linecap": "round",
+                  },
+                  h("rect", { x: 7, y: 7, width: 10, height: 10, rx: 1 })
+                )
+              )
+            : null,
           h(
             "button",
             {
@@ -893,44 +949,6 @@ window.__ModuleLoader__.load({
         document.addEventListener("mouseup", up);
       }
 
-      // 停靠面板头部：拖离右缘即撕出为浮窗
-      function onPanelHeadDown(e) {
-        if (e.button !== 0 || !rootRef.current) return;
-        var rect = rootRef.current.getBoundingClientRect();
-        var startX = e.clientX;
-        var startY = e.clientY;
-        var offX = startX - rect.left;
-        var offY = startY - rect.top;
-        var detached = false;
-        document.body.style.userSelect = "none";
-        function move(ev) {
-          var dx = ev.clientX - startX;
-          var dy = ev.clientY - startY;
-          if (!detached && (Math.abs(dx) > 36 || Math.abs(dy) > 36)) {
-            detached = true;
-            var x = Math.max(0, Math.min(window.innerWidth - 60, ev.clientX - offX));
-            var y = Math.max(0, Math.min(window.innerHeight - 40, ev.clientY - offY));
-            setState({ carrier: "float", floatPos: { x: x, y: y } });
-          }
-          if (detached && floatRef.current) {
-            var nx = Math.max(0, Math.min(window.innerWidth - 60, ev.clientX - offX));
-            var ny = Math.max(0, Math.min(window.innerHeight - 40, ev.clientY - offY));
-            floatRef.current.style.left = nx + "px";
-            floatRef.current.style.top = ny + "px";
-            floatRef.current.style.right = "auto";
-            floatRef.current.style.bottom = "auto";
-            store.floatPos = { x: nx, y: ny };
-          }
-        }
-        function up() {
-          document.body.style.userSelect = "";
-          document.removeEventListener("mousemove", move);
-          document.removeEventListener("mouseup", up);
-        }
-        document.addEventListener("mousemove", move);
-        document.addEventListener("mouseup", up);
-      }
-
       // 浮窗右下角缩放
       function onResizeStart(e) {
         if (e.button !== 0 || !floatRef.current) return;
@@ -967,9 +985,6 @@ window.__ModuleLoader__.load({
       }, [s.carrier]);
 
       // （原侧栏停靠挤压逻辑已移除：仅保留浮窗形态）
-
-      var panelWidth = Math.max(280, Math.min(640, pluginSettings.panelWidth || 380));
-      var isFloat = s.carrier === "float";
 
       var body = h(
         "div",
@@ -1041,11 +1056,7 @@ window.__ModuleLoader__.load({
 
       return h(
         "div",
-        {
-          className: "dss-root dss-float",
-          ref: floatRef,
-          style: { width: panelWidth + "px" },
-        },
+        { className: "dss-root dss-float", ref: floatRef },
         body,
         h("div", { className: "dss-resize", onMouseDown: onResizeStart, title: "拖拽缩放" })
       );
@@ -1103,7 +1114,10 @@ window.__ModuleLoader__.load({
       var apiKey = pluginSettings.apiKey;
       var model = pluginSettings.model;
       var endpoint = pluginSettings.endpoint;
-      var panelWidth = pluginSettings.panelWidth || 380;
+      // 上下文长度：本地暂存，点「确定」才写入设置（避免 select 每次 change 都持久化导致卡顿）
+      var ctxDraftState = useState(pluginSettings.contextLength || "2");
+      var ctxDraft = ctxDraftState[0];
+      var setCtxDraft = ctxDraftState[1];
 
       return h(
         "div",
@@ -1120,6 +1134,32 @@ window.__ModuleLoader__.load({
             h("option", { value: "3" }, "3 · 宿主 LLM（ctx.llm）")
           ),
           h("div", { className: "dss-set-hint" }, "三模式互斥、持久化、即时切换，无需重启 DSH。")
+        ),
+        h(
+          "div",
+          { className: "dss-set-row" },
+          h("div", { className: "dss-set-label" }, "上下文长度"),
+          h(
+            "select",
+            {
+              className: "dss-set-select",
+              value: ctxDraft,
+              onChange: function (e) { setCtxDraft(e.target.value); },
+            },
+            h("option", { value: "1" }, "1 · 标准（120 条 / 40K 字符，省 token）"),
+            h("option", { value: "2" }, "2 · 加长（600 条 / 200K 字符，推荐）"),
+            h("option", { value: "3" }, "3 · 完整（5000 条 / 2M 字符，最接近通读全文，token 消耗大）")
+          ),
+          h(
+            "button",
+            {
+              className: "dss-set-apply",
+              onClick: function () { setPluginSetting("contextLength", ctxDraft); },
+              title: "应用并保存",
+            },
+            "确定"
+          ),
+          h("div", { className: "dss-set-hint" }, "选择档位后点「确定」生效（控制临时会话能看到的对话条数与文件上限）。")
         ),
         mode === "2"
           ? h(
@@ -1161,24 +1201,7 @@ window.__ModuleLoader__.load({
               )
             )
           : null,
-        h(
-          "div",
-          { className: "dss-set-row" },
-          h("div", { className: "dss-set-label" }, "停靠面板宽度（px，280–640）"),
-          h("input", {
-            className: "dss-set-input",
-            type: "number",
-            min: "280",
-            max: "640",
-            step: "10",
-            value: panelWidth,
-            onChange: function (e) {
-              var n = parseInt(e.target.value, 10);
-              if (!isNaN(n)) setPluginSetting("panelWidth", Math.max(280, Math.min(640, n)));
-            },
-          }),
-          h("div", { className: "dss-set-hint" }, "浮窗可自由拖动/缩放；左下角侧栏图标或 Ctrl+Shift+S 唤起。")
-        ),
+        h("div", { className: "dss-set-hint" }, "浮窗可自由拖动/缩放；左下角侧栏图标或 Ctrl+Shift+S 唤起。"),
         mode === "1"
           ? h("div", { className: "dss-set-hint" }, "使用 DSH 全局凭据（DEEPSEEK_API_KEY 环境变量或 ~/.dsh/.credentials.yaml）。")
           : null,
@@ -1193,6 +1216,8 @@ window.__ModuleLoader__.load({
     // ------------------------------------------------------------------
     function setupSessionWatcher(ctx) {
       function poll() {
+        // 浮窗隐藏时暂停轮询（省资源）
+        if (!getState().expanded) return;
         try {
           var sessions = ctx.get ? ctx.get("sessions", false) : null;
           var id = "";
@@ -1235,102 +1260,79 @@ window.__ModuleLoader__.load({
     // 挂载
     // ------------------------------------------------------------------
     var mounted = false;
-    var appRoot = null;
     function mount(ctx) {
-      if (mounted || typeof document === "undefined") return function () {};
+      if (mounted || typeof document === "undefined") return;
       mounted = true;
       var container = document.createElement("div");
       container.id = "dsh-side-session-root";
       document.body.appendChild(container);
       try {
-        appRoot = reactDom.createRoot(container);
-        appRoot.render(h(App));
+        reactDom.createRoot(container).render(h(App));
       } catch (e) {
         console.warn("[dsh-side-session] 挂载失败：" + String((e && e.message) || e));
       }
-      return function () {
-        try {
-          if (appRoot) appRoot.unmount();
-        } catch (e) {}
-        try {
-          if (container.parentNode) container.parentNode.removeChild(container);
-        } catch (e) {}
-        mounted = false;
-        appRoot = null;
-      };
     }
 
     function apply(ctx) {
       ensureCss();
       bindSettings(ctx);
 
-      // —— 左侧主栏 footer 图标（sidebar.footer.action list 槽，scope=root）——
-      ctx.slots.inject(
-        "sidebar.footer.action",
-        function () {
-          return ctx.slots.register(
-            {
-              name: "sidebar.footer.action",
-              id: "side-session",
-              order: 120,
-              label: function () {
-                return "侧边临时会话";
+      ctx.effect(function () { return setupSessionWatcher(ctx); }, "dsh-side-session: session watcher");
+      ctx.effect(function () { return mount(ctx); }, "dsh-side-session: mount");
+      ctx.effect(function () { return setupHotkey(); }, "dsh-side-session: hotkey");
+
+      // 左侧主栏 footer 唤起图标（list 槽，inject 嵌套写法）
+      ctx.effect(function () {
+        try {
+          return ctx.slots.inject("sidebar.footer.action", function () {
+            return ctx.slots.register({ name: "sidebar.footer.action", id: "dsh-side-session", order: 220, label: "侧边临时会话" }, FooterIcon);
+          }, "dsh-side-session");
+        } catch (e) {
+          console.warn("[dsh-side-session] sidebar.footer.action 槽不可用：" + String((e && e.message) || e));
+        }
+      }, "dsh-side-session: footer icon");
+
+      // 设置面板（settings.section list 槽，inject 嵌套写法）
+      ctx.effect(function () {
+        try {
+          return ctx.slots.inject("settings.section", function () {
+            return ctx.slots.register({ name: "settings.section", id: "dsh-side-session", order: 80, label: function () { return "侧边临时会话"; } }, SettingsCard);
+          }, "name");
+        } catch (e) {
+          console.warn("[dsh-side-session] settings.section 槽不可用：" + String((e && e.message) || e));
+        }
+      }, "dsh-side-session: settings");
+
+      // 斜杠命令 /side-session（popupSelect：唤起浮窗 / 清空）
+      ctx.effect(function () {
+        try {
+          if (!ctx.commandUi || typeof ctx.commandUi.register !== "function") return;
+          return ctx.commandUi.register({
+            name: "side-session",
+            description: "临时会话",
+            available: function () { return true; },
+            ui: {
+              kind: "popupSelect",
+              options: function () {
+                return Promise.resolve([
+                  { id: "float", label: "唤起浮窗" },
+                  { id: "clear", label: "清空临时会话" },
+                ]);
+              },
+              onSelect: function (option) {
+                if (option.id === "float") setState({ expanded: true, carrier: "float" });
+                else if (option.id === "clear") clearThread();
               },
             },
-            FooterIcon
-          );
-        },
-        "dsh-side-session: footer action"
-      );
-
-      // —— 设置节（settings.section list 槽）——
-      ctx.slots.inject(
-        "settings.section",
-        function () {
-          return ctx.slots.register(
-            {
-              name: "settings.section",
-              id: "dsh-side-session",
-              order: 90,
-              label: function () {
-                return "侧边临时会话";
-              },
-            },
-            SettingsCard
-          );
-        },
-        "dsh-side-session: settings section"
-      );
-
-      // —— 会话监视：当前主会话变化时自动导入/刷新上下文 ——
-      ctx.effect(
-        function () {
-          return setupSessionWatcher(ctx);
-        },
-        "dsh-side-session: session watcher"
-      );
-
-      // —— 全局快捷键 Ctrl+Shift+S 唤起浮窗 ——
-      ctx.effect(
-        function () {
-          return setupHotkey();
-        },
-        "dsh-side-session: hotkey"
-      );
-
-      // —— 挂载面板根节点（卸载时清理）——
-      ctx.effect(
-        function () {
-          return mount(ctx);
-        },
-        "dsh-side-session: mount"
-      );
-
-      return function () {}; // 各 effect 自带 disposer，apply 无需额外清理
+          });
+        } catch (e) {
+          console.warn("[dsh-side-session] commandUi 注册失败：" + String((e && e.message) || e));
+        }
+      }, "dsh-side-session: slash command");
     }
 
     exports.apply = apply;
-    exports.inject = ["slots", "settingsScope"];
+    exports.inject = ["slots", "settingsScope", "commandUi"];
     return module.exports;
   }
 });
