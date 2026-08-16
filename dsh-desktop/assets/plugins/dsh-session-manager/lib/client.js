@@ -30,7 +30,7 @@ window.__ModuleLoader__.load({
 			deleteHint: "彻底删除该对话及其日志（不可恢复）",
 			confirmDelete: "确定要彻底删除这个对话吗？会话日志与附件将一并移除，此操作不可恢复。",
 			confirmDeleteTitle: "删除对话",
-			liveRejected: "该对话正在运行，无法删除：请先停止它再删除",
+			runningRejected: "该对话正在运行，无法删除：请先停止它再删除",
 			ok: "已操作",
 			failed: "操作失败",
 			unknownSession: "未知会话",
@@ -124,7 +124,7 @@ window.__ModuleLoader__.load({
 				const { result } = await workspaceApi(context).deleteSession({ sessionId });
 				if (!result.ok) {
 					const message = rpcErrorMessage(result);
-					window.alert(message && message.indexOf("live") >= 0 ? L.liveRejected : L.failed + ": " + message);
+					window.alert(message && /running|live/.test(message) ? L.runningRejected : L.failed + ": " + message);
 					return false;
 				}
 				return true;

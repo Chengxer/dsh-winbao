@@ -9,9 +9,10 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 
 ### 新增
 - **对话删除与归档管理（dsh-session-manager 内置插件）**：dsh 官方只有归档没有删除，现补齐：
-  - 会话行 ⋯ 菜单「归档会话」下方新增「删除对话」（当前会话行不显示）：确认后经宿主 RPC 删除会话日志与附件（运行中的会话被拒绝），列表经官方 host 帧实时移除；
+  - 会话行 ⋯ 菜单「归档会话」下方新增「删除对话」（当前会话行不显示）：确认后经宿主 RPC 删除会话日志与附件（**正在运行**的会话被拒绝），列表经官方 host 帧实时移除；
   - 设置 →「归档对话管理」面板：列出全部已归档对话（标题/项目/更新时间），每条提供「恢复」（回到原工作区与顺序，经 `workspace.unarchiveSession` 持久化并实时广播）与「删除」；
-  - 实现：`scripts/patch-session-manage.js` 对官方包做幂等运行时/打包补丁（`dsh-workspace` WorkspaceRegistry.unarchiveSession；`dsh-host-apiproxy` 新增 workspace.unarchiveSession / workspace.deleteSession RPC——删除按 jsonl 布局移除 `<DSH_HOME>/sessions/<project>/<id>/` 并清理归档集、广播 session/disposed；`dsh-client-connection` API 面与 unary 响应 schema；`dsh-client-ui-workspace` 菜单项与中英文案）；`assets/plugins/dsh-session-manager`（bundle，设置面板 + `window.__dshSessionManager` 桥），启动/打包三路覆盖（dev / afterPack / 运行时），dev node_modules 已实测应用
+  - 实现：`scripts/patch-session-manage.js` 对官方包做幂等运行时/打包补丁（`dsh-workspace` WorkspaceRegistry.unarchiveSession；`dsh-session` Sessions.remove——从 live 注册表摘除、优雅 flush 后释放并广播 session/disposed；`dsh-host-apiproxy` 新增 workspace.unarchiveSession / workspace.deleteSession RPC——删除先查 agent 运行状态表（agent/status 事件维护，仅拒绝真正运行中的会话），再按 jsonl 布局移除 `<DSH_HOME>/sessions/<project>/<id>/`、摘除 live 会话、清理归档集并广播；`dsh-client-connection` API 面与 unary 响应 schema；`dsh-client-ui-workspace` 菜单项与中英文案）；`assets/plugins/dsh-session-manager`（bundle，设置面板 + `window.__dshSessionManager` 桥），启动/打包三路覆盖（dev / afterPack / 运行时），dev node_modules 已实测应用
+  - 端到端集成场景 `session-delete-flow`：真实 RPC 链路验证 创建→归档→恢复→再归档→删除（目录消失 + 归档集清理）→空闲 live 会话摘除删除
 - **对话节点导航条（dsh-navbar，vlln/dsh-navbar，MIT）内置**：对话区右缘节点串快速跳转 user 消息（悬停预览 6 行截断 / 点击平滑跳转 + 品牌蓝高亮 / 连续悬停与滚轮切换 / >11 节点自动滑动窗口 / <2 条 user 消息自动隐藏 / 消息精选 pin 按会话持久化），实现 dsh-external/issues#144 规格，纯浏览器端 bundle（`assets/plugins/dsh-navbar`，含 LICENSE 与预编译 lib）。**取代** `dsh-conversation-tweaks` 内置的会话右侧导航滑轨（dct-rail 已移除），conversation-tweaks 保留「隐藏对话输出」；`sync-companion-plugins.js` 的插件清单与 `lib/index.mjs` 复制规则同步补齐（该清单此前与 main.js 漂移，缺 better-sidebar / harness-pet，已对齐）
 - **侧边临时会话（dsh-side-session，hzhz314159/dsh-side-session，MIT）内置**：基于当前主会话上下文在独立浮窗发起临时追问（答案不写入主会话）；💬 图标 / `Ctrl+Shift+S` 唤起；三种回答引擎（全局 Key / 插件 Key / 宿主 LLM）；zstd 帧扫描自动捕获上下文（含截断护栏）；bundle 随桌面端分发并自动同步
 
