@@ -120,7 +120,7 @@
 ## 对话删除与归档管理（dsh-session-manager）
 
 - 内置配套插件（本仓库实现，MIT）：dsh 官方只有「归档」没有「删除」，本插件补齐两条入口：
-  - **会话行 ⋯ 菜单「删除对话」**（位于「归档会话」下方，当前会话行不显示）：确认后经宿主 RPC 删除该会话日志与附件（运行中的会话会被拒绝），列表实时移除；
+  - **会话行 ⋯ 菜单「删除对话」**（位于「归档会话」下方，所有会话行均显示）：确认后经宿主 RPC 删除该会话日志与附件（**正在运行**的会话会被拒绝），列表实时移除；
   - **设置 →「归档对话管理」**：列出全部已归档对话（标题/项目/更新时间），每条提供「恢复」（回到原工作区与顺序）与「删除」。
 - 实现依赖 `scripts/patch-session-manage.js` 在启动/打包时对官方包做幂等补丁（`dsh-workspace` unarchiveSession、`dsh-host-apiproxy` unarchiveSession/deleteSession RPC、`dsh-client-connection` API 面与 schema、`dsh-client-ui-workspace` 菜单项）；状态更新走官方 host 帧，无需重启服务。
 

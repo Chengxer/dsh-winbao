@@ -88,7 +88,11 @@ const CONN_FACADE_INSERT = 'archiveSession: (payload, signal) => this.callUnary(
 // 4. dsh-client-ui-workspace：会话行菜单「删除对话」+ 翻译
 // ---------------------------------------------------------------------------
 const UI_MENU_ANCHOR = '{\n\t\t\t\t\tid: "archive",\n\t\t\t\t\tlabel: t("menu.archiveSession"),\n\t\t\t\t\ticon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconArchiveOutline20, { size: 16 })\n\t\t\t\t}\n\t\t\t];';
-const UI_MENU_INSERT = '{\n\t\t\t\t\tid: "archive",\n\t\t\t\t\tlabel: t("menu.archiveSession"),\n\t\t\t\t\ticon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconArchiveOutline20, { size: 16 })\n\t\t\t\t},\n\t\t\t\t// dsh-desktop patch (session manage): 归档下方增加删除（当前会话行不显示）。\n\t\t\t\t...(node.id !== currentId ? [{\n\t\t\t\t\tid: "delete",\n\t\t\t\t\tlabel: t("menu.deleteSession")\n\t\t\t\t}] : [])\n\t\t\t];';
+const UI_MENU_INSERT = '{\n\t\t\t\t\tid: "archive",\n\t\t\t\t\tlabel: t("menu.archiveSession"),\n\t\t\t\t\ticon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconArchiveOutline20, { size: 16 })\n\t\t\t\t},\n\t\t\t\t// dsh-desktop patch (session manage): 归档下方增加删除。\n\t\t\t\t{\n\t\t\t\t\tid: "delete",\n\t\t\t\t\tlabel: t("menu.deleteSession")\n\t\t\t\t}\n\t\t\t];';
+// 旧版补丁（v1：当前会话行不显示删除）→ 升级为无条件显示（用户反馈当前会话
+// 行的 ⋯ 菜单里看不到删除按钮）。
+const UI_MENU_UPGRADE_ANCHOR = '...(node.id !== currentId ? [{\n\t\t\t\t\tid: "delete",\n\t\t\t\t\tlabel: t("menu.deleteSession")\n\t\t\t\t}] : [])';
+const UI_MENU_UPGRADE_INSERT = '{\n\t\t\t\t\tid: "delete",\n\t\t\t\t\tlabel: t("menu.deleteSession")\n\t\t\t\t}';
 
 const UI_SELECT_ANCHOR = 'if (id === "archive") onArchive(node.id);';
 const UI_SELECT_INSERT = 'if (id === "archive") onArchive(node.id);\n\t\t\t\t\t\t\t\t\tif (id === "delete") window.__dshSessionManager?.deleteSession(node.id);';
@@ -101,7 +105,7 @@ const UI_EN_INSERT = '"menu.archiveSession": "Archive session",\n\t\t\t"menu.del
 // ---------------------------------------------------------------------------
 // 工具：在文件中做「锚点必须存在 + 标记幂等」的替换
 // ---------------------------------------------------------------------------
-function applyReplacements(file, replacements, log) {
+function applyReplacements(file, replacements, upgradeRules, log) {
   let src;
   try {
     src = fs.readFileSync(file, 'utf8');
@@ -110,6 +114,25 @@ function applyReplacements(file, replacements, log) {
     return false;
   }
   if (src.includes(MARKER)) {
+    // 已应用：仍执行「升级替换」（旧版补丁 → 新版语义，幂等），
+    // 例如 v1「当前会话行不显示删除」→ v2「所有会话行显示删除」。
+    let upgraded = false;
+    for (const { anchor, insert } of upgradeRules) {
+      if (src.includes(anchor)) {
+        src = src.replace(anchor, insert);
+        upgraded = true;
+      }
+    }
+    if (upgraded) {
+      try {
+        fs.writeFileSync(file, src, 'utf8');
+        log('session-manage 补丁: 已升级 ' + file);
+        return true;
+      } catch (err) {
+        log('session-manage 补丁: 升级写入失败 ' + file + ': ' + err.message);
+        return false;
+      }
+    }
     log('session-manage 补丁: 已应用，跳过 ' + file);
     return false;
   }
@@ -175,12 +198,15 @@ function patchSessionManage(nmRoot, log = () => {}) {
         { anchor: UI_ZH_ANCHOR, insert: UI_ZH_INSERT },
         { anchor: UI_EN_ANCHOR, insert: UI_EN_INSERT },
       ],
+      upgradeRules: [
+        { anchor: UI_MENU_UPGRADE_ANCHOR, insert: UI_MENU_UPGRADE_INSERT },
+      ],
     },
   ];
   let changed = 0;
   for (const t of targets) {
     if (!fs.existsSync(t.file)) continue;
-    if (applyReplacements(t.file, t.replacements, log)) changed += 1;
+    if (applyReplacements(t.file, t.replacements, t.upgradeRules || [], log)) changed += 1;
   }
   return changed;
 }

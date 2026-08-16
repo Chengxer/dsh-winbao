@@ -9,7 +9,7 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 
 ### 新增
 - **对话删除与归档管理（dsh-session-manager 内置插件）**：dsh 官方只有归档没有删除，现补齐：
-  - 会话行 ⋯ 菜单「归档会话」下方新增「删除对话」（当前会话行不显示）：确认后经宿主 RPC 删除会话日志与附件（**正在运行**的会话被拒绝），列表经官方 host 帧实时移除；
+  - 会话行 ⋯ 菜单「归档会话」下方新增「删除对话」（**所有会话行均显示**，含当前会话）：确认后经宿主 RPC 删除会话日志与附件（**正在运行**的会话被拒绝），列表经官方 host 帧实时移除；
   - 设置 →「归档对话管理」面板：列出全部已归档对话（标题/项目/更新时间），每条提供「恢复」（回到原工作区与顺序，经 `workspace.unarchiveSession` 持久化并实时广播）与「删除」；
   - 实现：`scripts/patch-session-manage.js` 对官方包做幂等运行时/打包补丁（`dsh-workspace` WorkspaceRegistry.unarchiveSession；`dsh-session` Sessions.remove——从 live 注册表摘除、优雅 flush 后释放并广播 session/disposed；`dsh-host-apiproxy` 新增 workspace.unarchiveSession / workspace.deleteSession RPC——删除先查 agent 运行状态表（agent/status 事件维护，仅拒绝真正运行中的会话），再按 jsonl 布局移除 `<DSH_HOME>/sessions/<project>/<id>/`、摘除 live 会话、清理归档集并广播；`dsh-client-connection` API 面与 unary 响应 schema；`dsh-client-ui-workspace` 菜单项与中英文案）；`assets/plugins/dsh-session-manager`（bundle，设置面板 + `window.__dshSessionManager` 桥），启动/打包三路覆盖（dev / afterPack / 运行时），dev node_modules 已实测应用
   - 端到端集成场景 `session-delete-flow`：真实 RPC 链路验证 创建→归档→恢复→再归档→删除（目录消失 + 归档集清理）→空闲 live 会话摘除删除
