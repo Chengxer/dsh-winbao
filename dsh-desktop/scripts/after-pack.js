@@ -78,6 +78,23 @@ module.exports = async function afterPack(context) {
     console.warn('afterPack: vendor/npm missing — npm CLI will not be bundled');
   }
 
+  // electron-builder strips nested node_modules from assets/plugins during the
+  // file copy (same behavior as extraResources noted above). Restore vendored
+  // plugin deps verbatim so bundled plugins with private dependencies (e.g.
+  // billion-context-dsh's acp-kernel) resolve inside the packed app; the
+  // runtime profile sync then carries them into the web profile.
+  const pluginRoot = path.join(appOutDir, 'resources', 'app', 'assets', 'plugins');
+  if (fs.existsSync(pluginRoot)) {
+    for (const rel of fs.readdirSync(pluginRoot)) {
+      const srcNm = path.resolve(__dirname, '..', 'assets', 'plugins', rel, 'node_modules');
+      if (!fs.existsSync(srcNm)) continue;
+      const dstNm = path.join(pluginRoot, rel, 'node_modules');
+      fs.rmSync(dstNm, { recursive: true, force: true });
+      fs.cpSync(srcNm, dstNm, { recursive: true });
+      console.log(`afterPack: vendored plugin node_modules restored (${rel})`);
+    }
+  }
+
   // Prune redundant files from the packed app (resources/app/...) and the
   // bundled npm CLI (resources/npm/...). Runtime files are never removed.
   const targets = [
