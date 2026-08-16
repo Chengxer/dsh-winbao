@@ -310,14 +310,14 @@ function renderMenu() {
     item.addEventListener('click', async () => {
       const act = item.dataset.act;
       if (act === 'toggle-notify' || act === 'toggle-close-to-tray' || act === 'toggle-balance') {
-        const next = await dshDesktop.menu.action(act);
+        const next = await dshDesktop.menu.action(act).catch(() => null);
         if (next) state = { ...state, ...next };
         renderMenu();
         return;
       }
       closeMenu();
       if (act === 'sponsor') { dshDesktop.sponsorWindow(); return; }
-      dshDesktop.menu.action(act);
+      dshDesktop.menu.action(act).catch(() => {});
     });
   });
   // 更新源复制按钮
@@ -327,7 +327,7 @@ function renderMenu() {
       const kind = btn.dataset.copy;
       const url = state.repoUrls && (kind === 'github' ? state.repoUrls.github : state.repoUrls.gitee);
       if (!url) return;
-      const r = await dshDesktop.copyText(url);
+      const r = await dshDesktop.copyText(url).catch(() => null);
       if (r && r.ok) {
         const prev = btn.textContent;
         btn.textContent = '已复制 ✓';
@@ -447,6 +447,8 @@ function injectChrome() {
   dshDesktop.getInfo().then((info) => {
     if (!info) return;
     state = { ...state, ...info };
+    // 回填旧字段 dshDesktop.appVersion（bridge 注释声明的契约，此前漏实现）。
+    if (typeof info.appVersion === 'string' && info.appVersion) dshDesktop.appVersion = info.appVersion;
     if (info.appVersion) badge.textContent = 'v' + info.appVersion;
     if (info.agentVersion) badge.title = 'agent v' + info.agentVersion + '（' + info.agentSource + '）';
     if (info.agentVersion) { badge.hidden = false; }

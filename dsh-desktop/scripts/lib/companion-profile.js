@@ -406,13 +406,9 @@ function syncCompanionFiles(opts) {
 }
 
 module.exports = {
-  PLUGIN_FILES,
-  VENDOR_DEPS,
   PATCH_HEADER,
   ACP_DISABLE_BLOCK,
   PET_DISABLE_BLOCK,
-  dirNeedsSync,
-  syncDir,
   removeStaleCompanionPlugins,
   removeLegacyMarketplaceDir,
   removeLegacyMarketplacePatchLines,
