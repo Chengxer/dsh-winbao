@@ -6,6 +6,10 @@ name: Release Build
 #   · 手动触发（workflow_dispatch）可指定 tag 与架构，用于给已发布的版本
 #     补传某个架构的安装包（例如给 v0.3.9 补 arm64）。
 # 用法：git tag v0.4.0 && git push origin v0.4.0（push gitee v0.4.0 同步 tag）
+#
+# 注意：GitHub Actions 的 job 级 if 无法引用 matrix context（解析期报
+# "Unrecognized named-value: 'matrix'"），故不用 matrix 裁剪，而是拆成
+# x64 / arm64 两个显式 job，各自用 if 按 inputs.arch 决定是否运行。
 on:
   push:
     tags:
@@ -25,27 +29,20 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: build-${{ matrix.arch }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            config: electron-builder.yml
-            script: dist
-          - arch: arm64
-            config: electron-builder.arm64.yml
-            script: dist:arm64
-    # 手动触发时按输入裁剪矩阵；推 tag 恒为双架构。
+  build-x64:
+    name: build-x64
+    # 手动触发时按输入裁剪；推 tag 恒为双架构。
     if: >-
       github.event_name == 'push' ||
       inputs.arch == 'both' ||
-      inputs.arch == matrix.arch
+      inputs.arch == 'x64'
     runs-on: windows-latest
     defaults:
       run:
         working-directory: dsh-desktop
+    env:
+      ARCH: x64
+      UNPACKED: win-unpacked
     steps:
       - uses: actions/checkout@v4
 
@@ -58,25 +55,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # 交叉构建：x64 构建机补装 arm64 原生预编译包（koffi / sharp /
-      # node-addon-require-builtin 运行时按 process.arch 动态选择平台包；
-      # node-pty 的 win32-arm64 预编译已随主包分发，无需安装）。
-      # 脚本自带 PE 架构校验，装错会直接失败。
-      - name: Install ARM64 native prebuilds
-        if: matrix.arch == 'arm64'
-        run: node scripts/install-arm64-prebuilds.js
-
       # vendor/ 不进 git（.gitignore 排除），构建前现场生成：
-      #   · x64：复制 runner 自带 Node 24 的 node.exe（ABI 与 npm ci 的原生模块匹配）；
-      #   · arm64：从 nodejs.org 下载同版本 win-arm64 node.exe。
+      # x64：复制 runner 自带 Node 24 的 node.exe（ABI 与 npm ci 的原生模块匹配）。
       # npm CLI（纯 JS）两架构通用。
       - name: Fetch runtime (vendor/node + vendor/npm)
         shell: pwsh
         run: |
-          if ($env:ARCH -eq 'arm64') { node scripts/fetch-node.js --arch=arm64 } else { npm run fetch-node }
+          npm run fetch-node
           npm run fetch-npm
-        env:
-          ARCH: ${{ matrix.arch }}
 
       # 打包前校验所有运行时原生二进制确实是目标架构（PE Machine 字段）。
       # 误装 x64 变体会在 arm64 机器上加载失败，此步提前拦截。
@@ -102,15 +88,15 @@ jobs:
               default { '0x{0:X4}' -f $m }
             }
           }
-          $want = '${{ matrix.arch }}'
+          $want = $env:ARCH
           # node-pty 的 x64/arm64 预编译同包并存，glob 必须精确到目标架构目录，
           # 不能写 win32-*（否则会扫到对侧架构的 pty.node 导致误报）。
           $targets = @(
             'vendor/node/node.exe',
-            'node_modules/@koromix/koffi-win32-${{ matrix.arch }}/win32_${{ matrix.arch }}/koffi.node',
-            'node_modules/@img/sharp-win32-${{ matrix.arch }}/lib/*.node',
-            'node_modules/node-addon-require-builtin-win32-${{ matrix.arch }}-msvc/prebuilt/*.node',
-            'node_modules/node-pty/prebuilds/win32-${{ matrix.arch }}/pty.node'
+            "node_modules/@koromix/koffi-win32-$want/win32_$want/koffi.node",
+            "node_modules/@img/sharp-win32-$want/lib/*.node",
+            "node_modules/node-addon-require-builtin-win32-$want-msvc/prebuilt/*.node",
+            "node_modules/node-pty/prebuilds/win32-$want/pty.node"
           )
           $checked = 0
           foreach ($pattern in $targets) {
@@ -124,8 +110,205 @@ jobs:
           if ($checked -eq 0) { throw '未找到任何待校验的原生二进制' }
           Write-Output "OK: $checked 个原生二进制均为 $want"
 
-      - name: Build (${{ matrix.arch }}, portable + nsis)
-        run: npm run ${{ matrix.script }}
+      - name: Build (x64, portable + nsis)
+        run: npm run dist
+        env:
+          # 无代码签名证书：禁止自动发现 Windows 证书，避免构建机上有证书时报错或误签
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      # 校验「打进安装包」的原生二进制（构建机上的 node_modules 不等于打包产物：
+      # 手工注入的可选依赖可能被 electron-builder 的依赖收集剔除，此步防止
+      # 原生模块静默漏出）。
+      - name: Verify packaged app natives
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-MachineType([string]$Path) {
+            $fs = [System.IO.File]::OpenRead($Path)
+            try {
+              $br = New-Object System.IO.BinaryReader($fs)
+              $fs.Position = 0x3C
+              $pe = $br.ReadInt32()
+              $fs.Position = $pe + 4
+              $m = $br.ReadUInt16()
+            } finally {
+              $br.Dispose(); $fs.Dispose()
+            }
+            switch ($m) {
+              0x8664 { 'x64' }
+              0xAA64 { 'arm64' }
+              0x014C { 'x86' }
+              default { '0x{0:X4}' -f $m }
+            }
+          }
+          $want = $env:ARCH
+          # electron-builder 解包目录：默认架构（构建机 x64 → x64 腿）为 win-unpacked，
+          # 非默认架构（arm64 腿）为 win-arm64-unpacked（getArchSuffix 规则）。
+          $unpacked = "dist/$env:UNPACKED"
+          # extraResources 落在 resources/<to>（与 app/ 平级），原生依赖在 app/node_modules。
+          $app = "$unpacked/resources/app"
+          $targets = @(
+            "$unpacked/resources/node/node.exe",
+            "$app/node_modules/@koromix/koffi-win32-$want/win32_$want/koffi.node",
+            "$app/node_modules/@img/sharp-win32-$want/lib/*.node",
+            "$app/node_modules/node-addon-require-builtin-win32-$want-msvc/prebuilt/*.node",
+            "$app/node_modules/node-pty/prebuilds/win32-$want/pty.node"
+          )
+          $checked = 0
+          foreach ($pattern in $targets) {
+            $files = @(Get-ChildItem $pattern -ErrorAction SilentlyContinue)
+            if ($files.Count -eq 0) { throw "打包产物缺少: $pattern" }
+            foreach ($f in $files) {
+              $got = Get-MachineType $f.FullName
+              Write-Output ("{0,-84} {1}" -f $f.FullName, $got)
+              if ($got -ne $want) { throw "架构不符: $($f.FullName) = $got (期望 $want)" }
+              $checked++
+            }
+          }
+          Write-Output "OK: $checked 个打包内原生二进制均为 $want"
+          # 顺手确认 extraResources 的 npm 目录也进了包
+          if (-not (Test-Path "$unpacked/resources/npm")) {
+            throw "打包产物缺少: $unpacked/resources/npm"
+          }
+
+      # 最终安装包（portable / nsis）的入口 stub 架构记录到日志（stub 即使为 x86
+      # 也能在 arm64 Windows 的 x86 仿真下安装运行，故不硬性断言）。
+      - name: Report installer machine types
+        shell: pwsh
+        run: |
+          function Get-MachineType([string]$Path) {
+            $fs = [System.IO.File]::OpenRead($Path)
+            try {
+              $br = New-Object System.IO.BinaryReader($fs)
+              $fs.Position = 0x3C
+              $pe = $br.ReadInt32()
+              $fs.Position = $pe + 4
+              $m = $br.ReadUInt16()
+            } finally {
+              $br.Dispose(); $fs.Dispose()
+            }
+            switch ($m) {
+              0x8664 { 'x64' }
+              0xAA64 { 'arm64' }
+              0x014C { 'x86' }
+              default { '0x{0:X4}' -f $m }
+            }
+          }
+          Get-ChildItem "dist/DSH-Desktop-*$env:ARCH*.exe" | ForEach-Object {
+            Write-Output ("{0,-64} machine={1}" -f $_.Name, (Get-MachineType $_.FullName))
+          }
+
+      - name: Publish to GitHub Release
+        shell: pwsh
+        run: |
+          $tag = $env:TAG
+          # 双架构任务并行发布到同一 release：创建时容忍竞态（重复创建报错则重试）
+          for ($i = 0; $i -lt 6; $i++) {
+            gh release view $tag --json id 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { break }
+            gh release create $tag --title "DSH Desktop $tag" --generate-notes 2>$null
+            if ($LASTEXITCODE -eq 0) { break }
+            Start-Sleep -Seconds 5
+          }
+          gh release view $tag --json id --jq .id | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "无法创建或读取 release $tag" }
+          $arch = $env:ARCH
+          gh release upload $tag "dist/DSH-Desktop-*-$arch.exe" "dist/DSH-Desktop-*-$arch.exe.blockmap" --clobber
+          Write-Output '=== release assets ==='
+          gh release view $tag --json assets --jq '.assets[].name'
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+
+  build-arm64:
+    name: build-arm64
+    if: >-
+      github.event_name == 'push' ||
+      inputs.arch == 'both' ||
+      inputs.arch == 'arm64'
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: dsh-desktop
+    env:
+      ARCH: arm64
+      UNPACKED: win-arm64-unpacked
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dsh-desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 交叉构建：x64 构建机补装 arm64 原生预编译包（koffi / sharp /
+      # node-addon-require-builtin 运行时按 process.arch 动态选择平台包；
+      # node-pty 的 win32-arm64 预编译已随主包分发，无需安装）。
+      # 脚本自带 PE 架构校验，装错会直接失败。
+      - name: Install ARM64 native prebuilds
+        run: node scripts/install-arm64-prebuilds.js
+
+      # vendor/ 不进 git（.gitignore 排除），构建前现场生成：
+      # arm64：从 nodejs.org 下载同版本 win-arm64 node.exe（x64 构建机无法
+      # 本地复制出 arm64 的 node.exe）。npm CLI（纯 JS）两架构通用。
+      - name: Fetch runtime (vendor/node + vendor/npm)
+        shell: pwsh
+        run: |
+          node scripts/fetch-node.js --arch=arm64
+          npm run fetch-npm
+
+      # 打包前校验所有运行时原生二进制确实是目标架构（PE Machine 字段）。
+      # 误装 x64 变体会在 arm64 机器上加载失败，此步提前拦截。
+      - name: Verify native binaries architecture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-MachineType([string]$Path) {
+            $fs = [System.IO.File]::OpenRead($Path)
+            try {
+              $br = New-Object System.IO.BinaryReader($fs)
+              $fs.Position = 0x3C
+              $pe = $br.ReadInt32()
+              $fs.Position = $pe + 4
+              $m = $br.ReadUInt16()
+            } finally {
+              $br.Dispose(); $fs.Dispose()
+            }
+            switch ($m) {
+              0x8664 { 'x64' }
+              0xAA64 { 'arm64' }
+              0x014C { 'x86' }
+              default { '0x{0:X4}' -f $m }
+            }
+          }
+          $want = $env:ARCH
+          # node-pty 的 x64/arm64 预编译同包并存，glob 必须精确到目标架构目录，
+          # 不能写 win32-*（否则会扫到对侧架构的 pty.node 导致误报）。
+          $targets = @(
+            'vendor/node/node.exe',
+            "node_modules/@koromix/koffi-win32-$want/win32_$want/koffi.node",
+            "node_modules/@img/sharp-win32-$want/lib/*.node",
+            "node_modules/node-addon-require-builtin-win32-$want-msvc/prebuilt/*.node",
+            "node_modules/node-pty/prebuilds/win32-$want/pty.node"
+          )
+          $checked = 0
+          foreach ($pattern in $targets) {
+            Get-ChildItem $pattern -ErrorAction SilentlyContinue | ForEach-Object {
+              $got = Get-MachineType $_.FullName
+              Write-Output ("{0,-72} {1}" -f $_.FullName, $got)
+              if ($got -ne $want) { throw "架构不符: $($_.FullName) = $got (期望 $want)" }
+              $checked++
+            }
+          }
+          if ($checked -eq 0) { throw '未找到任何待校验的原生二进制' }
+          Write-Output "OK: $checked 个原生二进制均为 $want"
+
+      - name: Build (arm64, portable + nsis)
+        run: npm run dist:arm64
         env:
           # 无代码签名证书：禁止自动发现 Windows 证书，避免构建机上有证书时报错或误签
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -155,16 +338,18 @@ jobs:
               default { '0x{0:X4}' -f $m }
             }
           }
-          $want = '${{ matrix.arch }}'
-          # electron-builder 的 Windows 解包目录固定为 win-unpacked（不含 arch）；
+          $want = $env:ARCH
+          # electron-builder 解包目录：默认架构（构建机 x64 → x64 腿）为 win-unpacked，
+          # 非默认架构（arm64 腿）为 win-arm64-unpacked（getArchSuffix 规则）。
+          $unpacked = "dist/$env:UNPACKED"
           # extraResources 落在 resources/<to>（与 app/ 平级），原生依赖在 app/node_modules。
-          $app = 'dist/win-unpacked/resources/app'
+          $app = "$unpacked/resources/app"
           $targets = @(
-            'dist/win-unpacked/resources/node/node.exe',
-            "$app/node_modules/@koromix/koffi-win32-${{ matrix.arch }}/win32_${{ matrix.arch }}/koffi.node",
-            "$app/node_modules/@img/sharp-win32-${{ matrix.arch }}/lib/*.node",
-            "$app/node_modules/node-addon-require-builtin-win32-${{ matrix.arch }}-msvc/prebuilt/*.node",
-            "$app/node_modules/node-pty/prebuilds/win32-${{ matrix.arch }}/pty.node"
+            "$unpacked/resources/node/node.exe",
+            "$app/node_modules/@koromix/koffi-win32-$want/win32_$want/koffi.node",
+            "$app/node_modules/@img/sharp-win32-$want/lib/*.node",
+            "$app/node_modules/node-addon-require-builtin-win32-$want-msvc/prebuilt/*.node",
+            "$app/node_modules/node-pty/prebuilds/win32-$want/pty.node"
           )
           $checked = 0
           foreach ($pattern in $targets) {
@@ -179,8 +364,8 @@ jobs:
           }
           Write-Output "OK: $checked 个打包内原生二进制均为 $want"
           # 顺手确认 extraResources 的 npm 目录也进了包
-          if (-not (Test-Path 'dist/win-unpacked/resources/npm')) {
-            throw '打包产物缺少: dist/win-unpacked/resources/npm'
+          if (-not (Test-Path "$unpacked/resources/npm")) {
+            throw "打包产物缺少: $unpacked/resources/npm"
           }
 
       # 最终安装包（portable / nsis）的入口 stub 架构记录到日志（stub 即使为 x86
@@ -206,7 +391,7 @@ jobs:
               default { '0x{0:X4}' -f $m }
             }
           }
-          Get-ChildItem "dist/DSH-Desktop-*${{ matrix.arch }}*.exe" | ForEach-Object {
+          Get-ChildItem "dist/DSH-Desktop-*$env:ARCH*.exe" | ForEach-Object {
             Write-Output ("{0,-64} machine={1}" -f $_.Name, (Get-MachineType $_.FullName))
           }
 
@@ -224,7 +409,7 @@ jobs:
           }
           gh release view $tag --json id --jq .id | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "无法创建或读取 release $tag" }
-          $arch = '${{ matrix.arch }}'
+          $arch = $env:ARCH
           gh release upload $tag "dist/DSH-Desktop-*-$arch.exe" "dist/DSH-Desktop-*-$arch.exe.blockmap" --clobber
           Write-Output '=== release assets ==='
           gh release view $tag --json assets --jq '.assets[].name'
