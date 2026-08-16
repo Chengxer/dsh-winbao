@@ -2742,12 +2742,16 @@ async function refreshBalance() {
     return result;
   }
   const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
+  // OpenCode Go 订阅额度（5h 滚动 / 周 / 月）并行查询，失败不影响余额展示。
+  const opencodePromise = balance.queryOpencodeUsage(home)
+    .catch((err) => ({ ok: false, error: String((err && err.message) || err) }));
   let result;
   try {
     result = await balance.queryBalance(home);
   } catch (err) {
     result = { ok: false, error: String((err && err.message) || err), balances: [] };
   }
+  result.opencode = await opencodePromise;
   // 按当前默认模型 + 当前时段（峰谷）计算有效单价；settings.json 的
   // balancePrices.<model> 可整体覆盖该模型的单价。
   const model = balance.readActiveModel(home) || 'deepseek-v4-pro';

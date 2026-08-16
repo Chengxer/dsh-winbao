@@ -71,13 +71,34 @@ window.__ModuleLoader__.load({
 			const primary = balances.find((b) => b.currency === "CNY") || balances[0];
 			const hasBalance = !!(data && data.ok && primary);
 			const usageKnown = hasUsage(usage);
-			if (!hasBalance && !usageKnown) return null;
+			// OpenCode Go 订阅额度：5 小时滚动 / 每周 / 每月（percent = 已用百分比）。
+			const oc = data && data.opencode;
+			const ocWindows = oc && oc.ok && oc.usage ? oc.usage : null;
+			const ocPct = (w) => (w && typeof w.percent === "number" ? Math.round(w.percent) + "%" : "");
+			const ocParts = [];
+			if (ocWindows) {
+				if (ocWindows.rolling) ocParts.push("5h " + ocPct(ocWindows.rolling));
+				if (ocWindows.weekly) ocParts.push("周 " + ocPct(ocWindows.weekly));
+				if (ocWindows.monthly) ocParts.push("月 " + ocPct(ocWindows.monthly));
+			}
+			const ocKnown = ocParts.length > 0;
+			if (!hasBalance && !usageKnown && !ocKnown) return null;
 			const parts = [];
 			if (usageKnown) parts.push("本轮 ¥" + money(sessionCost(usage, prices)));
 			if (hasBalance) parts.push("余额 ¥" + money(primary.total));
+			if (ocKnown) parts.push("Go " + ocParts.join(" "));
+			let ocTitle = "";
+			if (ocWindows) {
+				const fmt = (w) => (w ? `${w.percent == null ? "?" : Math.round(w.percent) + "%"}${w.resetsAt ? " · 重置 " + new Date(w.resetsAt).toLocaleString() : ""}${w.status && w.status !== "ok" ? " · " + w.status : ""}` : "不可用");
+				ocTitle = "OpenCode Go 已用额度（percent=已用比例，非剩余）：5小时滚动 " + fmt(ocWindows.rolling)
+					+ "；周 " + fmt(ocWindows.weekly)
+					+ "；月 " + fmt(ocWindows.monthly);
+			}
 			const title = hasBalance
-				? `${primary.currency} 余额 ¥${money(primary.total)}（充值 ¥${money(primary.toppedUp)} · 赠送 ¥${money(primary.granted)}）；本轮费用按 token 用量估算（¥/百万 token：命中 ${prices?.cacheHit ?? FALLBACK_PRICES.cacheHit} / 未命中 ${prices?.cacheMiss ?? FALLBACK_PRICES.cacheMiss} / 输出 ${prices?.output ?? FALLBACK_PRICES.output}${data.model ? " · " + data.model : ""}${typeof data.peak === "boolean" ? (data.peak ? " · 高峰价" : " · 空闲价") : ""}），点击前往充值`
-				: "本轮费用按 token 用量估算；未读取到 DeepSeek API Key，无法显示余额";
+				? `${primary.currency} 余额 ¥${money(primary.total)}（充值 ¥${money(primary.toppedUp)} · 赠送 ¥${money(primary.granted)}）；本轮费用按 token 用量估算（¥/百万 token：命中 ${prices?.cacheHit ?? FALLBACK_PRICES.cacheHit} / 未命中 ${prices?.cacheMiss ?? FALLBACK_PRICES.cacheMiss} / 输出 ${prices?.output ?? FALLBACK_PRICES.output}${data.model ? " · " + data.model : ""}${typeof data.peak === "boolean" ? (data.peak ? " · 高峰价" : " · 空闲价") : ""}）${ocTitle ? "；" + ocTitle : ""}，点击前往充值`
+				: ocTitle
+					? ocTitle
+					: "本轮费用按 token 用量估算；未读取到 DeepSeek API Key，无法显示余额";
 			return react_jsx_runtime.jsx("a", {
 				className: "dsh-balance-dock",
 				href: "https://platform.deepseek.com/top_up",

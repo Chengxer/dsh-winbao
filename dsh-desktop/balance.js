@@ -10,8 +10,71 @@
 const https = require('node:https');
 const fs = require('node:fs');
 const path = require('node:path');
+const { homedir } = require('node:os');
 
 const DEFAULT_BASE = 'https://api.deepseek.com';
+
+// ---------------------------------------------------------------------------
+// OpenCode Go 订阅额度（5 小时滚动 / 每周 / 每月）
+// 端点：https://opencode.ai/zen/go/v1/usage（官方未公开文档，2026-08 实测可用）
+// 密钥来源：环境变量 OPENCODE_GO_API_KEY（兼容 OPENCODE_API_KEY）>
+// DSH_HOME/.credentials.yaml 的 OPENCODE_GO_API_KEY > OpenCode CLI auth.json
+// （opencode-go / opencode 条目，type=api）。
+// 返回：{ usage: { rolling, weekly, monthly } }，每窗口
+// { status, percent(0-100 已用), resetsAt(ISO) }。
+// ---------------------------------------------------------------------------
+const OPENCODE_USAGE_URL = 'https://opencode.ai/zen/go/v1/usage';
+
+function readOpencodeGoKey(dshHome) {
+  const envKey = process.env.OPENCODE_GO_API_KEY || process.env.OPENCODE_API_KEY;
+  if (envKey) return envKey.trim();
+  try {
+    const text = fs.readFileSync(path.join(dshHome, '.credentials.yaml'), 'utf8');
+    for (const line of text.split(/\r?\n/)) {
+      const m = line.match(/^\s*OPENCODE_GO_API_KEY\s*:\s*["']?([^"'\s#]+)/);
+      if (m) return m[1];
+    }
+  } catch {}
+  // OpenCode CLI auth.json 兜底（macOS/Linux 默认位置；Windows 相同相对位置存在时也读）。
+  try {
+    const authPath = path.join(homedir(), '.local', 'share', 'opencode', 'auth.json');
+    const raw = JSON.parse(fs.readFileSync(authPath, 'utf8'));
+    const entry = raw['opencode-go'] ?? raw['opencode'];
+    if (entry && entry.type === 'api' && typeof entry.key === 'string' && entry.key.length > 0) return entry.key;
+  } catch {}
+  return '';
+}
+
+function pickUsageWindow(w) {
+  if (!w || typeof w !== 'object') return null;
+  const percent = Number(w.percent);
+  return {
+    status: typeof w.status === 'string' ? w.status : null,
+    percent: Number.isFinite(percent) ? percent : null,
+    resetsAt: typeof w.resetsAt === 'string' ? w.resetsAt : null,
+  };
+}
+
+// 返回 { ok, reason?, error?, usage?: { rolling, weekly, monthly } }
+async function queryOpencodeUsage(dshHome) {
+  const key = readOpencodeGoKey(dshHome);
+  if (!key) return { ok: false, reason: 'no-key' };
+  try {
+    const data = await fetchJson(OPENCODE_USAGE_URL, key);
+    const usage = data && typeof data === 'object' && data.usage ? data.usage : data;
+    if (!usage || typeof usage !== 'object') return { ok: false, reason: 'bad-response' };
+    return {
+      ok: true,
+      usage: {
+        rolling: pickUsageWindow(usage.rolling),
+        weekly: pickUsageWindow(usage.weekly),
+        monthly: pickUsageWindow(usage.monthly),
+      },
+    };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 模型价格（¥/百万 token）。官方定价：
@@ -152,6 +215,7 @@ async function queryBalance(dshHome) {
 
 module.exports = {
   queryBalance,
+  queryOpencodeUsage,
   readActiveModel,
   effectivePrice,
   isPeakHour,
