@@ -112,6 +112,8 @@ jobs:
 
       - name: Build (x64, portable + nsis)
         run: npm run dist
+        # 本地同款构建 5-8 分钟；公共 runner 更慢，30 分钟上限足够且失败时可取日志
+        timeout-minutes: 30
         env:
           # 无代码签名证书：禁止自动发现 Windows 证书，避免构建机上有证书时报错或误签
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -309,6 +311,8 @@ jobs:
 
       - name: Build (arm64, portable + nsis)
         run: npm run dist:arm64
+        # 本地同款构建 5-8 分钟；公共 runner 更慢，30 分钟上限足够且失败时可取日志
+        timeout-minutes: 30
         env:
           # 无代码签名证书：禁止自动发现 Windows 证书，避免构建机上有证书时报错或误签
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
