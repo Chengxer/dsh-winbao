@@ -3,6 +3,24 @@
 本项目为 DSH（DeepSeek Harness）插件：微信官方 ClawBot / OpenClaw 网关 → DSH 会话桥接。
 版本号遵循语义化版本；每次发布附测试状态（单元断言数由 `scripts/test.ps1` 输出）。
 
+## [0.7.0] — 2026-08（会话映射持久化，跨重启记忆连续）
+
+> 修复「DSH 桌面端重启后微信用户/模型名的对话记忆丢失」：key → 会话的映射
+> 原来只存在内存 pool 里，重启后每个 key 都会用新随机 id 新建会话，旧会话
+> 成为孤儿文件。
+
+### 修复
+- **会话映射落盘**（`~/.dsh/openclaw-bridge/session-map.json`）：`ensureAgent`
+  按「映射命中 → resume 原会话」优先恢复，记忆跨重启连续；新建/恢复后自动
+  记录映射，容量上限 200（按 createdAt 淘汰最旧）。
+- **老用户升级自动找回**：映射缺失时按工作区目录扫描会话日志（zstd 首帧
+  扫描 + 头部 `cwd` 字段匹配，只解压首个帧），自动恢复最近一次会话；会话
+  损坏/被删时降级新建。
+- **`/new` 同步清除持久化映射**（旧会话文件保留，可用 `/list` + `/attach`
+  找回）；**`/attach` 持久化接管关系**（重启后仍回到被接管的会话）。
+- 导出 `sessionMapSnapshot/sessionMapReset/sessionMapSet/sessionMapDelete/
+  findLatestSessionForCwd` 供测试与诊断；新增 11 个断言（合计 63 全绿）。
+
 ## [0.2.0] — 2026-08（ClawBot 设置栏）
 
 > 用户可见的核心里程碑：DSH 设置页出现「ClawBot」栏，可自行配置接收模型。

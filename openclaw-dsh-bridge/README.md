@@ -26,6 +26,10 @@ DSH Agent 会话（每 model 名一个常驻会话，独立工作区）
   （OpenClaw / 任意网关），支持 stream 与非 stream 两种返回。
 - **会话映射**：OpenClaw 端配置的 `model` 名映射到一个常驻 DSH 会话，
   跨轮记忆、工具状态、工作区文件全部连续。
+- **跨重启记忆连续（v0.7.0+）**：key → 会话映射持久化到
+  `~/.dsh/openclaw-bridge/session-map.json`，DSH 桌面端重启后按映射恢复原
+  会话；老版本升级后首次运行会自动扫描工作区找回最近的会话（无需手动
+  `/attach`）。`/new` 清除映射（旧会话保留可找回），`/attach` 持久化接管。
 - **历史去重**：网关每轮回放完整 messages，插件只注入新增的用户消息，
   不产生重复上下文。
 - **隔离**：每个映射会话有独立工作目录 `~/.dsh/openclaw-bridge/workspace/<key>`，

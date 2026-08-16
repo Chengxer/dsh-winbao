@@ -17,10 +17,11 @@
 //    ~/.dsh/openclaw-bridge/token.txt）。
 
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { zstdDecompressSync } from "node:zlib";
 
 // 版本号随 package.json 走，避免硬编码漂移。
 const PLUGIN_VERSION = (() => {
@@ -79,6 +80,159 @@ const POLL_MS = 100;
 
 // ---- 鉴权 token（设置 > 环境变量 > 自动生成并持久化） ----
 const BRIDGE_HOME = join(homedir(), ".dsh", "openclaw-bridge");
+
+// ---- key -> 常驻会话映射持久化（跨重启记忆连续） ----
+// 旧版把 key -> agent 的映射只放在内存 pool 里：DSH 桌面端重启后 pool 清空，
+// 每个 key（微信用户 / model 名）都会用新随机 id 新建会话，之前的对话记忆
+// （上下文）随之丢失，旧会话文件成为孤儿。现在把 key -> sessionId 落盘到
+// ~/.dsh/openclaw-bridge/session-map.json：重启后按映射 resume 原会话；
+// 映射缺失（升级前的老用户）时按工作区目录扫描会话日志，自动恢复最近的
+// 会话（会话日志头部带顶层 cwd 字段，与 dsh-side-session 同源的 zstd 帧
+// 扫描手法，只解压首个帧即可读头，成本可忽略）。
+const SESSION_MAP_FILE = join(BRIDGE_HOME, "session-map.json");
+const SESSION_MAP_MAX = 200;
+
+function loadSessionMap() {
+  try {
+    if (existsSync(SESSION_MAP_FILE)) {
+      const parsed = JSON.parse(readFileSync(SESSION_MAP_FILE, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return {};
+}
+
+let sessionMap = loadSessionMap();
+
+function saveSessionMap() {
+  try {
+    writeFileSync(SESSION_MAP_FILE, JSON.stringify(sessionMap, null, 2) + "\n");
+  } catch (err) {
+    console.warn("[openclaw-bridge] 会话映射持久化失败: " + String(err?.message || err));
+  }
+}
+
+/** 记录/更新 key 的常驻会话；超过上限时按 createdAt 淘汰最旧条目。 */
+function sessionMapSet(key, sessionId, cwd) {
+  sessionMap[key] = {
+    sessionId: String(sessionId || ""),
+    cwd: String(cwd || ""),
+    createdAt: new Date().toISOString(),
+  };
+  const keys = Object.keys(sessionMap);
+  if (keys.length > SESSION_MAP_MAX) {
+    const sorted = keys.slice().sort((a, b) =>
+      String(sessionMap[a].createdAt || "").localeCompare(String(sessionMap[b].createdAt || ""))
+    );
+    for (const k of sorted.slice(0, keys.length - SESSION_MAP_MAX)) delete sessionMap[k];
+  }
+  saveSessionMap();
+}
+
+function sessionMapDelete(key) {
+  if (key in sessionMap) {
+    delete sessionMap[key];
+    saveSessionMap();
+  }
+}
+
+/** 测试用：读取当前映射快照 / 重置映射（含删文件）。 */
+function sessionMapSnapshot() {
+  return { ...sessionMap };
+}
+function sessionMapReset() {
+  sessionMap = {};
+  try {
+    if (existsSync(SESSION_MAP_FILE)) writeFileSync(SESSION_MAP_FILE, "{}\n");
+  } catch {}
+}
+
+// ---- 会话日志头部读取（zstd 单帧扫描 + 首行解析）----
+const ZSTD_MAGIC = 4247762216; // 28 B5 2F FD little-endian
+
+function scanFrame(buf, offset) {
+  if (buf.length - offset < 4) return null;
+  if (buf.readUInt32LE(offset) !== ZSTD_MAGIC) return null;
+  let o = offset + 4;
+  const desc = buf.readUInt8(o++);
+  if ((desc & 24) !== 0) return null;
+  const csf = desc >>> 6;
+  const singleSeg = (desc & 32) !== 0;
+  const checksum = (desc & 4) !== 0;
+  const dictFlag = desc & 3;
+  const dictBytes = dictFlag === 3 ? 4 : dictFlag;
+  const contentSizeBytes = csf === 0 ? (singleSeg ? 1 : 0) : 1 << csf;
+  let remaining = (singleSeg ? 0 : 1) + dictBytes + contentSizeBytes;
+  if (buf.length - o < remaining) return null;
+  o += remaining;
+  for (;;) {
+    if (buf.length - o < 3) return null;
+    const bh = buf.readUIntLE(o, 3);
+    o += 3;
+    const last = (bh & 1) !== 0;
+    const bt = (bh >>> 1) & 3;
+    const bs = bh >>> 3;
+    if (bt === 3) return null;
+    const payload = bt === 1 ? 1 : bs;
+    if (buf.length - o < payload) return null;
+    o += payload;
+    if (last) break;
+  }
+  if (checksum) o += 4;
+  return { start: offset, end: o };
+}
+
+/** 读会话日志头部事件（只解压首个 zstd 帧；失败返回 null）。 */
+function sessionLogHead(file) {
+  try {
+    const buf = readFileSync(file);
+    const f = scanFrame(buf, 0);
+    if (!f) return null;
+    const firstLine = zstdDecompressSync(buf.subarray(f.start, f.end)).toString("utf8").split("\n", 1)[0];
+    const head = JSON.parse(firstLine);
+    return head && typeof head === "object" ? head : null;
+  } catch {
+    return null;
+  }
+}
+
+function normPath(p) {
+  return String(p || "").replace(/\\/g, "/").toLowerCase();
+}
+
+/**
+ * 扫描 <DSH_HOME>/sessions 下 cwd 匹配的会话，返回最近（按日志 mtime）的 id。
+ * 用于升级后首次启动的自动恢复：映射文件缺失时把老会话找回来。
+ */
+function findLatestSessionForCwd(cwd) {
+  const target = normPath(cwd);
+  if (!target) return null;
+  const root = join(process.env.DSH_HOME || join(homedir(), ".dsh"), "sessions");
+  let best = null; // { id, mtime }
+  const visit = (dir) => {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      const p = join(dir, e.name);
+      const logFile = join(p, "session.jsonl.zstd");
+      if (existsSync(logFile)) {
+        try {
+          const head = sessionLogHead(logFile);
+          if (head && typeof head.cwd === "string" && normPath(head.cwd) === target) {
+            const st = statSync(logFile);
+            if (!best || st.mtimeMs > best.mtime) best = { id: String(head.id || ""), mtime: st.mtimeMs };
+          }
+        } catch {}
+        continue; // 会话目录不嵌套
+      }
+      visit(p);
+    }
+  };
+  visit(root);
+  return best && best.id ? best.id : null;
+}
+
 let bridgeToken = String(process.env.OPENCLAW_BRIDGE_TOKEN || "").trim();
 if (!bridgeToken) {
   const tokenFile = join(BRIDGE_HOME, "token.txt");
@@ -263,14 +417,59 @@ async function ensureAgent(ctx, key, cwdOverride) {
   // S1 修复：并发首建竞态——ready 缓存 in-flight 创建 Promise，
   // 第二个并发请求 await rec.ready 而非直接触碰 null agent。
   rec.ready = (async () => {
-    const { agent } = await agents.create({
-      sessionId: SessionId("session-" + randomUUID()),
-      meta: { cwd },
-      agentOptions: { provider: selection.provider, model: selection.model },
-      setup: (agentCtx) => {
-        installModelSelection(agentCtx, { current: selection, assembled: void 0 });
-      },
-    });
+    let agent = null;
+    // 1) 映射命中 → resume 原会话（跨重启记忆连续）
+    const mapped = sessionMap[key];
+    if (mapped && mapped.sessionId) {
+      try {
+        const resumed = await agents.resume({
+          resumeSessionId: mapped.sessionId,
+          agentOptions: { provider: selection.provider, model: selection.model },
+          setup: (agentCtx) => {
+            installModelSelection(agentCtx, { current: selection, assembled: void 0 });
+          },
+        });
+        agent = resumed.agent;
+        console.log("[openclaw-bridge] resumed session for key '" + key + "' (" + mapped.sessionId + ")");
+      } catch (err) {
+        console.warn("[openclaw-bridge] 恢复映射会话失败（降级重建）: " + String(err?.message || err));
+        sessionMapDelete(key);
+      }
+    }
+    // 2) 无映射/恢复失败 → 按工作区扫描最近会话（老用户升级路径，自动找回）
+    if (!agent) {
+      try {
+        const latestId = findLatestSessionForCwd(cwd);
+        if (latestId) {
+          const resumed = await agents.resume({
+            resumeSessionId: latestId,
+            agentOptions: { provider: selection.provider, model: selection.model },
+            setup: (agentCtx) => {
+              installModelSelection(agentCtx, { current: selection, assembled: void 0 });
+            },
+          });
+          agent = resumed.agent;
+          console.log("[openclaw-bridge] recovered latest session for key '" + key + "' (" + latestId + ")");
+        }
+      } catch (err) {
+        console.warn("[openclaw-bridge] 扫描恢复会话失败（降级新建）: " + String(err?.message || err));
+      }
+    }
+    // 3) 都没有 → 新建会话并记录映射
+    if (!agent) {
+      const sessionId = SessionId("session-" + randomUUID());
+      const created = await agents.create({
+        sessionId,
+        meta: { cwd },
+        agentOptions: { provider: selection.provider, model: selection.model },
+        setup: (agentCtx) => {
+          installModelSelection(agentCtx, { current: selection, assembled: void 0 });
+        },
+      });
+      agent = created.agent;
+      console.log("[openclaw-bridge] created session for key '" + key + "'");
+    }
+    sessionMapSet(key, agent && agent.session ? agent.session.id : "", cwd);
     await agent.whenIdle();
     rec.agent = agent;
     console.log("[openclaw-bridge] agent ready for key '" + key + "' (cwd: " + cwd + ")");
@@ -420,7 +619,9 @@ async function handleWechatCommand(ctx, m, text, replyTo) {
 
   if (cmd === "new") {
     wxBinds.delete(from);
-    pool.delete("wx-" + sanitizeKey(from));
+    const nk = "wx-" + sanitizeKey(from);
+    pool.delete(nk);
+    sessionMapDelete(nk); // 同时清除持久化映射，下次消息不再 resume 旧会话
     await replyTo("已开启新会话，下一条消息开始全新上下文。");
     return;
   }
@@ -458,6 +659,8 @@ async function handleWechatCommand(ctx, m, text, replyTo) {
     }
     const rec = await attachRec(ctx, arg);
     wxBinds.set(from, rec);
+    // 持久化接管关系：重启后该微信用户仍回到被接管的会话（记忆连续）。
+    sessionMapSet("wx-" + sanitizeKey(from), arg, (rec.agent && rec.agent.session && rec.agent.session.meta && rec.agent.session.meta.cwd) || "");
     await replyTo("已接管会话 " + arg + "，之后的消息都进入该会话。");
     return;
   }
@@ -766,4 +969,8 @@ function apply(ctx, config) {
   };
 }
 
-export { Config, apply, inject, name, PROVIDER_ID, OpenAiCompatAdapter };
+export {
+  Config, apply, inject, name, PROVIDER_ID, OpenAiCompatAdapter,
+  // 会话映射持久化（测试与诊断用）
+  sessionMapSnapshot, sessionMapReset, sessionMapSet, sessionMapDelete, findLatestSessionForCwd,
+};

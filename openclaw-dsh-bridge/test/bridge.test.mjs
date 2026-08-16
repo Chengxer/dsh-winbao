@@ -5,6 +5,10 @@
 import assert from "node:assert";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
+import { mkdirSync, writeFileSync, utimesSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { zstdCompressSync } from "node:zlib";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -513,6 +517,75 @@ ok(Array.isArray(inject) && inject.includes("agents"), "inject 含 agents 服务
     caught = err;
   }
   ok(caught !== null && /bad api key|AUTH/.test(String(caught?.message || "") + " " + String(caught?.code || "")), "401 映射为 AUTH 错误");
+}
+
+// 17) 会话映射持久化：创建后写入映射；/new 清除映射；/attach 持久化接管
+{
+  const { sessionMapSnapshot, sessionMapReset } = mod;
+  sessionMapReset();
+  const res = await chat({ model: "dsh-bridge/map-a", messages: [{ role: "user", content: "你好" }] });
+  ok(res.statusCode === 200, "map-a 首次对话 200");
+  const snap1 = sessionMapSnapshot();
+  ok(snap1["dsh-bridge-map-a"] && /^session-/.test(snap1["dsh-bridge-map-a"].sessionId), "创建后映射记录 sessionId");
+  const base = sentMessages.length;
+  pendingMsgs.push(wxMsg("mockuser@im.wechat", "/new", "ctx-new-map"));
+  await waitSent(base + 1);
+  ok(!sessionMapSnapshot()["wx-mockuser-im.wechat"], "/new 清除该微信用户的持久化映射");
+  pendingMsgs.push(wxMsg("mockuser@im.wechat", "/attach session-999", "ctx-attach-map"));
+  await waitSent(base + 2);
+  const snap2 = sessionMapSnapshot();
+  ok(snap2["wx-mockuser-im.wechat"] && snap2["wx-mockuser-im.wechat"].sessionId === "session-999", "/attach 持久化接管会话 id");
+  sessionMapReset();
+}
+
+// 18) 重启恢复：映射命中 → agents.resume 原会话（不新建）
+{
+  const { sessionMapSnapshot, sessionMapSet, sessionMapReset } = mod;
+  sessionMapReset();
+  sessionMapSet("dsh-bridge-map-resume", "session-seeded-1", "C:\\mock-cwd");
+  const res = await chat({ model: "dsh-bridge/map-resume", messages: [{ role: "user", content: "继续" }] });
+  ok(res.statusCode === 200 && /attached-session-seeded-1/.test(res.body), "映射命中恢复原会话（resume session-seeded-1）");
+  ok(sessionMapSnapshot()["dsh-bridge-map-resume"] !== undefined, "恢复后映射仍在");
+  sessionMapReset();
+}
+
+// 19) 扫描恢复：无映射（老版本升级路径）→ 按工作区扫描最近会话并 resume
+{
+  const { sessionMapSnapshot, sessionMapReset, findLatestSessionForCwd } = mod;
+  sessionMapReset();
+  const tmpDsh = join(homedir(), ".dsh"); // 测试进程运行在临时 USERPROFILE 下
+  process.env.DSH_HOME = tmpDsh;
+  const ws = join(tmpDsh, "openclaw-bridge", "workspace", "dsh-bridge-scan-b");
+  mkdirSync(ws, { recursive: true });
+  const sessRoot = join(tmpDsh, "sessions", "proj-scan");
+  const mkSess = (dir, id, mtime) => {
+    const d = join(sessRoot, dir);
+    mkdirSync(d, { recursive: true });
+    const head = JSON.stringify({ type: "session", version: 0, id, cwd: ws, delegationDepth: 0 });
+    const file = join(d, "session.jsonl.zstd");
+    writeFileSync(file, zstdCompressSync(Buffer.from(head + "\n", "utf8")));
+    utimesSync(file, new Date(mtime), new Date(mtime));
+  };
+  mkSess("sess-old", "session-scan-old", Date.now() - 60000);
+  mkSess("sess-new", "session-scan-recovered-1", Date.now() - 1000);
+  const found = findLatestSessionForCwd(ws);
+  ok(found === "session-scan-recovered-1", "扫描按 mtime 取最近会话（" + found + "）");
+  const res = await chat({ model: "dsh-bridge/scan-b", messages: [{ role: "user", content: "在吗" }] });
+  ok(/attached-session-scan-recovered-1/.test(res.body), "无映射时扫描恢复最近会话");
+  ok(sessionMapSnapshot()["dsh-bridge-scan-b"] !== undefined, "扫描恢复后写入映射");
+  sessionMapReset();
+}
+
+// 20) sessionMapSet/Delete 覆盖更新与删除
+{
+  const { sessionMapSet, sessionMapDelete, sessionMapSnapshot, sessionMapReset } = mod;
+  sessionMapReset();
+  sessionMapSet("k1", "s1", "c1");
+  sessionMapSet("k1", "s1b", "c1");
+  ok(sessionMapSnapshot()["k1"].sessionId === "s1b", "同 key 覆盖更新");
+  sessionMapDelete("k1");
+  ok(sessionMapSnapshot()["k1"] === undefined, "删除后映射无该 key");
+  sessionMapReset();
 }
 
 console.log("\nall " + passed + " checks passed");
