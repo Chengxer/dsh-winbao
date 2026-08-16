@@ -3231,6 +3231,29 @@ function syncCompanionPlugins() {
       }
     }
 
+    // 桌面宠物（harness-pet）默认关闭：客户端常驻 rAF 逐帧绘制 320x320
+    // canvas（issue #34 诊断为软渲染/流式输出下的持续阻塞源），且旧版保存的
+    // 开关值会覆盖客户端默认。插件级 disabled 条目一票否决任何已保存状态；
+    // 需要时可在 设置 → 插件 → 管理 一键开启（与 dsh-plugin-manager 同机制）。
+    // 幂等：patch 中已存在 harness-pet 条目（含用户手写）则不动，尊重用户配置。
+    if (bundleNames.has('harness-pet')) {
+      const petPatchFile = path.join(profileDir, 'cordis.patch.yml');
+      try {
+        let patch = '';
+        try { patch = fs.readFileSync(petPatchFile, 'utf8'); } catch { /* 全新 profile：patch 文件尚未创建，视为空 */ }
+        if (!/(?:^|\n)\s*-?\s*id\s*:\s*harness-pet\b/.test('\n' + patch)) {
+          const block = '\n# harness-pet：桌面宠物默认关闭（设置 → 插件 → 管理 可一键开启）\n- id: harness-pet\n  disabled: true\n';
+          if (/^\s*\[\]\s*$/m.test(patch)) patch = patch.replace(/\[\]/m, block.trim());
+          else if (patch.trim() === '') patch = '# dsh web profile patch（由 DSH Desktop 维护）\n' + block.trim();
+          else patch = patch.replace(/\s*$/, '\n') + block;
+          fs.writeFileSync(petPatchFile, patch);
+          log('boot', '已默认关闭桌面宠物（harness-pet，可在插件管理开启）');
+        }
+      } catch (err) {
+        log('boot', '写入 harness-pet 禁用条目失败: ' + err.message);
+      }
+    }
+
     const manifestFile = path.join(profileDir, 'package.json');
     let manifest = {};
     try { manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8')); } catch { manifest = { name: 'dsh-profile-web', private: true }; }
