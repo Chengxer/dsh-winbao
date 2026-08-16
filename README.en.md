@@ -53,11 +53,13 @@ Ships the full dsh runtime and official plugins — no Node.js install required,
 
 ## 🚀 Quick Start
 
-**Requirements**: Windows 10 / 11 (x64). No pre-installed Node.js or any other runtime.
+**Requirements**: Windows 10 / 11 (x64 / arm64). No pre-installed Node.js or any other runtime. On ARM devices (e.g. Surface Pro X), grab the arm64 build.
 
 ### International users (GitHub)
 
 [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases) hosts the complete single-file installers (Portable + Setup + blockmap) with no size limit — download directly.
+
+**Supported architectures**: x64 and arm64 (pick `*-arm64.exe` on ARM devices), named `DSH-Desktop-<version>-portable-arm64.exe` / `DSH-Desktop-Setup-<version>-arm64.exe`.
 
 ### China users (Gitee)
 
@@ -78,7 +80,8 @@ Merge tool: [merge.bat](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/do
 cd dsh-desktop
 npm install
 npm run fetch-runtime    # bundle node.exe + npm CLI
-npm run dist             # build portable + NSIS -> dist/
+npm run dist             # build portable + NSIS (x64) -> dist/
+npm run dist:arm64       # cross-build arm64 (an x64 machine auto-fetches arm64 prebuilt native modules)
 ```
 
 Behind a firewall? `$env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'` and `$env:ELECTRON_BUILDER_BINARIES_MIRROR='https://npmmirror.com/mirrors/electron-builder-binaries/'`.

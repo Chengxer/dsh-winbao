@@ -6,7 +6,7 @@
 
 [![Release](https://img.shields.io/github/v/release/myYangyunfan/dsh_desktop?color=4D6BFE&label=Release)](https://github.com/myYangyunfan/dsh_desktop/releases) [![Stars](https://img.shields.io/github/stars/myYangyunfan/dsh_desktop?style=social)](https://github.com/myYangyunfan/dsh_desktop) [![Downloads](https://img.shields.io/github/downloads/myYangyunfan/dsh_desktop/total?color=4D6BFE)](https://github.com/myYangyunfan/dsh_desktop/releases) ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-4D6BFE) ![License](https://img.shields.io/badge/license-MIT-4D6BFE) [![Release CI](https://img.shields.io/github/actions/workflow/status/myYangyunfan/dsh_desktop/release.yml?color=4D6BFE&label=Release%20CI)](https://github.com/myYangyunfan/dsh_desktop/actions) [![Gitee Stars](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fgitee.com%2Fapi%2Fv5%2Frepos%2Fmy-yang-yunfan%2Fdsh_desktop&query=%24.stargazers_count&label=Gitee%20Stars&color=4D6BFE)](https://gitee.com/my-yang-yunfan/dsh_desktop)
 
-[Gitee 镜像](https://gitee.com/my-yang-yunfan/dsh_desktop) · [宣发落地页](landing/index.html) · [第三方组件清单](THIRD_PARTY_NOTICES.md)
+[English](README.en.md) · [Gitee 镜像](https://gitee.com/my-yang-yunfan/dsh_desktop) · [宣发落地页](landing/index.html) · [第三方组件清单](THIRD_PARTY_NOTICES.md)
 
 ---
 
@@ -53,7 +53,7 @@
 
 ## 🚀 快速开始
 
-**系统要求**：Windows 10 / 11（x64），无需预装 Node.js。
+**系统要求**：Windows 10 / 11（x64 / arm64），无需预装 Node.js。ARM 设备（如 Surface Pro X）请下载 arm64 版本。
 
 ### 国内用户（Gitee）
 
@@ -70,6 +70,8 @@
 
 [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases) 提供完整单文件安装包（便携版 + 安装版 + blockmap），无大小限制，直接下载。
 
+**支持架构**：x64 与 arm64（ARM 设备请选 `*-arm64.exe`），文件命名 `DSH-Desktop-<版本>-portable-arm64.exe` / `DSH-Desktop-Setup-<版本>-arm64.exe`。
+
 **数据位置**：便携版在 exe 旁 `data\`；安装版在 `%APPDATA%\DSH Desktop\`。设置环境变量 `DSH_HOME` 可强制指定 dsh 配置目录。
 
 ## 🛠 从源码构建
@@ -78,14 +80,15 @@
 cd dsh-desktop
 npm install
 npm run fetch-runtime    # 内置 node.exe + npm CLI
-npm run dist             # 构建 portable + NSIS → dist/
+npm run dist             # 构建 portable + NSIS（x64）→ dist/
+npm run dist:arm64       # 交叉构建 arm64（x64 构建机自动补装 arm64 预编译原生模块）
 ```
 
 网络受限时：`$env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'`，`$env:ELECTRON_BUILDER_BINARIES_MIRROR='https://npmmirror.com/mirrors/electron-builder-binaries/'`。
 
 ## 🤖 自动发布
 
-GitHub Actions 流水线（`.github/workflows/release.yml`）：推 `v*` tag 自动在云端构建 portable + NSIS 并上传 Release，无需本地构建。
+GitHub Actions 流水线（`.github/workflows/release.yml`）：推 `v*` tag 自动在云端构建 **x64 + arm64** 双架构 portable + NSIS 并上传 Release，无需本地构建。
 
 ```bash
 git tag v0.4.0 && git push origin v0.4.0
