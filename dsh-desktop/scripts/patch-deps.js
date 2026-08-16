@@ -38,3 +38,8 @@ function main() {
 }
 
 main();
+
+// 顺带应用 dsh-llm-pi-ai 余额判定补丁：opencode 等第三方 provider 余额不足时返回
+// 401 + CreditsError，dsh 原本一律判 AUTH 并显示 "API key is invalid"，误导用户。
+// 见 patch-pi-ai-credits.js（幂等，失败只告警不中断）。
+require('./patch-pi-ai-credits.js');
