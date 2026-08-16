@@ -51,6 +51,7 @@ const COMPANION_PLUGINS = [
   { id: 'dsh-vision', name: '@dsh-external/dsh-vision' },
   { id: 'side-session', name: '@dsh-external/dsh-side-session' },
   { id: 'compaction-acp', name: 'billion-context-dsh' },
+  { id: 'plugin-manager', name: '@deepseek-ai/dsh-plugin-manager' },
 ];
 
 const PLUGIN_FILES = [
