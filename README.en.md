@@ -4,7 +4,7 @@
 
 Ships the full dsh runtime and official plugins — no Node.js install required, double-click to run
 
-[![Release](https://img.shields.io/github/v/release/myYangyunfan/dsh_desktop?color=4D6BFE&label=Release)](https://github.com/myYangyunfan/dsh_desktop/releases) [![Stars](https://img.shields.io/github/stars/myYangyunfan/dsh_desktop?style=social)](https://github.com/myYangyunfan/dsh_desktop) [![Downloads](https://img.shields.io/github/downloads/myYangyunfan/dsh_desktop/total?color=4D6BFE)](https://github.com/myYangyunfan/dsh_desktop/releases) ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-4D6BFE) ![License](https://img.shields.io/badge/license-MIT-4D6BFE) [![Release CI](https://img.shields.io/github/actions/workflow/status/myYangyunfan/dsh_desktop/release.yml?color=4D6BFE&label=Release%20CI)](https://github.com/myYangyunfan/dsh_desktop/actions)
+[![Release](https://img.shields.io/github/v/release/myYangyunfan/dsh_desktop?color=4D6BFE&label=Release)](https://github.com/myYangyunfan/dsh_desktop/releases) [![Stars](https://img.shields.io/github/stars/myYangyunfan/dsh_desktop?style=social)](https://github.com/myYangyunfan/dsh_desktop) [![Downloads](https://img.shields.io/github/downloads/myYangyunfan/dsh_desktop/total?color=4D6BFE)](https://github.com/myYangyunfan/dsh_desktop/releases) ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-4D6BFE) ![License](https://img.shields.io/badge/license-MIT-4D6BFE) [![Release CI](https://img.shields.io/github/actions/workflow/status/myYangyunfan/dsh_desktop/release.yml?color=4D6BFE&label=Release%20CI)](https://github.com/myYangyunfan/dsh_desktop/actions) [![Gitee Stars](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fgitee.com%2Fapi%2Fv5%2Frepos%2Fmy-yang-yunfan%2Fdsh_desktop&query=%24.stargazers_count&label=Gitee%20Stars&color=4D6BFE)](https://gitee.com/my-yang-yunfan/dsh_desktop)
 
 [中文](README.md) · [Gitee mirror](https://gitee.com/my-yang-yunfan/dsh_desktop) · [Third-party notices](THIRD_PARTY_NOTICES.md)
 
@@ -35,6 +35,21 @@ Ships the full dsh runtime and official plugins — no Node.js install required,
 - **Dual-source updates** — official dsh agent updates + client self-update (GitHub / Gitee sources, split-part auto-merge, in-place replace & restart)
 - **Shortcut self-healing** — desktop and Start Menu shortcuts are recreated automatically when missing
 - **Cloud builds** — pushing a tag triggers GitHub Actions to build and publish (see below)
+
+## 📸 App Preview
+
+![DSH Desktop UI](https://cdn.jsdelivr.net/gh/myYangyunfan/dsh_desktop@main/docs/showcase.en.svg)
+
+**Vanilla `dsh web`** vs **DSH Desktop**:
+
+| Capability | Vanilla `dsh web` | DSH Desktop |
+| --- | --- | --- |
+| Startup | Manual Node.js install & CLI | Double-click, bundled runtime |
+| Surface | Browser tab | Native window · frameless dark glass |
+| Sessions | Archive only | Archive / restore / delete |
+| Balance | None | Live "this turn cost · balance" + OpenCode Go |
+| Desktop | None | Tray / notifications / pet / side popup |
+| Updates | Manual | Dual-source auto-update · part auto-merge |
 
 ## 🚀 Quick Start
 

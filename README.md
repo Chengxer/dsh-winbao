@@ -4,7 +4,7 @@
 
 内置完整 dsh 运行时与全部官方插件，免装 Node.js，双击即用
 
-[![Release](https://img.shields.io/github/v/release/myYangyunfan/dsh_desktop?color=4D6BFE&label=Release)](https://github.com/myYangyunfan/dsh_desktop/releases) [![Stars](https://img.shields.io/github/stars/myYangyunfan/dsh_desktop?style=social)](https://github.com/myYangyunfan/dsh_desktop) [![Downloads](https://img.shields.io/github/downloads/myYangyunfan/dsh_desktop/total?color=4D6BFE)](https://github.com/myYangyunfan/dsh_desktop/releases) ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-4D6BFE) ![License](https://img.shields.io/badge/license-MIT-4D6BFE) [![Release CI](https://img.shields.io/github/actions/workflow/status/myYangyunfan/dsh_desktop/release.yml?color=4D6BFE&label=Release%20CI)](https://github.com/myYangyunfan/dsh_desktop/actions)
+[![Release](https://img.shields.io/github/v/release/myYangyunfan/dsh_desktop?color=4D6BFE&label=Release)](https://github.com/myYangyunfan/dsh_desktop/releases) [![Stars](https://img.shields.io/github/stars/myYangyunfan/dsh_desktop?style=social)](https://github.com/myYangyunfan/dsh_desktop) [![Downloads](https://img.shields.io/github/downloads/myYangyunfan/dsh_desktop/total?color=4D6BFE)](https://github.com/myYangyunfan/dsh_desktop/releases) ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-4D6BFE) ![License](https://img.shields.io/badge/license-MIT-4D6BFE) [![Release CI](https://img.shields.io/github/actions/workflow/status/myYangyunfan/dsh_desktop/release.yml?color=4D6BFE&label=Release%20CI)](https://github.com/myYangyunfan/dsh_desktop/actions) [![Gitee Stars](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fgitee.com%2Fapi%2Fv5%2Frepos%2Fmy-yang-yunfan%2Fdsh_desktop&query=%24.stargazers_count&label=Gitee%20Stars&color=4D6BFE)](https://gitee.com/my-yang-yunfan/dsh_desktop)
 
 [Gitee 镜像](https://gitee.com/my-yang-yunfan/dsh_desktop) · [宣发落地页](landing/index.html) · [第三方组件清单](THIRD_PARTY_NOTICES.md)
 
@@ -35,6 +35,21 @@
 - **双源更新** — 官方 agent 更新 + 客户端自更新（GitHub / Gitee 双源，分片自动合并、原地替换）
 - **快捷方式自愈** — 桌面与开始菜单快捷方式缺失即自动补建
 - **云端构建** — 推 tag 即触发 GitHub Actions 自动打包发布（见下）
+
+## 📸 界面一览
+
+![DSH Desktop 界面](https://cdn.jsdelivr.net/gh/myYangyunfan/dsh_desktop@main/docs/showcase.svg)
+
+**开箱即用**（原生 dsh web）vs **DSH Desktop**：
+
+| 能力 | 原生 `dsh web` | DSH Desktop |
+| --- | --- | --- |
+| 启动 | 手动安装 Node.js、敲命令 | 双击即用，内置独立运行时 |
+| 界面 | 浏览器标签页 | 桌面原生窗口 · 深色玻璃无边框 |
+| 会话管理 | 仅归档 | 归档 / 恢复 / 删除 |
+| 余额 | 无 | 实时「本轮费用 · 余额」+ OpenCode Go |
+| 桌面能力 | 无 | 托盘常驻 / 完成通知 / 桌面宠物 / 侧边浮窗 |
+| 更新 | 手动 | 双源自动更新 · 分片自动合并 |
 
 ## 🚀 快速开始
 
