@@ -267,6 +267,12 @@ function startWatchdog() {
 // DSH_HOME 时这些链接常被还原成真实目录，dsh web 会以 exit code 1 启动失败。
 // 这里在每次启动 dsh 前调用官方 healProfilesModuleFallback；它若报
 // "exists and is not a symlink"，就移除该真实目录后重试，直到修复完成。
+//
+// 启动提速：健康状态下（依赖闭包未变、链接完好）用持久化快照做快速校验
+// （逐项 lstat/readlink），全部一致就直接跳过耗时的
+// import('@deepseek-ai/dsh-app-boot') + BFS + heal。快照签名包含 dsh
+// package.json 的路径/大小/mtime，dsh 升级后自动失效重算（升级后首次
+// 启动仍会完整 heal 一次，之后走快速路径）。
 // ---------------------------------------------------------------------------
 function dshPackageJson() {
   const bin = dshBin();
@@ -280,7 +286,104 @@ function dshPackageJson() {
   try { return require.resolve('@deepseek-ai/dsh/package.json'); } catch { return candidates[1]; }
 }
 
+function fallbackSnapshotPath() {
+  return path.join(userDataDir, 'profile-fallback-cache.json');
+}
+
+function fallbackAnchorSignature(anchor) {
+  try {
+    const st = fs.statSync(anchor);
+    return anchor + '|' + st.size + '|' + Math.round(st.mtimeMs);
+  } catch {
+    return anchor + '|?';
+  }
+}
+
+// 快照当前 fallback 目录：链接名（可能带 @scope 前缀）→ readlink 目标。
+// heal 创建的链接里 @scope 目录本身是真实目录、包 junction 在它里面，所以
+// 递归收集 `scope/pkg`；任何既不是 junction、也不是 @scope 真实目录的顶层
+// 项（云同步还原成真实目录的典型症状）都返回 null，表示需要完整 heal。
+function snapshotFallbackLinks(modulesRoot) {
+  const entries = {};
+  const addLink = (name) => {
+    const link = path.join(modulesRoot, name);
+    try {
+      const st = fs.lstatSync(link);
+      if (!st.isSymbolicLink()) return false;
+      entries[name] = fs.readlinkSync(link);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  let top;
+  try { top = fs.readdirSync(modulesRoot, { withFileTypes: true }); } catch { return null; }
+  for (const e of top) {
+    let st;
+    try { st = fs.lstatSync(path.join(modulesRoot, e.name)); } catch { return null; }
+    if (st.isSymbolicLink()) {
+      if (!addLink(e.name)) return null;
+      continue;
+    }
+    if (st.isDirectory() && e.name.startsWith('@')) {
+      let inner;
+      try { inner = fs.readdirSync(path.join(modulesRoot, e.name)); } catch { return null; }
+      for (const pkg of inner) {
+        if (!addLink(e.name + '/' + pkg)) return null;
+      }
+      continue;
+    }
+    return null;
+  }
+  return entries;
+}
+
+function verifyFallbackSnapshot(home, anchor, cache) {
+  if (!cache || cache.v !== 1) return false;
+  if (cache.home !== home || cache.anchor !== anchor) return false;
+  if (cache.anchorSignature !== fallbackAnchorSignature(anchor)) return false;
+  const expected = cache.entries;
+  if (!expected || typeof expected !== 'object') return false;
+  const names = Object.keys(expected);
+  if (names.length === 0) return false;
+  const modulesRoot = path.join(home, 'profiles', 'node_modules');
+  for (const name of names) {
+    const link = path.join(modulesRoot, name);
+    try {
+      const st = fs.lstatSync(link);
+      if (!st.isSymbolicLink()) return false;
+      if (fs.readlinkSync(link) !== expected[name]) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+function saveFallbackSnapshot(home, anchor, entries) {
+  try {
+    fs.writeFileSync(fallbackSnapshotPath(), JSON.stringify({
+      v: 1,
+      home,
+      anchor,
+      anchorSignature: fallbackAnchorSignature(anchor),
+      entries,
+    }));
+  } catch (err) {
+    log('boot', '写 profile fallback 快照失败: ' + err.message);
+  }
+}
+
 async function repairProfileFallback(home) {
+  const anchor = dshPackageJson();
+  const modulesRoot = path.join(home, 'profiles', 'node_modules');
+  // 快速路径：快照存在且逐项校验通过 → 跳过 import + BFS + heal。
+  let cache = null;
+  try { cache = JSON.parse(fs.readFileSync(fallbackSnapshotPath(), 'utf8')); } catch {}
+  if (verifyFallbackSnapshot(home, anchor, cache)) {
+    log('boot', 'profile fallback 健康（快照校验通过，跳过修复）');
+    return;
+  }
   let bootMod;
   try {
     bootMod = await import('@deepseek-ai/dsh-app-boot');
@@ -289,11 +392,13 @@ async function repairProfileFallback(home) {
     return;
   }
   if (typeof bootMod.healProfilesModuleFallback !== 'function') return;
-  const modulesRoot = path.join(home, 'profiles', 'node_modules');
   for (let attempt = 0; attempt < 24; attempt += 1) {
     try {
-      bootMod.healProfilesModuleFallback(dshPackageJson(), home);
+      bootMod.healProfilesModuleFallback(anchor, home);
       if (attempt > 0) log('boot', `profile fallback 已修复（重试 ${attempt} 次）`);
+      // 修复成功后记录健康快照，下次启动走快速校验。
+      const snap = snapshotFallbackLinks(modulesRoot);
+      if (snap) saveFallbackSnapshot(home, anchor, snap);
       return;
     } catch (err) {
       const message = String((err && err.message) || err);
@@ -2430,6 +2535,43 @@ function resolvableCoreBundles() {
   });
 }
 
+// 递归比对 src/dest 的 size+mtime，任一文件缺失或不一致返回 true（需要同步）。
+// dest 目录整体不存在时直接返回 true，避免逐文件 stat 异常。
+function dirNeedsSync(src, dest) {
+  if (!fs.existsSync(dest)) return true;
+  let entries;
+  try { entries = fs.readdirSync(src, { withFileTypes: true }); } catch { return true; }
+  for (const e of entries) {
+    const s = path.join(src, e.name);
+    const d = path.join(dest, e.name);
+    if (e.isDirectory()) {
+      if (dirNeedsSync(s, d)) return true;
+    } else {
+      try {
+        const ss = fs.statSync(s);
+        const ds = fs.statSync(d);
+        if (ds.size !== ss.size || Math.round(ds.mtimeMs) !== Math.round(ss.mtimeMs)) return true;
+      } catch {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// 目录级同步：内容一致时跳过，避免每次启动全量递归复制
+// （临时目录 + 杀软实时扫描下重复写盘最费时）。cpSync 必须保留时间戳，
+// 否则复制后的 mtime 每次都是"现在"，跳过比对永远不成立。
+function syncDir(src, dest) {
+  if (!fs.existsSync(src)) return;
+  try {
+    if (fs.existsSync(dest) && !dirNeedsSync(src, dest)) return;
+    fs.cpSync(src, dest, { recursive: true, force: true, preserveTimestamps: true });
+  } catch (err) {
+    log('boot', '同步目录失败 ' + src + ': ' + err.message);
+  }
+}
+
 function syncCompanionPlugins() {
   if (!IS_WIN) return;
   try {
@@ -2456,11 +2598,7 @@ function syncCompanionPlugins() {
     for (const name of vendorDeps) {
       const sdir = path.join(__dirname, 'node_modules', name);
       if (!fs.existsSync(sdir)) continue;
-      try {
-        fs.cpSync(sdir, path.join(profileDir, 'node_modules', name), { recursive: true, force: true });
-      } catch (err) {
-        log('boot', '同步内置依赖 ' + name + ' 失败: ' + err.message);
-      }
+      syncDir(sdir, path.join(profileDir, 'node_modules', name));
     }
     for (const p of COMPANION_PLUGINS) {
       const rel = companionDirName(p);
@@ -2476,16 +2614,22 @@ function syncCompanionPlugins() {
       fs.mkdirSync(path.join(dest, 'lib'), { recursive: true });
       for (const f of copyFiles) {
         const sf = path.join(src, f);
-        if (fs.existsSync(sf)) fs.copyFileSync(sf, path.join(dest, f));
+        if (!fs.existsSync(sf)) continue;
+        const df = path.join(dest, f);
+        // 逐文件比对大小+mtime（copyFile 保留时间戳），一致则跳过复制，
+        // 避免每次启动都写盘（临时目录 + 杀软实时扫描下重复写入最费时）。
+        try {
+          const sst = fs.statSync(sf);
+          const dst = fs.statSync(df);
+          if (dst.size === sst.size && Math.round(dst.mtimeMs) === Math.round(sst.mtimeMs)) continue;
+        } catch { /* 目标缺失或不可读 → 照常复制 */ }
+        fs.copyFileSync(sf, df);
       }
       // 完整同步插件自带的 lib/assets/src 目录：第三方插件（如
       // dsh-better-sidebar 的懒加载 chunk、harness-pet 的动画素材）不都落在
       // 固定文件清单里，递归复制保证打包产物与资源随插件一起进 profile。
       for (const sub of ['lib', 'assets', 'src']) {
-        const sdir = path.join(src, sub);
-        if (fs.existsSync(sdir)) {
-          fs.cpSync(sdir, path.join(dest, sub), { recursive: true, force: true });
-        }
+        syncDir(path.join(src, sub), path.join(dest, sub));
       }
       // Bundle 插件不写 patch 行：dsh 在启动时读取 profile 的
       // dsh.profile.bundles 并应用包内 cordis.patch.yml。
@@ -3652,6 +3796,11 @@ async function boot() {
 
   // 移除原生菜单栏（文件/视图/帮助），全部功能由自绘 chrome 与托盘提供。
   Menu.setApplicationMenu(null);
+  // 尽早弹出 loading 窗口（不依赖后续任何启动步骤），用户能第一时间看到
+  // 「正在启动」反馈。initRendererRecovery 不依赖窗口，wireWindowRecovery
+  // 仍在各分支原位调用（此时 mainWindow 已存在），此处提前只影响 loading
+  // 窗口的出现时机，不改变任何后续行为。
+  createWindow();
   startPreviewStaticServer();
   registerChromeIpc();
   createTray();
@@ -3665,7 +3814,6 @@ async function boot() {
     // 跳过 repairProfileFallback（WSL 内的 dsh 首次启动会自行 heal）与 koffi
     // 目录选择器 overlay（只作用于本地内置 dsh）。
     initRendererRecovery();
-    createWindow();
     wireWindowRecovery();
     startHeartbeatLoop();
     setupTestChannel();
@@ -3694,7 +3842,6 @@ async function boot() {
     applyWorkspaceSearchRailFix();
     applyWebSearchBaseUrlFix();
     initRendererRecovery();
-    createWindow();
     wireWindowRecovery();
     startHeartbeatLoop();
     setupTestChannel();
