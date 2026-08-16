@@ -1449,6 +1449,17 @@ function createWindow(opts = {}) {
   // 渲染进程崩溃/挂起的自恢复由 renderer-recovery.js 统一接管
   // （boot 阶段经 wireWindowRecovery() 挂载），这里不再只记日志。
 
+  // 窗口显示（从托盘/最小化/二次启动恢复）时刷新余额，切回来即是最新。
+  win.on('show', () => maybeRefreshBalance());
+
+  // 页面（重）加载完成后补推一次余额缓存（reload/恢复重建后插件订阅事件
+  // 已失效，直接推送当前缓存即可立即恢复显示）。
+  win.webContents.on('did-finish-load', () => {
+    if (balanceCache) {
+      try { win.webContents.send('dsh:balance', balanceCache); } catch {}
+    }
+  });
+
   // 移除菜单栏后仍保留的键盘快捷键。
   mainWindow.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
@@ -2089,6 +2100,8 @@ let lastGlobalNotifyAt = 0; // 全局限流：短时间窗口内至多一条，�
 
 function onSessionTurnEnd(info) {
   log('notify', 'DEBUG turn detected: ' + JSON.stringify({ sid: info.sessionId, title: info.title, notifyOnTurnEnd, quitting, vis: mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible(), foc: mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused(), curSid: currentSessionId }));
+  // 回合完成 = 产生消耗：触发余额刷新（节流 30s），让余额显示及时同步。
+  maybeRefreshBalance();
   if (!notifyOnTurnEnd || quitting) { log('notify', 'DEBUG skip: notifyOnTurnEnd=' + notifyOnTurnEnd + ' quitting=' + quitting); return; }
   // 主窗可见且聚焦：用户正在操作，不弹通知打扰。最小化/隐藏/失焦时不拦截。
   // 「当前正在观看的会话」不再单独拦截：同一会话在后台完成时（窗口被遮挡、
@@ -2650,16 +2663,40 @@ async function refreshBalance() {
   result.prices = { ...balance.effectivePrice(model), ...(override || {}) };
   result.model = model;
   result.peak = balance.isPeakHour();
+  result.at = new Date().toISOString(); // 数据获取时间（UI 可显示「更新于 …」）
   balanceCache = result;
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('dsh:balance', result);
   }
+  if (!result.ok) {
+    // 查询失败：30s 后自动重试一次，避免长时间停留在过期/缺失状态。
+    if (balanceRetryTimer) clearTimeout(balanceRetryTimer);
+    balanceRetryTimer = setTimeout(() => {
+      balanceRetryTimer = null;
+      maybeRefreshBalance(true);
+    }, 30 * 1000);
+    if (balanceRetryTimer.unref) balanceRetryTimer.unref();
+  }
   return result;
 }
 
-function startBalanceLoop() {
+// 余额刷新节流：会话完成 / 窗口显示 / 轮询共用，距上次不足 30s 跳过，
+// 避免高频事件（流式多回合）触发过多 HTTP 请求。
+let lastBalanceRefreshAt = 0;
+let balanceRetryTimer = null;
+
+function maybeRefreshBalance(force = false) {
+  const now = Date.now();
+  if (!force && now - lastBalanceRefreshAt < 30 * 1000) return;
+  lastBalanceRefreshAt = now;
   refreshBalance().catch(() => {});
-  balanceTimer = setInterval(() => refreshBalance().catch(() => {}), 15 * 60 * 1000);
+}
+
+function startBalanceLoop() {
+  // 启动即刷新；此后每 3 分钟轮询（原 15 分钟——用户反馈余额显示不同步/
+  // 更新慢，缩短轮询并配合「窗口显示/会话完成」触发点）。
+  maybeRefreshBalance(true);
+  balanceTimer = setInterval(() => maybeRefreshBalance(), 3 * 60 * 1000);
   if (balanceTimer.unref) balanceTimer.unref();
 }
 
