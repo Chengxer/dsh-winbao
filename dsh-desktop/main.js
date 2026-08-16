@@ -968,6 +968,14 @@ function backupAndRebuildProfileModules(home) {
 // 避免「重启后连续弹出多个启动失败窗口」。
 let boxChain = Promise.resolve();
 function showBox(opts) {
+  if (process.env.DSH_DESKTOP_TEST === '1') {
+    // 集成测试模式：不弹真实对话框。失败弹窗会直接出现在用户屏幕上（测试
+    // 实例与用户正在用的桌面端并存），且模态框会挂起测试场景直到超时。
+    // 改为记录日志并按 cancelId 处理（boot 失败弹窗 → 退出，场景快速失败）。
+    const cancel = opts.cancelId != null ? opts.cancelId : (Array.isArray(opts.buttons) ? opts.buttons.length - 1 : 0);
+    log('test', 'showBox 已抑制（测试模式）: ' + (opts.title || '') + ' :: ' + (opts.message || '') + ' :: ' + String(opts.detail || '').slice(0, 300));
+    return Promise.resolve({ response: cancel, checkboxChecked: false });
+  }
   const run = () => {
     if (mainWindow && !mainWindow.isDestroyed()) return dialog.showMessageBox(mainWindow, opts);
     return dialog.showMessageBox(opts);
