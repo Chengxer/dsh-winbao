@@ -36,6 +36,43 @@ const { patchWebSearchBaseUrl } = require('./scripts/patch-web-search-baseurl');
 const zlib = require('node:zlib');
 
 // ---------------------------------------------------------------------------
+// 启动期崩溃兜底（issue #30「便携版有进程无界面」）：模块加载 / 启动早期
+// 的任何未捕获异常都落盘 <userData>/logs/startup-crash.log，且启动完成前置
+// 可见错误框（绝不静默失败）。userData 可能尚未重定向，故便携版优先写到
+// exe 旁 data/logs，失败再退回系统临时目录。
+// ---------------------------------------------------------------------------
+let bootFinished = false; // boot() 建窗完成后置 true，之后不再弹启动期错误框
+function startupCrashLogFile() {
+  let base;
+  try {
+    base = process.env.PORTABLE_EXECUTABLE_DIR
+      ? path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'data')
+      : app.getPath('userData');
+  } catch {
+    base = path.join(os.tmpdir(), 'dsh-desktop');
+  }
+  const dir = path.join(base, 'logs');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  return path.join(dir, 'startup-crash.log');
+}
+function recordStartupCrash(kind, err) {
+  try {
+    fs.appendFileSync(startupCrashLogFile(), `[${new Date().toISOString()}] [${kind}] ${(err && err.stack) || err}\n`, 'utf8');
+  } catch {}
+}
+process.on('uncaughtException', (err) => {
+  recordStartupCrash('uncaughtException', err);
+  if (!bootFinished && err) {
+    try {
+      dialog.showErrorBox('DSH Desktop 启动异常', String((err && err.message) || err) + '\n\n详细日志：' + startupCrashLogFile());
+    } catch {}
+  }
+});
+process.on('unhandledRejection', (reason) => {
+  recordStartupCrash('unhandledRejection', reason instanceof Error ? reason : new Error(String(reason)));
+});
+
+// ---------------------------------------------------------------------------
 // H2/H3 路径围栏：文件还原/打开只允许「会话 cwd」之下的项目文件。
 // 任意绝对路径（如写入 Startup\*.bat）一律拒绝；缓存 5 分钟。
 // ---------------------------------------------------------------------------
@@ -1660,6 +1697,8 @@ async function runUpdateFlow(manual) {
       await updater.applyUpdate(ctx, latest);
       // 新 overlay 已就位：立即重打运行时补丁（全部幂等），否则「稍后重启」后再
       // 点「重启 dsh web 服务」会用未修复的新版本启动（识图发送、设置暴露等回归）。
+      // 同时把壳内置 Agent 预设补进新 overlay（干净 npm 包不含 8 个壳预设）。
+      syncLocalAgentPresets();
       applyRuntimeFlashFix();
       applyPromptExposeFix();
       applyImageSendFix();
@@ -2575,6 +2614,32 @@ function syncBuiltinAgentPresets() {
     log('boot', '已同步 ' + dests.length + ' 个内置 Agent 预设到 WSL dsh: ' + dests.map((d) => path.basename(d)).join(', '));
   } catch (err) {
     log('boot', '同步内置 Agent 预设到 WSL 失败: ' + err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 本地模式内置 Agent 预设同步（WSL 同族问题的 local 半边）：after-pack /
+// npm start 只把 assets/agent-presets 写进「内置」dsh 包；用户把 agent 更新到
+// overlay（userData/agent）后，overlay 是干净的 npm 包（updater.applyUpdate
+// 全新安装），8 个壳内置预设会消失（模式列表比内置/WSL 少）。这里幂等地把
+// 预设补进「当前生效」的 dsh 包：overlay 存在则 overlay，否则内置包（幂等，
+// 写入失败只告警不中断）。与 syncBuiltinAgentPresets 一起保证三种布局
+// （内置 / 更新 overlay / WSL）模式列表一致。
+// ---------------------------------------------------------------------------
+function syncLocalAgentPresets() {
+  if (isWslMode()) return; // WSL 走 UNC 的 syncBuiltinAgentPresets
+  try {
+    const active = updater.overlayVersion(updCtx())
+      ? path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh')
+      : path.join(__dirname, 'node_modules', '@deepseek-ai', 'dsh');
+    if (!fs.existsSync(path.join(active, 'package.json'))) {
+      log('boot', '未找到生效的 dsh 包，跳过内置 Agent 预设同步');
+      return;
+    }
+    const dests = installBuiltinPresets(active);
+    log('boot', '已同步 ' + dests.length + ' 个内置 Agent 预设到 ' + (updater.overlayVersion(updCtx()) ? 'agent overlay' : '内置 dsh 包') + ': ' + dests.map((d) => path.basename(d)).join(', '));
+  } catch (err) {
+    log('boot', '同步内置 Agent 预设失败: ' + err.message);
   }
 }
 
@@ -3617,6 +3682,7 @@ async function boot() {
     // 先修复 profile fallback 联接再同步/补丁依赖文件：EPERM 环境下补丁写不进去。
     await repairProfileFallback(home);
     syncCompanionPlugins();
+    syncLocalAgentPresets();
     applyRuntimeFlashFix();
     applyPromptExposeFix();
     applyImageSendFix();
@@ -3633,6 +3699,7 @@ async function boot() {
     if (runKoffiPreflight()) clearAutoPickerBrowseOverlay();
     else enablePickerBrowseOverlay();
   }
+  bootFinished = true; // 窗口已建：此后异常走既有 fatal/错误弹窗，不再重复弹
   startAndShow()
     .then(() => {
       // Session-completion notifications: watch dsh session logs under the
@@ -3670,17 +3737,31 @@ async function boot() {
 // App lifecycle
 // ---------------------------------------------------------------------------
 
+// 便携版数据目录必须在校验单实例锁之前重定向：Electron 的实例锁以 userData
+// 为键，旧代码在 boot() 里才 setPath —— 便携版与安装版（乃至两个便携版）会
+// 共用 %APPDATA%\DSH Desktop 的锁；安装版正在运行时再双击便携版会因
+// requestSingleInstanceLock() 失败而静默退出、无任何界面（issue #30「便携版
+// 双击无反应 / 有进程无窗口」的候选根因）。重定向后各安装形态各持其锁，
+// 便携版数据随 exe 走（data/），两版可同时运行互不干扰。
+if (process.env.PORTABLE_EXECUTABLE_DIR) {
+  try { app.setPath('userData', path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'data')); } catch {}
+}
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
   app.setAppUserModelId('com.deepseek.dsh.desktop');
+  // 本区块在模块加载期执行（boot() 之前），userDataDir 尚未赋值；统一用
+  // app.getPath('userData')（便携版已在上面重定向）构造 settings 上下文，
+  // 避免读写到 cwd 下无关的 settings.json。
+  const gpuSettingsCtx = () => ({ ...updCtx(), userDataDir: app.getPath('userData') });
   // GPU 进程崩溃是最常见的 Electron 静默退出原因（无日志、无弹窗）。
   // 默认启用硬件加速（issue #26：软件渲染导致 GPU 进程空转 ~60% 单核、
   // 设置页等整页重绘明显掉帧）。仅当 settings.json 标记
   // hardwareAcceleration === 'off'（用户手动关闭，或 GPU 连续崩溃自动降级
   // 写入）时才禁用硬件加速。
-  if (updater.loadSettings(updCtx()).hardwareAcceleration === 'off') {
+  if (updater.loadSettings(gpuSettingsCtx()).hardwareAcceleration === 'off') {
     app.disableHardwareAcceleration();
   }
   // GPU / 渲染进程崩溃日志 + 自动降级（issue #26）：GPU 进程短时间内连续
@@ -3692,9 +3773,9 @@ if (!gotLock) {
     try { const lp = path.join(app.getPath('userData'), 'logs', 'desktop.log'); fs.mkdirSync(path.dirname(lp), { recursive: true }); fs.appendFileSync(lp, `[${ts}] [crash] GPU 进程崩溃 ${extra}\n`); } catch {}
     if (!gpuCrashGuard.record()) return;
     try {
-      const s = updater.loadSettings(updCtx());
+      const s = updater.loadSettings(gpuSettingsCtx());
       s.hardwareAcceleration = 'off';
-      updater.saveSettings(updCtx(), s);
+      updater.saveSettings(gpuSettingsCtx(), s);
       log('boot', 'GPU 进程连续崩溃，已持久化关闭硬件加速，重启应用生效');
     } catch (err) {
       log('boot', 'GPU 降级标记写入失败: ' + ((err && err.message) || err));

@@ -8,16 +8,25 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 ## [Unreleased]
 
 ### 修复
-- **客户端自更新在中文 Windows 上解析失败**（`apply-update.ps1` 报 `Unexpected token '}'`，issue #23）：更新脚本改为带 UTF-8 BOM 写出，Windows PowerShell 5.1 不再按系统 ANSI 代码页（GBK）误读中文注释导致换行符被吞、语法乱码；`buildNsisPs1()` 模板注释同步 ASCII 化，脚本在任何代码页与换行风格下均安全
-- **桌面版默认启用硬件加速，修复软件渲染掉帧**（issue #26）：移除无条件 `app.disableHardwareAcceleration()`（软件渲染导致 GPU 进程空转 ~40-60% 单核、设置页等整页重绘明显掉帧）。改为：默认硬件加速；仅当 `settings.json` 标记 `hardwareAcceleration:'off'` 时禁用；GPU 进程 60 秒内连续崩溃 3 次（`gpu-process-crashed` / `child-process-gone` 双事件去重）自动持久化降级标记并重启应用，保留崩溃日志与自恢复兜底。降级逻辑抽为 `scripts/gpu-crash-guard.js`（含 `node --test` 单测）
+- **存量坏 profile manifest 不自愈 → 启动必失败**（issue #16，PR #21）：旧版本（0.3.3/0.3.4）写坏的 `profiles/web/package.json` 中 `dsh.profile.bundles` 只有配套 bundle、缺少核心 bundles（`@deepseek-ai/dsh-base` / `@deepseek-ai/dsh-web-app`），核心服务无人提供，插件树永久 `N entries did not activate`。`syncCompanionPlugins` 现在对已存在的 manifest 做「校验 + 补齐」：把缺失且实测可解析的核心 bundles 补到列表最前，其余条目（含用户添加的）原样保留；健康 manifest 零写入（幂等）。核心逻辑抽为 `profile-manifest.js`（纯函数，含 `node --test` 单测 + 集成场景 `heal-stale-manifest`）
+- **profile patch 同 id 重复注册 → 插件树崩溃**（issue #17，PR #24）：旧版本插件安装向 `cordis.patch.yml` 写入重复的 `- insert: - id: X` 块（或插件升级为 bundle 后 patch 残留行），cordis loader 抛 `duplicate loader entry id: X` 且永远无法自愈。新增 `profile-patch-heal.js`：启动时块级按 id 去重（保留首个、备份原文件）、把已升级为 bundle 的插件残留注册从 patch 层移除（`dropBlocksByIds`），并支持从 `dsh-web.log` 解析三种 loader 失败形态（hash / duplicate-id / 括号包名）映射回 patch 条目。含 `node --test` 单测 + 集成场景 `heal-dup-patch` / `heal-bundle-patch`
+- **web-search「接口地址」填第三方地址仍被拼 `/messages` 按 Anthropic 协议请求 → 404**（issue #20，PR #22）：`dsh-web-search-deepseek` 的 baseURL 拼接归一化（尾斜杠不产生双斜杠；基址已含 `/messages` 不再重复拼接），HTTP 失败信息附上实际请求地址与协议契约指引（裸 404 变可自解的提示），设置页中英文文案明确「POST <基址>/messages」契约。补丁本体在 `scripts/patch-web-search-baseurl.js`（打包补丁与运行时补丁共用同一实现，覆盖内置副本 / profile fallback / agent overlay），含 `node --test` 单测（含本地 mock 服务的真实 HTTP 回归）与集成场景 `web-search-patch`
+- **客户端自更新在中文 Windows 上解析失败**（`apply-update.ps1` 报 `Unexpected token '}'`，issue #23，PR #25）：更新脚本改为带 UTF-8 BOM 写出，Windows PowerShell 5.1 不再按系统 ANSI 代码页（GBK）误读中文注释导致换行符被吞、语法乱码；`buildNsisPs1()` 模板注释同步 ASCII 化，脚本在任何代码页与换行风格下均安全
+- **桌面版默认启用硬件加速，修复软件渲染掉帧**（issue #26，PR #28）：移除无条件 `app.disableHardwareAcceleration()`（软件渲染导致 GPU 进程空转 ~40-60% 单核、设置页等整页重绘明显掉帧）。改为：默认硬件加速；仅当 `settings.json` 标记 `hardwareAcceleration:'off'` 时禁用；GPU 进程 60 秒内连续崩溃 3 次（`gpu-process-crashed` / `child-process-gone` 双事件去重）自动持久化降级标记并重启应用，保留崩溃日志与自恢复兜底。降级逻辑抽为 `scripts/gpu-crash-guard.js`（含 `node --test` 单测）
 - **M3 主题管理器设置观察器防抖**（issue #26 附加项）：`assets/themes/m3-theme-manager.js` 的 `MutationObserver` 不再每批 DOM 变更都执行全文档 `querySelector`，改为 300ms 防抖（与 preload.js 中同功能实现对齐）
+- **M3 主题全局过渡拖慢整页**（issue #26 附加项）：`body[data-m3-theme="m3"] * { transition-duration }` 默认 `transition-property: all`，每个元素的所有属性变化（含布局开销最高的 width/height/transform）都被动画化，M3 模式下掉帧显著。收窄为颜色类属性（背景/文字/边框/阴影/透明度/transform），保留主题切换的平滑变色意图，几何变化不再动画
+- **WSL 模式「模式列表」比 local 少**（PR #29）：WSL 托管后端经 npm 安装的 dsh 是干净包，不含壳内置的 8 个 Agent 预设。`main.js` 在 WSL bootstrap 与更新后会经 UNC 把 `assets/agent-presets` 写入 WSL agent 包的 `config/agent-presets`；`scripts/sync-companion-plugins.js` 也自动同步预设（可 `--dsh-package <目录>` 显式指定）
+- **本地模式 agent 更新后丢失壳内置 Agent 预设**：`updater.applyUpdate` 全新安装的 overlay 也是干净 npm 包，8 个壳内置预设同样缺失（WSL 同族问题的 local 半边）。新增 `syncLocalAgentPresets()`：启动与更新后把预设幂等补进「当前生效」的 dsh 包（overlay 优先，否则内置），三种布局（内置 / 更新 overlay / WSL）模式列表一致
+- **识图 view_image 三个根因修复**（issue #33，PR #31 + #32）：① 旧模型（`glm-4v-flash` / `glm-4.1v-thinking-flash`）钳制 `maxTokens ≤ 1024` 并对 400 自动降档 1024 重试一次，400 code 1210 不再直接失败且 fallback 链持续生效；② 设置页保存不再把「等于插件默认值」的字段写进 `settings.yaml`（避免旧模型 maxTokens 2048 被写死固化）；③ `role('secret')` 的 apiKey 永不回显，留空 = 保持已存密钥，仅非空输入才写入（修复「改模型/地址后保存会静默清空密钥」）。新增 `scripts/verify-vision-upgrade.js` 交付前识图链路验证（插件完整性 / patch 唯一性 / 配置与模型上限兼容）
+- **余额欠费误报「API key is invalid」**：第三方 provider（opencode 等）余额不足返回 401 + CreditsError 时被 `dsh-llm-pi-ai` 一律判 AUTH。新增 `scripts/patch-pi-ai-credits.js` 把余额判定前置到 401-AUTH 之前：欠费 → QUOTA（客户端显示真实原因），真 key 无效仍判 AUTH
+- **便携版「有进程无窗口 / 双击无反应」**（issue #30）：① 便携版数据目录重定向提前到单实例锁校验之前——Electron 实例锁以 userData 为键，旧实现与安装版共用 `%APPDATA%\DSH Desktop` 锁，安装版在跑时双击便携版会静默退出；② 主进程启动期兜底：任何模块级 / 启动早期未捕获异常落盘 `<userData>/logs/startup-crash.log` 并在启动完成前弹可见错误框，杜绝静默失败
+- **打包前语法门覆盖补丁/自愈模块**：`scripts/check-syntax.js` 的入口清单并入 `profile-manifest.js` / `profile-patch-heal.js` / `patch-web-search-baseurl.js` / `gpu-crash-guard.js` / `install-minimal-win-preset.js` / `patch-deps.js` / `patch-pi-ai-credits.js` / `sync-companion-plugins.js` / `after-pack.js` / `patch-portable-template.js`，此类模块的语法/「async 与声明被拆开」问题在打包前即可拦截
 
 ## [0.3.8] — 2026-08-15
 
 ### 修复
 - **安装后启动即报 `ReferenceError: async is not defined`**：`main.js` 中 `async` 关键字与 `probeOverlayAgent` 函数声明被注释行拆开，导致主进程模块加载失败。已重接 `async function`；新增 `scripts/check-syntax.js` 并接入 `prepack` / `predist`，打包前强制做入口 JS 语法检查与「async/await 关键字与声明被拆开」模式扫描，此类坏包无法再打包。
 - **安装后启动即弹「应用初始化失败：home is not defined」**：`main.js` 的 `applySettingsSectionGuard()` 构造候选补丁路径时引用了未声明的 `home` 变量（相邻的 `applyProfilePatchGuard` / `applyWorkspaceSearchRailFix` 均有声明，唯独此处遗漏），`boot()` 无条件调用该函数导致每次启动必现初始化失败弹窗。已在该函数内补齐 `const home = effectiveDshHome() || path.join(os.homedir(), '.dsh')`，与相邻防护函数保持一致。
-- **WSL 模式「模式列表」比 local 少**：WSL 托管后端经 npm 安装的 dsh 是干净包，不含壳内置的 8 个 Agent 预设（`minimal-win` / `router-standard` / `anchored-standard` 等）。现在 `main.js` 在 WSL bootstrap 与更新后会经 UNC 把 `assets/agent-presets` 写入 WSL agent 包的 `config/agent-presets`；`scripts/sync-companion-plugins.js` 也自动同步预设（可 `--dsh-package <目录>` 显式指定），WSL / Linux 的模式列表与 Windows local 一致。
 
 ## [0.3.6] — 2026-08-15
 

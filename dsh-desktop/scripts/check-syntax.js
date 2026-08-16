@@ -22,6 +22,17 @@ const entryFiles = [
   'renderer-recovery.js',
   'wsl-backend.js',
   'watchdog.js',
+  // 自愈 / 补丁模块（electron-builder files 清单内，随包分发，必须过语法门）。
+  'profile-manifest.js',
+  'profile-patch-heal.js',
+  'scripts/patch-web-search-baseurl.js',
+  'scripts/gpu-crash-guard.js',
+  'scripts/install-minimal-win-preset.js',
+  'scripts/patch-deps.js',
+  'scripts/patch-pi-ai-credits.js',
+  'scripts/sync-companion-plugins.js',
+  'scripts/after-pack.js',
+  'scripts/patch-portable-template.js',
 ];
 
 // 匹配「async/await 关键字与紧随其后的 function 声明之间被空行/注释行拆开」：

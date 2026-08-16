@@ -601,6 +601,11 @@ body[data-m3-theme="m3"] {
 body[data-m3-theme="m3"] * {
   transition-duration: var(--m3-motion-short);
   transition-timing-function: var(--m3-easing-standard);
+  /* issue #26 附加项：`transition-duration` 默认 transition-property 是
+     `all`，会给文档内每个元素的所有属性变化（含 width/height/transform 等
+     布局开销最大的属性）都加过渡动画，M3 主题下整页掉帧。收窄为颜色类
+     属性（主题切换的视觉意图：平滑变色），布局/几何变化不再动画。 */
+  transition-property: background-color, color, border-color, box-shadow, fill, stroke, opacity, transform;
 }
 
 /* 按钮 M3 化 */
