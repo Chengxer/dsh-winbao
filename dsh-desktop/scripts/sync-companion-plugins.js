@@ -50,6 +50,7 @@ const COMPANION_PLUGINS = [
   { id: 'wsl-settings', name: '@deepseek-ai/dsh-wsl-settings' },
   { id: 'dsh-vision', name: '@dsh-external/dsh-vision' },
   { id: 'side-session', name: '@dsh-external/dsh-side-session' },
+  { id: 'compaction-acp', name: 'billion-context-dsh' },
 ];
 
 const PLUGIN_FILES = [
@@ -221,6 +222,15 @@ function syncPlugins(home, dryRun) {
       const sf = path.join(src, f);
       if (fs.existsSync(sf)) fs.copyFileSync(sf, path.join(dest, f));
     }
+    // 随包分发的目录整体递归拷贝：lib/assets/src/dist 的打包产物与资源，
+    // 以及 node_modules（如 billion-context-dsh 的私有依赖 acp-kernel），
+    // 保证 bundle 在 profile 内可解析。
+    for (const sub of ['lib', 'assets', 'src', 'dist', 'node_modules']) {
+      const sdir = path.join(src, sub);
+      if (fs.existsSync(sdir)) {
+        fs.cpSync(sdir, path.join(dest, sub), { recursive: true, force: true, preserveTimestamps: true });
+      }
+    }
     log(`已安装 ${p.name}${isBundle ? '（bundle 插件）' : ''}`);
   }
 
@@ -286,6 +296,28 @@ function syncPlugins(home, dryRun) {
     }
   } else {
     log('补丁层无变化（全部条目已存在）');
+  }
+
+  // billion-context-dsh（compaction-acp）是模型驱动的 ACP 压缩后端：同一
+  // realm 内与 dsh 默认的 compaction-basic 不能并存（插件 README 的官方
+  // 安装说明）。幂等写入禁用条目：patch 中已存在 compaction-basic 条目
+  // （含用户手写的 disabled 块）则不动，尊重用户配置。
+  if (bundleNames.has('billion-context-dsh')) {
+    let acpPatch = '';
+    try { acpPatch = fs.readFileSync(patchFile, 'utf8'); } catch { acpPatch = ''; }
+    if (!/(?:^|\n)\s*-?\s*id\s*:\s*compaction-basic\b/.test('\n' + acpPatch)) {
+      const block = '\n# billion-context-dsh：禁用 preset realm 的 compaction-basic（ACP 模型驱动后端接管压缩决策）\n- id: compaction-basic\n  disabled: true\n';
+      if (/^\s*\[\]\s*$/m.test(acpPatch)) acpPatch = acpPatch.replace(/\[\]/m, block.trim());
+      else if (acpPatch.trim() === '') acpPatch = '# dsh web profile patch（由 DSH Desktop 维护）\n' + block.trim();
+      else acpPatch = acpPatch.replace(/\s*$/, '\n') + block;
+      if (dryRun) log(`dry-run: 将向 ${patchFile} 写入 compaction-basic 禁用条目`);
+      else {
+        fs.writeFileSync(patchFile, acpPatch);
+        log('已写入 compaction-basic 禁用条目（billion-context-dsh 接管压缩后端）');
+      }
+    } else {
+      log('compaction-basic 禁用条目已存在（跳过）');
+    }
   }
 }
 

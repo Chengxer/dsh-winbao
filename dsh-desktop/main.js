@@ -2812,6 +2812,7 @@ const COMPANION_PLUGINS = [
   { id: 'wsl-settings', name: '@deepseek-ai/dsh-wsl-settings' },
   { id: 'dsh-vision', name: '@dsh-external/dsh-vision' },
   { id: 'side-session', name: '@dsh-external/dsh-side-session' },
+  { id: 'compaction-acp', name: 'billion-context-dsh' },
 ];
 
 function companionDirName(p) {
@@ -3135,15 +3136,40 @@ function syncCompanionPlugins() {
           log('boot', '同步配套插件文件失败 ' + sf + ': ' + err.message);
         }
       }
-      // 完整同步插件自带的 lib/assets/src 目录：第三方插件（如
-      // dsh-better-sidebar 的懒加载 chunk、harness-pet 的动画素材）不都落在
-      // 固定文件清单里，递归复制保证打包产物与资源随插件一起进 profile。
-      for (const sub of ['lib', 'assets', 'src']) {
+      // 完整同步插件自带的 lib/assets/src/dist/node_modules 目录：第三方插件
+      // （如 dsh-better-sidebar 的懒加载 chunk、harness-pet 的动画素材、
+      // billion-context-dsh 的 dist 构建产物）不都落在固定文件清单里，递归
+      // 复制保证打包产物与资源随插件一起进 profile；node_modules 用于随包
+      // 分发插件的私有依赖（如 billion-context-dsh 的 acp-kernel），保证
+      // bundle 在 profile 内可解析。
+      for (const sub of ['lib', 'assets', 'src', 'dist', 'node_modules']) {
         syncDir(path.join(src, sub), path.join(dest, sub));
       }
       // Bundle 插件不写 patch 行：dsh 在启动时读取 profile 的
       // dsh.profile.bundles 并应用包内 cordis.patch.yml。
       if (isBundle) bundleNames.add(p.name);
+    }
+
+    // billion-context-dsh（compaction-acp）是模型驱动的 ACP 压缩后端：同一
+    // realm 内与 dsh 默认的 compaction-basic 不能并存（插件 README 的官方
+    // 安装说明）。幂等写入禁用条目：patch 中已存在 compaction-basic 条目
+    // （含用户手写的 disabled 块）则不动，尊重用户配置。
+    if (bundleNames.has('billion-context-dsh')) {
+      const acpPatchFile = path.join(profileDir, 'cordis.patch.yml');
+      try {
+        let patch = '';
+        try { patch = fs.readFileSync(acpPatchFile, 'utf8'); } catch { /* 全新 profile：patch 文件尚未创建，视为空 */ }
+        if (!/(?:^|\n)\s*-?\s*id\s*:\s*compaction-basic\b/.test('\n' + patch)) {
+          const block = '\n# billion-context-dsh：禁用 preset realm 的 compaction-basic（ACP 模型驱动后端接管压缩决策）\n- id: compaction-basic\n  disabled: true\n';
+          if (/^\s*\[\]\s*$/m.test(patch)) patch = patch.replace(/\[\]/m, block.trim());
+          else if (patch.trim() === '') patch = '# dsh web profile patch（由 DSH Desktop 维护）\n' + block.trim();
+          else patch = patch.replace(/\s*$/, '\n') + block;
+          fs.writeFileSync(acpPatchFile, patch);
+          log('boot', '已禁用 compaction-basic（billion-context-dsh 接管压缩后端）');
+        }
+      } catch (err) {
+        log('boot', '写入 compaction-basic 禁用条目失败: ' + err.message);
+      }
     }
 
     const manifestFile = path.join(profileDir, 'package.json');

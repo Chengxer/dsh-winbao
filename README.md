@@ -155,6 +155,7 @@ dsh-desktop/
 | `@dsh-external/dsh-super-injector` | BSD-3-Clause | @dsh-external 社区 |
 | `@dsh-external/dsh-vision` | BSD-3-Clause | @dsh-external 社区 |
 | `@dsh-external/dsh-side-session` | MIT | [hzhz314159/dsh-side-session](https://github.com/hzhz314159/dsh-side-session) |
+| `billion-context-dsh` | MIT | [Tyan66666/billion-context-dsh](https://github.com/Tyan66666/billion-context-dsh) |
 | `dsh-navbar` | MIT | [vlln/dsh-navbar](https://github.com/vlln/dsh-navbar) |
 | `harness-pet` | MIT | [cakeni/harness-pet](https://github.com/cakeni/harness-pet) |
 | `zat-dsh-engine` | MIT | [mishibeikejie/zat-dsh-engine](https://github.com/mishibeikejie/zat-dsh-engine) |

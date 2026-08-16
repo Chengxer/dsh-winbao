@@ -56,6 +56,7 @@
 
 - 桌面端读取 `~/.dsh/.credentials.yaml` 的 `DEEPSEEK_API_KEY`（或环境变量），调用 `https://api.deepseek.com/user/balance`，每 15 分钟刷新，通过 preload 推送到 Web UI。
 - 配套 dsh 客户端插件（`assets/plugins/dsh-balance`）在每次启动时自动同步进 web profile 并注册到 `conversation.composer.dock`，在对话底部统计栏内联显示：**本轮 ¥X.XX · 余额 ¥Y.YY**（本轮费用按 token 用量 × 价格档估算，缓存命中/未命中/输出分别计价）。
+- **OpenCode Go 订阅额度**：同一小部件内追加显示 `Go 5h x% 周 x% 月 x%`——调用 `https://opencode.ai/zen/go/v1/usage` 读取 **5 小时滚动 / 每周 / 每月** 三个窗口的已用百分比与重置时间；密钥取自 `OPENCODE_GO_API_KEY`（环境变量或 `~/.dsh/.credentials.yaml`，回退 OpenCode CLI 的 `auth.json`），未配置时自动省略该段。
 - 价格档默认：deepseek-chat 2/0.5/8、deepseek-reasoner 与 deepseek-v4-pro 4/1/16（¥/百万 token）；可在 `<数据目录>\settings.json` 的 `balancePrices.<model>` 覆盖。代理/镜像可用 `DEEPSEEK_API_BASE` 或 `DEEPSEEK_BALANCE_URL` 环境变量。
 - 不需要余额提示时：chrome 栏 ⋯ 菜单 →「显示余额/本轮费用」取消勾选，整个 dock 会隐藏（第三方中转/非官方直连用户推荐关闭）。
 - 纯浏览器打开 Web UI 时无桌面壳推送，小部件只显示「本轮」费用。
@@ -116,6 +117,13 @@
 - 三种回答引擎（互斥、持久化、即时切换）：复用 DSH 全局 Key / 插件自带 Key / 走宿主 LLM 服务（`ctx.llm`，不读任何 key）；流式输出，UI 与主界面同款设计令牌（深色/浅色自动跟随）。
 - 上下文自动捕获：服务端解析会话日志 `session.jsonl.zstd`（zstd 帧扫描，容忍事件模型变更），含截断护栏（transcript 120 条 / 40K 字符、文件 200 个）。
 - 以 bundle 形式随桌面端分发（`assets/plugins/dsh-side-session`，含 LICENSE 与 README），启动时自动同步进 web profile。
+
+## 主动上下文压缩（billion-context-dsh）
+
+- [Tyan66666/billion-context-dsh](https://github.com/Tyan66666/billion-context-dsh)（MIT）内置：**模型驱动的上下文压缩后端**（ACP，移植自 billion-context-pi，内核 acp-kernel 复用）——由模型决定何时压缩、压缩什么，替代自动摘要式压缩。
+- 给模型四个工具：`compress`（模型自写摘要遮蔽 seq 范围，**无第二次 LLM 调用**）/ `decompress`（从会话日志恢复原文）/ `search_context`（块内检索）/ `acp_status`（块账本与上下文压力）；另有 `/acp` 命令。
+- 自动策略只 nudge（`agent/pre-step` 注入建议，非强制）；原文保留在 append-only 日志，支持分层蒸馏（T2/T3）与重启后账本重建。
+- 以 bundle 形式随桌面端分发（`assets/plugins/billion-context-dsh`，含 dist 与私有依赖 acp-kernel），启动时自动同步进 web profile；已按官方建议在 profile patch 禁用 `compaction-basic`（同一 realm 仅保留一个压缩后端）。
 
 ## 对话删除与归档管理（dsh-session-manager）
 
@@ -310,7 +318,7 @@ dsh-desktop/
 ├── assets/               # 加载页、更新进度页、恢复页、图标、托盘图标、配套 dsh 插件
 │   ├── sponsor/          # 赞助收款码（支付宝 / 微信，「请作者喝咖啡」面板与本文档共用）
 │   ├── agent-presets/    # 8 个内置预设（minimal-win / router-standard / anchored-standard / zero-anchored-standard / whoami-standard / v4-flash-godmode-opencode-go / warmupbetter / warmupbetter-replay），local 打包写入 / WSL 启动与更新时经 UNC 同步
-│   └── plugins/          # dsh-balance / dsh-file-changes / dsh-vision / zat-dsh-engine / dsh-better-sidebar / dsh-navbar / harness-pet / dsh-super-injector / dsh-side-session / dsh-wsl-settings（设置页「WSL 后端」栏）等，启动时自动同步进 web profile
+│   └── plugins/          # dsh-balance / dsh-file-changes / dsh-vision / zat-dsh-engine / dsh-better-sidebar / dsh-navbar / harness-pet / dsh-super-injector / dsh-side-session / billion-context-dsh / dsh-wsl-settings（设置页「WSL 后端」栏）等，启动时自动同步进 web profile
 ├── scripts/
 │   ├── fetch-node.js     # 内置 node.exe 复制脚本
 │   ├── fetch-npm.js      # 内置 npm CLI 复制脚本
