@@ -157,6 +157,15 @@ dsh-desktop/
 | `harness-pet` | MIT | [cakeni/harness-pet](https://github.com/cakeni/harness-pet) |
 | `zat-dsh-engine` | MIT | [mishibeikejie/zat-dsh-engine](https://github.com/mishibeikejie/zat-dsh-engine) |
 
+随安装包分发的第三方社区 Agent 预设（`dsh-desktop/assets/agent-presets/`）：
+
+| 预设 | 许可证 | 来源 |
+|---|---|---|
+| `router-standard` | MIT | [yjh051108/dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite) |
+| `anchored-standard` / `zero-anchored-standard` | MIT | [xiaobright/dsh-anchored-standard](https://github.com/xiaobright/dsh-anchored-standard) |
+| `v4-flash-godmode-opencode-go` | MIT | [SheberDavid/v4-flash-godmode-opencode-go](https://github.com/SheberDavid/v4-flash-godmode-opencode-go) |
+| `warmupbetter` / `warmupbetter-replay` | MIT | [0liveiraaa/myDshPresets](https://github.com/0liveiraaa/myDshPresets) |
+
 底层运行时依赖（Electron、zod、ws、schemastery、koffi、zstddec 等）与全部间接依赖的许可证声明，均在上述清单文件中。
 
 ## License

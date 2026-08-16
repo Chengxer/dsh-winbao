@@ -145,6 +145,15 @@ Third-party community dsh plugins bundled with the installer:
 | `harness-pet` | MIT | [cakeni/harness-pet](https://github.com/cakeni/harness-pet) |
 | `zat-dsh-engine` | MIT | [mishibeikejie/zat-dsh-engine](https://github.com/mishibeikejie/zat-dsh-engine) |
 
+Third-party community Agent presets bundled with the installer (`dsh-desktop/assets/agent-presets/`):
+
+| Preset | License | Source |
+|---|---|---|
+| `router-standard` | MIT | [yjh051108/dsh-routing-suite](https://github.com/yjh051108/dsh-routing-suite) |
+| `anchored-standard` / `zero-anchored-standard` | MIT | [xiaobright/dsh-anchored-standard](https://github.com/xiaobright/dsh-anchored-standard) |
+| `v4-flash-godmode-opencode-go` | MIT | [SheberDavid/v4-flash-godmode-opencode-go](https://github.com/SheberDavid/v4-flash-godmode-opencode-go) |
+| `warmupbetter` / `warmupbetter-replay` | MIT | [0liveiraaa/myDshPresets](https://github.com/0liveiraaa/myDshPresets) |
+
 License declarations for runtime dependencies (Electron, zod, ws, schemastery, koffi, zstddec, etc.) and all transitive dependencies are in the list file above.
 
 ## License

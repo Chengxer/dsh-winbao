@@ -2,7 +2,7 @@
 
 > DSH Desktop（本项目）许可证：**MIT**，见 [LICENSE](LICENSE)。
 > 本文件声明本项目使用、引用或分发的第三方开源组件及其许可证。各组件的完整许可证文本以其各自源仓库为准。
-> 本清单基于 `dsh-desktop` 的实际安装依赖树（`node_modules`）与内置插件目录（`assets/plugins`）自动汇总，共 772 个唯一的 `包名@版本`。
+> 本清单基于 `dsh-desktop` 的实际安装依赖树（`node_modules`）、内置插件目录（`assets/plugins`）与内置预设目录（`assets/agent-presets`）汇总，共 772 个唯一的 `包名@版本`。
 
 ---
 
@@ -75,14 +75,29 @@
 | @deepseek-ai/dsh-third-party-thinking | 0.1.0 |
 | @deepseek-ai/dsh-wsl-settings | 0.1.0 |
 
-## 3. 内置运行时（Bundled Runtime）
+## 3. 内置 Agent 预设（Bundled Agent Presets，第三方来源）
+
+随安装包分发的 agent 预设（位于 `dsh-desktop/assets/agent-presets/`），来自以下第三方社区仓库。这些预设均基于 DeepSeek Harness 官方 Standard/Minimal 预设改编，采用 MIT 许可证（其中 `v4-flash-godmode-opencode-go` 基于上游 `dsh-router-standard` 的 MIT 代码改编）。
+
+| 预设 | 用途 | 许可证 | 来源仓库 |
+|---|---|---|---|
+| `router-standard` | 任务感知路由（spec 计划 / react 执行） | MIT | https://github.com/yjh051108/dsh-routing-suite |
+| `anchored-standard` | 首轮锚定 + 工具延迟展开 | MIT | https://github.com/xiaobright/dsh-anchored-standard |
+| `zero-anchored-standard` | 零工具锚定轮 + 后续展开 | MIT | https://github.com/xiaobright/dsh-anchored-standard |
+| `v4-flash-godmode-opencode-go` | opencode-go V4 Flash 引导（神模式） | MIT | https://github.com/SheberDavid/v4-flash-godmode-opencode-go |
+| `warmupbetter` | 首轮真实模型长 COT 热身 | MIT | https://github.com/0liveiraaa/myDshPresets |
+| `warmupbetter-replay` | 首轮重放预录 COT | MIT | https://github.com/0liveiraaa/myDshPresets |
+
+> 另有 `minimal-win`（基于官方极简模式的 Windows PowerShell 适配）与 `whoami-standard`（实验性）为本项目内置预设，基于 DeepSeek Harness 官方预设衍生，非第三方来源。
+
+## 4. 内置运行时（Bundled Runtime）
 
 | 组件 | 许可证 | 说明 |
 |---|---|---|
 | Node.js | MIT（含 ISC/BSD 等组件） | 便携版内置 `node.exe` 运行时，目标机器无需预装 Node.js |
 | npm CLI | Artistic-2.0 | 内置 npm 命令行，用于插件安装与官方 dsh overlay 更新 |
 
-## 4. 兼容但非内置的社区插件（经 zat-dsh-engine 插件市场由用户自行安装）
+## 5. 兼容但非内置的社区插件（经 zat-dsh-engine 插件市场由用户自行安装）
 
 本项目未打包以下插件，仅对其写入的自定义会话事件做了兼容性补丁（修复 `SessionFormatUnsupportedError`）：
 
@@ -94,7 +109,7 @@
 
 ---
 
-## 5. 完整依赖清单（Full Dependency List，含间接依赖，按字母排序）
+## 6. 完整依赖清单（Full Dependency List，含间接依赖，按字母排序）
 
 > 共 772 个 `包名@版本`。许可证字段取自各包 `package.json` 的 `license` 声明；标注为组合表达式（如 `MIT AND BSD-3-Clause`）者以其 SPDX 含义为准。
 
