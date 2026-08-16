@@ -71,35 +71,17 @@ window.__ModuleLoader__.load({
 			const primary = balances.find((b) => b.currency === "CNY") || balances[0];
 			const hasBalance = !!(data && data.ok && primary);
 			const usageKnown = hasUsage(usage);
-			// OpenCode Go 订阅额度：5 小时滚动 / 每周 / 每月（percent = 已用百分比）。
-			const oc = data && data.opencode;
-			const ocWindows = oc && oc.ok && oc.usage ? oc.usage : null;
-			const ocPct = (w) => (w && typeof w.percent === "number" ? Math.round(w.percent) + "%" : "");
-			const ocParts = [];
-			if (ocWindows) {
-				if (ocWindows.rolling) ocParts.push("5h " + ocPct(ocWindows.rolling));
-				if (ocWindows.weekly) ocParts.push("周 " + ocPct(ocWindows.weekly));
-				if (ocWindows.monthly) ocParts.push("月 " + ocPct(ocWindows.monthly));
-			}
-			const ocKnown = ocParts.length > 0;
-			if (!hasBalance && !usageKnown && !ocKnown) return null;
+			// OpenCode Go 套餐用量（官方配额接口 /zen/go/v1/usage 三窗口已用百分比，
+			// PR #44 形态：独立状态栏 chip，链接 opencode.ai；percent=已用比例非剩余）。
+			const go = data && data.opencodeGo && data.opencodeGo.ok && data.opencodeGo.usage ? data.opencodeGo.usage : null;
+			if (!hasBalance && !usageKnown && !go) return null;
 			const parts = [];
 			if (usageKnown) parts.push("本轮 ¥" + money(sessionCost(usage, prices)));
 			if (hasBalance) parts.push("余额 ¥" + money(primary.total));
-			if (ocKnown) parts.push("Go " + ocParts.join(" "));
-			let ocTitle = "";
-			if (ocWindows) {
-				const fmt = (w) => (w ? `${w.percent == null ? "?" : Math.round(w.percent) + "%"}${w.resetsAt ? " · 重置 " + new Date(w.resetsAt).toLocaleString() : ""}${w.status && w.status !== "ok" ? " · " + w.status : ""}` : "不可用");
-				ocTitle = "OpenCode Go 已用额度（percent=已用比例，非剩余）：5小时滚动 " + fmt(ocWindows.rolling)
-					+ "；周 " + fmt(ocWindows.weekly)
-					+ "；月 " + fmt(ocWindows.monthly);
-			}
 			const title = hasBalance
-				? `${primary.currency} 余额 ¥${money(primary.total)}（充值 ¥${money(primary.toppedUp)} · 赠送 ¥${money(primary.granted)}）；本轮费用按 token 用量估算（¥/百万 token：命中 ${prices?.cacheHit ?? FALLBACK_PRICES.cacheHit} / 未命中 ${prices?.cacheMiss ?? FALLBACK_PRICES.cacheMiss} / 输出 ${prices?.output ?? FALLBACK_PRICES.output}${data.model ? " · " + data.model : ""}${typeof data.peak === "boolean" ? (data.peak ? " · 高峰价" : " · 空闲价") : ""}）${ocTitle ? "；" + ocTitle : ""}，点击前往充值`
-				: ocTitle
-					? ocTitle
-					: "本轮费用按 token 用量估算；未读取到 DeepSeek API Key，无法显示余额";
-			return react_jsx_runtime.jsx("a", {
+				? `${primary.currency} 余额 ¥${money(primary.total)}（充值 ¥${money(primary.toppedUp)} · 赠送 ¥${money(primary.granted)}）；本轮费用按 token 用量估算（¥/百万 token：命中 ${prices?.cacheHit ?? FALLBACK_PRICES.cacheHit} / 未命中 ${prices?.cacheMiss ?? FALLBACK_PRICES.cacheMiss} / 输出 ${prices?.output ?? FALLBACK_PRICES.output}${data.model ? " · " + data.model : ""}${typeof data.peak === "boolean" ? (data.peak ? " · 高峰价" : " · 空闲价") : ""}），点击前往充值`
+				: "本轮费用按 token 用量估算；未读取到 DeepSeek API Key，无法显示余额";
+			const dock = react_jsx_runtime.jsx("a", {
 				className: "dsh-balance-dock",
 				href: "https://platform.deepseek.com/top_up",
 				target: "_blank",
@@ -107,9 +89,49 @@ window.__ModuleLoader__.load({
 				title,
 				children: parts.join(" · ")
 			});
+			if (!go) return dock;
+			const goDock = react_jsx_runtime.jsx("a", {
+				className: "dsh-balance-dock dsh-balance-go",
+				href: "https://opencode.ai",
+				target: "_blank",
+				rel: "noreferrer",
+				title: goUsageTitle(go),
+				children: goUsageText(go)
+			});
+			if (!usageKnown && !hasBalance) return goDock;
+			return react_jsx_runtime.jsx("span", {
+				className: "dsh-balance-wrap",
+				children: [dock, goDock]
+			});
+		}
+
+		/** OpenCode Go 三窗口已用百分比（独立 chip 文本）。 */
+		const GO_LABELS = { rolling: "5h", weekly: "周", monthly: "月" };
+		const GO_WINDOW_ORDER = ["rolling", "weekly", "monthly"];
+		function goUsageText(windows) {
+			return "Go " + GO_WINDOW_ORDER
+				.filter((k) => windows[k])
+				.map((k) => GO_LABELS[k] + (windows[k].percent == null ? "?" : Math.round(windows[k].percent) + "%"))
+				.join(" · ");
+		}
+		function goUsageTitle(windows) {
+			const fmt = (iso) => {
+				try {
+					return new Date(iso).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+				} catch { return ""; }
+			};
+			const lines = ["OpenCode Go 套餐用量（percent=已用比例，非剩余）"];
+			for (const k of GO_WINDOW_ORDER) {
+				const w = windows[k];
+				if (!w) continue;
+				lines.push(GO_LABELS[k] + "：" + (w.percent == null ? "?" : Math.round(w.percent) + "%") + (w.resetsAt ? "，" + fmt(w.resetsAt) + " 重置" : "") + (w.status && w.status !== "ok" ? " · " + w.status : ""));
+			}
+			lines.push("点击打开 opencode.ai 用量页");
+			return lines.join("\n");
 		}
 
 		const CSS = [
+			".dsh-balance-wrap{display:inline-flex;align-items:center;gap:4px}",
 			".dsh-balance-dock{display:inline-flex;align-items:center;box-sizing:border-box;",
 			"color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:16px;text-decoration:none;",
 			"white-space:nowrap;border:1px solid var(--dsw-alias-border-l1);border-radius:999px;",

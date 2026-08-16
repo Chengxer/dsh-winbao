@@ -2742,20 +2742,23 @@ async function refreshBalance() {
     return result;
   }
   const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
-  // OpenCode Go 订阅额度（5h 滚动 / 周 / 月）并行查询，失败不影响余额展示。
-  const opencodePromise = balance.queryOpencodeUsage(home)
-    .catch((err) => ({ ok: false, error: String((err && err.message) || err) }));
+  const s = updater.loadSettings(updCtx());
+  // OpenCode Go 套餐用量（状态栏独立 chip，PR #44 语义）：settings.json 的
+  // showOpenCodeGoUsage:false 可整体关闭（查询与展示一并关闭）。
+  const opencodePromise = s.showOpenCodeGoUsage === false
+    ? Promise.resolve({ ok: false, disabled: true })
+    : balance.queryOpencodeUsage(home)
+      .catch((err) => ({ ok: false, error: String((err && err.message) || err) }));
   let result;
   try {
     result = await balance.queryBalance(home);
   } catch (err) {
     result = { ok: false, error: String((err && err.message) || err), balances: [] };
   }
-  result.opencode = await opencodePromise;
+  result.opencodeGo = await opencodePromise;
   // 按当前默认模型 + 当前时段（峰谷）计算有效单价；settings.json 的
   // balancePrices.<model> 可整体覆盖该模型的单价。
   const model = balance.readActiveModel(home) || 'deepseek-v4-pro';
-  const s = updater.loadSettings(updCtx());
   const override = s.balancePrices && s.balancePrices[model];
   result.prices = { ...balance.effectivePrice(model), ...(override || {}) };
   result.model = model;
