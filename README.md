@@ -1,26 +1,14 @@
-<p align="center">
-  <img src="dsh-desktop/build/icon.png" width="96" alt="DSH Desktop" />
-</p>
+![DSH Desktop](docs/logo.png)
 
-<h1 align="center">DSH Desktop</h1>
+# DSH Desktop
 
-<p align="center">
-  <b>把 DeepSeek Harness 装进 Windows 桌面的开箱即用客户端</b><br/>
-  内置完整 dsh 运行时与全部官方插件，免装 Node.js，双击即用
-</p>
+**把 DeepSeek Harness 装进 Windows 桌面的开箱即用客户端**
 
-<p align="center">
-  <a href="https://github.com/myYangyunfan/dsh_desktop/releases"><img src="https://img.shields.io/github/v/release/myYangyunfan/dsh_desktop?color=4D6BFE&label=Release" alt="Release"></a>
-  <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-4D6BFE" alt="Platform">
-  <img src="https://img.shields.io/badge/license-MIT-4D6BFE" alt="License">
-  <a href="https://github.com/myYangyunfan/dsh_desktop/actions"><img src="https://img.shields.io/github/actions/workflow/status/myYangyunfan/dsh_desktop/release.yml?color=4D6BFE&label=Release%20CI" alt="CI"></a>
-</p>
+内置完整 dsh 运行时与全部官方插件，免装 Node.js，双击即用
 
-<p align="center">
-  <a href="https://gitee.com/my-yang-yunfan/dsh_desktop">Gitee 镜像</a> ·
-  <a href="landing/index.html">宣发落地页</a> ·
-  <a href="THIRD_PARTY_NOTICES.md">第三方组件清单</a>
-</p>
+[![Release](https://img.shields.io/github/v/release/myYangyunfan/dsh_desktop?color=4D6BFE&label=Release)](https://github.com/myYangyunfan/dsh_desktop/releases) ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-4D6BFE) ![License](https://img.shields.io/badge/license-MIT-4D6BFE) [![Release CI](https://img.shields.io/github/actions/workflow/status/myYangyunfan/dsh_desktop/release.yml?color=4D6BFE&label=Release%20CI)](https://github.com/myYangyunfan/dsh_desktop/actions)
+
+[Gitee 镜像](https://gitee.com/my-yang-yunfan/dsh_desktop) · [宣发落地页](landing/index.html) · [第三方组件清单](THIRD_PARTY_NOTICES.md)
 
 ---
 

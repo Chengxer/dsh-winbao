@@ -1,26 +1,14 @@
-<p align="center">
-  <img src="dsh-desktop/build/icon.png" width="96" alt="DSH Desktop" />
-</p>
+![DSH Desktop](docs/logo.png)
 
-<h1 align="center">DSH Desktop</h1>
+# DSH Desktop
 
-<p align="center">
-  <b>A ready-to-use Windows desktop client for DeepSeek Harness</b><br/>
-  Ships the full dsh runtime and official plugins — no Node.js install required, double-click to run
-</p>
+**A ready-to-use Windows desktop client for DeepSeek Harness**
 
-<p align="center">
-  <a href="https://github.com/myYangyunfan/dsh_desktop/releases"><img src="https://img.shields.io/github/v/release/myYangyunfan/dsh_desktop?color=4D6BFE&label=Release" alt="Release"></a>
-  <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-4D6BFE" alt="Platform">
-  <img src="https://img.shields.io/badge/license-MIT-4D6BFE" alt="License">
-  <a href="https://github.com/myYangyunfan/dsh_desktop/actions"><img src="https://img.shields.io/github/actions/workflow/status/myYangyunfan/dsh_desktop/release.yml?color=4D6BFE&label=Release%20CI" alt="CI"></a>
-</p>
+Ships the full dsh runtime and official plugins — no Node.js install required, double-click to run
 
-<p align="center">
-  <a href="README.md">中文</a> ·
-  <a href="https://gitee.com/my-yang-yunfan/dsh_desktop">Gitee mirror</a> ·
-  <a href="THIRD_PARTY_NOTICES.md">Third-party notices</a>
-</p>
+[![Release](https://img.shields.io/github/v/release/myYangyunfan/dsh_desktop?color=4D6BFE&label=Release)](https://github.com/myYangyunfan/dsh_desktop/releases) ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-4D6BFE) ![License](https://img.shields.io/badge/license-MIT-4D6BFE) [![Release CI](https://img.shields.io/github/actions/workflow/status/myYangyunfan/dsh_desktop/release.yml?color=4D6BFE&label=Release%20CI)](https://github.com/myYangyunfan/dsh_desktop/actions)
+
+[中文](README.md) · [Gitee mirror](https://gitee.com/my-yang-yunfan/dsh_desktop) · [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 ---
 
