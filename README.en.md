@@ -1,4 +1,4 @@
-![DSH Desktop](docs/logo.png)
+![DSH Desktop](https://cdn.jsdelivr.net/gh/myYangyunfan/dsh_desktop@main/docs/logo.png)
 
 # DSH Desktop
 
