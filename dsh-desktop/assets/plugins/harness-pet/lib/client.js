@@ -769,7 +769,10 @@ var HarnessPet = (function(exports) {
 	const STORAGE_KEY = "harness-pet:settings";
 	const DEFAULT_SETTINGS = Object.freeze({
 		language: "en-US",
-		enabled: true,
+		// 默认关闭（issue #34 诊断）：宠物常驻 rAF 逐帧绘制 320x320 canvas +
+		// webp 动画帧 + drop-shadow，在软渲染/多代理流式输出下是持续阻塞源。
+		// 改为显式开启（设置卡里可随时打开），老用户已保存的开关值不受影响。
+		enabled: false,
 		size: 112,
 		opacity: .95,
 		reducedMotion: true,
@@ -1303,6 +1306,9 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 		function restartAnimation() {
 			if (animationRequest !== void 0) cancelAnimationFrame(animationRequest);
 			animationRequest = void 0;
+			// 宠物关闭（默认）时完全停掉动画循环：隐藏状态下逐帧绘制 canvas
+			// 是纯浪费（issue #34 诊断的持续阻塞源之一）。
+			if (!settings.enabled) return;
 			if (reduced()) render();
 			else animationRequest = requestAnimationFrame(animate);
 		}

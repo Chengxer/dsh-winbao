@@ -26,6 +26,7 @@ const entryFiles = [
   'profile-manifest.js',
   'profile-patch-heal.js',
   'scripts/patch-web-search-baseurl.js',
+  'scripts/patch-menu-viewport.js',
   'scripts/gpu-crash-guard.js',
   'scripts/install-minimal-win-preset.js',
   'scripts/patch-deps.js',

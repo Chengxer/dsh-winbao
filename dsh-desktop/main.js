@@ -33,6 +33,7 @@ const { RendererRecovery } = require('./renderer-recovery');
 const { ensureCoreBundles, CORE_BUNDLE_NAMES } = require('./profile-manifest');
 const { dedupePatchEntries, dropBlocksByIds, parseFailedLoaderIds, mapPackagesToPatchIds } = require('./profile-patch-heal');
 const { patchWebSearchBaseUrl } = require('./scripts/patch-web-search-baseurl');
+const { patchMenuViewport } = require('./scripts/patch-menu-viewport');
 const zlib = require('node:zlib');
 
 // ---------------------------------------------------------------------------
@@ -1812,6 +1813,7 @@ async function runUpdateFlow(manual) {
       applySettingsSectionGuard();
       applyWorkspaceSearchRailFix();
       applyWebSearchBaseUrlFix();
+      applyMenuViewportFix();
     }
     const { response: r2 } = await showBox({
       type: 'info',
@@ -2585,6 +2587,17 @@ function syncCompanionPlugins() {
     removeStaleCompanionPlugins(profileModules, expectedDirs);
     removeLegacyMarketplace(path.join(profileDir, 'node_modules'), profileDir);
 
+    // 源缺失的配套插件（用户从 assets 删除 / 开发中裁剪 / 安装包损坏）：
+    // 既不能复制、也无法从源码确认 bundle 身份。处理原则（issue #34 诊断
+    // 的自愈死循环）：缺失源一律不写 patch 注册（否则「注册了但包不存在」
+    // 会让 dsh web 启动崩溃）；若 manifest 仍登记为 bundle，则视为用户
+    // 意图禁用，从 bundles 移除。
+    const missingSourceNames = new Set();
+    for (const p of COMPANION_PLUGINS) {
+      const sdir = path.join(__dirname, 'assets', 'plugins', companionDirName(p));
+      if (!fs.existsSync(path.join(sdir, 'package.json'))) missingSourceNames.add(p.name);
+    }
+
     const bundleNames = new Set();
     const copyFiles = [
       'package.json', 'cordis.patch.yml', 'LICENSE', 'README.md', 'README.zh.md',
@@ -2616,14 +2629,20 @@ function syncCompanionPlugins() {
         const sf = path.join(src, f);
         if (!fs.existsSync(sf)) continue;
         const df = path.join(dest, f);
-        // 逐文件比对大小+mtime（copyFile 保留时间戳），一致则跳过复制，
-        // 避免每次启动都写盘（临时目录 + 杀软实时扫描下重复写入最费时）。
+        // 逐文件比对大小+mtime，一致则跳过复制，避免每次启动都写盘
+        // （临时目录 + 杀软实时扫描下重复写入最费时）。注意 fs.copyFileSync
+        // 不保留时间戳（复制的目标 mtime=现在），会让比对永远不成立；这里
+        // 用 cpSync + preserveTimestamps 写，保证第二次启动能命中跳过。
         try {
           const sst = fs.statSync(sf);
           const dst = fs.statSync(df);
           if (dst.size === sst.size && Math.round(dst.mtimeMs) === Math.round(sst.mtimeMs)) continue;
         } catch { /* 目标缺失或不可读 → 照常复制 */ }
-        fs.copyFileSync(sf, df);
+        try {
+          fs.cpSync(sf, df, { force: true, preserveTimestamps: true });
+        } catch (err) {
+          log('boot', '同步配套插件文件失败 ' + sf + ': ' + err.message);
+        }
       }
       // 完整同步插件自带的 lib/assets/src 目录：第三方插件（如
       // dsh-better-sidebar 的懒加载 chunk、harness-pet 的动画素材）不都落在
@@ -2681,6 +2700,17 @@ function syncCompanionPlugins() {
         log('boot', '已把 bundle 插件加入 web profile bundles: ' + name);
       }
     }
+    // 存量 bundle 源缺失 → 视为用户禁用：从 bundles 移除（幂等），否则 dsh
+    // 启动仍会因 manifest 登记了不存在的包而失败。只动配套插件名，用户自行
+    // 添加的第三方 bundle 与核心 bundles 不受影响。
+    if (missingSourceNames.size > 0 && Array.isArray(manifest.dsh.profile.bundles)) {
+      const before = manifest.dsh.profile.bundles.length;
+      manifest.dsh.profile.bundles = manifest.dsh.profile.bundles.filter((n) => !missingSourceNames.has(n));
+      if (manifest.dsh.profile.bundles.length !== before) {
+        writePatchAtomic(manifestFile, JSON.stringify(manifest, null, 2) + '\n');
+        log('boot', '配套 bundle 源缺失，已从 web profile bundles 移除（视为禁用）: ' + [...missingSourceNames].join(', '));
+      }
+    }
 
     // 非 bundle 插件注册到 profile 的 patch 层（幂等）。
     const patchFile = path.join(profileDir, 'cordis.patch.yml');
@@ -2704,8 +2734,25 @@ function syncCompanionPlugins() {
         log('boot', '已把 bundle 插件移出 profile patch（避免双登记）: ' + [...new Set(migration.removed)].join(', '));
       }
     }
+    // 源缺失插件的旧注册残留同样移除：不清理的话 loader 仍会尝试加载
+    // 不存在的包（issue #34 诊断的「Cannot find package」崩溃）；用户手写
+    // 的 config/disabled 覆盖条目由 dropBlocksByIds 语义原样保留。
+    if (missingSourceNames.size > 0 && patch.includes('- id:')) {
+      const missingIds = COMPANION_PLUGINS.filter((p) => missingSourceNames.has(p.name)).map((p) => p.id);
+      if (missingIds.length > 0) {
+        const drop = dropBlocksByIds(patch, missingIds);
+        if (drop.removed.length > 0) {
+          patch = drop.text;
+          changed = true;
+          log('boot', '已把源缺失插件移出 profile patch（避免注册不存在的包）: ' + [...new Set(drop.removed)].join(', '));
+        }
+      }
+    }
     for (const p of COMPANION_PLUGINS) {
       if (bundleNames.has(p.name)) continue;
+      // 源缺失：不写任何注册（复制循环已跳过它），避免「注册了但包不存在」
+      // 导致 dsh web 启动崩溃。
+      if (missingSourceNames.has(p.name)) continue;
       // 该 id 在 patch 里已存在：若它现在的 name 与当前版本不一致（例如终端
       // 包改名 @deepseek-ai/dsh-terminal → dsh-terminal-tab），就地改名为当前
       // 值。否则旧名残留会让配套插件与 agent 内置终端重复注册路由、或加载
@@ -3225,6 +3272,31 @@ function applyWebSearchBaseUrlFix() {
       if (n > 0) log('boot', 'web-search baseURL 补丁: 已应用到 ' + root);
     } catch (err) {
       log('boot', 'web-search baseURL 补丁失败(' + root + '): ' + err.message);
+    }
+  }
+}
+// ---------------------------------------------------------------------------
+// issue #36 运行时补丁：dsh-client-ui-primitives 的 Menu portal 弹层在条目很多
+// （内置 8 个 Agent 预设 + npm 自带 + 用户安装叠加）时没有高度上限，place()
+// 会把超出视口的弹层推到屏幕上方，顶部条目被裁掉且无法触达（「预设多了
+// 上面的会不显示」）。补丁本体在 scripts/patch-menu-viewport.js（与打包补丁
+// 共用同一实现）；覆盖三处运行副本：profile fallback、内置 app 副本、用户
+// 更新过的 agent overlay。锚点不匹配（上游将来修复后）自动跳过，绝不损坏。
+// ---------------------------------------------------------------------------
+function applyMenuViewportFix() {
+  const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
+  const targets = [
+    path.join(home, 'profiles', 'node_modules'),
+    path.join(__dirname, 'node_modules'),
+    path.join(userDataDir, 'agent', 'node_modules'),
+  ];
+  for (const root of targets) {
+    if (!root || !fs.existsSync(root)) continue;
+    try {
+      const n = patchMenuViewport(root, (m) => log('boot', m));
+      if (n > 0) log('boot', 'menu 视口补丁: 已应用到 ' + root);
+    } catch (err) {
+      log('boot', 'menu 视口补丁失败(' + root + '): ' + err.message);
     }
   }
 }
@@ -3797,10 +3869,13 @@ async function boot() {
   // 移除原生菜单栏（文件/视图/帮助），全部功能由自绘 chrome 与托盘提供。
   Menu.setApplicationMenu(null);
   // 尽早弹出 loading 窗口（不依赖后续任何启动步骤），用户能第一时间看到
-  // 「正在启动」反馈。initRendererRecovery 不依赖窗口，wireWindowRecovery
-  // 仍在各分支原位调用（此时 mainWindow 已存在），此处提前只影响 loading
-  // 窗口的出现时机，不改变任何后续行为。
+  // 「正在启动」反馈；同时立刻装配渲染进程自恢复与挂起心跳——loading 窗口
+  // 阶段（首次同步/补丁可能耗时数十秒）崩溃/挂起也有兜底，而不是裸奔。
+  // （PR #39 提速 + 本合入补齐恢复装配时机）
   createWindow();
+  initRendererRecovery();
+  wireWindowRecovery();
+  startHeartbeatLoop();
   startPreviewStaticServer();
   registerChromeIpc();
   createTray();
@@ -3813,9 +3888,6 @@ async function boot() {
     // 确保 WSL 内 agent 安装完成后再同步配套插件/补丁（经 UNC 写入 WSL profile）。
     // 跳过 repairProfileFallback（WSL 内的 dsh 首次启动会自行 heal）与 koffi
     // 目录选择器 overlay（只作用于本地内置 dsh）。
-    initRendererRecovery();
-    wireWindowRecovery();
-    startHeartbeatLoop();
     setupTestChannel();
     await wslBackend.ensureInstalled();
     syncCompanionPlugins();
@@ -3828,6 +3900,7 @@ async function boot() {
     applySettingsSectionGuard();
     applyWorkspaceSearchRailFix();
     applyWebSearchBaseUrlFix();
+    applyMenuViewportFix();
   } else {
     // 先修复 profile fallback 联接再同步/补丁依赖文件：EPERM 环境下补丁写不进去。
     await repairProfileFallback(home);
@@ -3841,9 +3914,7 @@ async function boot() {
     applySettingsSectionGuard();
     applyWorkspaceSearchRailFix();
     applyWebSearchBaseUrlFix();
-    initRendererRecovery();
-    wireWindowRecovery();
-    startHeartbeatLoop();
+    applyMenuViewportFix();
     setupTestChannel();
     if (runKoffiPreflight()) clearAutoPickerBrowseOverlay();
     else enablePickerBrowseOverlay();

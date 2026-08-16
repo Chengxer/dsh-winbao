@@ -21,6 +21,10 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 - **余额欠费误报「API key is invalid」**：第三方 provider（opencode 等）余额不足返回 401 + CreditsError 时被 `dsh-llm-pi-ai` 一律判 AUTH。新增 `scripts/patch-pi-ai-credits.js` 把余额判定前置到 401-AUTH 之前：欠费 → QUOTA（客户端显示真实原因），真 key 无效仍判 AUTH
 - **便携版「有进程无窗口 / 双击无反应」**（issue #30）：① 便携版数据目录重定向提前到单实例锁校验之前——Electron 实例锁以 userData 为键，旧实现与安装版共用 `%APPDATA%\DSH Desktop` 锁，安装版在跑时双击便携版会静默退出；② 主进程启动期兜底：任何模块级 / 启动早期未捕获异常落盘 `<userData>/logs/startup-crash.log` 并在启动完成前弹可见错误框，杜绝静默失败
 - **打包前语法门覆盖补丁/自愈模块**：`scripts/check-syntax.js` 的入口清单并入 `profile-manifest.js` / `profile-patch-heal.js` / `patch-web-search-baseurl.js` / `gpu-crash-guard.js` / `install-minimal-win-preset.js` / `patch-deps.js` / `patch-pi-ai-credits.js` / `sync-companion-plugins.js` / `after-pack.js` / `patch-portable-template.js`，此类模块的语法/「async 与声明被拆开」问题在打包前即可拦截
+- **启动提速**（PR #39）：① `repairProfileFallback` 增加健康快照（`profile-fallback-cache.json`，含 dsh 包签名）——依赖闭包未变、链接逐项校验通过时跳过耗时的 `import('dsh-app-boot')` + BFS + heal；dsh 升级后签名失效自动重算；② 配套插件同步（vendor 依赖与 lib/assets/src 递归目录、固定文件清单）逐文件比对 size+mtime，一致跳过写盘（复制改用 `preserveTimestamps`，确保二次启动命中跳过）；③ loading 窗口提前到启动最前段创建，用户第一时间看到「正在启动」，并同步提前装配渲染进程自恢复与挂起心跳（loading 阶段崩溃/挂起也有兜底）
+- **router flash 等重负载场景掉帧 / 周期性假死**（issue #34）：① `harness-pet` 默认改为关闭（opt-in，设置卡可开启），且关闭时完全停掉 rAF 动画循环（此前隐藏状态下仍逐帧绘制 320x320 canvas）；② `dsh-conversation-tweaks` 会话滑轨的 MutationObserver 不再每 250ms 全量 `querySelectorAll + getBoundingClientRect`，改为仅在内容尺寸真实变化时重算标记位置；③ 修复 `syncCompanionPlugins` 自愈死循环——bundle 插件源缺失时不再被当普通插件写回 `cordis.patch.yml`（此前会注册不存在的包导致 dsh web 启动崩溃），并从 manifest bundles 移除（视为用户禁用）、清理 patch 残留注册（用户手写 config/disabled 覆盖条目保留）
+- **Agent 预设很多时「上面的不显示」**（issue #36）：`dsh-client-ui-primitives` 的 Menu portal 弹层在条目超过视口时没有高度上限，`place()` 把整列推到视口上方、顶部条目被裁掉且无法触达。新增 `scripts/patch-menu-viewport.js`：portal 列表加 `max-height: min(calc(100vh - 24px), 560px)` + `overflow-y: auto`，y 夹紧按封顶后高度计算，任何视口高度下完整可用（打包 afterPack / 启动运行时 / dev node_modules 三路覆盖，含 `node --test` 单测）
+- **第三方模型思考强度**（issue #37）：功能已就绪（`dsh-third-party-thinking` 默认关闭、可对支持的 provider 开启并把档位注入请求体）；设置页「请求字段名」提示补充 opencode-go 套餐内 DeepSeek Flash/Pro 的开启说明
 
 ## [0.3.8] — 2026-08-15
 

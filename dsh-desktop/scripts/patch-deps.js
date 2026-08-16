@@ -43,3 +43,14 @@ main();
 // 401 + CreditsError，dsh 原本一律判 AUTH 并显示 "API key is invalid"，误导用户。
 // 见 patch-pi-ai-credits.js（幂等，失败只告警不中断）。
 require('./patch-pi-ai-credits.js');
+
+// 顺带应用 Menu portal 视口补丁（issue #36）：预设很多时弹层顶部条目被裁掉。
+// 开发模式（npm start）直接打 dev node_modules；打包由 after-pack 与启动时
+// 运行时补丁覆盖（幂等，锚点不匹配只告警不中断）。
+try {
+  const { patchMenuViewport } = require('./patch-menu-viewport');
+  const n = patchMenuViewport(root, (m) => console.log(m));
+  if (n > 0) console.log('[patch-deps] menu-viewport 补丁已应用（dev node_modules）');
+} catch (err) {
+  console.log('[patch-deps] menu-viewport 补丁跳过: ' + (err && err.message ? err.message : err));
+}

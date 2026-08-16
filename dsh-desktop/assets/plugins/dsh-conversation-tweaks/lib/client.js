@@ -127,12 +127,24 @@ window.__ModuleLoader__.load({
 			let lastSizeSignature = "";
 			const dotByKey = new Map();
 
-			// 新用户消息出现时只做标记，250ms 内合并到同一次 update，
-			// 避免流式输出期间每个 DOM 变更都触发一轮全量布局读取。
+			// 新 DOM 变更只做标记，250ms 内合并到同一次 update；且仅在内容
+			// 尺寸真实变化（流式输出使滚动区变高、新用户消息行出现）时才重算
+			// 全部消息标记位置，避免流式期间每 250ms 全量 querySelectorAll +
+			// getBoundingClientRect 强制同步布局（issue #34 诊断的渲染主线程
+			// 阻塞源之一）。
 			const domObserver = new MutationObserver(() => {
-				markersDirty = true;
 				if (markerTimer) clearTimeout(markerTimer);
-				markerTimer = setTimeout(() => requestUpdate(), 250);
+				markerTimer = setTimeout(() => {
+					if (target) {
+						const content = Math.max(target.scrollHeight, target.clientHeight, 1);
+						const viewport = target.clientHeight;
+						const sig = content + ":" + viewport;
+						if (sig !== lastSizeSignature) markersDirty = true;
+					} else {
+						markersDirty = true;
+					}
+					requestUpdate();
+				}, 250);
 			});
 
 			// 密集滚动/动画事件统一进动画帧，并把布局读取限到 ~120ms 一次；

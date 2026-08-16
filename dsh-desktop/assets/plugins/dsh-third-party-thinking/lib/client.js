@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
 			enabledLabel: "启用第三方模型思考强度",
 			enabledHint: "默认关闭以避免百炼等严格校验请求体的第三方 API 报参数错误；仅当你的 provider 支持 reasoning_effort（或自定义字段）时开启",
 			wireFieldLabel: "请求字段名",
-			wireFieldHint: "OpenAI 兼容 provider 用于承接该档位的请求体字段，默认 reasoning_effort；留空则只显示档位控件、不注入参数",
+			wireFieldHint: "OpenAI 兼容 provider 用于承接该档位的请求体字段，默认 reasoning_effort；留空则只显示档位控件、不注入参数。例如 opencode-go 套餐内的 DeepSeek Flash/Pro 支持 reasoning_effort——开启注入后即可使用思考强度",
 			save: "保存",
 			saving: "保存中…",
 			saved: "已保存",
