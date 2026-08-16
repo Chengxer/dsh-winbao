@@ -38,7 +38,7 @@ Ships the full dsh runtime and official plugins — no Node.js install required,
 
 ## 📸 App Preview
 
-![DSH Desktop UI](https://cdn.jsdelivr.net/gh/myYangyunfan/dsh_desktop@main/docs/showcase.en.svg)
+![DSH Desktop UI](https://cdn.jsdelivr.net/gh/myYangyunfan/dsh_desktop@main/docs/showcase.png)
 
 **Vanilla `dsh web`** vs **DSH Desktop**:
 

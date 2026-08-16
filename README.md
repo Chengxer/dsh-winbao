@@ -38,7 +38,7 @@
 
 ## 📸 界面一览
 
-![DSH Desktop 界面](https://cdn.jsdelivr.net/gh/myYangyunfan/dsh_desktop@main/docs/showcase.svg)
+![DSH Desktop 界面](https://cdn.jsdelivr.net/gh/myYangyunfan/dsh_desktop@main/docs/showcase.png)
 
 **开箱即用**（原生 dsh web）vs **DSH Desktop**：
 
