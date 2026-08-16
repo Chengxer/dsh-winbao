@@ -2452,10 +2452,27 @@ function trayHintOnce() {
 }
 
 function showMainWindow() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  // 防御性恢复（用户反馈：关闭到托盘后托盘/桌面图标都无法重新打开）：
+  // 1) 窗口被销毁或从未创建 → 重建主窗并加载 Web UI；
+  // 2) 最小化 → 先 restore；隐藏 → show；最后置顶聚焦，确保回到前台。
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    if (!webUrl) return;
+    try {
+      createWindow();
+      initRendererRecovery();
+      wireWindowRecovery();
+      mainWindow.loadURL(webUrl).catch((err) => log('boot', '恢复窗口加载失败: ' + ((err && err.message) || err)));
+      log('boot', '主窗不存在，已重建并加载 Web UI');
+    } catch (err) {
+      log('boot', '重建主窗失败: ' + ((err && err.message) || err));
+    }
+    return;
+  }
   if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  try { mainWindow.setSkipTaskbar(false); } catch {}
   mainWindow.focus();
+  try { mainWindow.moveTop(); } catch {}
 }
 
 function ensureTray() {
@@ -2492,10 +2509,9 @@ function createTray() {
       { label: '退出', click: () => { forceQuit = true; app.quit(); } },
     ]);
     tray.setContextMenu(menu);
-    tray.on('click', () => {
-      if (mainWindow && mainWindow.isVisible()) mainWindow.hide();
-      else showMainWindow();
-    });
+    // 左键/双击一律恢复窗口（用户反馈「托盘点不开」：去掉「可见则隐藏」的
+    // 双态逻辑，避免隐藏态误判导致的点按无反应）。
+    tray.on('click', () => showMainWindow());
     tray.on('double-click', () => showMainWindow());
     log('boot', '系统托盘已就绪');
   } catch (err) {
@@ -3553,7 +3569,8 @@ function maintainShortcuts() {
     const settings = updater.loadSettings(updCtx());
     const linksDir = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
     const startMenu = path.join(linksDir, 'DSH Desktop.lnk');
-    const desktop = path.join(app.getPath('desktop'), 'DSH Desktop.lnk');
+    const desktopDir = app.getPath('desktop');
+    const desktop = path.join(desktopDir, 'DSH Desktop.lnk');
     const ico = shortcutIconPath();
     const opts = {
       target,
@@ -3562,6 +3579,29 @@ function maintainShortcuts() {
       appUserModelId: 'com.deepseek.dsh.desktop',
     };
     let changed = false;
+
+    // 去重（用户反馈「每次启动自动生成多个快捷方式」）：清理规范名之外的
+    // 同族快捷方式——Windows 自动重命名的副本（“DSH Desktop (1).lnk”）、
+    // 手动“发送到桌面”的副本（“DSH Desktop - 快捷方式.lnk”）、旧版本残留等，
+    // 只保留规范名一个。前缀匹配，不会误删用户其它快捷方式。
+    const cleanupDir = (dir) => {
+      let removed = 0;
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return 0; }
+      for (const e of entries) {
+        if (!e.isFile() || !/^DSH Desktop.*\.lnk$/i.test(e.name)) continue;
+        if (e.name.toLowerCase() === 'DSH Desktop.lnk') continue;
+        try { fs.rmSync(path.join(dir, e.name), { force: true }); removed++; } catch {}
+      }
+      return removed;
+    };
+    const removedDesktop = cleanupDir(desktopDir);
+    const removedStart = cleanupDir(linksDir);
+    if (removedDesktop + removedStart > 0) {
+      log('boot', '快捷方式去重: 清理桌面 ' + removedDesktop + ' 个、开始菜单 ' + removedStart + ' 个重复快捷方式');
+    }
+
+    const isPortable = !!process.env.PORTABLE_EXECUTABLE_FILE;
     // exe 被移动过，或图标设计更新过：替换现有快捷方式（修复“指向的文件消失”）。
     if ((settings.shortcutTarget && settings.shortcutTarget !== target) || settings.shortcutIcon !== SHORTCUT_ICON_VERSION) {
       for (const p of [startMenu, desktop]) {
@@ -3570,11 +3610,13 @@ function maintainShortcuts() {
         }
       }
     }
-    // 缺失则创建：便携版补桌面快捷方式；开始菜单快捷方式是系统通知的前置条件。
+    // 开始菜单快捷方式是系统通知的前置条件：缺失则创建。
     if (!fs.existsSync(startMenu)) {
       try { shell.writeShortcutLink(startMenu, 'create', opts); changed = true; } catch {}
     }
-    if (!fs.existsSync(desktop)) {
+    // 桌面快捷方式：仅便携版由壳层维护（安装版由 NSIS 安装器创建，壳层不再
+    // 自动生成，避免「每次启动自动生成桌面快捷方式」造成多个图标）。
+    if (isPortable && !fs.existsSync(desktop)) {
       try { shell.writeShortcutLink(desktop, 'create', opts); changed = true; } catch {}
     }
     if (changed) {
@@ -4233,11 +4275,9 @@ if (!gotLock) {
     if (details.type === 'GPU') recordGpuCrash('(via child-process-gone)');
   });
   app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.show();
-      mainWindow.focus();
-    }
+    // 用户再次双击桌面/开始菜单图标：恢复（或重建）主窗口。
+    log('boot', 'second-instance：恢复主窗口');
+    showMainWindow();
   });
   app.on('before-quit', () => {
     quitting = true;
