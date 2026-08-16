@@ -4139,6 +4139,10 @@ function shortcutIconPath() {
 
 function maintainShortcuts() {
   if (!IS_WIN) return;
+  // 集成测试（DSH_DESKTOP_TEST=1）用 dev electron 以「文件路径」方式启动，此时
+  // app.isPackaged 也为 true；若不拦截，测试会把用户真实的开始菜单/桌面快捷方式
+  // 改指向 node_modules 下的开发用 electron.exe（曾实测发生）。显式拦一道。
+  if (process.env.DSH_DESKTOP_TEST === '1') return;
   // 仅对真正的打包产物维护快捷方式。本机 app.isPackaged 在 dev 下也恒为 true，
   // 故用 resources 下是否存在 app/app.asar 判别：dev 的 electron 只有
   // default_app.asar，从而避免把快捷方式改指向 node_modules 下的开发用 electron。
@@ -4183,7 +4187,6 @@ function maintainShortcuts() {
       log('boot', '快捷方式去重: 清理桌面 ' + removedDesktop + ' 个、开始菜单 ' + removedStart + ' 个重复快捷方式');
     }
 
-    const isPortable = !!process.env.PORTABLE_EXECUTABLE_FILE;
     // exe 被移动过，或图标设计更新过：替换现有快捷方式（修复“指向的文件消失”）。
     if ((settings.shortcutTarget && settings.shortcutTarget !== target) || settings.shortcutIcon !== SHORTCUT_ICON_VERSION) {
       for (const p of [startMenu, desktop]) {
@@ -4196,9 +4199,12 @@ function maintainShortcuts() {
     if (!fs.existsSync(startMenu)) {
       try { shell.writeShortcutLink(startMenu, 'create', opts); changed = true; } catch {}
     }
-    // 桌面快捷方式：仅便携版由壳层维护（安装版由 NSIS 安装器创建，壳层不再
-    // 自动生成，避免「每次启动自动生成桌面快捷方式」造成多个图标）。
-    if (isPortable && !fs.existsSync(desktop)) {
+    // 桌面快捷方式：缺失则补建（便携版与安装版一致）。去重逻辑在函数开头先行，
+    // 保证桌面上至多保留一个规范名快捷方式，因此「缺失补建」不会复现旧版
+    // 「每次启动生成多个快捷方式」的问题；同时自愈「更新后桌面图标消失」——
+    // 安装版更新（NSIS 向导取消勾选创建 / 旧版卸载清理 / 手动覆盖安装目录）后
+    // 桌面快捷方式可能缺失，此前安装版不再自动补建导致图标永久丢失。
+    if (!fs.existsSync(desktop)) {
       try { shell.writeShortcutLink(desktop, 'create', opts); changed = true; } catch {}
     }
     if (changed) {
