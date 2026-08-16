@@ -271,26 +271,17 @@ const EMPTY = {
   model: DEFAULT_MODEL,
 };
 
-const parseCache = new Map(); // 文件 -> { mtimeMs, result }
+const parseCache = new Map(); // 文件 -> { mtimeMs, size, firstMagic, frameEnd, at, state }
+// state = 增量累计状态；transcript 窗口与 seenFiles 上限的维护保证与「全量
+// 解析的最近 N 条」语义完全一致（日志只追加，窗口 = 全量最近 N 条）。
+const SEEN_FILES_MAX = 2000; // seenFiles 兜底上限（远大于任何档位的 filesTotal）
 
-function parseSessionFile(file) {
-  let raw;
-  try {
-    raw = decompressZstd(readFileSync(file));
-  } catch {
-    try {
-      raw = readFileSync(file, "utf8");
-    } catch {
-      return { ...EMPTY };
-    }
-  }
-  const lines = raw.split(/\r?\n/).filter(Boolean);
-  const seenFiles = new Map();
-  const transcriptRaw = [];
-  let title = "";
-  let provider = "";
-  let model = "";
+function freshParseState() {
+  return { title: "", provider: "", model: "", seenFiles: new Map(), transcript: [] };
+}
 
+/** 逐行解析事件并累计进 state（增量与全量共用同一语义）。 */
+function parseEventsInto(state, lines) {
   for (const line of lines) {
     let ev;
     try {
@@ -302,20 +293,20 @@ function parseSessionFile(file) {
 
     // 标题
     if (ev.type === "session/title" && ev.data && typeof ev.data.title === "string")
-      title = ev.data.title;
-    else if (ev.type === "session" && typeof ev.title === "string") title = ev.title;
+      state.title = ev.data.title;
+    else if (ev.type === "session" && typeof ev.title === "string") state.title = ev.title;
 
     // provider/model：取自 request/header（data.header.config）或 request/context
     // （data.provider/data.model），最后一次为准。
     if (ev.type === "request/header" && ev.data) {
       const cfg = (ev.data.config || (ev.data.header && ev.data.header.config)) || null;
       if (cfg) {
-        if (cfg.provider) provider = String(cfg.provider);
-        if (cfg.model) model = String(cfg.model);
+        if (cfg.provider) state.provider = String(cfg.provider);
+        if (cfg.model) state.model = String(cfg.model);
       }
     } else if (ev.type === "request/context" && ev.data) {
-      if (ev.data.provider) provider = String(ev.data.provider);
-      if (ev.data.model) model = String(ev.data.model);
+      if (ev.data.provider) state.provider = String(ev.data.provider);
+      if (ev.data.model) state.model = String(ev.data.model);
     }
 
     // 文件捕获：tool/code-dispatch* 事件
@@ -324,34 +315,63 @@ function parseSessionFile(file) {
       const args = (ev.data && ev.data.arguments) || {};
       if (name === "read" || name === "write" || name === "edit") {
         const p = typeof args.file_path === "string" ? args.file_path.trim() : "";
-        if (p)
-          seenFiles.set(p, {
+        if (p) {
+          state.seenFiles.set(p, {
             path: p,
             op: name === "read" ? "read" : name === "edit" ? "edit" : "write",
           });
+          if (state.seenFiles.size > SEEN_FILES_MAX) {
+            state.seenFiles.delete(state.seenFiles.keys().next().value);
+          }
+        }
       } else if (
         (name === "grep" || name === "glob") &&
         typeof args.path === "string" &&
         args.path.trim() &&
-        !seenFiles.has(args.path.trim())
+        !state.seenFiles.has(args.path.trim())
       ) {
-        seenFiles.set(args.path.trim(), { path: args.path.trim(), op: "search" });
+        state.seenFiles.set(args.path.trim(), { path: args.path.trim(), op: "search" });
       }
     }
 
-    // transcript
+    // transcript（窗口维护：只保留最近 L.msgs 条）
     const role = extractRole(ev);
     if (role === "user" || role === "assistant") {
       const text = extractText(ev);
-      if (text) transcriptRaw.push({ role, text });
+      if (text) {
+        state.transcript.push({ role, text });
+        const L = ctxLen();
+        if (state.transcript.length > L.msgs) state.transcript.shift();
+      }
     }
   }
+}
 
-  // 截断 transcript（按当前上下文档位）
+/**
+ * 从字节偏移 from 起扫描完整 zstd 帧并解压（尾部半帧自动忽略，下次轮询
+ * 续解）。返回 { text, end }：end 为最后一个完整帧的结束偏移。
+ */
+function decompressFrames(buf, from) {
+  let offset = from;
+  let out = "";
+  for (;;) {
+    const f = scanFrame(buf, offset);
+    if (!f) break;
+    try {
+      out += zstdDecompressSync(buf.subarray(f.start, f.end)).toString("utf8");
+    } catch {
+      break;
+    }
+    offset = f.end;
+    if (offset >= buf.length) break;
+  }
+  return { text: out, end: offset };
+}
+
+/** 把累计状态渲染为对外结果（按档位截断，与全量解析一致）。 */
+function renderState(state) {
   const L = ctxLen();
-  let transcript = transcriptRaw;
-  if (transcript.length > L.msgs)
-    transcript = transcript.slice(transcript.length - L.msgs);
+  let transcript = state.transcript;
   let chars = transcript.reduce((n, m) => n + m.text.length, 0);
   if (chars > L.chars) {
     const kept = [];
@@ -364,37 +384,87 @@ function parseSessionFile(file) {
     }
     transcript = kept;
   }
-
-  let files = [...seenFiles.values()];
+  let files = [...state.seenFiles.values()];
   let truncated = false;
   if (files.length > L.filesTotal) {
     files = files.slice(files.length - L.filesTotal);
     truncated = true;
   }
-
   return {
-    title,
+    title: state.title,
     files,
     transcript,
     truncated,
-    provider: provider || DEFAULT_PROVIDER,
-    model: model || readGlobalModel(),
+    provider: state.provider || DEFAULT_PROVIDER,
+    model: state.model || readGlobalModel(),
   };
 }
 
+/**
+ * 会话解析（增量版）：大日志（实测 7MB 压缩 ≈ 20MB 文本）不再每次全量
+ * 解压+逐行解析（约 600ms 同步阻塞，会拖慢同进程的聊天请求），而是只解
+ * 自上次帧边界以来的新帧、累计进 state；文件被整体替换（首帧 magic 变化 /
+ * 体积回退 / 帧边界失效）时自动回退全量解析。结果与全量解析逐字节等价。
+ */
 function parseSession(sessionId) {
   const file = findSessionFile(sessionId);
   if (!file) return { ...EMPTY };
-  let mtime = 0;
+  let st;
   try {
-    mtime = statSync(file).mtimeMs;
-  } catch {}
+    st = statSync(file);
+  } catch {
+    return { ...EMPTY };
+  }
   const cached = parseCache.get(file);
-  if (cached && cached.mtimeMs === mtime) return cached.result;
-  const result = parseSessionFile(file);
-  parseCache.set(file, { mtimeMs: mtime, result });
+  if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) return renderState(cached.state);
+
+  const buf = readFileSync(file);
+  const firstMagic = buf.length >= 4 ? buf.readUInt32LE(0) : 0;
+  let state = null;
+  let frameEnd = buf.length;
+  // 增量路径：同一文件（首帧 magic 相同）且缓存边界有效 → 只解新帧
+  if (
+    cached &&
+    cached.firstMagic === firstMagic &&
+    cached.frameEnd > 0 &&
+    cached.frameEnd <= buf.length &&
+    cached.size <= st.size
+  ) {
+    const inc = decompressFrames(buf, cached.frameEnd);
+    if (inc.text) {
+      state = cached.state;
+      parseEventsInto(state, inc.text.split(/\r?\n/).filter(Boolean));
+      frameEnd = inc.end;
+    } else {
+      // 无完整新帧（可能正在写半帧）：沿用旧状态，边界不动
+      state = cached.state;
+      frameEnd = cached.frameEnd;
+    }
+  }
+  if (!state) {
+    // 全量（无缓存 / 文件被替换 / 边界失效）
+    let raw;
+    try {
+      raw = decompressZstd(buf);
+    } catch {
+      try {
+        raw = buf.toString("utf8");
+      } catch {
+        return { ...EMPTY };
+      }
+    }
+    state = freshParseState();
+    parseEventsInto(state, raw.split(/\r?\n/).filter(Boolean));
+    frameEnd = decompressFrames(buf, 0).end;
+  }
+  parseCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, firstMagic, frameEnd, at: Date.now(), state });
   capMap(parseCache, CACHE_MAX);
-  return result;
+  return renderState(state);
+}
+
+/** 测试用：清空解析缓存。 */
+function resetParseCacheForTest() {
+  parseCache.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -796,4 +866,4 @@ function apply(ctx, config) {
   };
 }
 
-export { apply, inject, name };
+export { apply, inject, name, parseSession, resetParseCacheForTest };

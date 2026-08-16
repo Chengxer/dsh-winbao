@@ -139,6 +139,9 @@ window.__ModuleLoader__.load({
     // 上下文获取
     // ------------------------------------------------------------------
     var lastFingerprint = "";
+    var lastFullAt = 0; // 全量拉取节流：流式回合中日志 mtime 持续变化，
+    // 若每次都拉全量会每 2s 传输数百 KB JSON 并触发重渲染；4s 节流足够
+    // 保持面板新鲜，同时避免拖慢主对话 UI。
     function fetchContext(sessionId) {
       if (!sessionId) return;
       // 先轮询轻量 meta（计数+指纹），内容变化才拉全量 → 避免大 JSON 每 2s 传输解析
@@ -151,6 +154,9 @@ window.__ModuleLoader__.load({
           var fp = String(m.updatedAt || 0) + ":" + String(m.msgs || 0) + ":" + String(m.files || 0) + ":" + String(m.title || "");
           if (fp === lastFingerprint) return; // 无变化：不重拉、不重渲染
           lastFingerprint = fp;
+          var now = Date.now();
+          if (now - lastFullAt < 4000) return; // 全量节流：等待下一轮轮询再拉
+          lastFullAt = now;
           fetch("/api/dsh-side-session/context?sessionId=" + encodeURIComponent(sessionId))
             .then(function (r) {
               return r.ok ? r.json() : null;
@@ -165,6 +171,7 @@ window.__ModuleLoader__.load({
     function loadContext(sessionId) {
       if (!sessionId) return;
       lastFingerprint = "";
+      lastFullAt = 0; // 切换会话立即全量拉取（不节流）
       setState({ sessionId: String(sessionId), context: null });
       fetchContext(sessionId);
     }
