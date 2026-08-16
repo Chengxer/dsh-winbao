@@ -8,7 +8,12 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 ## [Unreleased]
 
 ### 新增
+- **对话删除与归档管理（dsh-session-manager 内置插件）**：dsh 官方只有归档没有删除，现补齐：
+  - 会话行 ⋯ 菜单「归档会话」下方新增「删除对话」（当前会话行不显示）：确认后经宿主 RPC 删除会话日志与附件（运行中的会话被拒绝），列表经官方 host 帧实时移除；
+  - 设置 →「归档对话管理」面板：列出全部已归档对话（标题/项目/更新时间），每条提供「恢复」（回到原工作区与顺序，经 `workspace.unarchiveSession` 持久化并实时广播）与「删除」；
+  - 实现：`scripts/patch-session-manage.js` 对官方包做幂等运行时/打包补丁（`dsh-workspace` WorkspaceRegistry.unarchiveSession；`dsh-host-apiproxy` 新增 workspace.unarchiveSession / workspace.deleteSession RPC——删除按 jsonl 布局移除 `<DSH_HOME>/sessions/<project>/<id>/` 并清理归档集、广播 session/disposed；`dsh-client-connection` API 面与 unary 响应 schema；`dsh-client-ui-workspace` 菜单项与中英文案）；`assets/plugins/dsh-session-manager`（bundle，设置面板 + `window.__dshSessionManager` 桥），启动/打包三路覆盖（dev / afterPack / 运行时），dev node_modules 已实测应用
 - **对话节点导航条（dsh-navbar，vlln/dsh-navbar，MIT）内置**：对话区右缘节点串快速跳转 user 消息（悬停预览 6 行截断 / 点击平滑跳转 + 品牌蓝高亮 / 连续悬停与滚轮切换 / >11 节点自动滑动窗口 / <2 条 user 消息自动隐藏 / 消息精选 pin 按会话持久化），实现 dsh-external/issues#144 规格，纯浏览器端 bundle（`assets/plugins/dsh-navbar`，含 LICENSE 与预编译 lib）。**取代** `dsh-conversation-tweaks` 内置的会话右侧导航滑轨（dct-rail 已移除），conversation-tweaks 保留「隐藏对话输出」；`sync-companion-plugins.js` 的插件清单与 `lib/index.mjs` 复制规则同步补齐（该清单此前与 main.js 漂移，缺 better-sidebar / harness-pet，已对齐）
+- **侧边临时会话（dsh-side-session，hzhz314159/dsh-side-session，MIT）内置**：基于当前主会话上下文在独立浮窗发起临时追问（答案不写入主会话）；💬 图标 / `Ctrl+Shift+S` 唤起；三种回答引擎（全局 Key / 插件 Key / 宿主 LLM）；zstd 帧扫描自动捕获上下文（含截断护栏）；bundle 随桌面端分发并自动同步
 
 ### 修复
 - **存量坏 profile manifest 不自愈 → 启动必失败**（issue #16，PR #21）：旧版本（0.3.3/0.3.4）写坏的 `profiles/web/package.json` 中 `dsh.profile.bundles` 只有配套 bundle、缺少核心 bundles（`@deepseek-ai/dsh-base` / `@deepseek-ai/dsh-web-app`），核心服务无人提供，插件树永久 `N entries did not activate`。`syncCompanionPlugins` 现在对已存在的 manifest 做「校验 + 补齐」：把缺失且实测可解析的核心 bundles 补到列表最前，其余条目（含用户添加的）原样保留；健康 manifest 零写入（幂等）。核心逻辑抽为 `profile-manifest.js`（纯函数，含 `node --test` 单测 + 集成场景 `heal-stale-manifest`）

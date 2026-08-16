@@ -34,6 +34,7 @@ const { ensureCoreBundles, CORE_BUNDLE_NAMES } = require('./profile-manifest');
 const { dedupePatchEntries, dropBlocksByIds, parseFailedLoaderIds, mapPackagesToPatchIds } = require('./profile-patch-heal');
 const { patchWebSearchBaseUrl } = require('./scripts/patch-web-search-baseurl');
 const { patchMenuViewport } = require('./scripts/patch-menu-viewport');
+const { patchSessionManage } = require('./scripts/patch-session-manage');
 const zlib = require('node:zlib');
 
 // ---------------------------------------------------------------------------
@@ -1943,6 +1944,7 @@ async function runUpdateFlow(manual) {
       applyWorkspaceSearchRailFix();
       applyWebSearchBaseUrlFix();
       applyMenuViewportFix();
+      applySessionManageFix();
     }
     const { response: r2 } = await showBox({
       type: 'info',
@@ -2559,12 +2561,16 @@ const COMPANION_PLUGINS = [
   // user 消息（悬停预览/点击跳转/滚轮切换），取代 conversation-tweaks
   // 内置的会话滑轨。
   { id: 'dsh-navbar', name: '@vlln/dsh-navbar' },
+  // 对话删除与归档管理（本仓库内置）：会话行菜单删除按钮 + 设置内归档管理
+  // 面板（恢复/删除）。依赖 patch-session-manage.js 的官方包运行时补丁。
+  { id: 'dsh-session-manager', name: 'dsh-session-manager' },
   { id: 'conversation-tweaks', name: '@deepseek-ai/dsh-conversation-tweaks' },
   { id: 'super-injector', name: '@dsh-external/dsh-super-injector' },
   { id: 'prompt-custom', name: '@deepseek-ai/dsh-prompt-custom' },
   { id: 'third-party-thinking', name: '@deepseek-ai/dsh-third-party-thinking' },
   { id: 'wsl-settings', name: '@deepseek-ai/dsh-wsl-settings' },
   { id: 'dsh-vision', name: '@dsh-external/dsh-vision' },
+  { id: 'side-session', name: '@dsh-external/dsh-side-session' },
 ];
 
 function companionDirName(p) {
@@ -3485,6 +3491,31 @@ function applyMenuViewportFix() {
     }
   }
 }
+// ---------------------------------------------------------------------------
+// 对话删除 / 归档管理运行时补丁（dsh-session-manager 插件的前置依赖）：
+// dsh-workspace（unarchiveSession）+ dsh-host-apiproxy（unarchiveSession /
+// deleteSession RPC）+ dsh-client-connection（API 面 + schema）+
+// dsh-client-ui-workspace（会话行菜单「删除对话」）。补丁本体在
+// scripts/patch-session-manage.js（幂等、锚点不匹配自动跳过）；覆盖三处运行
+// 副本：profile fallback、内置 app 副本、用户更新过的 agent overlay。
+// ---------------------------------------------------------------------------
+function applySessionManageFix() {
+  const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
+  const targets = [
+    path.join(home, 'profiles', 'node_modules'),
+    path.join(__dirname, 'node_modules'),
+    path.join(userDataDir, 'agent', 'node_modules'),
+  ];
+  for (const root of targets) {
+    if (!root || !fs.existsSync(root)) continue;
+    try {
+      const n = patchSessionManage(root, (m) => log('boot', m));
+      if (n > 0) log('boot', '对话删除补丁: 已应用到 ' + root);
+    } catch (err) {
+      log('boot', '对话删除补丁失败(' + root + '): ' + err.message);
+    }
+  }
+}
 // 快捷方式维护：修复「没有桌面快捷方式 / 快捷方式指向的文件消失」，
 // 并让快捷方式图标跟随图标设计更新（.lnk 单独指定 icon.ico）。
 // ---------------------------------------------------------------------------
@@ -4086,6 +4117,7 @@ async function boot() {
     applyWorkspaceSearchRailFix();
     applyWebSearchBaseUrlFix();
     applyMenuViewportFix();
+    applySessionManageFix();
   } else {
     // 先修复 profile fallback 联接再同步/补丁依赖文件：EPERM 环境下补丁写不进去。
     await repairProfileFallback(home);
@@ -4100,6 +4132,7 @@ async function boot() {
     applyWorkspaceSearchRailFix();
     applyWebSearchBaseUrlFix();
     applyMenuViewportFix();
+    applySessionManageFix();
     setupTestChannel();
     if (runKoffiPreflight()) clearAutoPickerBrowseOverlay();
     else enablePickerBrowseOverlay();
