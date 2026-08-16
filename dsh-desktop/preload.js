@@ -66,6 +66,16 @@ const dshDesktop = {
     open: (sessionId) => ipcRenderer.invoke('chrome:float-window', { action: 'open', sessionId }),
     close: () => ipcRenderer.send('float:close'),
   },
+  // 桌面宠物原生小窗（harness-pet）：主窗控制开关/状态查询/最小化自动弹出
+  // 上报；小窗内关闭自身/搬窗（绝对目标位置）。
+  petWindow: {
+    open: () => ipcRenderer.invoke('chrome:pet-window', { action: 'open' }),
+    toggle: () => ipcRenderer.invoke('chrome:pet-window', { action: 'toggle' }),
+    isOpen: () => ipcRenderer.invoke('chrome:pet-window', { action: 'state' }),
+    close: () => ipcRenderer.send('pet:close'),
+    moveTo: (x, y) => ipcRenderer.send('pet:move-to', { x, y }),
+    setAutoOpen: (enabled) => ipcRenderer.send('pet:set-auto-open', { enabled }),
+  },
   // 恢复页面（assets/recovery.html）使用的动作与状态读取。
   recovery: {
     getState: () => ipcRenderer.invoke('chrome:recovery-state'),
@@ -116,6 +126,17 @@ if (FLOAT_MODE) {
   } catch (_e) { /* 忽略持久化失败 */ }
 }
 
+// 宠物小窗模式检测：preload 的 process.argv 由 webPreferences.additionalArguments
+// 注入（createPetWindow 传 --dsh-pet=1）。小窗内注入 window.__DSH_PET__ 供
+// harness-pet 插件识别，并隐藏除宠物根节点外的全部界面（页面透明，只显示鲸鱼）。
+const PET_MODE = process.argv.includes('--dsh-pet=1');
+if (PET_MODE) {
+  contextBridge.exposeInMainWorld('__DSH_PET__', {});
+  const style = document.createElement('style');
+  style.textContent = 'html,body{background:transparent!important;overflow:hidden!important}body>:not(#harness-pet-root){display:none!important}';
+  document.head.appendChild(style);
+}
+
 // 页面异常 → 主进程日志（desktop.log），便于排查插件空白视图。
 window.addEventListener('error', (e) => {
   try { ipcRenderer.send('dsh:page-error', 'window.onerror: ' + ((e && (e.message || e.error)) || 'unknown')); } catch {}
@@ -127,6 +148,12 @@ window.addEventListener('unhandledrejection', (e) => {
 // 余额推送 → window 事件（dsh-balance 插件订阅）。
 ipcRenderer.on('dsh:balance', (_e, data) => {
   try { window.dispatchEvent(new CustomEvent('dsh-balance-changed', { detail: data })); } catch {}
+});
+
+// 宠物小窗状态推送（主进程 pet:state）→ 页面事件 dsh-pet-state
+// （harness-pet 插件据此刷新面板按钮文案与主窗宠物互斥状态）。
+ipcRenderer.on('pet:state', (_e, data) => {
+  try { window.dispatchEvent(new CustomEvent('dsh-pet-state', { detail: data || {} })); } catch {}
 });
 
 // 上报「当前观看的会话」ID → 主进程（仅用于完成通知的调试日志）。
@@ -349,6 +376,7 @@ function injectFloatBar() {
 }
 
 function injectChrome() {
+  if (PET_MODE) return; // 宠物小窗模式：只显示宠物，不注入标题栏/浮窗条
   if (FLOAT_MODE) { injectFloatBar(); return; }
   if (document.getElementById(BAR_ID)) return;
   const style = document.createElement('style');

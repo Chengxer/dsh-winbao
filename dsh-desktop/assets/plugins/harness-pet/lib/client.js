@@ -223,6 +223,9 @@ var HarnessPet = (function(exports) {
 			openDesktopWindow: "Open Floating Pet",
 			desktopWindowUnsupported: "Floating Pet Unsupported",
 			desktopWindowHint: "Keeps the pet visible when Harness is minimized. Keep the browser running.",
+			autoDesktop: "Show window when minimized",
+			sound: "Sound Alerts",
+			labelSize: "Hint Text Size",
 			returnToHarness: "Return to Harness",
 			followHarness: "Follow Harness",
 			closeSettings: "Close settings",
@@ -308,6 +311,9 @@ var HarnessPet = (function(exports) {
 			openDesktopWindow: "打开独立宠物窗口",
 			desktopWindowUnsupported: "浏览器不支持独立宠物窗口",
 			desktopWindowHint: "主 Harness 窗口最小化后宠物仍会显示；请保持浏览器运行。",
+			autoDesktop: "最小化时自动显示小窗",
+			sound: "声音提示",
+			labelSize: "提示文本大小",
 			returnToHarness: "返回 Harness",
 			followHarness: "跟随 Harness",
 			closeSettings: "关闭设置",
@@ -393,6 +399,9 @@ var HarnessPet = (function(exports) {
 			openDesktopWindow: "フローティングペットを開く",
 			desktopWindowUnsupported: "フローティングペットは非対応です",
 			desktopWindowHint: "Harness を最小化してもペットは表示されます。ブラウザは起動したままにしてください。",
+			autoDesktop: "最小化時に小窓を表示",
+			sound: "サウンド通知",
+			labelSize: "ヒント文字サイズ",
 			returnToHarness: "Harness に戻す",
 			followHarness: "Harness に追従",
 			closeSettings: "設定を閉じる",
@@ -478,6 +487,9 @@ var HarnessPet = (function(exports) {
 			openDesktopWindow: "플로팅 펫 열기",
 			desktopWindowUnsupported: "플로팅 펫을 지원하지 않음",
 			desktopWindowHint: "Harness를 최소화해도 펫은 계속 표시됩니다. 브라우저는 실행 상태로 유지하세요.",
+			autoDesktop: "최소화 시 작은 창 표시",
+			sound: "소리 알림",
+			labelSize: "힌트 글자 크기",
 			returnToHarness: "Harness로 돌아가기",
 			followHarness: "Harness 상태 따르기",
 			closeSettings: "설정 닫기",
@@ -555,6 +567,28 @@ var HarnessPet = (function(exports) {
 	function uiCopy(language) {
 		return COPY[language];
 	}
+	//#endregion
+	//#region src/pet/native-window.ts（DSH Desktop 原生小窗对接）
+	// 小窗模式：preload 检测到 --dsh-pet=1 后注入 window.__DSH_PET__。
+	// nativePetBridge() 存在时优先走原生小窗（Electron 的 Document PiP 会抛
+	// "Internal error: no window"）；纯浏览器（无 preload）回退 Document PiP。
+	const PET_MODE = window.__DSH_PET__ !== void 0;
+	function nativePetBridge() {
+		return window.dshDesktop?.petWindow;
+	}
+	// 小窗布局：页面透明；宠物贴底居中；气泡锚定在鲸鱼正上方（底部 = 宠物
+	// 高度 + 36px，--hw-pet-size 由 place() 写入根节点，跟随大小设置 72–160px）；
+	// 气泡尾巴箭头居中朝下；齿轮右下角；设置面板四边内嵌。
+	const PET_WINDOW_STYLE = `
+html, body { background: transparent !important; overflow: hidden !important; }
+#harness-pet-root { position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100vh !important; }
+#harness-pet-root .hw-pet { left: 50% !important; top: auto !important; right: auto !important; bottom: 14px !important; transform: translateX(-50%); }
+#harness-pet-root .hw-dialog { left: 50% !important; top: auto !important; right: auto !important; bottom: calc(var(--hw-pet-size, 112px) + 36px) !important; width: min(430px, calc(100vw - 24px)) !important; transform: translateX(-50%) !important; max-height: calc(100vh - var(--hw-pet-size, 112px) - 60px); }
+#harness-pet-root .hw-dialog::after { left: 50% !important; top: auto !important; bottom: -8px !important; transform: translateX(-50%) rotate(45deg) !important; }
+#harness-pet-root .hw-dialog[data-placement='below']::after { top: -8px !important; bottom: auto !important; transform: translateX(-50%) rotate(225deg) !important; }
+#harness-pet-root .hw-gear { left: auto !important; top: auto !important; right: 12px !important; bottom: 12px !important; }
+#harness-pet-root .hw-panel { left: 12px !important; top: 12px !important; right: 12px !important; bottom: 12px !important; width: auto !important; max-height: calc(100vh - 24px); }
+`;
 	//#endregion
 	//#region src/status.ts
 	const PET_STATUSES = [
@@ -639,6 +673,19 @@ var HarnessPet = (function(exports) {
 		}
 		const autoCycle = document.createElement("input");
 		autoCycle.type = "checkbox";
+		const autoDesktop = document.createElement("input");
+		autoDesktop.type = "checkbox";
+		const sound = document.createElement("input");
+		sound.type = "checkbox";
+		const labelSize = document.createElement("input");
+		labelSize.type = "range";
+		labelSize.min = "10";
+		labelSize.max = "26";
+		labelSize.step = "1";
+		const labelSizeValue = document.createElement("output");
+		const labelSizeControl = document.createElement("span");
+		labelSizeControl.className = "hw-range";
+		labelSizeControl.append(labelSize, labelSizeValue);
 		const badge = document.createElement("span");
 		badge.className = "hw-status-badge";
 		badge.setAttribute("aria-live", "polite");
@@ -661,8 +708,11 @@ var HarnessPet = (function(exports) {
 		const reducedMotionRow = row("", reducedMotion);
 		const debugStateRow = row("", debugState);
 		const autoCycleRow = row("", autoCycle);
+		const autoDesktopRow = row("", autoDesktop);
+		const soundRow = row("", sound);
+		const labelSizeRow = row("", labelSizeControl);
 		const statusRow = row("", badge);
-		element.append(header, languageRow, enabledRow, sizeRow, opacityRow, reducedMotionRow, debugStateRow, autoCycleRow, statusRow, reset, showDialog, desktopWindow, desktopWindowHint, desktopWindowMessage, footer);
+		element.append(header, languageRow, enabledRow, sizeRow, opacityRow, reducedMotionRow, debugStateRow, autoCycleRow, autoDesktopRow, soundRow, labelSizeRow, statusRow, reset, showDialog, desktopWindow, desktopWindowHint, desktopWindowMessage, footer);
 		const notify = (patch) => {
 			settings = {
 				...settings,
@@ -683,6 +733,12 @@ var HarnessPet = (function(exports) {
 		reducedMotion.addEventListener("change", () => notify({ reducedMotion: reducedMotion.checked }));
 		debugState.addEventListener("change", () => notify({ debugState: debugState.value }));
 		autoCycle.addEventListener("change", () => notify({ autoCycle: autoCycle.checked }));
+		autoDesktop.addEventListener("change", () => notify({ autoDesktop: autoDesktop.checked }));
+		sound.addEventListener("change", () => notify({ sound: sound.checked }));
+		labelSize.addEventListener("input", () => {
+			labelSizeValue.textContent = `${labelSize.value}px`;
+			notify({ labelSize: Number(labelSize.value) });
+		});
 		reset.addEventListener("click", options.onResetPosition);
 		showDialog.addEventListener("click", options.onShowDialog);
 		desktopWindow.addEventListener("click", () => {
@@ -715,12 +771,18 @@ var HarnessPet = (function(exports) {
 			setRowText(reducedMotionRow, copy.reducedMotion);
 			setRowText(debugStateRow, copy.debugState);
 			setRowText(autoCycleRow, copy.autoCycle);
+			setRowText(autoDesktopRow, copy.autoDesktop);
+			setRowText(soundRow, copy.sound);
+			setRowText(labelSizeRow, copy.labelSize);
 			setRowText(statusRow, copy.currentStatus);
 			for (const option of [...debugState.options]) option.textContent = option.value === "auto" ? copy.followHarness : copy.statuses[option.value].label;
 			badge.textContent = copy.statuses[currentStatus].label;
 			reset.textContent = copy.resetPosition;
 			showDialog.textContent = copy.showDialog;
-			desktopWindow.textContent = desktopWindowOpen ? copy.returnToHarness : options.desktopWindowAvailable ? copy.openDesktopWindow : copy.desktopWindowUnsupported;
+			// 小窗模式：按钮 = 「返回 Harness」（关闭小窗）；主窗 = 打开/返回。
+			desktopWindow.textContent = PET_MODE || desktopWindowOpen ? copy.returnToHarness : options.desktopWindowAvailable ? copy.openDesktopWindow : copy.desktopWindowUnsupported;
+			// 小窗模式隐藏 PiP 提示文案（不适用原生小窗）。
+			desktopWindowHint.hidden = PET_MODE;
 			desktopWindowHint.textContent = copy.desktopWindowHint;
 			footer.textContent = copy.disclaimer;
 		};
@@ -735,6 +797,10 @@ var HarnessPet = (function(exports) {
 			reducedMotion.checked = next.reducedMotion;
 			debugState.value = next.debugState;
 			autoCycle.checked = next.autoCycle;
+			autoDesktop.checked = next.autoDesktop;
+			sound.checked = next.sound;
+			labelSize.value = String(next.labelSize);
+			labelSizeValue.textContent = `${next.labelSize}px`;
 			applyCopy();
 		};
 		setSettings(settings);
@@ -757,7 +823,7 @@ var HarnessPet = (function(exports) {
 			setDesktopWindow: (open, message) => {
 				desktopWindowOpen = open;
 				const copy = uiCopy(settings.language);
-				desktopWindow.textContent = open ? copy.returnToHarness : options.desktopWindowAvailable ? copy.openDesktopWindow : copy.desktopWindowUnsupported;
+				desktopWindow.textContent = PET_MODE || open ? copy.returnToHarness : options.desktopWindowAvailable ? copy.openDesktopWindow : copy.desktopWindowUnsupported;
 				desktopWindow.disabled = !options.desktopWindowAvailable;
 				desktopWindowMessage.textContent = message ?? "";
 				desktopWindowMessage.hidden = message === void 0;
@@ -778,7 +844,13 @@ var HarnessPet = (function(exports) {
 		reducedMotion: true,
 		debugState: "auto",
 		autoCycle: false,
-		position: null
+		position: null,
+		// 原生小窗（desktop 侧 --dsh-pet）：主窗最小化时自动弹出小窗。
+		autoDesktop: true,
+		// 状态跃迁提示音（等待输入/任务完成）。
+		sound: true,
+		// 宠物下方提示文本字号（px）。
+		labelSize: 15
 	});
 	function isRecord(value) {
 		return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -800,6 +872,9 @@ var HarnessPet = (function(exports) {
 			reducedMotion: typeof value.reducedMotion === "boolean" ? value.reducedMotion : DEFAULT_SETTINGS.reducedMotion,
 			debugState: value.debugState === "auto" || isPetStatus(value.debugState) ? value.debugState : DEFAULT_SETTINGS.debugState,
 			autoCycle: typeof value.autoCycle === "boolean" ? value.autoCycle : DEFAULT_SETTINGS.autoCycle,
+			autoDesktop: typeof value.autoDesktop === "boolean" ? value.autoDesktop : DEFAULT_SETTINGS.autoDesktop,
+			sound: typeof value.sound === "boolean" ? value.sound : DEFAULT_SETTINGS.sound,
+			labelSize: validNumber(value.labelSize, 10, 26) ? value.labelSize : DEFAULT_SETTINGS.labelSize,
 			position
 		};
 	}
@@ -936,6 +1011,15 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 .hw-followup-error { grid-column: 1 / -1; margin: -8px 10px 0; color: #bd4050; font-size: 11px; line-height: 1.25; }
 .hw-followup-error[hidden] { display: none; }
 .hw-pet-label { position: absolute; left: 50%; bottom: -7px; transform: translateX(-50%); padding: 2px 7px; border-radius: 999px; color: #fff; background: rgba(20, 65, 87, .78); font-size: 10px; letter-spacing: .02em; white-space: nowrap; }
+#harness-pet-root[data-status="idle"] .hw-pet-label { color: #dbe9f2; background: #33536b; }
+#harness-pet-root[data-status="thinking"] .hw-pet-label { color: #eaf4ff; background: #3d7ea6; }
+#harness-pet-root[data-status="working"] .hw-pet-label { color: #ffffff; background: #1f7ab8; }
+#harness-pet-root[data-status="searching"] .hw-pet-label { color: #eafffb; background: #219a8a; }
+#harness-pet-root[data-status="bash"] .hw-pet-label { color: #e8f1f5; background: #3a4d5c; }
+#harness-pet-root[data-status="editing"] .hw-pet-label { color: #f0f2ff; background: #5a67b8; }
+#harness-pet-root[data-status="waiting"] .hw-pet-label { color: #fff7e6; background: #b57d1c; }
+#harness-pet-root[data-status="error"] .hw-pet-label { color: #fff0f1; background: #c43f50; }
+#harness-pet-root[data-status="success"] .hw-pet-label { color: #f0fff6; background: #2c9568; }
 .hw-gear { position: fixed; width: 30px; height: 30px; padding: 0; border: 1px solid rgba(53, 124, 153, .25); border-radius: 50%; background: rgba(255, 255, 255, .92); color: #256884; box-shadow: 0 3px 10px rgba(14, 64, 91, .16); cursor: pointer; pointer-events: auto; }
 .hw-panel { position: fixed; width: min(310px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow-y: auto; padding: 14px; border: 1px solid rgba(53, 124, 153, .22); border-radius: 16px; background: rgba(249, 253, 255, .98); box-shadow: 0 14px 38px rgba(14, 45, 62, .24); pointer-events: auto; backdrop-filter: blur(12px); }
 .hw-panel[hidden] { display: none; }
@@ -1061,9 +1145,9 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 		if (previous === void 0 || next === void 0 || next.length <= previous.length) return false;
 		return next.startsWith(previous);
 	}
-	function facingFromMovement(current, deltaX) {
-		if (Math.abs(deltaX) < 1) return current;
-		return deltaX < 0 ? -1 : 1;
+	function facingFromCenter(current, centerX, boundary) {
+		const next = centerX < boundary ? 1 : -1;
+		return next === current ? current : next;
 	}
 	function petDialogPresentation(status, conversationTitle, language = "en-US") {
 		const statusCopy = uiCopy(language).statuses[status];
@@ -1182,6 +1266,8 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 		let followupOpen = false;
 		let sendingFollowup = false;
 		let disposed = false;
+		let soundCtx = null;   // Web Audio 合成提示音（零资源）
+		let soundPrimed = false; // 首个状态不响，避免启动/刷新页面即响
 		const root = document.createElement("div");
 		root.id = "harness-pet-root";
 		const style = document.createElement("style");
@@ -1255,13 +1341,22 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 		whaleAnimation.src = PET_ANIMATION_URL;
 		whaleAnimation.addEventListener("load", () => render(performance.now()), { once: true });
 		let updateDesktopPanel;
-		const desktopWindow = createDesktopWindowController({
+		// 原生小窗桥优先（Electron）：PiP 仅作纯浏览器回退。
+		const nativePet = nativePetBridge();
+		const pipDesktopWindow = createDesktopWindowController({
 			scope: window,
 			root,
 			style,
 			getLanguage: () => settings.language,
 			onStateChange: (open) => updateDesktopPanel?.(open)
 		});
+		let desktopPetWindowOpen = false; // 原生小窗打开态（dsh-pet-state 事件驱动）
+		const desktopWindow = {
+			supported: !!nativePet || pipDesktopWindow.supported,
+			isOpen: () => nativePet ? desktopPetWindowOpen : pipDesktopWindow.isOpen(),
+			toggle: () => nativePet ? nativePet.toggle() : pipDesktopWindow.toggle(),
+			dispose: () => pipDesktopWindow.dispose()
+		};
 		const panel = createSettingsPanel({
 			settings,
 			onChange: (next) => {
@@ -1283,14 +1378,45 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 			onShowDialog: () => setDialogVisible(true),
 			desktopWindowAvailable: desktopWindow.supported,
 			onToggleDesktopWindow: async () => {
-				const result = await desktopWindow.toggle();
-				if (result.ok && desktopWindow.isOpen()) panel.setOpen(false);
+				if (nativePet) {
+					// 小窗内按钮 = 「返回 Harness」（关闭小窗）；主窗按钮 = 开关。
+					if (PET_MODE) { nativePet.close(); return { ok: true }; }
+					const result = await nativePet.toggle();
+					return result && result.ok ? result : { ok: true };
+				}
+				const result = await pipDesktopWindow.toggle();
+				if (result.ok && pipDesktopWindow.isOpen()) panel.setOpen(false);
 				return result;
 			}
 		});
 		updateDesktopPanel = (open) => panel.setDesktopWindow(open);
+		// 双宠物互斥：原生小窗打开时隐藏主窗宠物/对话框/齿轮并收起面板；
+		// 关闭后恢复。主窗启动/刷新时先查询小窗状态（小窗还开着则保持隐藏）。
+		let desktopPetSuppressed = false;
+		let petStyleEl = null;
+		const applyDesktopSuppression = (open) => {
+			desktopPetWindowOpen = !!open;
+			desktopPetSuppressed = !!open && !PET_MODE;
+			applySettings();
+			updateDesktopPanel?.(!!open);
+			if (open && !PET_MODE) panel.setOpen(false);
+		};
+		const onPetStateEvent = (event) => {
+			applyDesktopSuppression(!!(event.detail && event.detail.open));
+		};
+		window.addEventListener("dsh-pet-state", onPetStateEvent);
+		if (nativePet) {
+			nativePet.isOpen().then((result) => {
+				if (result && result.ok && result.open) applyDesktopSuppression(true);
+			}).catch(() => {});
+		}
 		root.append(pet, dialog, gear, panel.element);
 		document.head.append(style);
+		if (PET_MODE) {
+			petStyleEl = document.createElement("style");
+			petStyleEl.textContent = PET_WINDOW_STYLE;
+			document.head.appendChild(petStyleEl);
+		}
 		document.body.append(root);
 		function displayedStatus() {
 			if (settings.autoCycle) return PET_STATUSES[cycleIndex % PET_STATUSES.length] ?? "idle";
@@ -1307,8 +1433,9 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 			if (animationRequest !== void 0) cancelAnimationFrame(animationRequest);
 			animationRequest = void 0;
 			// 宠物关闭（默认）时完全停掉动画循环：隐藏状态下逐帧绘制 canvas
-			// 是纯浪费（issue #34 诊断的持续阻塞源之一）。
-			if (!settings.enabled) return;
+			// 是纯浪费（issue #34 诊断的持续阻塞源之一）。小窗模式例外：宠物
+			// 始终显示（与主窗「启用宠物」开关解耦），动画照常跑。
+			if (!settings.enabled && !PET_MODE) return;
 			if (reduced()) render();
 			else animationRequest = requestAnimationFrame(animate);
 		}
@@ -1339,6 +1466,8 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 		}
 		function place() {
 			position = clampPosition(position, settings.size);
+			// 小窗气泡锚定用：宠物尺寸跟随设置 72–160px 动态适配。
+			root.style.setProperty("--hw-pet-size", `${settings.size}px`);
 			pet.style.left = `${position.x}px`;
 			pet.style.top = `${position.y}px`;
 			pet.style.width = `${settings.size}px`;
@@ -1402,12 +1531,20 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 		}
 		function applySettings() {
 			position = clampPosition(position, settings.size);
-			pet.hidden = !settings.enabled;
-			dialog.hidden = !settings.enabled || dialogDismissed;
+			// 可见性统一表达式（互斥抑制也作用于气泡与齿轮）：小窗模式宠物
+			// 始终显示（与主窗「启用宠物」开关解耦）；主窗在宠物关闭或小窗
+			// 打开（互斥）时隐藏。
+			const visible = PET_MODE ? true : settings.enabled && !desktopPetSuppressed;
+			pet.hidden = !visible;
+			dialog.hidden = !visible || dialogDismissed;
+			gear.hidden = !PET_MODE && desktopPetSuppressed;
 			pet.style.opacity = String(settings.opacity);
 			dialog.style.opacity = String(settings.opacity);
 			gear.style.opacity = String(Math.max(settings.opacity, .65));
 			root.classList.toggle("hw-reduced", reduced());
+			// 提示文本字号（10–26px，内边距按比例随动）。
+			petLabel.style.fontSize = `${settings.labelSize}px`;
+			petLabel.style.padding = `${settings.labelSize * .18}px ${settings.labelSize * .6}px`;
 			const copy = uiCopy(settings.language);
 			root.lang = settings.language;
 			pet.setAttribute("aria-label", copy.petLabel);
@@ -1419,13 +1556,20 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 			contextMark.setAttribute("aria-label", followupOpen ? copy.collapseFollowup : copy.expandFollowup);
 			panel.setSettings(settings);
 			configureCycle();
+			// 上报「最小化自动弹出小窗」开关（原生桥存在时）。
+			if (nativePet) {
+				try { nativePet.setAutoOpen(settings.enabled && settings.autoDesktop); } catch {}
+			}
 			updateStatus();
 			place();
 			restartAnimation();
 		}
 		function setDialogVisible(visible) {
 			dialogDismissed = !visible;
-			dialog.hidden = !settings.enabled || dialogDismissed;
+			// 与 applySettings 共用同一套可见性表达式：互斥抑制也作用于气泡，
+			// 否则会话切换（setStatus → setDialogVisible(true)）会把被抑制的
+			// 气泡错误弹出。
+			dialog.hidden = !(PET_MODE ? true : settings.enabled && !desktopPetSuppressed) || dialogDismissed;
 			panel.setDialogVisible(visible);
 			if (!visible && followupOpen) setFollowupOpen(false);
 			placeDialog();
@@ -1566,7 +1710,15 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 				pointerY: event.clientY,
 				lastPointerX: event.clientX,
 				x: position.x,
-				y: position.y
+				y: position.y,
+				// 小窗模式：记录抓取偏移（窗口屏幕坐标 - 光标屏幕坐标）与拖动
+				// 起点窗口位置，搬窗用绝对目标位置（无增量累加误差与 IPC 抖动）。
+				...(PET_MODE ? {
+					grabOffsetX: window.screenX - event.screenX,
+					grabOffsetY: window.screenY - event.screenY,
+					startScreenX: window.screenX,
+					pointerScreenX: event.screenX
+				} : {})
 			};
 			longPressTimer = setTimeout(() => {
 				longPressTimer = void 0;
@@ -1577,7 +1729,6 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 			if (dragStart === void 0) return;
 			const dx = event.clientX - dragStart.pointerX;
 			const dy = event.clientY - dragStart.pointerY;
-			const movementX = event.clientX - dragStart.lastPointerX;
 			dragStart.lastPointerX = event.clientX;
 			if (Math.hypot(dx, dy) > 4) {
 				if (!dragged) pet.setPointerCapture(event.pointerId);
@@ -1586,14 +1737,30 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 				longPressTimer = void 0;
 			}
 			if (!dragged) return;
-			const nextFacing = facingFromMovement(facing, movementX);
+			if (PET_MODE && nativePet) {
+				// 小窗模式：搬动整个小窗（光标屏幕坐标 + 抓取偏移 = 绝对目标位置）。
+				nativePet.moveTo(event.screenX + dragStart.grabOffsetX, event.screenY + dragStart.grabOffsetY);
+				// 朝向：小窗中心相对所在屏幕水平中线判定（用拖动起点窗口位置
+				// + 累计位移计算，精确无延迟）；只有越过中线才调转一次。
+				const boundary = window.screen.availLeft + window.screen.availWidth / 2;
+				const centerX = dragStart.startScreenX + (event.screenX - dragStart.pointerScreenX) + settings.size / 2;
+				const nextFacing = facingFromCenter(facing, centerX, boundary);
+				if (nextFacing !== facing) {
+					facing = nextFacing;
+					render(performance.now());
+				}
+				return;
+			}
+			// 主窗模式：宠物中心相对视口水平中线判定；越过中线才调转一次，
+			// 半屏内鼠标任意抖动不翻转。位置取整落位，消除高分屏亚像素抖动。
+			const nextFacing = facingFromCenter(facing, dragStart.x + dx + settings.size / 2, window.innerWidth / 2);
 			if (nextFacing !== facing) {
 				facing = nextFacing;
 				render(performance.now());
 			}
 			position = clampPosition({
-				x: dragStart.x + dx,
-				y: dragStart.y + dy
+				x: Math.round(dragStart.x + dx),
+				y: Math.round(dragStart.y + dy)
 			}, settings.size);
 			place();
 		});
@@ -1603,6 +1770,8 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 			dragStart = void 0;
 			if (!dragged) return;
 			pet.blur();
+			// 小窗模式：位置由主进程 pet-window.json 持久化，不写回页面设置。
+			if (PET_MODE) return;
 			settings = {
 				...settings,
 				position
@@ -1646,13 +1815,45 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 		window.addEventListener("resize", onResize);
 		media.addEventListener("change", onMotionChange);
 		applySettings();
+		// 状态跃迁提示音（仅主窗；仅 waiting/success；仅跃迁响一声；受
+		// settings.sound 开关与 soundPrimed 首状态标记约束）。Web Audio 合成
+		// 双音：waiting = 下行 E5→C5（提示），success = 上行 A5→E6（叮咚）。
+		function playPetSound(status) {
+			if (PET_MODE || !settings.sound) return;
+			try {
+				const AudioCtor = window.AudioContext || window.webkitAudioContext;
+				if (!AudioCtor) return;
+				soundCtx = soundCtx || new AudioCtor();
+				if (soundCtx.state === "suspended") soundCtx.resume().catch(() => {});
+				const notes = status === "waiting" ? [659.25, 523.25] : status === "success" ? [880, 1318.5] : null;
+				if (!notes) return;
+				const now = soundCtx.currentTime;
+				notes.forEach((freq, index) => {
+					const osc = soundCtx.createOscillator();
+					const gain = soundCtx.createGain();
+					osc.type = "sine";
+					osc.frequency.value = freq;
+					const t0 = now + index * .12;
+					gain.gain.setValueAtTime(.0001, t0);
+					gain.gain.exponentialRampToValueAtTime(.12, t0 + .02);
+					gain.gain.exponentialRampToValueAtTime(.0001, t0 + .3);
+					osc.connect(gain).connect(soundCtx.destination);
+					osc.start(t0);
+					osc.stop(t0 + .35);
+				});
+			} catch {}
+		}
 		return {
 			setStatus: (status, nextConversationTitle, nextAssistantText, nextConversationIdentity) => {
 				if (nextConversationIdentity !== void 0 && nextConversationIdentity !== conversationIdentity) {
 					conversationIdentity = nextConversationIdentity;
 					setDialogVisible(true);
 				}
+				const previousStatus = harnessStatus;
 				harnessStatus = status;
+				// 只在状态跃迁时响一声；状态持续期间不重复响。
+				if (!soundPrimed) soundPrimed = true;
+				else if (previousStatus !== status && (status === "waiting" || status === "success")) playPetSound(status);
 				conversationTitle = nextConversationTitle?.trim() || conversationTitle;
 				const nextReply = nextAssistantText?.trim() || void 0;
 				followAssistantTail = shouldFollowAssistantTail(assistantReply, nextReply);
@@ -1662,6 +1863,8 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 			dispose: () => {
 				disposed = true;
 				desktopWindow.dispose();
+				window.removeEventListener("dsh-pet-state", onPetStateEvent);
+				if (petStyleEl !== null) petStyleEl.remove();
 				if (animationRequest !== void 0) cancelAnimationFrame(animationRequest);
 				if (cycleTimer !== void 0) clearInterval(cycleTimer);
 				if (interactionTimer !== void 0) clearTimeout(interactionTimer);
@@ -1760,6 +1963,24 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 		let conversationTitle;
 		let assistantText;
 		let conversationIdentity;
+		// 小窗会话跟随：小窗与主窗共享 localStorage（desktop 侧同分区），
+		// 主窗切换会话写入 dsh.sessions.current → storage 事件 → 与当前
+		// 不一致时 context.sessions.open(id)，宠物实时跟随当前会话。
+		let unlistenStorage;
+		if (window.__DSH_PET__ !== void 0 && context.sessions && typeof context.sessions.open === "function") {
+			const onStorage = (event) => {
+				if (event.key !== "dsh.sessions.current" || event.newValue === null) return;
+				try {
+					const parsed = JSON.parse(event.newValue);
+					const id = parsed && typeof parsed === "object" && typeof parsed.sessionId === "string" ? parsed.sessionId : void 0;
+					if (!id) return;
+					const current = context.sessions.list.getSnapshot().current;
+					if (id !== current) context.sessions.open(id).catch(() => {});
+				} catch {}
+			};
+			window.addEventListener("storage", onStorage);
+			unlistenStorage = () => window.removeEventListener("storage", onStorage);
+		}
 		const unsubscribe = observeHarnessSignals(context, (snapshot) => {
 			const identity = harnessSignalIdentity(snapshot);
 			if (identity !== conversationIdentity) {
@@ -1781,6 +2002,7 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 		return { dispose: () => {
 			if (successTimer !== void 0) clearTimeout(successTimer);
 			unsubscribe();
+			unlistenStorage?.();
 			pet.dispose();
 		} };
 	}

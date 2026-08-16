@@ -163,6 +163,18 @@ const floatBySession = new Map(); // sessionId -> BrowserWindow（同一会话�
 let sponsorWindow = null; // 「请作者喝咖啡」独立小窗（单例）
 
 // ---------------------------------------------------------------------------
+// 桌面宠物原生小窗（harness-pet）：主窗最小化后宠物仍可见。
+// 插件 PiP 方案在 Electron 里不可用（requestWindow 抛 Internal error），
+// 这里用独立透明置顶 BrowserWindow 承载同一 Web UI 的「宠物小窗模式」
+// （--dsh-pet=1，preload 据此隐藏除宠物外的全部界面）。
+// ---------------------------------------------------------------------------
+const PET_WINDOW_W = 360;
+const PET_WINDOW_H = 420;
+let petWindow = null; // 宠物小窗单例（BrowserWindow）
+let petAutoOpen = false; // 主窗插件上报：宠物启用且开启「最小化自动弹出小窗」
+let petPosTimer = null; // 小窗位置防抖保存定时器
+
+// ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
 
@@ -1373,6 +1385,12 @@ function createWindow(opts = {}) {
     }
   });
 
+  // 主窗最小化且宠物启用「最小化自动弹出小窗」→ 自动打开宠物小窗
+  // （小窗为独立置顶窗口，主窗最小化/隐藏不影响其显示）。
+  mainWindow.on('minimize', () => {
+    if (petAutoOpen && (!petWindow || petWindow.isDestroyed())) createPetWindow();
+  });
+
   mainWindow.on('closed', () => {
     // 崩溃恢复会销毁并重建主窗：旧窗口的 closed 可能晚于新窗口创建，
     // 必须校验身份，避免把新的 mainWindow 全局引用置空。
@@ -1566,6 +1584,117 @@ function closeAllFloatWindows() {
   floatBySession.clear();
   if (sponsorWindow && !sponsorWindow.isDestroyed()) sponsorWindow.destroy();
   sponsorWindow = null;
+}
+
+// ---------------------------------------------------------------------------
+// 桌面宠物原生小窗
+// ---------------------------------------------------------------------------
+
+function petPositionFile() {
+  return path.join(userDataDir, 'pet-window.json');
+}
+
+// 读取持久化的小窗位置：跨屏校验（目标点所在显示器存在则用），并钳制在
+// 该显示器可视区内；读不到 / 不合法时返回 null（调用方落默认右下角）。
+function loadPetPosition() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(petPositionFile(), 'utf8'));
+    if (raw && Number.isFinite(raw.x) && Number.isFinite(raw.y)) {
+      const probe = { x: Math.round(raw.x), y: Math.round(raw.y), width: PET_WINDOW_W, height: PET_WINDOW_H };
+      const area = screen.getDisplayMatching(probe).workArea;
+      return {
+        x: Math.round(Math.min(Math.max(raw.x, area.x), area.x + area.width - PET_WINDOW_W)),
+        y: Math.round(Math.min(Math.max(raw.y, area.y), area.y + area.height - PET_WINDOW_H)),
+      };
+    }
+  } catch {}
+  return null;
+}
+
+function savePetPosition(x, y) {
+  try {
+    fs.writeFileSync(petPositionFile(), JSON.stringify({ x: Math.round(x), y: Math.round(y) }));
+  } catch (err) {
+    log('pet', '保存宠物小窗位置失败: ' + (err && err.message ? err.message : err));
+  }
+}
+
+function pushPetState() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.webContents.send('pet:state', { open: !!(petWindow && !petWindow.isDestroyed()) }); } catch {}
+  }
+}
+
+function closePetWindow() {
+  if (petPosTimer !== null) { clearTimeout(petPosTimer); petPosTimer = null; }
+  if (petWindow && !petWindow.isDestroyed()) petWindow.destroy();
+  petWindow = null;
+}
+
+// 创建（或复用）宠物小窗：无边框、透明、置顶（screen-saver）、不进任务栏。
+// 与主窗共用默认分区（共享 localStorage：会话选中态与 harness-pet 设置），
+// preload 经 additionalArguments 的 --dsh-pet=1 进入小窗模式。
+function createPetWindow() {
+  if (petWindow && !petWindow.isDestroyed()) return petWindow;
+  if (!webUrl) return null;
+  const saved = loadPetPosition();
+  const area = screen.getPrimaryDisplay().workArea;
+  const pos = saved || {
+    x: area.x + area.width - PET_WINDOW_W - 24,
+    y: area.y + area.height - PET_WINDOW_H - 24,
+  };
+  const win = new BrowserWindow({
+    width: PET_WINDOW_W,
+    height: PET_WINDOW_H,
+    x: pos.x,
+    y: pos.y,
+    show: false,
+    title: 'DSH 宠物',
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    fullscreenable: false,
+    hasShadow: false,
+    backgroundColor: '#00000000',
+    icon: path.join(__dirname, 'assets', 'icon.png'),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
+      // 不设 partition：与主窗共享 localStorage（dsh.sessions.current 与
+      // harness-pet:settings），小窗才能实时跟随主窗会话/设置。
+      additionalArguments: ['--dsh-pet=1'],
+    },
+  });
+  petWindow = win;
+  win.setAlwaysOnTop(true, 'screen-saver');
+  win.loadURL(webUrl).catch((err) => log('pet', '小窗加载失败: ' + ((err && err.message) || err)));
+  win.once('ready-to-show', () => { if (!win.isDestroyed()) win.show(); });
+  // 位置防抖保存（400ms）。
+  win.on('move', () => {
+    if (petPosTimer !== null) clearTimeout(petPosTimer);
+    petPosTimer = setTimeout(() => {
+      petPosTimer = null;
+      if (petWindow === win && !win.isDestroyed()) {
+        const [x, y] = win.getPosition();
+        savePetPosition(x, y);
+      }
+    }, 400);
+  });
+  win.on('closed', () => {
+    if (petPosTimer !== null) { clearTimeout(petPosTimer); petPosTimer = null; }
+    if (petWindow === win) petWindow = null;
+    pushPetState();
+  });
+  guardWebContents(win.webContents);
+  if (recovery) recovery.attach(win, "float");
+  log('pet', '已创建宠物小窗 (' + PET_WINDOW_W + 'x' + PET_WINDOW_H + ')');
+  pushPetState();
+  return win;
 }
 
 // ---------------------------------------------------------------------------
@@ -2083,6 +2212,58 @@ function registerChromeIpc() {
     for (const win of floatWindows) {
       if (!win.isDestroyed() && win.webContents === event.sender) { win.close(); break; }
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // 桌面宠物原生小窗（harness-pet 插件对接，双端契约见 docs/pet-desktop.md）
+  // -------------------------------------------------------------------------
+
+  // 主窗请求宠物小窗 open / toggle / state（校验发送者必须是主窗）。
+  ipcMain.handle('chrome:pet-window', (event, { action } = {}) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'unauthorized' };
+    if (action === 'state') {
+      return { ok: true, open: !!(petWindow && !petWindow.isDestroyed()) };
+    }
+    if (action === 'open' || action === 'toggle') {
+      if (petWindow && !petWindow.isDestroyed()) {
+        if (action === 'toggle') {
+          closePetWindow();
+          return { ok: true, open: false };
+        }
+        petWindow.show();
+        petWindow.focus();
+        return { ok: true, open: true, id: petWindow.id, reused: true };
+      }
+      const win = createPetWindow();
+      if (!win) return { ok: false, error: 'not-ready' };
+      return { ok: true, open: true, id: win.id };
+    }
+    return { ok: false, error: 'bad-action' };
+  });
+
+  // 小窗关闭自身（校验发送者是小窗）。
+  ipcMain.on('pet:close', (event) => {
+    if (petWindow && !petWindow.isDestroyed() && petWindow.webContents === event.sender) {
+      petWindow.close();
+    }
+  });
+
+  // 小窗搬窗：绝对目标位置（光标屏幕坐标 + 抓取偏移），钳制在当前显示器
+  // 可视区（至少露出 80px，防止拖出视口找不回来）+ 取整（校验发送者是小窗）。
+  ipcMain.on('pet:move-to', (event, { x, y } = {}) => {
+    if (!petWindow || petWindow.isDestroyed() || petWindow.webContents !== event.sender) return;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    const probe = { x: Math.round(x), y: Math.round(y), width: PET_WINDOW_W, height: PET_WINDOW_H };
+    const area = screen.getDisplayMatching(probe).workArea;
+    const nx = Math.min(Math.max(x, area.x - PET_WINDOW_W + 80), area.x + area.width - 80);
+    const ny = Math.min(Math.max(y, area.y - PET_WINDOW_H + 80), area.y + area.height - 80);
+    petWindow.setPosition(Math.round(nx), Math.round(ny));
+  });
+
+  // 主窗插件上报「最小化自动弹出小窗」开关（校验发送者必须是主窗）。
+  ipcMain.on('pet:set-auto-open', (event, { enabled } = {}) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return;
+    petAutoOpen = enabled === true;
   });
 
   // 复制文本到剪贴板（菜单「更新源」复制按钮 / 关于对话框）。
@@ -4026,6 +4207,7 @@ if (!gotLock) {
     forceQuit = true;
     markCleanExit();
     log('boot', '正在退出，销毁会话浮窗并停止 dsh web 进程树…');
+    closePetWindow(); // 宠物小窗随应用退出关闭（主窗「关闭到托盘」时保留）
     closeAllFloatWindows();
     killTreeSync(serverProc);
     updater.abort();

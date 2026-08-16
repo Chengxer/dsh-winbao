@@ -25,6 +25,10 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 - **router flash 等重负载场景掉帧 / 周期性假死**（issue #34）：① `harness-pet` 默认改为关闭（opt-in，设置卡可开启），且关闭时完全停掉 rAF 动画循环（此前隐藏状态下仍逐帧绘制 320x320 canvas）；② `dsh-conversation-tweaks` 会话滑轨的 MutationObserver 不再每 250ms 全量 `querySelectorAll + getBoundingClientRect`，改为仅在内容尺寸真实变化时重算标记位置；③ 修复 `syncCompanionPlugins` 自愈死循环——bundle 插件源缺失时不再被当普通插件写回 `cordis.patch.yml`（此前会注册不存在的包导致 dsh web 启动崩溃），并从 manifest bundles 移除（视为用户禁用）、清理 patch 残留注册（用户手写 config/disabled 覆盖条目保留）
 - **Agent 预设很多时「上面的不显示」**（issue #36）：`dsh-client-ui-primitives` 的 Menu portal 弹层在条目超过视口时没有高度上限，`place()` 把整列推到视口上方、顶部条目被裁掉且无法触达。新增 `scripts/patch-menu-viewport.js`：portal 列表加 `max-height: min(calc(100vh - 24px), 560px)` + `overflow-y: auto`，y 夹紧按封顶后高度计算，任何视口高度下完整可用（打包 afterPack / 启动运行时 / dev node_modules 三路覆盖，含 `node --test` 单测）
 - **第三方模型思考强度**（issue #37）：功能已就绪（`dsh-third-party-thinking` 默认关闭、可对支持的 provider 开启并把档位注入请求体）；设置页「请求字段名」提示补充 opencode-go 套餐内 DeepSeek Flash/Pro 的开启说明
+- **桌面宠物原生置顶小窗**（harness-pet「主窗最小化后宠物消失」根治）：插件自带 Document PiP 独立窗口在 Electron 中不可用（`requestWindow` 抛 `Internal error: no window`）。改为主进程原生方案：
+  - `main.js`：新增 360×420 无边框透明置顶（screen-saver）不进任务栏的宠物小窗（与主窗共享分区/localStorage），位置经 `userData/pet-window.json` 持久化（跨屏校验 + 钳制回可视区，拖动 400ms 防抖保存）；IPC 双端契约：`chrome:pet-window`（open/toggle/state，校验主窗来源）、`pet:close`、`pet:move-to`（绝对目标位置，至少露出 80px）、`pet:set-auto-open`；主窗最小化且插件开启「最小化自动显示小窗」时自动弹出；before-quit 清理；复用 `guardWebContents` 与 `recovery.attach`
+  - `preload.js`：`--dsh-pet=1` 模式检测 → 注入 `window.__DSH_PET__`、隐藏除宠物根节点外的全部界面、跳过自绘标题栏；桥接 `dshDesktop.petWindow`（open/toggle/isOpen/close/moveTo/setAutoOpen）；主进程 `pet:state` 转发为页面事件 `dsh-pet-state`
+  - `harness-pet` 插件：原生桥优先（浏览器仍回退 PiP）；小窗布局（宠物贴底居中、气泡锚定鲸鱼正上方随大小自适应、齿轮右下角、面板内嵌）；双宠物互斥（小窗打开时主窗宠物/气泡/齿轮隐藏，含刷新后状态查询恢复，`applySettings`/`setDialogVisible` 共用可见性表达式）；拖动（小窗 = 绝对定位搬窗无抖动、主窗 = 取整落位）；朝向只越水平中线才调转（主窗视口中线 / 小窗屏幕中线）；会话跟随（共享 localStorage + storage 事件 + `sessions.open`）；新设置项 `autoDesktop`（最小化自动显示小窗，默认开）/ `sound`（状态跃迁 Web Audio 合成提示音：等待输入/任务完成，仅主窗、仅跃迁响一声、首状态不响）/ `labelSize`（提示文本字号 10–26px 默认 15px，四语言文案齐全）；提示文本 9 种状态前景/背景配色
 
 ## [0.3.8] — 2026-08-15
 
