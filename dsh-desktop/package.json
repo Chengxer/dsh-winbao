@@ -14,6 +14,7 @@
                     "predist":  "node scripts/check-syntax.js",
                     "prepack":  "node scripts/check-syntax.js",
                     "dist":  "node scripts/patch-portable-template.js \u0026\u0026 node scripts/patch-deps.js \u0026\u0026 electron-builder --win",
+                    "dist:arm64":  "node scripts/patch-portable-template.js \u0026\u0026 node scripts/patch-deps.js \u0026\u0026 electron-builder --win --config electron-builder.arm64.yml",
                     "fetch-npm":  "node scripts/fetch-npm.js",
                     "fetch-runtime":  "node scripts/fetch-node.js \u0026\u0026 node scripts/fetch-npm.js",
                     "postinstall":  "node scripts/patch-deps.js",

@@ -7,9 +7,10 @@
 //   1. checkLatest(): 依次查询上游发布源（GitHub Releases → Gitee Releases，
 //      可用环境变量 DSH_DESKTOP_RELEASE_API 指向自定义镜像 API），取 latest
 //      release 的 tag 作为版本号，与当前 APP_VERSION 比较。
-//   2. selectAsset(): 按当前部署形态选择安装包 —— 便携版选
-//      *-portable-x64.exe；安装版选 Setup-*-x64.exe。Gitee 因单文件 100MB
-//      限制把安装包拆成 .part1/.part2 分片，此时自动按序下载并拼接。
+//   2. selectAsset(): 按当前部署形态与 CPU 架构选择安装包 —— 便携版选
+//      *-portable-<arch>.exe（x64/arm64）；安装版选 Setup-*-<arch>.exe。
+//      Gitee 因单文件 100MB 限制把安装包拆成 .part1/.part2 分片，此时自动
+//      按序下载并拼接。
 //   3. downloadRelease(): 流式下载（带进度回调）到 <userData>/updates/。
 //   4. applyUpdate(): 写一个纯 ASCII 的 cmd 脚本并以 detached 方式启动，随后
 //      主进程退出：
@@ -34,6 +35,14 @@ const MIN_VALID_BYTES = 64 * 1024 * 1024; // 完整安装包远大于 64MB，防
 
 function isPortable() {
   return !!process.env.PORTABLE_EXECUTABLE_DIR;
+}
+
+// 当前 CPU 架构：默认取 Electron 主进程的 process.arch（arm64 机器上为
+// arm64），可用 DSH_DESKTOP_ARCH 环境变量强制指定（供测试与排查使用）。
+function currentArch() {
+  const forced = String(process.env.DSH_DESKTOP_ARCH || '').trim();
+  if (forced === 'x64' || forced === 'arm64') return forced;
+  return process.arch === 'arm64' ? 'arm64' : 'x64';
 }
 
 /** 解析仓库地址（格式非法或缺省时回退到内置默认仓库）。 */
@@ -145,14 +154,17 @@ async function checkLatest(ctx, currentVersion) {
 // --- 资产选择 / 下载 -------------------------------------------------------
 
 function selectAsset(release) {
-  const wanted = isPortable() ? /-portable-x64\.exe$/i : /-setup-.*-x64\.exe$/i;
+  const arch = currentArch();
+  const wanted = isPortable()
+    ? new RegExp(`-portable-${arch}\\.exe$`, 'i')
+    : new RegExp(`-setup-.*-${arch}\\.exe$`, 'i');
   const direct = release.assets.find((a) => wanted.test(a.name));
   if (direct) return { parts: [direct], name: direct.name, totalSize: direct.size };
 
   // Gitee 单文件 100MB 限制：安装包拆分为 <file>.part1 / <file>.part2 …
   const base = isPortable()
-    ? `DSH-Desktop-${release.version}-portable-x64.exe`
-    : `DSH-Desktop-Setup-${release.version}-x64.exe`;
+    ? `DSH-Desktop-${release.version}-portable-${arch}.exe`
+    : `DSH-Desktop-Setup-${release.version}-${arch}.exe`;
   const parts = release.assets
     .filter((a) => a.name.startsWith(base + '.part'))
     .sort((a, b) => {
@@ -560,6 +572,7 @@ module.exports = {
   buildNsisPs1,
   buildNsisCmd,
   isPortable,
+  currentArch,
   resolveRepos,
   DEFAULT_REPOS,
 };

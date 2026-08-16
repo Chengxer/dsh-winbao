@@ -2,8 +2,8 @@
 
 // client-updater.js 纯函数单元测试（node --test，无需网络与 Electron）。
 // 用法：node --test scripts/test/unit-client-updater.test.js
-// 覆盖：资产选择（便携版 / 安装版 / Gitee 分片排序）、仓库配置回退、
-//       更新脚本模板纯 ASCII、便携版替换重试与只读降级分支、
+// 覆盖：资产选择（便携版 / 安装版 / Gitee 分片排序 / x64 与 arm64 架构）、
+//       仓库配置回退、更新脚本模板纯 ASCII、便携版替换重试与只读降级分支、
 //       NSIS 安装失败保留安装包供重试。
 
 const test = require('node:test');
@@ -15,6 +15,7 @@ const {
   buildPortableCmd,
   buildNsisPs1,
   buildNsisCmd,
+  currentArch,
 } = require('../../client-updater');
 
 function withEnv(name, value, fn) {
@@ -75,6 +76,88 @@ test('selectAsset: Gitee 分片按 part 序号排序并拼接为完整文件名'
       'DSH-Desktop-0.4.1-portable-x64.exe.part1',
       'DSH-Desktop-0.4.1-portable-x64.exe.part2',
     ]);
+  });
+});
+
+test('selectAsset: arm64 机器选择 portable-arm64 资产', () => {
+  withEnv('PORTABLE_EXECUTABLE_DIR', 'C:\\tools\\dsh-desktop', () => {
+    withEnv('DSH_DESKTOP_ARCH', 'arm64', () => {
+      const release = {
+        version: '0.3.9',
+        assets: [
+          { name: 'DSH-Desktop-0.3.9-portable-x64.exe', url: 'https://example/px64', size: 1 },
+          { name: 'DSH-Desktop-0.3.9-portable-arm64.exe', url: 'https://example/parm64', size: 1 },
+          { name: 'DSH-Desktop-Setup-0.3.9-x64.exe', url: 'https://example/sx64', size: 1 },
+          { name: 'DSH-Desktop-Setup-0.3.9-arm64.exe', url: 'https://example/sarm64', size: 1 },
+        ],
+      };
+      const sel = selectAsset(release);
+      assert.strictEqual(sel.name, 'DSH-Desktop-0.3.9-portable-arm64.exe');
+      assert.strictEqual(sel.parts.length, 1);
+    });
+  });
+});
+
+test('selectAsset: arm64 安装版选择 Setup-arm64（大小写不敏感）', () => {
+  withEnv('PORTABLE_EXECUTABLE_DIR', undefined, () => {
+    withEnv('DSH_DESKTOP_ARCH', 'arm64', () => {
+      const release = {
+        version: '0.3.9',
+        assets: [
+          { name: 'DSH-Desktop-0.3.9-portable-arm64.exe', url: 'https://example/p', size: 1 },
+          { name: 'DSH-Desktop-SETUP-0.3.9-ARM64.exe', url: 'https://example/s', size: 1 },
+        ],
+      };
+      const sel = selectAsset(release);
+      assert.strictEqual(sel.name, 'DSH-Desktop-SETUP-0.3.9-ARM64.exe');
+    });
+  });
+});
+
+test('selectAsset: arm64 分片资产按 part 序号排序', () => {
+  withEnv('PORTABLE_EXECUTABLE_DIR', undefined, () => {
+    withEnv('DSH_DESKTOP_ARCH', 'arm64', () => {
+      const release = {
+        version: '0.3.9',
+        assets: [
+          { name: 'DSH-Desktop-Setup-0.3.9-arm64.exe.part2', url: 'https://example/s2', size: 2 },
+          { name: 'DSH-Desktop-Setup-0.3.9-arm64.exe.part1', url: 'https://example/s1', size: 1 },
+        ],
+      };
+      const sel = selectAsset(release);
+      assert.strictEqual(sel.name, 'DSH-Desktop-Setup-0.3.9-arm64.exe');
+      assert.deepStrictEqual(sel.parts.map((p) => p.name), [
+        'DSH-Desktop-Setup-0.3.9-arm64.exe.part1',
+        'DSH-Desktop-Setup-0.3.9-arm64.exe.part2',
+      ]);
+    });
+  });
+});
+
+test('selectAsset: x64 机器不误选 arm64 资产（回归）', () => {
+  withEnv('PORTABLE_EXECUTABLE_DIR', undefined, () => {
+    withEnv('DSH_DESKTOP_ARCH', 'x64', () => {
+      const release = {
+        version: '0.3.9',
+        assets: [
+          { name: 'DSH-Desktop-0.3.9-portable-arm64.exe', url: 'https://example/p', size: 1 },
+          { name: 'DSH-Desktop-Setup-0.3.9-arm64.exe', url: 'https://example/s', size: 1 },
+        ],
+      };
+      assert.throws(() => selectAsset(release), /未找到匹配的安装包资产/);
+    });
+  });
+});
+
+test('currentArch: 默认跟随 process.arch，DSH_DESKTOP_ARCH 可强制指定', () => {
+  withEnv('DSH_DESKTOP_ARCH', undefined, () => {
+    assert.strictEqual(currentArch(), process.arch === 'arm64' ? 'arm64' : 'x64');
+  });
+  withEnv('DSH_DESKTOP_ARCH', 'arm64', () => {
+    assert.strictEqual(currentArch(), 'arm64');
+  });
+  withEnv('DSH_DESKTOP_ARCH', 'bad-value', () => {
+    assert.strictEqual(currentArch(), process.arch === 'arm64' ? 'arm64' : 'x64');
   });
 });
 
