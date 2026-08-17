@@ -25,6 +25,7 @@ const {
   transformFlashFix, transformExposeFix,
   SHELL_DESC_MARKER, PW_REL, BASH_REL, transformShellDescriptionOptional,
   CODE_MODE_MARKER, CODE_PRESET_REL, transformCodeModeCompat,
+  ATTACH_MIME_MARKER, ATTACH_LOCAL_REL, transformAttachmentMimeTrust,
 } = require('../lib/runtime-patches');
 const { COMPANION_PLUGINS, companionDirName } = require('../lib/companion-plugins');
 const {
@@ -288,6 +289,26 @@ test('tool-compat: code preset 锚点缺失时跳过且不改写', () => {
   assert.deepStrictEqual(out, {
     status: 'anchor-missing',
     detail: '未找到 code preset 的 tool-presentation 锚点（版本可能已变更），跳过 ' + file,
+  });
+});
+
+test('tool-compat: attachment 图片字节信任变换（真实 vendored 文件 + 幂等）', () => {
+  const file = path.join(repoRoot, 'node_modules', '@deepseek-ai', ATTACH_LOCAL_REL);
+  const src = fs.readFileSync(file, 'utf8');
+  const out = transformAttachmentMimeTrust(src, file);
+  assert.strictEqual(out.status, 'changed');
+  assert.ok(out.src.includes(ATTACH_MIME_MARKER), '应写入幂等标记');
+  assert.ok(!out.src.includes('throw new AttachmentError("Declared image type does not match its bytes."'), '应移除严格比对拒绝');
+  assert.ok(out.src.includes('declaredMediaType = detected.mediaType;'), '应以解码字节为准');
+  assert.deepStrictEqual(transformAttachmentMimeTrust(out.src, file), { status: 'already' }, '二次应用应幂等');
+});
+
+test('tool-compat: attachment 锚点缺失时跳过且不改写', () => {
+  const file = path.join('C:', 'x', 'index.js');
+  const out = transformAttachmentMimeTrust('export const x = 1;', file);
+  assert.deepStrictEqual(out, {
+    status: 'anchor-missing',
+    detail: '未找到 attachment-local MIME 校验锚点（版本可能已变更），跳过 ' + file,
   });
 });
 

@@ -160,6 +160,29 @@ const CODE_MODE_NEW = `- id: tool-presentation
 const CODE_PRESET_REL = path.join('dsh', 'config', 'agent-presets', 'code', 'agent.cordis.yml');
 
 /** code preset `mode: code` → `mode: both` 变换（幂等，锚点失配跳过）。 */
+// ---------------------------------------------------------------------------
+// 图片字节信任补丁（问题背景：浏览器声明的 MIME 跟随文件扩展名，不可信——
+// webp/jpeg 改名 .png 后 file.type 仍是 image/png，而字节解码为 webp，官方
+// 严格比对 declared !== detected 直接拒发整条消息，用户看到「仅支持 PNG、JPG、
+// WebP、GIF」却发不出去）。decoded 字节才是权威：声明为 image/* 时以字节
+// 实际格式为准记录，不再拒绝发送。
+// 幂等标记 = dsh-desktop compat: trust decoded image bytes。
+// ---------------------------------------------------------------------------
+
+const ATTACH_MIME_MARKER = "dsh-desktop compat: trust decoded image bytes";
+const ATTACH_MIME_OLD = '\tif (detected.mediaType !== declaredMediaType) throw new AttachmentError("Declared image type does not match its bytes.", "IMAGE_TYPE_MISMATCH");';
+const ATTACH_MIME_NEW = '\t// ' + ATTACH_MIME_MARKER + '. The browser-declared MIME follows the file extension and is\n\t// untrusted (a webp/jpeg renamed to .png arrives as image/png while the bytes decode as\n\t// webp); the decoded bytes are authoritative, so record the detected type instead of\n\t// rejecting the whole send.\n\tif (detected.mediaType !== declaredMediaType && typeof declaredMediaType === "string" && declaredMediaType.startsWith("image/")) declaredMediaType = detected.mediaType;';
+
+const ATTACH_LOCAL_REL = path.join("dsh-attachment-local", "lib", "index.js");
+
+/** attachment-local 图片字节信任变换（幂等，锚点失配跳过）。 */
+function transformAttachmentMimeTrust(src, file) {
+  if (src.includes(ATTACH_MIME_MARKER)) return { status: "already" };
+  if (!src.includes(ATTACH_MIME_OLD)) {
+    return { status: "anchor-missing", detail: "未找到 attachment-local MIME 校验锚点（版本可能已变更），跳过 " + file };
+  }
+  return { status: "changed", src: src.replace(ATTACH_MIME_OLD, ATTACH_MIME_NEW) };
+}
 function transformCodeModeCompat(src, file) {
   if (src.includes(CODE_MODE_MARKER)) return { status: 'already' };
   if (!src.includes(CODE_MODE_OLD)) {
@@ -187,4 +210,7 @@ module.exports = {
   CODE_MODE_MARKER,
   CODE_PRESET_REL,
   transformCodeModeCompat,
+  ATTACH_MIME_MARKER,
+  ATTACH_LOCAL_REL,
+  transformAttachmentMimeTrust,
 };

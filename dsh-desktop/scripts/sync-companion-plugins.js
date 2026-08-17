@@ -38,6 +38,7 @@ const {
   FLASH_PKG_REL, EXPOSE_PKG_REL, PW_REL, BASH_REL, CODE_PRESET_REL, patchTargets,
   transformFlashFix, transformExposeFix,
   transformShellDescriptionOptional, transformCodeModeCompat,
+  transformAttachmentMimeTrust, ATTACH_LOCAL_REL,
 } = require('./lib/runtime-patches');
 const {
   ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK,
@@ -340,6 +341,21 @@ function applyRuntimePatches(home, dryRun) {
     failLog: (file, err) => 'code 模式兼容补丁失败(' + file + '): ' + err.message,
     dryRun,
     dryRunChangedLog: (file) => 'dry-run: 将把 code preset 切换为 both ' + file,
+  });
+
+  // 图片字节信任补丁（浏览器声明的 MIME 跟随扩展名不可信，以解码字节为准）。
+  applyPatchToFiles({
+    prefix: '图片字节信任补丁',
+    files: patchTargets(home, ATTACH_LOCAL_REL),
+    log: (m) => log(m),
+    anchorLog: (m) => warn(m),
+    transform: transformAttachmentMimeTrust,
+    alreadyLog: (file) => '已应用，跳过 ' + file,
+    doneLog: (file) => '已信任图片解码字节 ' + file,
+    donePrefix: false,
+    failLog: (file, err) => '图片字节信任补丁失败(' + file + '): ' + err.message,
+    dryRun,
+    dryRunChangedLog: (file) => 'dry-run: 将信任图片解码字节 ' + file,
   });
 }
 

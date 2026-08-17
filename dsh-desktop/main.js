@@ -49,7 +49,7 @@ const { PROFILE_BUNDLE_GUARD_MARKER, PROFILE_BOOT_GUARD_MARKER, verifyBundleDir,
 const { COMPANION_PLUGINS } = require('./scripts/lib/companion-plugins');
 const { writeFileAtomic } = require('./scripts/lib/patch-io');
 const { applyPatchToFiles } = require('./scripts/lib/patch-engine');
-const { FLASH_PKG_REL, EXPOSE_PKG_REL, PW_REL, BASH_REL, CODE_PRESET_REL, patchTargets, localCopyFiles, guardCopyFiles, localNodeModulesRoots, transformFlashFix, transformExposeFix, transformShellDescriptionOptional, transformCodeModeCompat } = require('./scripts/lib/runtime-patches');
+const { FLASH_PKG_REL, EXPOSE_PKG_REL, PW_REL, BASH_REL, CODE_PRESET_REL, patchTargets, localCopyFiles, guardCopyFiles, localNodeModulesRoots, transformFlashFix, transformExposeFix, transformShellDescriptionOptional, transformCodeModeCompat, transformAttachmentMimeTrust, ATTACH_LOCAL_REL } = require('./scripts/lib/runtime-patches');
 const { ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK, removeLegacyMarketplacePatchLines, removedPluginIdsFromPatch, ensureDisabledPatchEntry, registerCompanionPatchEntries, syncCompanionFiles } = require('./scripts/lib/companion-profile');
 const { patchWebSearchBaseUrl } = require('./scripts/patch-web-search-baseurl');
 const { patchMenuViewport } = require('./scripts/patch-menu-viewport');
@@ -2180,6 +2180,7 @@ async function runUpdateFlow(manual) {
       applyShellDescriptionCompatFix();
       applyCodeModeCompatFix();
       applyImageSendFix();
+      applyAttachmentMimeTrustFix();
       applyVisionKeyFix();
       applyProfilePatchGuard();
       applyProfileBundleGuard();
@@ -2202,6 +2203,7 @@ async function runUpdateFlow(manual) {
       applyShellDescriptionCompatFix();
       applyCodeModeCompatFix();
       applyImageSendFix();
+      applyAttachmentMimeTrustFix();
       applyVisionKeyFix();
       applyProfilePatchGuard();
       applyProfileBundleGuard();
@@ -4056,6 +4058,29 @@ function applyCodeModeCompatFix() {
 }
 
 // ---------------------------------------------------------------------------
+// 图片字节信任补丁：官方 attachment-local 严格比对「浏览器声明的 MIME」与
+// 「字节解码出的格式」，而声明跟随文件扩展名不可信（webp/jpeg 改名 .png 后
+// file.type 仍是 image/png，字节却是 webp），不一致直接拒发整条消息，用户
+// 看到「仅支持 PNG、JPG、WebP、GIF」却发不出去。本补丁把声明为 image/* 时
+// 的媒体类型改为以字节实际格式为准记录，不再拒绝发送。幂等；覆盖三份运行
+// 副本，WSL 覆盖 profile fallback + agent。
+// ---------------------------------------------------------------------------
+function applyAttachmentMimeTrustFix() {
+  const wslHome = effectiveDshHome();
+  const files = isWslMode()
+    ? patchTargets(wslHome, ATTACH_LOCAL_REL)
+    : runtimeCopyFiles(ATTACH_LOCAL_REL);
+  applyPatchToFiles({
+    prefix: '图片字节信任补丁',
+    files,
+    log: (m) => log('boot', m),
+    transform: transformAttachmentMimeTrust,
+    alreadyLog: (file) => '已应用，跳过 ' + file,
+    doneLog: (file) => '已信任图片解码字节 ' + file,
+    failLog: (file, err) => '图片字节信任补丁失败(' + file + '): ' + err.message,
+  });
+}
+// ---------------------------------------------------------------------------
 // 文本模型自动识图补丁：官方 apiproxy 在 session.prompt 入口检查模型是否支持
 // image 输入，不支持就直接拒绝。本补丁复用已安装的 dsh-vision 插件配置
 // （设置 → 识图插件（view_image）的 VLM baseURL/model/apiKey），把图片转述为
@@ -5213,6 +5238,7 @@ async function boot() {
     applyShellDescriptionCompatFix();
     applyCodeModeCompatFix();
     applyImageSendFix();
+    applyAttachmentMimeTrustFix();
     applyVisionKeyFix();
     applyProfilePatchGuard();
     applyProfileBundleGuard();
@@ -5232,6 +5258,7 @@ async function boot() {
     applyShellDescriptionCompatFix();
     applyCodeModeCompatFix();
     applyImageSendFix();
+    applyAttachmentMimeTrustFix();
     applyVisionKeyFix();
     applyProfilePatchGuard();
     applyProfileBundleGuard();
