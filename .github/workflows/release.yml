@@ -252,12 +252,12 @@ jobs:
 
           | 平台 | 芯片 | 文件 |
           | --- | --- | --- |
-          | Windows 便携版（免安装） | x64 | DSH-Desktop-$tag-portable-x64.exe |
-          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$tag-portable-arm64.exe |
-          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-Setup-$tag-x64.exe |
-          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-Setup-$tag-arm64.exe |
-          | macOS（Intel） | x64 | DSH-Desktop-$tag-macos-x64.dmg / .zip |
-          | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$tag-macos-arm64.dmg / .zip |
+          | Windows 便携版（免安装） | x64 | DSH-Desktop-$($tag -replace '^v','')-portable-x64.exe |
+          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$($tag -replace '^v','')-portable-arm64.exe |
+          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-Setup-$($tag -replace '^v','')-x64.exe |
+          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-Setup-$($tag -replace '^v','')-arm64.exe |
+          | macOS（Intel） | x64 | DSH-Desktop-$($tag -replace '^v','')-macos-x64.dmg / .zip |
+          | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$($tag -replace '^v','')-macos-arm64.dmg / .zip |
 
           - Windows 用户：x64 设备选 x64 文件；ARM 设备（如 Surface Pro X）选 arm64 文件。
           - macOS 用户：Intel Mac 选 x64；Apple Silicon（M1/M2/M3/M4）选 arm64。将 App 拖入「应用程序」。
@@ -494,12 +494,12 @@ jobs:
 
           | 平台 | 芯片 | 文件 |
           | --- | --- | --- |
-          | Windows 便携版（免安装） | x64 | DSH-Desktop-$tag-portable-x64.exe |
-          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$tag-portable-arm64.exe |
-          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-Setup-$tag-x64.exe |
-          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-Setup-$tag-arm64.exe |
-          | macOS（Intel） | x64 | DSH-Desktop-$tag-macos-x64.dmg / .zip |
-          | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$tag-macos-arm64.dmg / .zip |
+          | Windows 便携版（免安装） | x64 | DSH-Desktop-$($tag -replace '^v','')-portable-x64.exe |
+          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$($tag -replace '^v','')-portable-arm64.exe |
+          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-Setup-$($tag -replace '^v','')-x64.exe |
+          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-Setup-$($tag -replace '^v','')-arm64.exe |
+          | macOS（Intel） | x64 | DSH-Desktop-$($tag -replace '^v','')-macos-x64.dmg / .zip |
+          | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$($tag -replace '^v','')-macos-arm64.dmg / .zip |
 
           - Windows 用户：x64 设备选 x64 文件；ARM 设备（如 Surface Pro X）选 arm64 文件。
           - macOS 用户：Intel Mac 选 x64；Apple Silicon（M1/M2/M3/M4）选 arm64。将 App 拖入「应用程序」。
@@ -694,12 +694,12 @@ jobs:
 
           | 平台 | 芯片 | 文件 |
           | --- | --- | --- |
-          | Windows 便携版（免安装） | x64 | DSH-Desktop-$tag-portable-x64.exe |
-          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$tag-portable-arm64.exe |
-          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-Setup-$tag-x64.exe |
-          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-Setup-$tag-arm64.exe |
-          | macOS（Intel） | x64 | DSH-Desktop-$tag-macos-x64.dmg / .zip |
-          | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$tag-macos-arm64.dmg / .zip |
+          | Windows 便携版（免安装） | x64 | DSH-Desktop-$($tag -replace '^v','')-portable-x64.exe |
+          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$($tag -replace '^v','')-portable-arm64.exe |
+          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-Setup-$($tag -replace '^v','')-x64.exe |
+          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-Setup-$($tag -replace '^v','')-arm64.exe |
+          | macOS（Intel） | x64 | DSH-Desktop-$($tag -replace '^v','')-macos-x64.dmg / .zip |
+          | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$($tag -replace '^v','')-macos-arm64.dmg / .zip |
 
           - Windows 用户：x64 设备选 x64 文件；ARM 设备（如 Surface Pro X）选 arm64 文件。
           - macOS 用户：Intel Mac 选 x64；Apple Silicon（M1/M2/M3/M4）选 arm64。将 App 拖入「应用程序」。
@@ -871,12 +871,12 @@ jobs:
 
           | 平台 | 芯片 | 文件 |
           | --- | --- | --- |
-          | Windows 便携版（免安装） | x64 | DSH-Desktop-$tag-portable-x64.exe |
-          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$tag-portable-arm64.exe |
-          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-Setup-$tag-x64.exe |
-          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-Setup-$tag-arm64.exe |
-          | macOS（Intel） | x64 | DSH-Desktop-$tag-macos-x64.dmg / .zip |
-          | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$tag-macos-arm64.dmg / .zip |
+          | Windows 便携版（免安装） | x64 | DSH-Desktop-$($tag -replace '^v','')-portable-x64.exe |
+          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$($tag -replace '^v','')-portable-arm64.exe |
+          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-Setup-$($tag -replace '^v','')-x64.exe |
+          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-Setup-$($tag -replace '^v','')-arm64.exe |
+          | macOS（Intel） | x64 | DSH-Desktop-$($tag -replace '^v','')-macos-x64.dmg / .zip |
+          | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$($tag -replace '^v','')-macos-arm64.dmg / .zip |
 
           - Windows 用户：x64 设备选 x64 文件；ARM 设备（如 Surface Pro X）选 arm64 文件。
           - macOS 用户：Intel Mac 选 x64；Apple Silicon（M1/M2/M3/M4）选 arm64。将 App 拖入「应用程序」。
