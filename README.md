@@ -59,6 +59,8 @@
 
 > Gitee 单文件限制 100 MB，安装包拆为 3 个分片，全部下载后双击 `merge.bat` 自动合并。
 >
+> **分片沿用旧命名**（不含 `win-` 前缀，如 `...-portable-x64.exe.part1`），与 GitHub 新命名格式不同，不影响合并使用。
+>
 > macOS 安装包暂未同步到 Gitee，请从 [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases) 下载。
 
 | 版本 | 分片下载 |
@@ -72,9 +74,22 @@
 
 [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases) 提供完整单文件安装包（便携版 + 安装版 + blockmap），无大小限制，直接下载。
 
-**支持架构**：x64 与 arm64（ARM 设备请选 `*-arm64.exe`）。文件命名带平台前缀，一眼区分：`DSH-Desktop-<版本>-win-portable-x64.exe`（x64 便携版）、`-win-portable-arm64.exe`（arm64 便携版）、`-win-setup-x64.exe`（x64 安装版）、`-win-setup-arm64.exe`（arm64 安装版）。
+> [!IMPORTANT]
+> **下载前必看 —— 安装包名字里就写着答案：**
+>
+> - **`win-` = Windows，`macos-` = macOS**（`.exe` 一定是 Windows，`.dmg` / `.zip` 一定是 macOS）；
+> - **`x64` = Intel/AMD 芯片，`arm64` = ARM 芯片**（Windows ARM 设备如 Surface Pro X、Apple Silicon Mac 选 arm64，其余一律选 x64）。
+>
+> 按你的设备直接挑：
 
-**macOS**：提供 `DSH-Desktop-<版本>-macos-x64.dmg` / `-macos-arm64.dmg`（另有同架构 `.zip`）。Intel Mac 选 x64，Apple Silicon 选 arm64，将 App 拖入「应用程序」即可。macOS 版暂未签名，Apple Silicon 首次打开会提示「无法验证开发者」——请**右键点击 App → 打开**，或终端执行：
+| 你的设备 | 下载 |
+| --- | --- |
+| 💻 Windows 电脑（绝大多数 Intel/AMD） | `DSH-Desktop-<版本>-win-portable-x64.exe`（免安装，双击即用）或 `-win-setup-x64.exe`（安装版，建快捷方式） |
+| 🪟 Windows ARM（如 Surface Pro X） | `DSH-Desktop-<版本>-win-portable-arm64.exe` |
+| 🍎 Mac Intel | `DSH-Desktop-<版本>-macos-x64.dmg` |
+| 🍏 Mac Apple Silicon（M1/M2/M3/M4） | `DSH-Desktop-<版本>-macos-arm64.dmg` |
+
+macOS 版暂未签名，Apple Silicon 首次打开会提示「无法验证开发者」——请**右键点击 App → 打开**，或终端执行：
 
 ```bash
 xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"

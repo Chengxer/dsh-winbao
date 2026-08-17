@@ -59,9 +59,22 @@ Ships the full dsh runtime and official plugins — no Node.js install required,
 
 [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases) hosts the complete single-file installers (Portable + Setup + blockmap) with no size limit — download directly.
 
-**Supported architectures**: x64 and arm64 (pick `*-arm64.exe` on ARM devices). File names carry a platform prefix so you can tell them apart at a glance: `DSH-Desktop-<version>-win-portable-x64.exe` (x64 portable), `-win-portable-arm64.exe` (arm64 portable), `-win-setup-x64.exe` (x64 setup), `-win-setup-arm64.exe` (arm64 setup).
+> [!IMPORTANT]
+> **Read before you download — the answer is in the file name:**
+>
+> - **`win-` = Windows, `macos-` = macOS** (`.exe` is always Windows; `.dmg` / `.zip` is always macOS);
+> - **`x64` = Intel/AMD chip, `arm64` = ARM chip** (Windows ARM devices like Surface Pro X and Apple Silicon Macs pick arm64; everything else picks x64).
+>
+> Pick yours:
 
-**macOS**: grab `DSH-Desktop-<version>-macos-x64.dmg` / `-macos-arm64.dmg` (or the same-arch `.zip`). Intel Macs take x64, Apple Silicon takes arm64; drag the app into "Applications". The macOS build is not code-signed yet — on Apple Silicon, the first launch shows "cannot verify developer". **Right-click the app → Open**, or run:
+| Your device | Download |
+| --- | --- |
+| 💻 Windows PC (most Intel/AMD) | `DSH-Desktop-<version>-win-portable-x64.exe` (no install, double-click to run) or `-win-setup-x64.exe` (installer with shortcuts) |
+| 🪟 Windows ARM (e.g. Surface Pro X) | `DSH-Desktop-<version>-win-portable-arm64.exe` |
+| 🍎 Mac Intel | `DSH-Desktop-<version>-macos-x64.dmg` |
+| 🍏 Mac Apple Silicon (M1/M2/M3/M4) | `DSH-Desktop-<version>-macos-arm64.dmg` |
+
+The macOS build is not code-signed yet — on Apple Silicon, the first launch shows "cannot verify developer". **Right-click the app → Open**, or run:
 
 ```bash
 xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"
@@ -70,6 +83,8 @@ xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"
 ### China users (Gitee)
 
 > Gitee caps files at 100 MB, so installers are split into 3 parts. Download all parts, then double-click `merge.bat` to merge them automatically.
+>
+> **Gitee parts keep the legacy naming** (no `win-` prefix, e.g. `...-portable-x64.exe.part1`) — different from the new GitHub naming, but merging works the same.
 >
 > macOS installers are not mirrored to Gitee yet — download them from [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases).
 
