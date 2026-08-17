@@ -32,7 +32,7 @@ Ships the full dsh runtime and official plugins — no Node.js install required,
 
 - **Crash self-healing** — renderer freezes auto-reload with exponential backoff; a watchdog relaunches the main process
 - **History compatibility** — session event vocabulary is patched automatically so third-party plugin events never break history loading
-- **Dual-source updates** — official dsh agent updates + client self-update (GitHub / Gitee sources, split-part auto-merge, in-place replace & restart; client self-update is Windows-only for now — grab the latest macOS build manually from Releases)
+- **Dual-source updates** — official dsh agent updates + client self-update (GitHub / Gitee sources, split-part auto-merge, in-place replace & restart; client self-update works on Windows install/portable and macOS (.app replacement) — other platforms: grab the latest build manually from Releases)
 - **Shortcut self-healing** — desktop and Start Menu shortcuts are recreated automatically when missing
 - **Cloud builds** — pushing a tag triggers GitHub Actions to build and publish (see below)
 
