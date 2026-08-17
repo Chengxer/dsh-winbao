@@ -102,7 +102,7 @@ window.__ModuleLoader__.load({
 				target: "_blank",
 				rel: "noreferrer",
 				title,
-				children: parts.join(" · ")
+				children: joined.join(" · ")
 			});
 			if (!go) return dock;
 			const goDock = react_jsx_runtime.jsx("a", {
