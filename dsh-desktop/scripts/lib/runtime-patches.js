@@ -119,31 +119,39 @@ function transformExposeFix(src, file) {
 // ---------------------------------------------------------------------------
 // 模型工具兼容补丁（问题背景：code 模式的 run_code 程序经常省略 shell 工具
 // 的 `description`，而该字段只用于 UI/日志展示，不应让整个工具调用失败）。
-// 两个变换共享同一套锚点：
-//   - schema 中 description.required: true → false（code-mode SDK 变为可选）；
-//   - validateBashArgs / validatePwshArgs 在缺省时用 command 首行自动补值。
+// 变换：validateBashArgs / validatePwshArgs 在缺省时用 command 首行自动补值。
+// 曾同时改 schema 的 description.required: true → false，但引擎 schema 校验器
+// 拒绝（"unsupported JSON schema: parameters.description.required must be true
+// when present"）→ 该部分已废弃，transform 会自动回滚已写入的 false。
 // 幂等标记 = dsh-desktop compat: optional shell description。
 // ---------------------------------------------------------------------------
 
 const SHELL_DESC_MARKER = "dsh-desktop compat: optional shell description";
 const SHELL_DESC_VALIDATE_OLD = "\tif (args.description.trim().length === 0) throw new Error(\"invalid description: expected a non-empty string\");";
-const SHELL_DESC_VALIDATE_NEW = "\tif (typeof args.description !== \"string\" || args.description.trim().length === 0) {\n\t\t// " + SHELL_DESC_MARKER + ": description is only for UI/log; derive one when the model omits it.\n\t\targs.description = args.command.trim().split(/\r?\n/)[0].slice(0, 80) || \"Run shell command\";\n\t}";
+const SHELL_DESC_VALIDATE_NEW = "\tif (typeof args.description !== \"string\" || args.description.trim().length === 0) {\n\t\t// " + SHELL_DESC_MARKER + ": description is only for UI/log; derive one when the model omits it.\n\t\targs.description = args.command.trim().split(/\\r?\\n/)[0].slice(0, 80) || \"Run shell command\";\n\t}";
 const SHELL_DESC_SCHEMA_OLD = "\t\t\tdescription: {\n\t\t\t\ttype: \"string\",\n\t\t\t\trequired: true,\n\t\t\t\tdescription: \"Clear, concise description of what this command does in active voice, 5-10 words (shown in the UI). Examples:";
+// 已废弃：仅作旧补丁回滚识别锚点（引擎 schema 校验器拒绝 required: false）。
 const SHELL_DESC_SCHEMA_NEW = "\t\t\tdescription: {\n\t\t\t\ttype: \"string\",\n\t\t\t\trequired: false, // " + SHELL_DESC_MARKER + "\n\t\t\t\tdescription: \"Clear, concise description of what this command does in active voice, 5-10 words (shown in the UI). Examples:";
 
 const PW_REL = path.join("dsh-tool-pwsh", "lib", "index.js");
 const BASH_REL = path.join("dsh-tool-bash", "lib", "index.js");
 
-/** shell 工具 description 可选化变换（pwsh/bash 共用，锚点逐字节一致）。 */
+/** shell 工具 description 兜底变换（pwsh/bash 共用，锚点逐字节一致）。
+ *  只改 validate 校验（缺省时用 command 首行补值）；schema 的
+ *  required: false 已被引擎拒绝（必须 true），旧补丁若已写入会自动回滚。 */
 function transformShellDescriptionOptional(src, file) {
-  if (src.includes(SHELL_DESC_MARKER)) return { status: "already" };
-  if (!src.includes(SHELL_DESC_VALIDATE_OLD) || !src.includes(SHELL_DESC_SCHEMA_OLD)) {
+  let reverted = false;
+  if (src.includes(SHELL_DESC_SCHEMA_NEW)) {
+    src = src.replace(SHELL_DESC_SCHEMA_NEW, SHELL_DESC_SCHEMA_OLD);
+    reverted = true;
+  }
+  if (src.includes(SHELL_DESC_MARKER)) {
+    return reverted ? { status: "changed", src, note: "已回滚 schema required: false" } : { status: "already" };
+  }
+  if (!src.includes(SHELL_DESC_VALIDATE_OLD)) {
     return { status: "anchor-missing", detail: "未找到 shell description 锚点（版本可能已变更），跳过 " + file };
   }
-  return {
-    status: "changed",
-    src: src.replace(SHELL_DESC_VALIDATE_OLD, SHELL_DESC_VALIDATE_NEW).replace(SHELL_DESC_SCHEMA_OLD, SHELL_DESC_SCHEMA_NEW),
-  };
+  return { status: "changed", src: src.replace(SHELL_DESC_VALIDATE_OLD, SHELL_DESC_VALIDATE_NEW), note: reverted ? "已回滚 schema required: false" : undefined };
 }
 
 const CODE_MODE_MARKER = 'dsh-desktop compat: direct tools alongside run_code';
@@ -204,13 +212,21 @@ module.exports = {
   transformFlashFix,
   transformExposeFix,
   SHELL_DESC_MARKER,
+  SHELL_DESC_VALIDATE_OLD,
+  SHELL_DESC_VALIDATE_NEW,
+  SHELL_DESC_SCHEMA_OLD,
+  SHELL_DESC_SCHEMA_NEW,
   PW_REL,
   BASH_REL,
   transformShellDescriptionOptional,
   CODE_MODE_MARKER,
+  CODE_MODE_OLD,
+  CODE_MODE_NEW,
   CODE_PRESET_REL,
   transformCodeModeCompat,
   ATTACH_MIME_MARKER,
+  ATTACH_MIME_OLD,
+  ATTACH_MIME_NEW,
   ATTACH_LOCAL_REL,
   transformAttachmentMimeTrust,
 };

@@ -24,8 +24,8 @@ const {
   localCopyFiles, guardCopyFiles, localNodeModulesRoots,
   transformFlashFix, transformExposeFix,
   SHELL_DESC_MARKER, PW_REL, BASH_REL, transformShellDescriptionOptional,
-  CODE_MODE_MARKER, CODE_PRESET_REL, transformCodeModeCompat,
-  ATTACH_MIME_MARKER, ATTACH_LOCAL_REL, transformAttachmentMimeTrust,
+  CODE_MODE_MARKER, CODE_MODE_OLD, CODE_MODE_NEW, CODE_PRESET_REL, transformCodeModeCompat,
+  ATTACH_MIME_MARKER, ATTACH_MIME_OLD, ATTACH_MIME_NEW, ATTACH_LOCAL_REL, transformAttachmentMimeTrust,
 } = require('../lib/runtime-patches');
 const { COMPANION_PLUGINS, companionDirName } = require('../lib/companion-plugins');
 const {
@@ -250,17 +250,32 @@ test('runtime-patches: 候选路径构造器（本地三副本/防护四副本/W
   ]);
 });
 
-test('tool-compat: shell description 可选化变换（真实 vendored 文件 + 幂等）', () => {
+test('tool-compat: shell description 兜底变换（真实 vendored 文件 + 幂等）', () => {
   for (const rel of [PW_REL, BASH_REL]) {
     const file = path.join(repoRoot, 'node_modules', '@deepseek-ai', rel);
     const src = fs.readFileSync(file, 'utf8');
     const out = transformShellDescriptionOptional(src, file);
     assert.strictEqual(out.status, 'changed', rel + ' 应可补丁');
     assert.ok(out.src.includes(SHELL_DESC_MARKER), rel + ' 应写入幂等标记');
-    assert.ok(out.src.includes('required: false'), rel + ' 的 schema description 应改为可选');
+    assert.ok(out.src.includes('required: true'), rel + ' 的 schema description 必须保持 required: true（引擎校验器拒绝 false）');
+    assert.ok(!out.src.includes('required: false'), rel + ' 不得写入 required: false');
     assert.ok(out.src.includes('args.description = args.command.trim().split'), rel + ' 缺省 description 应从 command 生成');
+    assert.ok(!/split\(\/\r?\n\/\)/.test(out.src), rel + ' 生成的正则不得含真换行（转义回归）');
     assert.deepStrictEqual(transformShellDescriptionOptional(out.src, file), { status: 'already' }, rel + ' 二次应用应幂等');
   }
+});
+
+test('tool-compat: shell description 旧 schema 补丁（required: false）自动回滚', () => {
+  const file = path.join(repoRoot, 'node_modules', '@deepseek-ai', PW_REL);
+  const src = fs.readFileSync(file, 'utf8');
+  const legacy = src.replace(
+    '\t\t\t\trequired: true,\n\t\t\t\tdescription: "Clear, concise description',
+    '\t\t\t\trequired: false, // dsh-desktop compat: optional shell description\n\t\t\t\tdescription: "Clear, concise description'
+  );
+  const out = transformShellDescriptionOptional(legacy, file);
+  assert.strictEqual(out.status, 'changed', '含旧 false 补丁时应回滚');
+  assert.ok(out.src.includes('required: true'), '回滚后 schema 应恢复 required: true');
+  assert.ok(!out.src.includes('required: false'), '回滚后不得残留 required: false');
 });
 
 test('tool-compat: shell description 锚点缺失时跳过且不改写', () => {
@@ -274,7 +289,8 @@ test('tool-compat: shell description 锚点缺失时跳过且不改写', () => {
 
 test('tool-compat: code preset code→both 变换（真实 vendored 文件 + 幂等）', () => {
   const file = path.join(repoRoot, 'node_modules', '@deepseek-ai', CODE_PRESET_REL);
-  const src = fs.readFileSync(file, 'utf8');
+  const src0 = fs.readFileSync(file, 'utf8');
+  const src = src0.includes(CODE_MODE_MARKER) ? src0.replace(CODE_MODE_NEW, CODE_MODE_OLD) : src0;
   const out = transformCodeModeCompat(src, file);
   assert.strictEqual(out.status, 'changed');
   assert.ok(out.src.includes(CODE_MODE_MARKER), '应写入幂等标记');
@@ -294,7 +310,8 @@ test('tool-compat: code preset 锚点缺失时跳过且不改写', () => {
 
 test('tool-compat: attachment 图片字节信任变换（真实 vendored 文件 + 幂等）', () => {
   const file = path.join(repoRoot, 'node_modules', '@deepseek-ai', ATTACH_LOCAL_REL);
-  const src = fs.readFileSync(file, 'utf8');
+  const src0 = fs.readFileSync(file, 'utf8');
+  const src = src0.includes(ATTACH_MIME_MARKER) ? src0.replace(ATTACH_MIME_NEW, ATTACH_MIME_OLD) : src0;
   const out = transformAttachmentMimeTrust(src, file);
   assert.strictEqual(out.status, 'changed');
   assert.ok(out.src.includes(ATTACH_MIME_MARKER), '应写入幂等标记');
