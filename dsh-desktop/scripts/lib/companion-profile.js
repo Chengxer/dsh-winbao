@@ -422,7 +422,7 @@ function syncCompanionFiles(opts) {
     // 完整同步插件自带的 lib/assets/src/dist/node_modules 目录：第三方插件
     // 的懒加载 chunk、动画素材、dist 构建产物与随包分发的私有依赖
     // （如 billion-context-dsh 的 acp-kernel）不都落在固定文件清单里。
-    for (const sub of ['lib', 'assets', 'src', 'dist', 'node_modules']) {
+    for (const sub of ['lib', 'client', 'data', 'assets', 'src', 'dist', 'node_modules']) {
       syncDir(path.join(src, sub), path.join(dest, sub), log);
     }
     // 落盘后校验 bundle 完整性：dsh 装配时会读取补丁层与入口文件，任一缺失

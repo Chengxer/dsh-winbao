@@ -67,8 +67,9 @@ function bundleEntryOf(pkg) {
 
 /**
  * 校验一个已落盘的 bundle 目录：package.json 可解析、声明了 dsh.bundle.patch、
- * 补丁层与入口文件都存在。任一不满足返回 { ok:false, reason } —— 同步方必须
- * 按「源缺失」处理（不注册为 profile bundle），否则 dsh 启动时必然崩溃。
+ * 补丁层与入口文件都存在；声明了 exports["./client"] 时 client bundle 入口也
+ * 必须存在。任一不满足返回 { ok:false, reason } —— 同步方必须按「源缺失」处理
+ * （不注册为 profile bundle），否则 dsh 启动时必然崩溃。
  */
 function verifyBundleDir(dir) {
   let pkg = null;
@@ -89,6 +90,17 @@ function verifyBundleDir(dir) {
     const entryFile = path.resolve(dir, entry);
     if (!entryFile.startsWith(dirRoot)) return { ok: false, reason: '入口文件路径越界: ' + entry };
     if (!fs.existsSync(entryFile)) return { ok: false, reason: '入口文件缺失: ' + entry };
+  }
+  // client bundle 入口（exports["./client"] 字符串声明）：client-modules 装配时
+  // 按该路径读取客户端 bundle，缺失会让整个 client 模块注册 fail-loud
+  // （MissingClientBundleError → dsh web 启动失败）。同步方必须把 client
+  // 目录一并落盘（companion-profile.js 的目录同步清单含 client）。
+  const clientRel = pkg && pkg.exports && typeof pkg.exports === 'object' && !Array.isArray(pkg.exports)
+    && typeof pkg.exports['./client'] === 'string' ? pkg.exports['./client'] : '';
+  if (clientRel) {
+    const clientFile = path.resolve(dir, clientRel);
+    if (!clientFile.startsWith(dirRoot)) return { ok: false, reason: 'client 入口路径越界: ' + clientRel };
+    if (!fs.existsSync(clientFile)) return { ok: false, reason: 'client 入口缺失: ' + clientRel };
   }
   return { ok: true, reason: '' };
 }

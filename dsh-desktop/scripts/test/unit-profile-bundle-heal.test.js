@@ -110,6 +110,25 @@ test('verifyBundleDir: 健康目录通过，缺失/损坏逐项拒绝', () => {
   assert.equal(r3.ok, false);
   assert.match(r3.reason, /未声明 dsh\.bundle\.patch/);
 
+  // client bundle 入口（exports["./client"] 声明）：dshmarket 类插件装配时
+  // client-modules 按该路径读客户端 bundle，缺失即 MissingClientBundleError。
+  const withClient = tmpFixture({
+    'package.json': JSON.stringify({ name: 'x', main: 'dist/index.js', dsh: { bundle: { patch: './cordis.patch.yml' } }, exports: { './client': './client/client.js' } }),
+    'cordis.patch.yml': '[]\n',
+    'dist/index.js': 'export {};\n',
+    'client/client.js': 'export {};\n',
+  });
+  assert.deepEqual(verifyBundleDir(withClient), { ok: true, reason: '' });
+
+  const noClientFile = tmpFixture({
+    'package.json': JSON.stringify({ name: 'x', main: 'dist/index.js', dsh: { bundle: { patch: './cordis.patch.yml' } }, exports: { './client': './client/client.js' } }),
+    'cordis.patch.yml': '[]\n',
+    'dist/index.js': 'export {};\n',
+  });
+  const r5 = verifyBundleDir(noClientFile);
+  assert.equal(r5.ok, false);
+  assert.match(r5.reason, /client 入口缺失/);
+
   const badJson = tmpFixture({ 'package.json': '{"name": "x", BAD' });
   const r4 = verifyBundleDir(badJson);
   assert.equal(r4.ok, false);
