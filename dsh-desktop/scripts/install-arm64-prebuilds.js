@@ -26,11 +26,19 @@ const { execFileSync } = require('node:child_process');
 const root = path.resolve(__dirname, '..');
 const ARM64_MACHINE = 0xaa64; // IMAGE_FILE_MACHINE_ARM64
 
-// 通过随 Node 分发的 npm-cli.js 调 npm（Windows 下 .cmd 无法直接 spawn）
+// 通过随 Node 分发的 npm-cli.js 调 npm（Windows 下 .cmd 无法直接 spawn）。
+// 布局因平台而异：Windows 安装把 npm 放在 <bin>/node_modules/npm，而
+// macOS/Linux（含 GitHub Actions setup-node 的 toolcache）放在
+// <bin>/../lib/node_modules/npm。
 function npmCliJs() {
-  const candidate = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
-  if (fs.existsSync(candidate)) return candidate;
-  throw new Error('未找到随 Node 分发的 npm-cli.js: ' + candidate);
+  const candidates = [
+    path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    path.join(path.dirname(process.execPath), '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  throw new Error('未找到随 Node 分发的 npm-cli.js（尝试: ' + candidates.join(', ') + '）');
 }
 
 // [npm 包名, node_modules 目标相对路径]

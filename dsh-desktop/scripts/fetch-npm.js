@@ -12,7 +12,21 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const src = path.join(path.dirname(process.execPath), 'node_modules', 'npm');
+// 随 Node 分发的 npm 目录。布局因平台而异：Windows 安装放在
+// <bin>/node_modules/npm，macOS/Linux（含 GitHub Actions setup-node 的
+// toolcache）放在 <bin>/../lib/node_modules/npm。
+function bundledNpmDir() {
+  const candidates = [
+    path.join(path.dirname(process.execPath), 'node_modules', 'npm'),
+    path.join(path.dirname(process.execPath), '..', 'lib', 'node_modules', 'npm'),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(path.join(c, 'bin', 'npm-cli.js'))) return c;
+  }
+  throw new Error('找不到随 Node 分发的 npm（尝试: ' + candidates.join(', ') + '）');
+}
+
+const src = bundledNpmDir();
 const dest = path.resolve(__dirname, '..', 'vendor', 'npm');
 
 if (!fs.existsSync(path.join(src, 'bin', 'npm-cli.js'))) {
