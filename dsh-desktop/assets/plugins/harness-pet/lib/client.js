@@ -1848,15 +1848,19 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 		}
 		return {
 			setStatus: (status, nextConversationTitle, nextAssistantText, nextConversationIdentity) => {
+				let identityChanged = false;
 				if (nextConversationIdentity !== void 0 && nextConversationIdentity !== conversationIdentity) {
 					conversationIdentity = nextConversationIdentity;
+					identityChanged = true;
 					setDialogVisible(true);
 				}
 				const nextTitle = nextConversationTitle?.trim() || conversationTitle;
 				const nextReply = nextAssistantText?.trim() || void 0;
 				// 状态与展示内容都没变（如 runningCalls/派生细节变化）→ 跳过
-				// DOM 写入、canvas 重绘与强制 reflow，静态期零开销。
-				if (status === harnessStatus && nextTitle === conversationTitle && nextReply === assistantReply) return;
+				// DOM 写入、canvas 重绘与强制 reflow，静态期零开销。会话切换
+				// （identity 变化）永远走完整刷新，避免新会话空内容时卡片冻结
+				// 残留上个会话的标题/回复。
+				if (!identityChanged && status === harnessStatus && nextTitle === conversationTitle && nextReply === assistantReply) return;
 				const previousStatus = harnessStatus;
 				harnessStatus = status;
 				// 只在状态跃迁时响一声；状态持续期间不重复响；autoCycle 轮播
