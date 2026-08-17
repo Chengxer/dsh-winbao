@@ -183,23 +183,29 @@ function selectAsset(release) {
   if (direct) return { parts: [direct], name: direct.name, totalSize: direct.size };
 
   // Gitee 单文件 100MB 限制：安装包拆分为 <完整文件名>.part1 / .part2 …
-  // base 名必须与 GitHub 资产名一致（win-/macos- 前缀，v0.3.9+ 命名规则），
-  // 分片用 zip 为基准（与 zip 优先的直选规则一致；dmg 分片不预期出现）。
-  const base = mac
-    ? `DSH-Desktop-${release.version}-macos-${arch}.zip`
+  // 优先匹配 v0.3.9+ 新命名（win-/macos- 前缀），同时兼容 Gitee 已发布的
+  // v0.3.9 旧命名分片（portable 与 Setup 均为无 win- 前缀的老命名）。
+  const bases = mac
+    ? [`DSH-Desktop-${release.version}-macos-${arch}.zip`]
     : isPortable()
-      ? `DSH-Desktop-${release.version}-win-portable-${arch}.exe`
-      : `DSH-Desktop-${release.version}-win-setup-${arch}.exe`;
-  const parts = release.assets
-    .filter((a) => a.name.startsWith(base + '.part'))
-    .sort((a, b) => {
-      const n = (s) => parseInt(s.split('part').pop(), 10) || 0;
-      return n(a.name) - n(b.name);
-    });
-  if (!parts.length) {
-    throw new Error('未找到匹配的安装包资产（' + release.assets.map((a) => a.name).join(', ') + '）');
+      ? [
+          `DSH-Desktop-${release.version}-win-portable-${arch}.exe`,
+          `DSH-Desktop-${release.version}-portable-${arch}.exe`,
+        ]
+      : [
+          `DSH-Desktop-${release.version}-win-setup-${arch}.exe`,
+          `DSH-Desktop-Setup-${release.version}-${arch}.exe`,
+        ];
+  for (const base of bases) {
+    const parts = release.assets
+      .filter((a) => a.name.startsWith(base + '.part'))
+      .sort((a, b) => {
+        const n = (s) => parseInt(s.split('part').pop(), 10) || 0;
+        return n(a.name) - n(b.name);
+      });
+    if (parts.length) return { parts, name: base, totalSize: parts.reduce((s, p) => s + p.size, 0) };
   }
-  return { parts, name: base, totalSize: parts.reduce((s, p) => s + p.size, 0) };
+  throw new Error('未找到匹配的安装包资产（' + release.assets.map((a) => a.name).join(', ') + '）');
 }
 
 function downloadFile(url, dest, { onProgress } = {}) {

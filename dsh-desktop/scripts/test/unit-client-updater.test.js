@@ -99,6 +99,42 @@ test('selectAsset: Gitee 分片按 part 序号排序并拼接为完整文件名'
   });
 });
 
+test('selectAsset: Gitee v0.3.9 旧命名分片（安装版）仍可排序拼接', () => {
+  withEnv('PORTABLE_EXECUTABLE_DIR', undefined, () => {
+    const release = {
+      version: '0.3.9',
+      assets: [
+        { name: 'DSH-Desktop-Setup-0.3.9-x64.exe.part2', url: 'https://example/s2', size: 2 },
+        { name: 'DSH-Desktop-Setup-0.3.9-x64.exe.part1', url: 'https://example/s1', size: 1 },
+      ],
+    };
+    const sel = selectAsset(release);
+    assert.strictEqual(sel.name, 'DSH-Desktop-Setup-0.3.9-x64.exe');
+    assert.deepStrictEqual(sel.parts.map((p) => p.name), [
+      'DSH-Desktop-Setup-0.3.9-x64.exe.part1',
+      'DSH-Desktop-Setup-0.3.9-x64.exe.part2',
+    ]);
+  });
+});
+
+test('selectAsset: Gitee v0.3.9 旧命名分片（便携版）仍可排序拼接', () => {
+  withEnv('PORTABLE_EXECUTABLE_DIR', 'C:\tools\dsh-desktop', () => {
+    const release = {
+      version: '0.3.9',
+      assets: [
+        { name: 'DSH-Desktop-0.3.9-portable-x64.exe.part2', url: 'https://example/p2', size: 2 },
+        { name: 'DSH-Desktop-0.3.9-portable-x64.exe.part1', url: 'https://example/p1', size: 1 },
+      ],
+    };
+    const sel = selectAsset(release);
+    assert.strictEqual(sel.name, 'DSH-Desktop-0.3.9-portable-x64.exe');
+    assert.deepStrictEqual(sel.parts.map((p) => p.name), [
+      'DSH-Desktop-0.3.9-portable-x64.exe.part1',
+      'DSH-Desktop-0.3.9-portable-x64.exe.part2',
+    ]);
+  });
+});
+
 test('selectAsset: arm64 机器选择 win-portable-arm64 资产', () => {
   withEnv('PORTABLE_EXECUTABLE_DIR', 'C:\\tools\\dsh-desktop', () => {
     withEnv('DSH_DESKTOP_ARCH', 'arm64', () => {
