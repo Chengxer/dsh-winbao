@@ -1,10 +1,10 @@
 ![DSH Desktop](https://cdn.jsdelivr.net/gh/myYangyunfan/dsh_desktop@main/docs/banner.svg)
 
-**把 DeepSeek Harness 装进 Windows 桌面的开箱即用客户端**
+**把 DeepSeek Harness 装进桌面（Windows / macOS）的开箱即用客户端**
 
 内置完整 dsh 运行时与全部官方插件，免装 Node.js，双击即用
 
-[![Release](https://img.shields.io/github/v/release/myYangyunfan/dsh_desktop?color=4D6BFE&label=Release)](https://github.com/myYangyunfan/dsh_desktop/releases) [![Stars](https://img.shields.io/github/stars/myYangyunfan/dsh_desktop?style=social)](https://github.com/myYangyunfan/dsh_desktop) [![Forks](https://img.shields.io/github/forks/myYangyunfan/dsh_desktop?style=social)](https://github.com/myYangyunfan/dsh_desktop/fork) [![Downloads](https://img.shields.io/github/downloads/myYangyunfan/dsh_desktop/total?color=4D6BFE)](https://github.com/myYangyunfan/dsh_desktop/releases) [![Issues](https://img.shields.io/github/issues/myYangyunfan/dsh_desktop?color=4D6BFE)](https://github.com/myYangyunfan/dsh_desktop/issues) ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-4D6BFE) ![License](https://img.shields.io/badge/license-MIT-4D6BFE) [![Release CI](https://img.shields.io/github/actions/workflow/status/myYangyunfan/dsh_desktop/release.yml?color=4D6BFE&label=Release%20CI)](https://github.com/myYangyunfan/dsh_desktop/actions) [![Gitee Stars](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fgitee.com%2Fapi%2Fv5%2Frepos%2Fmy-yang-yunfan%2Fdsh_desktop&query=%24.stargazers_count&label=Gitee%20Stars&color=4D6BFE)](https://gitee.com/my-yang-yunfan/dsh_desktop)
+[![Release](https://img.shields.io/github/v/release/myYangyunfan/dsh_desktop?color=4D6BFE&label=Release)](https://github.com/myYangyunfan/dsh_desktop/releases) [![Stars](https://img.shields.io/github/stars/myYangyunfan/dsh_desktop?style=social)](https://github.com/myYangyunfan/dsh_desktop) [![Forks](https://img.shields.io/github/forks/myYangyunfan/dsh_desktop?style=social)](https://github.com/myYangyunfan/dsh_desktop/fork) [![Downloads](https://img.shields.io/github/downloads/myYangyunfan/dsh_desktop/total?color=4D6BFE)](https://github.com/myYangyunfan/dsh_desktop/releases) [![Issues](https://img.shields.io/github/issues/myYangyunfan/dsh_desktop?color=4D6BFE)](https://github.com/myYangyunfan/dsh_desktop/issues) ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20%C2%B7%20macOS%2012%2B-4D6BFE) ![License](https://img.shields.io/badge/license-MIT-4D6BFE) [![Release CI](https://img.shields.io/github/actions/workflow/status/myYangyunfan/dsh_desktop/release.yml?color=4D6BFE&label=Release%20CI)](https://github.com/myYangyunfan/dsh_desktop/actions) [![Gitee Stars](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fgitee.com%2Fapi%2Fv5%2Frepos%2Fmy-yang-yunfan%2Fdsh_desktop&query=%24.stargazers_count&label=Gitee%20Stars&color=4D6BFE)](https://gitee.com/my-yang-yunfan/dsh_desktop)
 
 [Gitee 镜像](https://gitee.com/my-yang-yunfan/dsh_desktop) · [![English](https://img.shields.io/badge/English-4D6BFE?style=for-the-badge&logo=translate)](README.en.md) · [宣发落地页](landing/index.html)
 
@@ -32,7 +32,7 @@
 
 - **崩溃自愈** — 渲染进程假死指数退避自动重载；主进程异常退出由看门狗拉起
 - **历史兼容** — 自动修补会话事件词汇表，第三方插件写入的事件不破坏会话历史
-- **双源更新** — 官方 agent 更新 + 客户端自更新（GitHub / Gitee 双源，分片自动合并、原地替换）
+- **双源更新** — 官方 agent 更新 + 客户端自更新（GitHub / Gitee 双源，分片自动合并、原地替换；客户端自更新目前仅 Windows，macOS 版请从 Releases 手动下载新版）
 - **快捷方式自愈** — 桌面与开始菜单快捷方式缺失即自动补建
 - **云端构建** — 推 tag 即触发 GitHub Actions 自动打包发布（见下）
 
@@ -49,15 +49,17 @@
 | 会话管理 | 仅归档 | 归档 / 恢复 / 删除 |
 | 余额 | 无 | 实时「本轮费用 · 余额」+ OpenCode Go |
 | 桌面能力 | 无 | 托盘常驻 / 完成通知 / 桌面宠物 / 侧边浮窗 |
-| 更新 | 手动 | 双源自动更新 · 分片自动合并 |
+| 更新 | 手动 | 自动更新（Windows 版）· 分片自动合并 |
 
 ## 🚀 快速开始
 
-**系统要求**：Windows 10 / 11（x64 / arm64），无需预装 Node.js。ARM 设备（如 Surface Pro X）请下载 arm64 版本。
+**系统要求**：Windows 10 / 11（x64 / arm64）或 macOS 12+（Intel / Apple Silicon），无需预装 Node.js。ARM 设备（如 Surface Pro X）请下载 arm64 版本。
 
 ### 国内用户（Gitee）
 
 > Gitee 单文件限制 100 MB，安装包拆为 3 个分片，全部下载后双击 `merge.bat` 自动合并。
+>
+> macOS 安装包暂未同步到 Gitee，请从 [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases) 下载。
 
 | 版本 | 分片下载 |
 | --- | --- |
@@ -72,7 +74,13 @@
 
 **支持架构**：x64 与 arm64（ARM 设备请选 `*-arm64.exe`），文件命名 `DSH-Desktop-<版本>-portable-arm64.exe` / `DSH-Desktop-Setup-<版本>-arm64.exe`。
 
-**数据位置**：便携版在 exe 旁 `data\`；安装版在 `%APPDATA%\DSH Desktop\`。设置环境变量 `DSH_HOME` 可强制指定 dsh 配置目录。
+**macOS**：提供 `DSH-Desktop-<版本>-x64.dmg` / `-arm64.dmg`（另有同架构 `.zip`）。Intel Mac 选 x64，Apple Silicon 选 arm64，将 App 拖入「应用程序」即可。macOS 版暂未签名，Apple Silicon 首次打开会提示「无法验证开发者」——请**右键点击 App → 打开**，或终端执行：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"
+```
+
+**数据位置**：Windows 便携版在 exe 旁 `data\`；安装版在 `%APPDATA%\DSH Desktop\`。macOS 在 `~/Library/Application Support/DSH Desktop/`。设置环境变量 `DSH_HOME` 可强制指定 dsh 配置目录。
 
 ## 💬 社区交流
 
@@ -88,13 +96,16 @@ npm install
 npm run fetch-runtime    # 内置 node.exe + npm CLI
 npm run dist             # 构建 portable + NSIS（x64）→ dist/
 npm run dist:arm64       # 交叉构建 arm64（x64 构建机自动补装 arm64 预编译原生模块）
+# macOS（需在 macOS 上执行，x64 / arm64 二选一）：
+npm run dist:mac -- --x64     # 构建 macOS x64 dmg + zip
+npm run dist:mac -- --arm64   # 构建 macOS arm64 dmg + zip
 ```
 
 网络受限时：`$env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'`，`$env:ELECTRON_BUILDER_BINARIES_MIRROR='https://npmmirror.com/mirrors/electron-builder-binaries/'`。
 
 ## 🤖 自动发布
 
-GitHub Actions 流水线（`.github/workflows/release.yml`）：推 `v*` tag 自动在云端构建 **x64 + arm64** 双架构 portable + NSIS 并上传 Release，无需本地构建。
+GitHub Actions 流水线（`.github/workflows/release.yml`）：推 `v*` tag 自动在云端构建 **Windows x64 + arm64**（portable + NSIS）与 **macOS x64 + arm64**（dmg + zip，Apple Silicon runner 交叉构建）并上传 Release，无需本地构建。
 
 ```bash
 git tag v0.4.0 && git push origin v0.4.0
@@ -124,11 +135,11 @@ git tag v0.4.0 && git push origin v0.4.0
 │  · 单实例锁 / 无边框窗口 / 托盘 / 生命周期            │
 │  · 会话完成监听 (session-watcher.js) → 系统通知       │
 │  · 官方更新 (updater.js) → 用户同意后安装 overlay     │
-│  · spawn 内置 node.exe                               │
+│  · spawn 内置 node（Windows 为 node.exe）             │
 └──────────────────┬──────────────────────────────────┘
                    │  dsh web --host 127.0.0.1 --port <复用端口>
                    ▼
-        内置 node.exe + @deepseek-ai/dsh
+        内置 node + @deepseek-ai/dsh
         路径解析：用户目录 overlay > 内置包
                    │  轮询 HTTP 200
                    ▼
