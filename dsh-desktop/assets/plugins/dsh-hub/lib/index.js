@@ -1844,12 +1844,21 @@ function writeJsonSafe(p, obj) {
   writeTextSafe(p, JSON.stringify(obj, null, 2) + '\n')
 }
 
-/** plugin-src 里 graph-memory 源码存在性 + 版本。 */
+/** graph-memory 源码存在性 + 版本（plugin-src 用户源码，或随壳内置副本）。 */
 function gmSourceStatus() {
   const pkgPath = path.join(gmSourceDir(), 'package.json')
-  if (!existsSync(pkgPath)) return { present: false }
-  const meta = readJson(pkgPath)
-  return { present: true, version: meta?.version ?? null, dir: gmSourceDir() }
+  if (existsSync(pkgPath)) {
+    const meta = readJson(pkgPath)
+    return { present: true, version: meta?.version ?? null, dir: gmSourceDir(), source: 'plugin-src' }
+  }
+  // 随 DSH Desktop 内置分发：companion 同步器把 assets/plugins/graph-memory 复制进
+  // profile node_modules 并登记 bundles，无需 plugin-src 源码目录。
+  const bundledPkg = path.join(profileDir(), 'node_modules', GRAPH_MEMORY_PKG, 'package.json')
+  if (existsSync(bundledPkg)) {
+    const meta = readJson(bundledPkg)
+    return { present: true, version: meta?.version ?? null, dir: path.dirname(bundledPkg), source: 'bundled' }
+  }
+  return { present: false }
 }
 
 /** profile 装配状态（bundles / dependencies link / node_modules junction）。 */
@@ -1860,7 +1869,8 @@ function gmInstalledStatus() {
   const dep = manifest.dependencies?.[GRAPH_MEMORY_PKG]
   const linked = typeof dep === 'string' && dep.startsWith('link:')
   const nodeModules = existsSync(path.join(profileDir(), 'node_modules', GRAPH_MEMORY_PKG))
-  return { inBundles, linked, nodeModules, installed: inBundles && linked && nodeModules }
+  // bundled 装配（companion 同步）是真实目录而非 link junction，因此不要求 linked。
+  return { inBundles, linked, nodeModules, installed: inBundles && nodeModules }
 }
 
 /** 读 graph-memory SQLite 统计（node:sqlite 只读打开，不依赖 graph-memory 本体）。 */
