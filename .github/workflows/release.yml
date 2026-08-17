@@ -26,9 +26,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '要发布到的 release tag（默认 v0.3.9）'
+        description: '要发布到的 release tag（默认 v0.3.10）'
         required: false
-        default: 'v0.3.9'
+        default: 'v0.3.10'
       arch:
         description: 'Windows 构建架构：both / x64 / arm64'
         required: false
@@ -236,7 +236,7 @@ jobs:
           - Windows 用户：x64 设备选 x64 文件；ARM 设备（如 Surface Pro X）选 arm64 文件。
           - macOS 用户：Intel Mac 选 x64；Apple Silicon（M1/M2/M3/M4）选 arm64。将 App 拖入「应用程序」。
           - macOS 版未签名：首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"。
-          - 客户端自动更新仅 Windows；macOS 请手动下载新版。
+          - 客户端自动更新：Windows 与 macOS 均支持（macOS 版未签名，首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine）。
           "@
           gh release create $tag --title "DSH Desktop $tag" --notes $notes 2>$null
             if ($LASTEXITCODE -eq 0) { break }
@@ -452,7 +452,7 @@ jobs:
           - Windows 用户：x64 设备选 x64 文件；ARM 设备（如 Surface Pro X）选 arm64 文件。
           - macOS 用户：Intel Mac 选 x64；Apple Silicon（M1/M2/M3/M4）选 arm64。将 App 拖入「应用程序」。
           - macOS 版未签名：首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"。
-          - 客户端自动更新仅 Windows；macOS 请手动下载新版。
+          - 客户端自动更新：Windows 与 macOS 均支持（macOS 版未签名，首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine）。
           "@
           gh release create $tag --title "DSH Desktop $tag" --notes $notes 2>$null
             if ($LASTEXITCODE -eq 0) { break }
@@ -626,7 +626,7 @@ jobs:
           - Windows 用户：x64 设备选 x64 文件；ARM 设备（如 Surface Pro X）选 arm64 文件。
           - macOS 用户：Intel Mac 选 x64；Apple Silicon（M1/M2/M3/M4）选 arm64。将 App 拖入「应用程序」。
           - macOS 版未签名：首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"。
-          - 客户端自动更新仅 Windows；macOS 请手动下载新版。
+          - 客户端自动更新：Windows 与 macOS 均支持（macOS 版未签名，首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine）。
           "@
           gh release create $tag --title "DSH Desktop $tag" --notes $notes 2>$null
             if ($LASTEXITCODE -eq 0) { break }
@@ -777,7 +777,7 @@ jobs:
           - Windows 用户：x64 设备选 x64 文件；ARM 设备（如 Surface Pro X）选 arm64 文件。
           - macOS 用户：Intel Mac 选 x64；Apple Silicon（M1/M2/M3/M4）选 arm64。将 App 拖入「应用程序」。
           - macOS 版未签名：首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"。
-          - 客户端自动更新仅 Windows；macOS 请手动下载新版。
+          - 客户端自动更新：Windows 与 macOS 均支持（macOS 版未签名，首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine）。
           "@
           gh release create $tag --title "DSH Desktop $tag" --notes $notes 2>$null
             if ($LASTEXITCODE -eq 0) { break }
