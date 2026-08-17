@@ -4011,6 +4011,28 @@ let ZatMarketGateway = (() => {
 						enabled: true,
 						message: `${n} 已经在启用列表中`
 					};
+					// 契约校验（防砖）：bundle 清单里的包必须声明 dsh.bundle.patch，
+					// 否则旧世代 boot 对缺失声明 fail-loud（Error: profile bundle
+					// "X" declares no dsh.bundle ...），整个 dsh web 起不来。启用前
+					// 提前拦截并给出修复指引，而不是等下一次启动崩溃。
+					try {
+						const meta = JSON.parse(readFileSync(join(dir, "node_modules", n, "package.json"), "utf8"));
+						const patch = meta.dsh && meta.dsh.bundle && meta.dsh.bundle.patch;
+						const hasPatch = typeof patch === "string";
+						if (!hasPatch) return {
+							ok: false,
+							message: `${n} 未声明 dsh.bundle.patch（不是可加载插件），启用会让 dsh 无法启动，已阻止`
+						};
+						if (!existsSync(join(dir, "node_modules", n, patch))) return {
+							ok: false,
+							message: `${n} 声明了 dsh.bundle.patch 但补丁文件不存在（${patch}），启用后加载会失败，已阻止`
+						};
+					} catch {
+						return {
+							ok: false,
+							message: `${n} 未安装或 package.json 不可读，无法校验，已阻止启用`
+						};
+					}
 					bundles.push(n);
 				} else {
 					if (!bundles.includes(n)) return {

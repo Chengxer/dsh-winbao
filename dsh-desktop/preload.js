@@ -105,6 +105,20 @@ const dshDesktop = {
     checkUpdates: () => ipcRenderer.invoke('dsh:plugin-check-updates'),
     update: (id) => ipcRenderer.invoke('dsh:plugin-update', { id }),
   },
+  // 诊断与备份/恢复（设置页「诊断与管理」分区）：诊断只读分析；
+  // 备份导出/恢复经系统对话框选路径，恢复前校验 + 原子写 + 失败回滚；
+  // 日志包导出 / 防砖体检 / bundle 顺序检测与应用。
+  diagBackup: {
+    runDiagnostics: () => ipcRenderer.invoke('dsh:diag-run'),
+    exportBackup: (label) => ipcRenderer.invoke('dsh:backup-export', { label }),
+    previewRestore: () => ipcRenderer.invoke('dsh:backup-restore', { preview: true }),
+    restore: (token) => ipcRenderer.invoke('dsh:backup-restore', { preview: false, token }),
+    exportDiagnostics: () => ipcRenderer.invoke('dsh:diag-export'),
+    validatePlugins: () => ipcRenderer.invoke('dsh:diag-validate'),
+    removeBundle: (names) => ipcRenderer.invoke('dsh:diag-remove-bundle', { names }),
+    analyzeOrder: () => ipcRenderer.invoke('dsh:diag-order'),
+    applyOrder: (order) => ipcRenderer.invoke('dsh:diag-order-apply', { order }),
+  },
   // 桌面宠物原生小窗（harness-pet）：主窗控制开关/状态查询/最小化自动弹出
   // 上报；小窗内关闭自身/搬窗（绝对目标位置）。
   petWindow: {

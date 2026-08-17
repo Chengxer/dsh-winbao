@@ -222,7 +222,7 @@ function dropBlocksByIds(text, ids) {
 }
 
 /**
- * 从 dsh-web.log 尾部识别 loader 失败条目 id。覆盖三种形态：
+ * 从 dsh-web.log 尾部识别 loader 失败条目 id。覆盖四种形态：
  *   1. failed to apply loader entry <hash> (@scope/pkg): ...（旧形态，hash 是
  *      条目实例 id，对 overlay 无用但保留兼容）；
  *   2. duplicate loader entry id: X（cordis-plugin-loader 的重复注册 TypeError）；
@@ -230,6 +230,9 @@ function dropBlocksByIds(text, ids) {
  *      等配套插件都是非 scope，历史正则只认 @scope/ 会漏掉这些条目），交由
  *      mapPackagesToPatchIds 映射回 patch id。旧日志的无关 token "(include)"
  *      统一排除。
+ *   4. profile bundle "X" declares no dsh.bundle in its package.json（旧世代
+ *      boot 对 bundles 里无 dsh.bundle 声明的包 fail-loud，包名可为裸名或
+ *      @scope/pkg，交由调用方做文件系统二次确认后自愈移除）。
  * @param {string} text 日志文本
  * @returns {string[]} 去重后的 id/包名 token 列表
  */
@@ -245,7 +248,113 @@ function parseFailedLoaderIds(text) {
   const pkgRe = /failed to apply loader entry[\s\S]{0,120}?\((@?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?)\)/g;
   while ((m = pkgRe.exec(text)) !== null) ids.add(m[1]);
   ids.delete('include'); // 旧日志形态里的无关 token
+  const bundleRe = /profile bundle\s+"([^"]+)"\s+declares no dsh\.bundle/g;
+  while ((m = bundleRe.exec(text)) !== null) ids.add(m[1]);
   return [...ids];
+}
+
+/**
+ * 只读自愈预检：日志含「declares no dsh.bundle」形态时，返回经文件系统二次
+ * 确认的坏 bundle 名单（在 dsh.profile.bundles 里、包目录存在但 package.json
+ * 缺 dsh.bundle.patch 声明）。绝不含 @deepseek-ai/*（内置官方包）。
+ * 纯函数（fs 可注入），便于 node:test 单测。
+ * @param {string} profileDir profile 目录（含 package.json 与 node_modules）
+ * @param {string} logText dsh-web.log 尾部文本
+ * @param {object} [fs] 文件系统实现（默认 node:fs）
+ * @returns {string[]} 需从 bundles 移除的包名列表
+ */
+function findMissingBundleDeclarations(profileDir, logText, fs = require('node:fs')) {
+  if (!/profile bundle\s+"([^"]+)"\s+declares no dsh\.bundle/.test(logText || '')) return [];
+  const claimed = (parseFailedLoaderIds(logText) || []).filter((t) => t && !t.startsWith('@deepseek-ai/'));
+  if (claimed.length === 0) return [];
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(require('node:path').join(profileDir, 'package.json'), 'utf8'));
+  } catch {
+    return [];
+  }
+  const bundles = (manifest.dsh?.profile?.bundles || []).filter((n) => claimed.includes(n));
+  return bundles.filter((n) => {
+    // 二次确认：目录缺失属 cannot-resolve 家族（另一条错误），不在此处置。
+    try {
+      const pkg = JSON.parse(fs.readFileSync(require('node:path').join(profileDir, 'node_modules', n, 'package.json'), 'utf8'));
+      return typeof (pkg.dsh && pkg.dsh.bundle && pkg.dsh.bundle.patch) !== 'string';
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * 只读自愈预检（不依赖日志）：直接扫 profile manifest 的 dsh.profile.bundles，
+ * 返回经文件系统二次确认的缺声明名单（包目录存在但 package.json 缺
+ * dsh.bundle.patch 声明）。与 findMissingBundleDeclarations 的区别：不要求日志
+ * 先命中「declares no dsh.bundle」形态——日志轮转/截断/编码异常时仍能发现
+ * 坏条目，是更可靠的主路径；日志形态作为兜底保留。绝不收 @deepseek-ai/*。
+ * 纯函数（fs 可注入），便于 node:test 单测。
+ * @param {string} profileDir profile 目录（含 package.json 与 node_modules）
+ * @param {object} [fs] 文件系统实现（默认 node:fs）
+ * @returns {string[]} 需从 bundles 移除的包名列表
+ */
+function scanBundleContracts(profileDir, fs = require('node:fs')) {
+  const path = require('node:path');
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
+  } catch {
+    return [];
+  }
+  const bundles = (manifest.dsh?.profile?.bundles || []).filter((n) => typeof n === 'string' && n && !n.startsWith('@deepseek-ai/'));
+  const missing = [];
+  for (const n of bundles) {
+    // 二次确认：目录缺失属 cannot-resolve 家族（另一条错误），不在此处置。
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(profileDir, 'node_modules', n, 'package.json'), 'utf8'));
+      if (typeof (pkg.dsh && pkg.dsh.bundle && pkg.dsh.bundle.patch) !== 'string') missing.push(n);
+    } catch {
+      // 目录缺失 / package.json 不可读 → 交给 cannot-resolve 家族
+    }
+  }
+  return missing;
+}
+
+/**
+ * 备份 + 原子写回：把坏 bundle 从 dsh.profile.bundles 移除，但保留
+ * dependencies（纯客户端插件仍可能由市场挂载，移出启动层不等于卸载）。
+ * 无实际变化时零写入。返回实际移除的名单。
+ * @param {string} profileDir profile 目录
+ * @param {string[]} names 待移除包名（应已过 @deepseek-ai/* 过滤）
+ * @param {object} [fs] 文件系统实现（默认 node:fs）
+ * @returns {string[]} 实际移除的包名
+ */
+function removeBundlesFromProfile(profileDir, names, fs = require('node:fs')) {
+  const path = require('node:path');
+  const wanted = new Set((names || []).filter((n) => typeof n === 'string' && n && !n.startsWith('@deepseek-ai/')));
+  if (wanted.size === 0) return [];
+  const pkgFile = path.join(profileDir, 'package.json');
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
+  } catch {
+    return [];
+  }
+  const before = manifest.dsh?.profile?.bundles || [];
+  const bundles = before.filter((n) => !wanted.has(n));
+  if (bundles.length === before.length) return [];
+  const backupFile = pkgFile + '.bak-' + Date.now() + '-' + process.pid;
+  const tmpFile = pkgFile + '.dsh-heal-' + process.pid + '-' + Math.random().toString(36).slice(2, 8);
+  fs.copyFileSync(pkgFile, backupFile);
+  manifest.dsh = manifest.dsh || {};
+  manifest.dsh.profile = manifest.dsh.profile || {};
+  manifest.dsh.profile.bundles = bundles;
+  try {
+    fs.writeFileSync(tmpFile, JSON.stringify(manifest, null, 2) + '\n');
+    fs.renameSync(tmpFile, pkgFile);
+  } catch (err) {
+    try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch { /* ignore cleanup failure */ }
+    throw err;
+  }
+  return before.filter((n) => wanted.has(n));
 }
 
 /**
@@ -274,4 +383,12 @@ function mapPackagesToPatchIds(patchText, packages) {
   return ids;
 }
 
-module.exports = { dedupePatchEntries, dropBlocksByIds, parseFailedLoaderIds, mapPackagesToPatchIds };
+module.exports = {
+  dedupePatchEntries,
+  dropBlocksByIds,
+  parseFailedLoaderIds,
+  mapPackagesToPatchIds,
+  findMissingBundleDeclarations,
+  scanBundleContracts,
+  removeBundlesFromProfile,
+};

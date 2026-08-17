@@ -54,13 +54,77 @@ window.__ModuleLoader__.load({
 			uninstallDone: "已卸载，重启后生效",
 			restoreBtn: "恢复",
 			restoreDone: "已恢复，重启后生效",
-			actionFailed: "操作失败："
+			actionFailed: "操作失败：",
+			// 诊断与备份区块
+			diagTitle: "诊断与管理",
+			diagHint: "诊断当前 profile 的健康状况；备份/恢复配置（不含插件包与对话记录）。全部为本地操作，不会上传任何数据。",
+			diagRun: "运行诊断",
+			diagRunning: "诊断中…",
+			diagOk: "未发现问题 ✓",
+			diagErrors: "错误",
+			diagWarnings: "警告",
+			diagInfos: "信息",
+			diagEmpty: "无",
+			diagFail: "诊断运行失败：",
+			diagSelfHealTitle: "最近启动自愈",
+			diagSelfHealRemoved: "已自动移出启动清单 {0}",
+			diagSelfHealDisabled: "已自动禁用 {0}",
+			backupTitle: "备份配置",
+			backupExport: "导出备份…",
+			backupExporting: "导出中…",
+			backupDone: "已导出备份（{0} 个文件）",
+			backupCanceled: "已取消导出",
+			backupFail: "导出失败：",
+			restoreTitle: "恢复配置",
+			restorePick: "选择备份文件恢复…",
+			restorePicking: "等待选择…",
+			restorePreview: "确认恢复以下内容？",
+			restorePreviewFiles: "共 {0} 个文件（{1}）",
+			restoreSecretWarn: "⚠ 备份含密钥/敏感配置（settings.yaml / .credentials.yaml 等），恢复将覆盖当前配置。",
+			restoreConfirm: "确认恢复",
+			restoreAbort: "取消",
+			restoreDone2: "已恢复 {0} 个文件，完全退出并重启后生效",
+			restoreCanceled: "已取消恢复",
+			restoreFail: "恢复失败（已自动回滚）：",
+			restartHint: "备份/恢复/诊断均为本地操作，不会上传任何数据。",
+			diagLogTitle: "导出诊断日志包",
+			diagLogExport: "导出日志包…",
+			diagLogExporting: "导出中…",
+			diagLogDone: "已导出诊断日志包 （含诊断报告与日志尾部，路径已打码）",
+			diagLogCanceled: "已取消导出日志包",
+			diagValidTitle: "防砖体检",
+			diagValidRun: "体检已安装插件…",
+			diagValidRunning: "体检中…",
+			diagValidFail: "体检运行失败：",
+			diagValidOk: "未发现会导致启动失败的问题 ✓",
+			diagValidSummary: "已检查 {0} 个插件包：{1} 个错误，{2} 个警告",
+			diagValidConflict: "跨包重复的 loader 条目 id「{0}」（{1}）：下次启动可能失败（duplicate loader entry id）",
+			diagRemoveBtn: "一键移除失效条目",
+			diagRemoveConfirm: "确认移除 {0} 个失效条目？（备份后从启动清单移除，重启生效）",
+			diagRemoveDone: "已从启动清单移除：{0}",
+			diagOrderTitle: "Bundle 顺序",
+			diagOrderHint: "官方内置 bundle 位置固定；社区 bundle 按声明规则与依赖自动排序。",
+			diagOrderRun: "检测顺序…",
+			diagOrderRunning: "检测中…",
+			diagOrderOk: "当前顺序满足所有声明规则 ✓",
+			diagOrderConflictN: "{0} 个顺序冲突",
+			diagOrderApply: "应用建议顺序",
+			diagOrderApplying: "应用中…",
+			diagOrderApplied: "已应用建议顺序，重启后生效",
+			diagOrderCycle: "规则/依赖存在循环，无法自动排序：",
+			diagOrderRestart: "顺序变更需完全退出并重启后生效。"
 		};
 
 		function bridge() {
 			const b = window.dshDesktop;
 			if (!b || !b.pluginManager || typeof b.pluginManager.list !== "function") return null;
 			return b.pluginManager;
+		}
+
+		function diagBridge() {
+			const b = window.dshDesktop;
+			if (!b || !b.diagBackup) return null;
+			return b.diagBackup;
 		}
 
 		const badge = (text, color) => jsx("span", {
@@ -613,6 +677,8 @@ window.__ModuleLoader__.load({
 				children: label
 			});
 			const msgColor = /失败|错误/.test(actionMsg || "") ? "var(--dsw-alias-state-error-primary, #ff7a85)" : "var(--dsw-alias-state-info-primary, #5b9bd5)";
+			// 有可更新项的个数（工具栏「检查更新」按钮据此高亮 + 显示数量）
+			const updTotal = updateMap ? Object.values(updateMap).filter((it) => it && it.hasUpdate).length : 0;
 
 			return jsxs("div", { children: [
 				jsx("span", { style: { fontSize: 12, opacity: 0.65 }, children: L.tabHint }),
@@ -632,8 +698,8 @@ window.__ModuleLoader__.load({
 							type: "button",
 							disabled: checkingUpdates,
 							onClick: doCheckUpdates,
-							style: { fontSize: 12, padding: "5px 12px", borderRadius: 8, cursor: "pointer", whiteSpace: "nowrap", border: "1px solid " + (checkingUpdates ? "var(--dsw-alias-border-l2, rgba(128,128,128,0.35))" : "var(--dsw-alias-state-info-primary, #5b9bd5)"), background: checkingUpdates ? "transparent" : "color-mix(in srgb, var(--dsw-alias-state-info-primary, #5b9bd5) 12%, transparent)", color: checkingUpdates ? "inherit" : "var(--dsw-alias-state-info-primary, #5b9bd5)" },
-							children: checkingUpdates ? L.checking : L.checkUpdates
+							style: { fontSize: 12, padding: "5px 12px", borderRadius: 8, cursor: "pointer", whiteSpace: "nowrap", border: "1px solid " + (checkingUpdates ? "var(--dsw-alias-border-l2, rgba(128,128,128,0.35))" : (updTotal > 0 ? "var(--dsw-alias-state-info-primary, #5b9bd5)" : "var(--dsw-alias-border-l2, rgba(128,128,128,0.35))")), background: checkingUpdates ? "transparent" : (updTotal > 0 ? "color-mix(in srgb, var(--dsw-alias-state-info-primary, #5b9bd5) 12%, transparent)" : "transparent"), color: checkingUpdates ? "inherit" : (updTotal > 0 ? "var(--dsw-alias-state-info-primary, #5b9bd5)" : "inherit") },
+							children: checkingUpdates ? L.checking : (updTotal > 0 ? L.checkUpdates + " · " + updTotal : L.checkUpdates)
 						}),
 						jsx("button", {
 							type: "button",
@@ -647,6 +713,345 @@ window.__ModuleLoader__.load({
 				renderChips(),
 				localOnly ? jsx("div", { style: { fontSize: 12, opacity: 0.6, marginTop: 6 }, children: L.localOnlyHint }) : null,
 				renderBody()
+			] });
+		}
+
+		/** 设置侧栏「诊断与管理」分区：诊断 / 备份恢复 / 日志包导出 / 防砖体检 / bundle 顺序。 */
+		function DiagSection() {
+			const [diagReport, setDiagReport] = react.useState(null);
+			const [diagBusy, setDiagBusy] = react.useState(false);
+			const [bkBusy, setBkBusy] = react.useState(false);
+			const [bkMsg, setBkMsg] = react.useState(null);
+			const [restorePreview, setRestorePreview] = react.useState(null);
+			const [validReport, setValidReport] = react.useState(null);
+			const [validBusy, setValidBusy] = react.useState(false);
+			const [validArmed, setValidArmed] = react.useState(false);
+			const [orderReport, setOrderReport] = react.useState(null);
+			const [orderBusy, setOrderBusy] = react.useState(false);
+			const [orderApplied, setOrderApplied] = react.useState(false);
+
+			/** 运行诊断：主进程扫描 patch/bundles/日志/崩溃转储，返回分级报告。 */
+			const doRunDiag = () => {
+				const d = diagBridge();
+				if (!d || !d.runDiagnostics || diagBusy) return;
+				setDiagBusy(true);
+				d.runDiagnostics().then((res) => {
+					setDiagBusy(false);
+					if (res && res.ok && res.report) setDiagReport(res.report);
+					else setDiagReport({ ok: false, errors: [L.diagFail + String((res && res.error) || "未知错误")], warnings: [], infos: [] });
+				}).catch((err) => {
+					setDiagBusy(false);
+					setDiagReport({ ok: false, errors: [L.diagFail + String((err && err.message) || err)], warnings: [], infos: [] });
+				});
+			};
+
+			// 进入「诊断与管理」即自动跑一次诊断：诊断结果（含「最近启动自愈」
+			// 蓝色条）立即可见，不用等用户手动点「运行诊断」。
+			react.useEffect(() => {
+				doRunDiag();
+				// eslint-disable-next-line react-hooks/exhaustive-deps
+			}, []);
+
+			/** 导出备份：弹保存对话框，主进程生成 JSON 备份文件。 */
+			const doExportBackup = () => {
+				const d = diagBridge();
+				if (!d || !d.exportBackup || bkBusy) return;
+				setBkBusy(true);
+				d.exportBackup().then((res) => {
+					setBkBusy(false);
+					if (res && res.ok) {
+						const base = L.backupDone.replace("{0}", String(res.files));
+						const secretN = Array.isArray(res.secretFiles) ? res.secretFiles.length : 0;
+						setBkMsg(secretN > 0 ? base + "（含 " + secretN + " 个敏感文件，请妥善保管）" : base);
+					}
+					else if (res && res.canceled) setBkMsg(L.backupCanceled);
+					else setBkMsg(L.backupFail + String((res && res.error) || "未知错误"));
+				}).catch((err) => {
+					setBkBusy(false);
+					setBkMsg(L.backupFail + String((err && err.message) || err));
+				});
+			};
+
+			/** 恢复流程第一步：选择备份文件并预览内容（主进程不写盘）。 */
+			const doPickRestore = () => {
+				const d = diagBridge();
+				if (!d || !d.previewRestore || bkBusy) return;
+				setBkBusy(true);
+				d.previewRestore().then((res) => {
+					setBkBusy(false);
+					if (res && res.ok && res.preview) setRestorePreview(res.preview);
+					else if (res && res.canceled) setBkMsg(L.restoreCanceled);
+					else setBkMsg(L.restoreFail + String((res && res.error) || "未知错误"));
+				}).catch((err) => {
+					setBkBusy(false);
+					setBkMsg(L.restoreFail + String((err && err.message) || err));
+				});
+			};
+
+			/** 恢复流程第二步：用主进程签发的一次性令牌确认写入。 */
+			const doConfirmRestore = () => {
+				const d = diagBridge();
+				if (!d || !d.restore || bkBusy) return;
+				setBkBusy(true);
+				d.restore(restorePreview && restorePreview.token ? restorePreview.token : undefined).then((res) => {
+					setBkBusy(false);
+					setRestorePreview(null);
+					if (res && res.ok) setBkMsg(L.restoreDone2.replace("{0}", String(res.files)));
+					else if (res && res.canceled) setBkMsg(L.restoreCanceled);
+					else setBkMsg(L.restoreFail + String((res && res.error) || "未知错误"));
+				}).catch((err) => {
+					setBkBusy(false);
+					setRestorePreview(null);
+					setBkMsg(L.restoreFail + String((err && err.message) || err));
+				});
+			};
+
+			const doCancelRestore = () => {
+				setRestorePreview(null);
+				setBkMsg(L.restoreCanceled);
+			};
+
+			/** 一键导出诊断日志包（诊断报告 + 日志尾部，路径打码）。 */
+			const doExportDiag = () => {
+				const d = diagBridge();
+				if (!d || !d.exportDiagnostics || bkBusy) return;
+				setBkBusy(true);
+				d.exportDiagnostics().then((res) => {
+					setBkBusy(false);
+					if (res && res.ok) setBkMsg(L.diagLogDone);
+					else if (res && res.canceled) setBkMsg(L.diagLogCanceled);
+					else setBkMsg(L.diagFail + String((res && res.error) || "未知错误"));
+				}).catch((err) => {
+					setBkBusy(false);
+					setBkMsg(L.diagFail + String((err && err.message) || err));
+				});
+			};
+
+			/** 防砖体检：检查已装插件的清单/补丁入口/跨包 id 冲突。 */
+			const doValidate = () => {
+				const d = diagBridge();
+				if (!d || !d.validatePlugins || validBusy) return;
+				setValidBusy(true);
+				setValidArmed(false);
+				d.validatePlugins().then((res) => {
+					setValidBusy(false);
+					if (res && res.ok && res.report) setValidReport(res.report);
+					else setValidReport({ ok: false, checked: [], conflicts: [], summary: { errors: 1, warnings: 0 }, loadError: String((res && res.error) || "未知错误") });
+				}).catch((err) => {
+					setValidBusy(false);
+					setValidReport({ ok: false, checked: [], conflicts: [], summary: { errors: 1, warnings: 0 }, loadError: String((err && err.message) || err) });
+				});
+			};
+
+			/** 一键移除启动清单中的失效 bundle 条目（两步确认；成功后重跑体检反映最新状态）。 */
+			const doRemoveBundles = () => {
+				const d = diagBridge();
+				const list = validReport && Array.isArray(validReport.contractViolations) ? validReport.contractViolations : [];
+				if (!d || !d.removeBundle || validBusy || list.length === 0) return;
+				if (!validArmed) { setValidArmed(true); return; }
+				setValidArmed(false);
+				setValidBusy(true);
+				d.removeBundle(list).then((res) => {
+					setValidBusy(false);
+					if (res && res.ok) {
+						setBkMsg(L.diagRemoveDone.replace("{0}", String((res.removed || []).length)));
+						doValidate(); // 移除后重跑体检，反映最新状态
+					} else {
+						setBkMsg(L.diagFail + String((res && res.error) || "未知错误"));
+					}
+				}).catch((err) => {
+					setValidBusy(false);
+					setBkMsg(L.diagFail + String((err && err.message) || err));
+				});
+			};
+
+			/** bundle 顺序检测（只读分析 + 建议顺序）。 */
+			const doAnalyzeOrder = () => {
+				const d = diagBridge();
+				if (!d || !d.analyzeOrder || orderBusy) return;
+				setOrderBusy(true);
+				setOrderApplied(false);
+				d.analyzeOrder().then((res) => {
+					setOrderBusy(false);
+					if (res && res.ok && res.report) setOrderReport(res.report);
+					else setOrderReport({ error: String((res && res.error) || "未知错误"), bundles: [], conflicts: [], suggested: null });
+				}).catch((err) => {
+					setOrderBusy(false);
+					setOrderReport({ error: String((err && err.message) || err), bundles: [], conflicts: [], suggested: null });
+				});
+			};
+
+			/** 应用建议顺序（官方内置保持原位，原子写回 profile package.json）。 */
+			const doApplyOrder = () => {
+				const d = diagBridge();
+				if (!d || !d.applyOrder || orderBusy || !orderReport || !orderReport.suggested || !orderReport.suggested.ok) return;
+				setOrderBusy(true);
+				d.applyOrder(orderReport.suggested.order).then((res) => {
+					setOrderBusy(false);
+					if (res && res.ok) {
+						setOrderApplied(true);
+						setBkMsg(res.changed ? L.diagOrderApplied : "顺序已是最优，无需变更");
+					} else {
+						setOrderReport({ ...orderReport, applyError: String((res && res.error) || "未知错误") });
+					}
+				}).catch((err) => {
+					setOrderBusy(false);
+					setOrderReport({ ...orderReport, applyError: String((err && err.message) || err) });
+				});
+			};
+
+			const btnStyle = (danger) => ({
+				fontSize: 12, padding: "5px 12px", borderRadius: 8, cursor: "pointer", whiteSpace: "nowrap",
+				border: "1px solid " + (danger ? "var(--dsw-alias-state-error-primary, #ff7a85)" : "var(--dsw-alias-border-l2, rgba(128,128,128,0.35))"),
+				background: "transparent", color: danger ? "var(--dsw-alias-state-error-primary, #ff7a85)" : "inherit",
+				opacity: 1,
+			});
+			const actionBtn = (label, onClick, busy, danger) => jsx("button", {
+				type: "button", disabled: busy, onClick,
+				style: { ...btnStyle(danger), cursor: busy ? "default" : "pointer", opacity: busy ? 0.55 : 1 },
+				children: label
+			});
+			const card = (title, childrenJsx) => jsxs("div", {
+				style: { display: "flex", flexDirection: "column", gap: 8, padding: "12px 14px", borderRadius: 10, border: "1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.25))" },
+				children: [jsx("span", { style: { fontSize: 13, fontWeight: 600 }, children: title }), childrenJsx]
+			});
+			const msgColor = /失败|错误/.test(bkMsg || "") ? "var(--dsw-alias-state-error-primary, #ff7a85)" : "var(--dsw-alias-state-info-primary, #5b9bd5)";
+
+			// 诊断报告三色区块渲染
+			const diagBody = (() => {
+				if (!diagReport) return null;
+				const r = diagReport;
+				// 兼容两条产出路径：主进程 runDiagnostics 产 {code,message} 对象，前端失败分支产字符串
+				const txt = (m) => (m && typeof m === "object" && "message" in m ? String(m.message) : String(m));
+				const errs = r.errors || [];
+				const warns = r.warnings || [];
+				const infos = r.infos || [];
+				// 启动自愈历史：模态框/通知是一次性的，这里提供持久回看（主进程
+				// 每次自愈写入 userData/self-heal-history.json，随诊断报告带回）。
+				const selfHealBox = (items) => {
+					if (!items || items.length === 0) return null;
+					return jsxs("div", { style: { fontSize: 12, padding: "8px 10px", borderRadius: 8, marginTop: 6, background: "color-mix(in srgb, var(--dsw-alias-state-info-primary, #5b9bd5) 10%, transparent)", color: "var(--dsw-alias-state-info-primary, #5b9bd5)", display: "flex", flexDirection: "column", gap: 3 }, children: [
+						jsx("span", { style: { fontWeight: 600 }, children: L.diagSelfHealTitle }),
+						items.map((it, i) => jsx("div", { key: i, style: { wordBreak: "break-all" }, children: (it.kind === "overlay" ? L.diagSelfHealDisabled : L.diagSelfHealRemoved).replace("{0}", (it.names || []).join("、")) + "（" + new Date(it.ts).toLocaleString() + "）" }))
+					] });
+				};
+				// 自愈历史随报告放在 sections.selfHeal（顶层仅 ok/errors/warnings/infos），
+				// 兼容两处取值，避免 r.selfHeal 恒为 undefined 蓝条永不显示。
+				const selfHeal = Array.isArray(r.selfHeal) ? r.selfHeal : (r.sections && Array.isArray(r.sections.selfHeal) ? r.sections.selfHeal : []);
+				if (r.ok === true) return jsxs("div", { children: [
+					selfHealBox(selfHeal),
+					jsx("div", { style: { fontSize: 12, color: "var(--dsw-alias-state-success-primary, #4caf7d)", marginTop: 6 }, children: L.diagOk })
+				] });
+				const section = (title, items, color, icon) => jsxs("div", { style: { marginTop: 6 }, children: [
+					jsx("span", { style: { fontSize: 12, fontWeight: 600, color }, children: title + "（" + items.length + "）" }),
+					items.length === 0 ? null : jsx("ul", { style: { margin: "4px 0 0", paddingLeft: 18, fontSize: 12 }, children: items.map((m, i) => jsx("li", { key: i, style: { color, margin: "2px 0", wordBreak: "break-all" }, children: icon + " " + txt(m) })) })
+				] });
+				return jsxs("div", { children: [
+					selfHealBox(selfHeal),
+					section(L.diagErrors, errs, "var(--dsw-alias-state-error-primary, #ff7a85)", "⛔"),
+					section(L.diagWarnings, warns, "var(--dsw-alias-state-warning-primary, #d99a3d)", "⚠"),
+					section(L.diagInfos, infos, "var(--dsw-alias-label-tertiary, rgba(128,128,128,0.6))", "ℹ")
+				] });
+			})();
+
+			// 防砖体检结果渲染
+			const validBody = (() => {
+				if (!validReport) return null;
+				const r = validReport;
+				if (r.loadError) return jsx("div", { style: { fontSize: 12, color: "var(--dsw-alias-state-error-primary, #ff7a85)" }, children: L.diagValidFail + r.loadError });
+				const s = r.summary || { errors: 0, warnings: 0 };
+				return jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 6, fontSize: 12 }, children: [
+					r.ok
+						? jsx("div", { style: { color: "var(--dsw-alias-state-success-primary, #4caf7d)" }, children: L.diagValidOk })
+						: jsx("div", { style: { color: "var(--dsw-alias-state-error-primary, #ff7a85)", fontWeight: 600 }, children: L.diagValidSummary.replace("{0}", String(r.checked.length)).replace("{1}", String(s.errors)).replace("{2}", String(s.warnings)) }),
+					(() => {
+						const violations = Array.isArray(r.contractViolations) ? r.contractViolations : [];
+						if (violations.length === 0) return null;
+						return jsxs("div", { style: { display: "flex", gap: 8, alignItems: "center", marginTop: 2, flexWrap: "wrap" }, children: [
+							actionBtn(validArmed ? L.diagRemoveConfirm.replace("{0}", String(violations.length)) : L.diagRemoveBtn + "（" + violations.length + "）", doRemoveBundles, validBusy, true),
+							validArmed ? jsx("button", { type: "button", onClick: () => setValidArmed(false), style: btnStyle(false), children: L.restoreAbort }) : null
+						] });
+					})(),
+					r.conflicts.length > 0 ? jsx("ul", { style: { margin: 0, paddingLeft: 16 }, children: r.conflicts.map((c, i) => jsx("li", { key: i, style: { color: "var(--dsw-alias-state-error-primary, #ff7a85)", wordBreak: "break-all" }, children: "⛔ " + L.diagValidConflict.replace("{0}", c.id).replace("{1}", c.owners.join(" / ")) })) }) : null,
+					r.checked.length > 0 ? jsx("div", { style: { display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }, children: r.checked.map((c) => {
+						if (!c.issues || c.issues.length === 0) return jsx("div", { key: c.name, style: { opacity: 0.85, wordBreak: "break-all" }, children: "✔ " + c.name + (c.source ? "（" + c.source + "）" : "") });
+						return jsxs("div", { key: c.name, style: { wordBreak: "break-all" }, children: [
+							jsx("span", { children: c.name + "（" + c.source + "）" }),
+							jsx("ul", { style: { margin: "2px 0 0", paddingLeft: 16 }, children: c.issues.map((it, i) => jsx("li", { key: i, style: { color: it.level === "error" ? "var(--dsw-alias-state-error-primary, #ff7a85)" : "var(--dsw-alias-state-warning-primary, #d99a3d)" }, children: (it.level === "error" ? "⛔ " : "⚠ ") + it.text })) })
+						] });
+					}) }) : null
+				] });
+			})();
+
+			// bundle 顺序结果渲染
+			const orderBody = (() => {
+				if (!orderReport) return null;
+				const r = orderReport;
+				if (r.error) return jsx("div", { style: { fontSize: 12, color: "var(--dsw-alias-state-error-primary, #ff7a85)" }, children: "⛔ " + r.error });
+				const list = (arr) => jsx("ol", { style: { margin: "4px 0 0", paddingLeft: 20, fontSize: 12, lineHeight: 1.7 }, children: arr.map((n, i) => jsx("li", { key: i, children: n })) });
+				return jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 6, fontSize: 12 }, children: [
+					r.conflicts.length === 0 && r.suggested && r.suggested.ok
+						? jsx("div", { style: { color: "var(--dsw-alias-state-success-primary, #4caf7d)" }, children: L.diagOrderOk })
+						: (r.conflicts.length > 0 ? jsx("div", { style: { color: "var(--dsw-alias-state-warning-primary, #d99a3d)", fontWeight: 600 }, children: "⚠ " + L.diagOrderConflictN.replace("{0}", String(r.conflicts.length)) }) : null),
+					r.conflicts.length > 0 ? jsx("ul", { style: { margin: 0, paddingLeft: 16 }, children: r.conflicts.map((c, i) => jsx("li", { key: i, style: { wordBreak: "break-all" }, children: "「" + c.name + "」" + c.reason })) }) : null,
+					r.suggested && r.suggested.ok ? jsxs("div", { children: [
+						jsx("div", { style: { opacity: 0.7, marginTop: 2 }, children: "建议顺序：" }),
+						list(r.suggested.order),
+						orderApplied
+							? jsx("div", { style: { color: "var(--dsw-alias-state-success-primary, #4caf7d)", marginTop: 4 }, children: L.diagOrderApplied })
+							: jsxs("div", { style: { display: "flex", gap: 8, marginTop: 8 }, children: [
+								actionBtn(L.diagOrderApply, doApplyOrder, orderBusy, false),
+								jsx("span", { style: { fontSize: 11, opacity: 0.55, alignSelf: "center" }, children: L.diagOrderRestart })
+							] })
+					] }) : null,
+					r.suggested && !r.suggested.ok ? jsxs("div", { style: { color: "var(--dsw-alias-state-error-primary, #ff7a85)" }, children: [
+						jsx("div", { children: L.diagOrderCycle }),
+						list(r.suggested.cycle)
+					] }) : null,
+					r.applyError ? jsx("div", { style: { color: "var(--dsw-alias-state-error-primary, #ff7a85)" }, children: "⛔ " + r.applyError }) : null
+				] });
+			})();
+
+			return jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 12 }, children: [
+				jsx("div", { style: { fontSize: 12, opacity: 0.6 }, children: L.diagHint }),
+				card(L.diagTitle + " — 诊断", jsxs("div", { children: [
+					actionBtn(diagBusy ? L.diagRunning : L.diagRun, doRunDiag, diagBusy, false),
+					diagBody
+				] })),
+				card(L.backupTitle, jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }, children: [
+					actionBtn(bkBusy ? L.backupExporting : L.backupExport, doExportBackup, bkBusy, false)
+				] })),
+				card(L.restoreTitle, jsxs("div", { children: [
+					jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }, children: [
+						actionBtn(bkBusy ? L.restorePicking : L.restorePick, doPickRestore, bkBusy, false)
+					] }),
+					restorePreview ? jsxs("div", { style: { marginTop: 8, padding: 10, borderRadius: 8, border: "1px solid var(--dsw-alias-state-warning-primary, #d99a3d)", background: "color-mix(in srgb, var(--dsw-alias-state-warning-primary, #d99a3d) 8%, transparent)", fontSize: 12 }, children: [
+						jsx("div", { style: { fontWeight: 600 }, children: L.restorePreview }),
+						jsx("div", { style: { marginTop: 4, opacity: 0.85, wordBreak: "break-all" }, children: restorePreview.file }),
+						jsx("div", { style: { marginTop: 2, opacity: 0.85 }, children: L.restorePreviewFiles.replace("{0}", String(restorePreview.files == null ? 0 : restorePreview.files)).replace("{1}", restorePreview.createdAt ? new Date(restorePreview.createdAt).toLocaleString() : "-") }),
+						(restorePreview.secretFiles && restorePreview.secretFiles.length > 0) ? jsx("div", { style: { color: "var(--dsw-alias-state-error-primary, #ff7a85)", marginTop: 6, fontWeight: 600 }, children: L.restoreSecretWarn }) : null,
+						jsxs("div", { style: { display: "flex", gap: 8, marginTop: 8 }, children: [
+							actionBtn(L.restoreConfirm, doConfirmRestore, bkBusy, true),
+							actionBtn(L.restoreAbort, doCancelRestore, false, false)
+						] })
+					] }) : null
+				] })),
+				card(L.diagLogTitle, jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }, children: [
+					actionBtn(bkBusy ? L.diagLogExporting : L.diagLogExport, doExportDiag, bkBusy, false)
+				] })),
+				card(L.diagValidTitle, jsxs("div", { children: [
+					actionBtn(validBusy ? L.diagValidRunning : L.diagValidRun, doValidate, validBusy, false),
+					validBody
+				] })),
+				card(L.diagOrderTitle, jsxs("div", { children: [
+					jsx("div", { style: { fontSize: 11, opacity: 0.55 }, children: L.diagOrderHint }),
+					jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8, marginTop: 6, flexWrap: "wrap" }, children: [
+						actionBtn(orderBusy ? L.diagOrderRunning : L.diagOrderRun, doAnalyzeOrder, orderBusy, false)
+					] }),
+					orderBody
+				] })),
+				bkMsg ? jsx("div", { style: { fontSize: 12, padding: "6px 12px", borderRadius: 8, border: "1px solid " + msgColor, background: "color-mix(in srgb, " + msgColor + " 8%, transparent)", color: msgColor }, children: bkMsg }) : null,
+				jsx("div", { style: { fontSize: 11, opacity: 0.5 }, children: L.restartHint })
 			] });
 		}
 
@@ -664,6 +1069,14 @@ window.__ModuleLoader__.load({
 				label: () => L.tab,
 				inject: injected
 			}, PluginManagerTab), "dsh-plugin-manager: plugins management tab");
+			// 「插件」分区下的第二个标签「诊断与管理」（与「管理」并列）：诊断 / 备份恢复 /
+			// 日志包导出 / 防砖体检 / bundle 顺序检测与重排。
+			ctx.slots.inject("settings.plugins.tab", () => ctx.slots.register({
+				name: "settings.plugins.tab",
+				id: "diag",
+				order: 25,
+				label: () => L.diagTitle
+			}, DiagSection), "dsh-plugin-manager: diagnostics & maintenance tab");
 		}
 
 		const inject = ["slots", "remote", "remote.pluginInventory"];
