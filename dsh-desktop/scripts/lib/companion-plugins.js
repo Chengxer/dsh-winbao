@@ -39,6 +39,13 @@ const COMPANION_PLUGINS = [
   { id: 'side-session', name: '@dsh-external/dsh-side-session' },
   { id: 'compaction-acp', name: 'billion-context-dsh' },
   { id: 'plugin-manager', name: '@deepseek-ai/dsh-plugin-manager' },
+  // 知识图谱记忆（adoresever/graph-memory，MIT）：跨会话图记忆 + PageRank /
+  // 社区检测 + 向量去重；作者为 DSH 提供原生适配器（graph-memory/dsh 入口），
+  // 内置后随壳分发，dsh-hub 中枢页直接显示装配状态与图谱统计。
+  { id: 'graph-memory', name: 'graph-memory' },
+  // 可视化插件市场（dsh-market/dsh-market，MIT）：浏览/搜索/一键安装社区插件，
+  // 内置后与 zat-dsh-engine 并存，设置页各自入口。
+  { id: 'dsh-market', name: 'dshmarket' },
   // 插件中枢（ARFCON/dsh-hub-DSH，MIT）：插件更新引擎（版本对比/一键更新/
   // 启停/卸载/启动自检修复）+ 全局记忆 + graph-memory / dsh-market 挂载 +
   // 自身更新检查；原生适配 Gitee 版客户端版本双源对比。

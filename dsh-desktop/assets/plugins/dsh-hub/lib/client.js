@@ -110,6 +110,7 @@ window.__ModuleLoader__.load({
 			memoryFile: "数据文件",
 			gmTitle: "graph-memory（记忆图谱）",
 			gmSourceMissing: "未在 plugin-src 找到 graph-memory 源码",
+			gmSourceBundled: "内置",
 			gmSourceVersion: "源码版本",
 			gmInstalled: "已装配",
 			gmNotInstalled: "未装配",
@@ -231,6 +232,7 @@ window.__ModuleLoader__.load({
 			memoryFile: "File",
 			gmTitle: "graph-memory",
 			gmSourceMissing: "graph-memory source not found in plugin-src",
+			gmSourceBundled: "Built-in",
 			gmSourceVersion: "Source version",
 			gmInstalled: "Installed",
 			gmNotInstalled: "Not installed",
@@ -432,7 +434,7 @@ window.__ModuleLoader__.load({
 						(0, react_jsx_runtime.jsxs)("div", { className: s.heading, children: [
 							(0, react_jsx_runtime.jsx)("h3", { children: t("gmTitle") }),
 							gmSrc.present === true
-								? (0, react_jsx_runtime.jsx)("span", { children: t("gmSourceVersion") + " " + (gmSrc.version ?? "?") })
+								? (0, react_jsx_runtime.jsx)("span", { children: (gmSrc.source === "bundled" ? t("gmSourceBundled") : t("gmSourceVersion")) + " " + (gmSrc.version ?? "?") })
 								: null
 						] }),
 						gmSrc.present === true ? [
