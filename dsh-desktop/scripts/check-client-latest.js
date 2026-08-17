@@ -5,7 +5,7 @@
 //   node scripts/check-client-latest.js --download  # 选中资产并试下载（不安装）
 // 可选环境变量：
 //   DSH_DESKTOP_RELEASE_API   自定义 release API（镜像）
-//   PORTABLE_EXECUTABLE_DIR   模拟便携版（资产选 *-portable-x64.exe）
+//   PORTABLE_EXECUTABLE_DIR   模拟便携版（资产选 *-win-portable-x64.exe）
 //   DSH_DESKTOP_APP_VERSION   以指定版本作为“当前版本”比较（默认 0.0.0）
 
 const path = require('node:path');
