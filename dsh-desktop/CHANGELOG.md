@@ -5,7 +5,7 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 
 
 
-## [Unreleased]
+## [0.3.10] — 2026-08-17
 ### 新增
 - **工作区锚点（workspace-anchor）**：新增 `@deepseek-ai/dsh-workspace-anchor` 配套插件，在每个 agent 的稳定 system prompt 中注入约 70 token 的 `{{cwd}}` 工作区偏好（默认在 cwd 内编辑/构建/交付、优先相对路径、允许读取/搜索任何位置但不得把搜索命中的外部目录当作新项目根、仅当用户显式指定或确有必要时才离开 cwd 并随后返回）。纯提示词偏好，不改变任何权限/沙箱行为。`minimal-win`、`anchored-standard`、`zero-anchored-standard`、`whoami-standard`、`warmupbetter`、`warmupbetter-replay` 六个 complete-persona 预设因会丢弃插件注入节，已在各自的 `agent.cordis.yml` persona 文本中直接写入同一锚点；`standard` / `code` / `router-standard` / `v4-flash-godmode-opencode-go` 等非 complete 预设由插件节覆盖
 - **macOS 版客户端自动更新（多操作系统支持）**：此前客户端自更新仅 Windows（安装版/便携版），macOS 入口降级为手动下载。现 macOS 走独立链路——资产选择支持 `DSH-Desktop-<版本>-macos-<arch>.zip`（优先，免挂载自更新）/ `.dmg`（兜底，hdiutil 挂载）及 Gitee 分片（`.partN` 按序拼接）；更新脚本（bash，纯 ASCII，系统自带工具零依赖）等待旧进程退出 → `ditto` 解压 → 备份 `.bak` → 同卷 `mv` 原子替换 `/Applications/DSH Desktop.app`（`ditto` 复制兜底）→ `xattr -dr com.apple.quarantine` 解除隔离（未签名构建首次启动不被 Gatekeeper 拦截）→ `open` 重启；替换失败自动还原旧版并启动，应用绝不消失。平台判定支持 `DSH_DESKTOP_PLATFORM` 强制（仅资产选择等纯函数），新增 5 个 macOS 单测（zip/dmg 直选、arm64 架构、分片排序、模板 ASCII 结构、平台判定）
