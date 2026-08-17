@@ -113,6 +113,28 @@ window.__ModuleLoader__.load({
 				tick();
 			});
 		}
+		// ------------------------------------------------------------------
+		// 会话完成通知点击跳转：主窗口订阅主进程通知点击事件，
+		// 通过 sessions.open(id) 切换到对应会话。
+		// ------------------------------------------------------------------
+		function setupNotificationJump(ctx) {
+			const bridge = typeof window !== "undefined" ? window.dshDesktop : undefined;
+			if (!bridge || typeof bridge.onNotificationJump !== "function") return;
+			return bridge.onNotificationJump((payload) => {
+				const sessionId = payload && payload.sessionId ? String(payload.sessionId) : "";
+				if (!sessionId) return;
+				retry(() => {
+					const sessions = typeof ctx.get === "function" ? ctx.get("sessions", false) : undefined;
+					if (!sessions || typeof sessions.open !== "function") return false;
+					try {
+						sessions.open(sessionId);
+						return true;
+					} catch {
+						return false;
+					}
+				}, { label: "通知跳转会话", attempts: 40, delayMs: 300 });
+			});
+		}
 
 		// ------------------------------------------------------------------
 		// 浮窗：沉浸折叠 + 选中目标会话
@@ -311,6 +333,7 @@ window.__ModuleLoader__.load({
 					order: 200
 				}, PopOutButton), "dsh-float-window: pop-out button");
 				ctx.effect(() => setupDragOut(), "dsh-float-window: drag-out proxy");
+				ctx.effect(() => setupNotificationJump(ctx), "dsh-float-window: notification jump");
 				return;
 			}
 			// 浮窗：沉浸折叠 + 选中会话 + 标题。

@@ -2242,6 +2242,14 @@ function onSessionTurnEnd(info) {
         if (mainWindow.isMinimized()) mainWindow.restore();
         mainWindow.show();
         mainWindow.focus();
+        // 额外把目标 sessionId 推给渲染层，让主窗口切换到对应会话。
+        try {
+          mainWindow.webContents.send('dsh:notification-jump', {
+            sessionId: info.sessionId || '',
+            title: info.title || '',
+            body: info.body || ''
+          });
+        } catch {}
       }
     });
     n.show();
