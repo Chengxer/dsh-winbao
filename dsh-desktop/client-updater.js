@@ -279,6 +279,27 @@ async function downloadRelease(ctx, release, { onProgress } = {}) {
   return { filePath: finalPath, size: stat.size };
 }
 
+// 清理已处理（安装成功/版本落后/文件缺失）的待安装包及其 .part 分片残留。
+// 目的：避免「已下载但不再需要安装」的过时安装包（每包 120+MB）永久留在
+// updates 目录——用户看到它们会误以为「下载好了却从不弹安装」，且占用磁盘。
+// 幂等：目标文件已不存在时静默成功；不抛异常（删除失败不影响标记清理）。
+function cleanupPendingPackage(pending) {
+  if (!pending || typeof pending !== 'object' || !pending.path) return;
+  try {
+    fs.rmSync(pending.path, { force: true });
+  } catch {}
+  const dir = path.dirname(pending.path);
+  const base = path.basename(pending.path);
+  if (!base) return;
+  let entries = [];
+  try { entries = fs.readdirSync(dir); } catch { return; }
+  for (const f of entries) {
+    if (f.startsWith(base + '.part')) {
+      try { fs.rmSync(path.join(dir, f), { force: true }); } catch {}
+    }
+  }
+}
+
 // --- 应用更新（detached 脚本 + 主进程退出） ---------------------------------
 
 // 用完整路径找 cmd.exe（%ComSpec%），避免应用 PATH 精简时 spawn('cmd.exe') 报 ENOENT。
@@ -576,6 +597,7 @@ module.exports = {
   selectAsset,
   downloadRelease,
   applyUpdate,
+  cleanupPendingPackage,
   buildPortableCmd,
   buildNsisPs1,
   buildNsisCmd,

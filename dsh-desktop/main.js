@@ -4598,6 +4598,34 @@ async function runClientUpdateFlow(manual) {
   }
   const ctx = updCtx();
   const settings = updater.loadSettings(ctx);
+  // 手动检查时优先处理已下载的待安装包：用户主动点「检查客户端更新」即表明
+  // 更新意图，不应被 24h 静默期（clientUpdateSnoozeUntil）挡住——否则会出现
+  // 「包已下载却没有任何安装入口，看起来像更新坏了」的体验。
+  if (manual && process.platform === 'win32' && settings.pendingClientUpdate && settings.pendingClientUpdate.path) {
+    const pend = settings.pendingClientUpdate;
+    if (fs.existsSync(pend.path) && updater.compareVersions(pend.version, APP_VERSION) > 0) {
+      const { response: rp } = await showBox({
+        type: 'info',
+        title: '有待安装的客户端更新',
+        message: `已下载 DSH Desktop v${pend.version}，是否立即安装并重启？`,
+        detail: '安装包保存在数据目录的 updates 文件夹中。',
+        buttons: ['立即重启', '取消'],
+        defaultId: 0,
+        cancelId: 1,
+      });
+      if (rp === 0) {
+        quitForClientUpdate(ctx, pend);
+        return;
+      }
+    } else if (!fs.existsSync(pend.path)) {
+      // 安装包已丢失：清理标记，避免每次手动检查都卡在这个分支。
+      clientUpdater.cleanupPendingPackage(pend);
+      settings.pendingClientUpdate = null;
+      settings.pendingClientVersion = null;
+      settings.clientUpdateAttempt = null;
+      updater.saveSettings(ctx, settings);
+    }
+  }
   let release;
   try {
     release = await clientUpdater.checkLatest(ctx, APP_VERSION);
@@ -4710,6 +4738,8 @@ function offerPendingClientUpdate() {
   const pending = settings.pendingClientUpdate;
   if (!pending || !pending.path) return;
   if (!fs.existsSync(pending.path)) {
+    // 安装包已被清理/删除：清掉标记与同目录分片残留，不再打扰用户。
+    clientUpdater.cleanupPendingPackage(pending);
     settings.pendingClientUpdate = null;
     settings.pendingClientVersion = null;
     settings.clientUpdateAttempt = null;
@@ -4717,6 +4747,9 @@ function offerPendingClientUpdate() {
     return;
   }
   if (updater.compareVersions(pending.version, APP_VERSION) <= 0) {
+    // 当前版本已不低于待安装版本（更新已通过其它方式生效，或版本被跳过）：
+    // 删除残留的过时安装包（每包 120+MB），避免「下载了但不弹安装」的磁盘残留。
+    clientUpdater.cleanupPendingPackage(pending);
     settings.pendingClientUpdate = null;
     settings.pendingClientVersion = null;
     settings.clientUpdateAttempt = null;

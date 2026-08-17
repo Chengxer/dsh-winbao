@@ -8,6 +8,9 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const {
   selectAsset,
   resolveRepos,
@@ -16,6 +19,7 @@ const {
   buildNsisPs1,
   buildNsisCmd,
   currentArch,
+  cleanupPendingPackage,
 } = require('../../client-updater');
 
 function withEnv(name, value, fn) {
@@ -219,4 +223,33 @@ test('buildNsisCmd: 经 cmd 包装器调用 powershell 并透传全部参数', (
   assert.ok(cmd.includes('-ExecutionPolicy Bypass'), '需要绕过执行策略');
   assert.ok(cmd.includes('-File "%PS1%"'), '需要按变量调用 .ps1');
   assert.ok(cmd.includes('-LogFile "%LOGF%"'), '需要透传日志参数');
+});
+
+test('cleanupPendingPackage: 删除安装包及其 .part 分片残留', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-cleanup-'));
+  try {
+    const pkg = path.join(dir, 'DSH-Desktop-0.4.0-win-setup-x64.exe');
+    fs.writeFileSync(pkg, 'fake installer');
+    fs.writeFileSync(pkg + '.part1', 'part1');
+    fs.writeFileSync(path.join(dir, 'unrelated-file.bin'), 'keep me');
+    cleanupPendingPackage({ path: pkg });
+    assert.ok(!fs.existsSync(pkg), '安装包本体应被删除');
+    assert.ok(!fs.existsSync(pkg + '.part1'), '残留分片应被删除');
+    assert.ok(fs.existsSync(path.join(dir, 'unrelated-file.bin')), '无关文件不得被误删');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('cleanupPendingPackage: 文件已不存在时静默成功（幂等）', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-cleanup2-'));
+  try {
+    const pkg = path.join(dir, 'DSH-Desktop-0.4.0-win-portable-x64.exe');
+    assert.doesNotThrow(() => cleanupPendingPackage({ path: pkg }));
+    assert.doesNotThrow(() => cleanupPendingPackage(null));
+    assert.doesNotThrow(() => cleanupPendingPackage({}));
+    cleanupPendingPackage({});
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
