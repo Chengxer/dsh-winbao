@@ -66,14 +66,14 @@ win:
         - arm64
 
 portable:
-  # 命名规则：<平台>-<形态>-<架构>，Release 页面一眼区分 win/mac 与芯片。
+  # 命名规则：v0.3.9 式（无 win- 中缀），Release 页面一眼区分形态与芯片。
   # 注意保持「-portable-<arch>.exe」后缀，兼容已发布版本的客户端更新正则。
-  artifactName: DSH-Desktop-${version}-win-portable-${arch}.${ext}
+  artifactName: DSH-Desktop-${version}-portable-${arch}.${ext}
   # 与 x64 版（dsh-desktop-portable）隔离，防止同一机器上双架构便携版串缓存。
   unpackDirName: dsh-desktop-portable-arm64
 
 nsis:
-  artifactName: DSH-Desktop-${version}-win-setup-${arch}.${ext}
+  artifactName: DSH-Desktop-Setup-${version}-${arch}.${ext}
   oneClick: false
   perMachine: false
   runAfterFinish: true

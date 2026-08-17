@@ -222,14 +222,40 @@ jobs:
             gh release view $tag --json id 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) { break }
           $notes = @"
+          # 更新要点：每次发版更新本段（面向当前版本），新版本发布时改为新版本要点
+          ## ✨ v0.3.10 更新要点
+
+          **新增**
+          - 🧩 内置插件中枢 dsh-hub：插件更新引擎（一键更新/启停/卸载/自修复）+ 全局记忆（5 个 memory_* 工具，跨会话共享）+ graph-memory 一键挂载
+          - 🍎 macOS 客户端自动更新（dmg/zip 下载安装，失败自动回滚）
+          - 🔔 点击系统通知一键回到应用前台
+          - 💰 余额增强：OpenCode Go 订阅额度、峰谷定价、未知模型回退修正
+          - 🐳 桌面宠物默认关闭（设置 → 插件 → 管理 可一键开启）
+          - 📌 侧边会话浮窗升级 v0.2.5（图标对齐/动画档位/输入框同款）
+
+          **修复**
+          - 更新后桌面图标消失（安装版缺失即补建）
+          - 客户端更新下载完成不弹安装（待安装包优先弹窗）
+          - WSL 托管后端探测失败自动回落本地（issue #54）
+          - 更新回退失败静默卡住（弹错误框双出口）
+          - 余额栏消失、左侧 Object 字样、计费回退不一致
+          - 路径围栏本地 DoS、更新竞态、服务启动句柄泄漏
+
+          **工程**
+          - 插件管理：卸载/恢复 + 双源镜像更新（npm 官方 ↔ npmmirror、GitHub ↔ gh-proxy 自动切换）
+          - profile bundle 装配自愈根治（无效登记隔离记录）
+          - agent 预设更新保护（保留用户自定义预设）
+          - 内置插件市场 zat-dsh-engine 移除；keyed slot 兼容
+          - GitHub Actions 双平台四架构自动构建（win x64/arm64 + mac x64/arm64）
+
           ## 📦 怎么选安装包（平台 / 芯片对照）
 
           | 平台 | 芯片 | 文件 |
           | --- | --- | --- |
-          | Windows 便携版（免安装） | x64 | DSH-Desktop-$tag-win-portable-x64.exe |
-          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$tag-win-portable-arm64.exe |
-          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-$tag-win-setup-x64.exe |
-          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-$tag-win-setup-arm64.exe |
+          | Windows 便携版（免安装） | x64 | DSH-Desktop-$tag-portable-x64.exe |
+          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$tag-portable-arm64.exe |
+          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-Setup-$tag-x64.exe |
+          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-Setup-$tag-arm64.exe |
           | macOS（Intel） | x64 | DSH-Desktop-$tag-macos-x64.dmg / .zip |
           | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$tag-macos-arm64.dmg / .zip |
 
@@ -438,14 +464,40 @@ jobs:
             gh release view $tag --json id 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) { break }
           $notes = @"
+          # 更新要点：每次发版更新本段（面向当前版本），新版本发布时改为新版本要点
+          ## ✨ v0.3.10 更新要点
+
+          **新增**
+          - 🧩 内置插件中枢 dsh-hub：插件更新引擎（一键更新/启停/卸载/自修复）+ 全局记忆（5 个 memory_* 工具，跨会话共享）+ graph-memory 一键挂载
+          - 🍎 macOS 客户端自动更新（dmg/zip 下载安装，失败自动回滚）
+          - 🔔 点击系统通知一键回到应用前台
+          - 💰 余额增强：OpenCode Go 订阅额度、峰谷定价、未知模型回退修正
+          - 🐳 桌面宠物默认关闭（设置 → 插件 → 管理 可一键开启）
+          - 📌 侧边会话浮窗升级 v0.2.5（图标对齐/动画档位/输入框同款）
+
+          **修复**
+          - 更新后桌面图标消失（安装版缺失即补建）
+          - 客户端更新下载完成不弹安装（待安装包优先弹窗）
+          - WSL 托管后端探测失败自动回落本地（issue #54）
+          - 更新回退失败静默卡住（弹错误框双出口）
+          - 余额栏消失、左侧 Object 字样、计费回退不一致
+          - 路径围栏本地 DoS、更新竞态、服务启动句柄泄漏
+
+          **工程**
+          - 插件管理：卸载/恢复 + 双源镜像更新（npm 官方 ↔ npmmirror、GitHub ↔ gh-proxy 自动切换）
+          - profile bundle 装配自愈根治（无效登记隔离记录）
+          - agent 预设更新保护（保留用户自定义预设）
+          - 内置插件市场 zat-dsh-engine 移除；keyed slot 兼容
+          - GitHub Actions 双平台四架构自动构建（win x64/arm64 + mac x64/arm64）
+
           ## 📦 怎么选安装包（平台 / 芯片对照）
 
           | 平台 | 芯片 | 文件 |
           | --- | --- | --- |
-          | Windows 便携版（免安装） | x64 | DSH-Desktop-$tag-win-portable-x64.exe |
-          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$tag-win-portable-arm64.exe |
-          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-$tag-win-setup-x64.exe |
-          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-$tag-win-setup-arm64.exe |
+          | Windows 便携版（免安装） | x64 | DSH-Desktop-$tag-portable-x64.exe |
+          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$tag-portable-arm64.exe |
+          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-Setup-$tag-x64.exe |
+          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-Setup-$tag-arm64.exe |
           | macOS（Intel） | x64 | DSH-Desktop-$tag-macos-x64.dmg / .zip |
           | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$tag-macos-arm64.dmg / .zip |
 
@@ -612,14 +664,40 @@ jobs:
             gh release view $tag --json id 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) { break }
           $notes = @"
+          # 更新要点：每次发版更新本段（面向当前版本），新版本发布时改为新版本要点
+          ## ✨ v0.3.10 更新要点
+
+          **新增**
+          - 🧩 内置插件中枢 dsh-hub：插件更新引擎（一键更新/启停/卸载/自修复）+ 全局记忆（5 个 memory_* 工具，跨会话共享）+ graph-memory 一键挂载
+          - 🍎 macOS 客户端自动更新（dmg/zip 下载安装，失败自动回滚）
+          - 🔔 点击系统通知一键回到应用前台
+          - 💰 余额增强：OpenCode Go 订阅额度、峰谷定价、未知模型回退修正
+          - 🐳 桌面宠物默认关闭（设置 → 插件 → 管理 可一键开启）
+          - 📌 侧边会话浮窗升级 v0.2.5（图标对齐/动画档位/输入框同款）
+
+          **修复**
+          - 更新后桌面图标消失（安装版缺失即补建）
+          - 客户端更新下载完成不弹安装（待安装包优先弹窗）
+          - WSL 托管后端探测失败自动回落本地（issue #54）
+          - 更新回退失败静默卡住（弹错误框双出口）
+          - 余额栏消失、左侧 Object 字样、计费回退不一致
+          - 路径围栏本地 DoS、更新竞态、服务启动句柄泄漏
+
+          **工程**
+          - 插件管理：卸载/恢复 + 双源镜像更新（npm 官方 ↔ npmmirror、GitHub ↔ gh-proxy 自动切换）
+          - profile bundle 装配自愈根治（无效登记隔离记录）
+          - agent 预设更新保护（保留用户自定义预设）
+          - 内置插件市场 zat-dsh-engine 移除；keyed slot 兼容
+          - GitHub Actions 双平台四架构自动构建（win x64/arm64 + mac x64/arm64）
+
           ## 📦 怎么选安装包（平台 / 芯片对照）
 
           | 平台 | 芯片 | 文件 |
           | --- | --- | --- |
-          | Windows 便携版（免安装） | x64 | DSH-Desktop-$tag-win-portable-x64.exe |
-          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$tag-win-portable-arm64.exe |
-          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-$tag-win-setup-x64.exe |
-          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-$tag-win-setup-arm64.exe |
+          | Windows 便携版（免安装） | x64 | DSH-Desktop-$tag-portable-x64.exe |
+          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$tag-portable-arm64.exe |
+          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-Setup-$tag-x64.exe |
+          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-Setup-$tag-arm64.exe |
           | macOS（Intel） | x64 | DSH-Desktop-$tag-macos-x64.dmg / .zip |
           | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$tag-macos-arm64.dmg / .zip |
 
@@ -763,14 +841,40 @@ jobs:
             gh release view $tag --json id 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) { break }
           $notes = @"
+          # 更新要点：每次发版更新本段（面向当前版本），新版本发布时改为新版本要点
+          ## ✨ v0.3.10 更新要点
+
+          **新增**
+          - 🧩 内置插件中枢 dsh-hub：插件更新引擎（一键更新/启停/卸载/自修复）+ 全局记忆（5 个 memory_* 工具，跨会话共享）+ graph-memory 一键挂载
+          - 🍎 macOS 客户端自动更新（dmg/zip 下载安装，失败自动回滚）
+          - 🔔 点击系统通知一键回到应用前台
+          - 💰 余额增强：OpenCode Go 订阅额度、峰谷定价、未知模型回退修正
+          - 🐳 桌面宠物默认关闭（设置 → 插件 → 管理 可一键开启）
+          - 📌 侧边会话浮窗升级 v0.2.5（图标对齐/动画档位/输入框同款）
+
+          **修复**
+          - 更新后桌面图标消失（安装版缺失即补建）
+          - 客户端更新下载完成不弹安装（待安装包优先弹窗）
+          - WSL 托管后端探测失败自动回落本地（issue #54）
+          - 更新回退失败静默卡住（弹错误框双出口）
+          - 余额栏消失、左侧 Object 字样、计费回退不一致
+          - 路径围栏本地 DoS、更新竞态、服务启动句柄泄漏
+
+          **工程**
+          - 插件管理：卸载/恢复 + 双源镜像更新（npm 官方 ↔ npmmirror、GitHub ↔ gh-proxy 自动切换）
+          - profile bundle 装配自愈根治（无效登记隔离记录）
+          - agent 预设更新保护（保留用户自定义预设）
+          - 内置插件市场 zat-dsh-engine 移除；keyed slot 兼容
+          - GitHub Actions 双平台四架构自动构建（win x64/arm64 + mac x64/arm64）
+
           ## 📦 怎么选安装包（平台 / 芯片对照）
 
           | 平台 | 芯片 | 文件 |
           | --- | --- | --- |
-          | Windows 便携版（免安装） | x64 | DSH-Desktop-$tag-win-portable-x64.exe |
-          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$tag-win-portable-arm64.exe |
-          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-$tag-win-setup-x64.exe |
-          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-$tag-win-setup-arm64.exe |
+          | Windows 便携版（免安装） | x64 | DSH-Desktop-$tag-portable-x64.exe |
+          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$tag-portable-arm64.exe |
+          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-Setup-$tag-x64.exe |
+          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-Setup-$tag-arm64.exe |
           | macOS（Intel） | x64 | DSH-Desktop-$tag-macos-x64.dmg / .zip |
           | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$tag-macos-arm64.dmg / .zip |
 
