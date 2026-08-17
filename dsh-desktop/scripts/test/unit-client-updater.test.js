@@ -18,6 +18,8 @@ const {
   buildPortableCmd,
   buildNsisPs1,
   buildNsisCmd,
+  buildMacSh,
+  platformKind,
   currentArch,
   cleanupPendingPackage,
 } = require('../../client-updater');
@@ -223,6 +225,100 @@ test('buildNsisCmd: 经 cmd 包装器调用 powershell 并透传全部参数', (
   assert.ok(cmd.includes('-ExecutionPolicy Bypass'), '需要绕过执行策略');
   assert.ok(cmd.includes('-File "%PS1%"'), '需要按变量调用 .ps1');
   assert.ok(cmd.includes('-LogFile "%LOGF%"'), '需要透传日志参数');
+});
+
+test('selectAsset: macOS 优先选 zip（免挂载自更新），dmg 兜底', () => {
+  withEnv('DSH_DESKTOP_PLATFORM', 'macos', () => {
+    const release = {
+      version: '0.4.0',
+      assets: [
+        { name: 'DSH-Desktop-0.4.0-macos-x64.zip', url: 'https://example/z', size: 1 },
+        { name: 'DSH-Desktop-0.4.0-macos-x64.dmg', url: 'https://example/d', size: 1 },
+      ],
+    };
+    const sel = selectAsset(release);
+    assert.strictEqual(sel.name, 'DSH-Desktop-0.4.0-macos-x64.zip');
+    assert.strictEqual(sel.parts.length, 1);
+  });
+  withEnv('DSH_DESKTOP_PLATFORM', 'macos', () => {
+    const release = {
+      version: '0.4.0',
+      assets: [{ name: 'DSH-Desktop-0.4.0-macos-x64.dmg', url: 'https://example/d', size: 1 }],
+    };
+    const sel = selectAsset(release);
+    assert.strictEqual(sel.name, 'DSH-Desktop-0.4.0-macos-x64.dmg');
+  });
+});
+
+test('selectAsset: macOS arm64 选 arm64 资产，x64 强制下不误选 arm64', () => {
+  withEnv('DSH_DESKTOP_PLATFORM', 'macos', () => {
+    withEnv('DSH_DESKTOP_ARCH', 'arm64', () => {
+      const release = {
+        version: '0.4.0',
+        assets: [
+          { name: 'DSH-Desktop-0.4.0-macos-x64.zip', url: 'https://example/zx', size: 1 },
+          { name: 'DSH-Desktop-0.4.0-macos-arm64.zip', url: 'https://example/za', size: 1 },
+        ],
+      };
+      const sel = selectAsset(release);
+      assert.strictEqual(sel.name, 'DSH-Desktop-0.4.0-macos-arm64.zip');
+    });
+  });
+  withEnv('DSH_DESKTOP_PLATFORM', 'macos', () => {
+    withEnv('DSH_DESKTOP_ARCH', 'x64', () => {
+      const release = {
+        version: '0.4.0',
+        assets: [{ name: 'DSH-Desktop-0.4.0-macos-arm64.zip', url: 'https://example/za', size: 1 }],
+      };
+      assert.throws(() => selectAsset(release), /未找到匹配的安装包资产/);
+    });
+  });
+});
+
+test('selectAsset: macOS 大包走 Gitee 分片（.partN 排序拼接）', () => {
+  withEnv('DSH_DESKTOP_PLATFORM', 'macos', () => {
+    withEnv('DSH_DESKTOP_ARCH', 'arm64', () => {
+      const release = {
+      version: '0.4.1',
+      assets: [
+        { name: 'DSH-Desktop-0.4.1-macos-arm64.zip.part2', url: 'https://example/p2', size: 2 },
+        { name: 'DSH-Desktop-0.4.1-macos-arm64.zip.part1', url: 'https://example/p1', size: 1 },
+      ],
+    };
+    const sel = selectAsset(release);
+    assert.strictEqual(sel.name, 'DSH-Desktop-0.4.1-macos-arm64.zip');
+    assert.deepStrictEqual(sel.parts.map((p) => p.name), [
+      'DSH-Desktop-0.4.1-macos-arm64.zip.part1',
+      'DSH-Desktop-0.4.1-macos-arm64.zip.part2',
+    ]);
+      });
+  });
+});
+
+test('platformKind: 真实平台判定，DSH_DESKTOP_PLATFORM 可强制指定', () => {
+  withEnv('DSH_DESKTOP_PLATFORM', undefined, () => {
+    const want = process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'win' : null;
+    assert.strictEqual(platformKind(), want);
+  });
+  withEnv('DSH_DESKTOP_PLATFORM', 'macos', () => assert.strictEqual(platformKind(), 'macos'));
+  withEnv('DSH_DESKTOP_PLATFORM', 'win', () => assert.strictEqual(platformKind(), 'win'));
+  withEnv('DSH_DESKTOP_PLATFORM', 'bogus', () => {
+    const want = process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'win' : null;
+    assert.strictEqual(platformKind(), want);
+  });
+});
+
+test('buildMacSh: 纯 ASCII，含解压/备份/还原/解除隔离/重启分支', () => {
+  const sh = buildMacSh('/data/updates/apply-update.log');
+  assert.ok(ASCII.test(sh), 'macOS 更新脚本必须是纯 ASCII');
+  assert.ok(sh.includes('ditto -x -k'), 'zip 用 ditto 免挂载解压');
+  assert.ok(sh.includes('hdiutil attach'), 'dmg 走 hdiutil 挂载');
+  assert.ok(sh.includes('xattr -dr com.apple.quarantine'), '未签名构建需解除 quarantine 才能自动启动');
+  assert.ok(sh.includes('pgrep -f'), '等待旧进程退出');
+  assert.ok(sh.includes('DSH Desktop.bak'), '替换前备份旧版');
+  assert.ok(sh.includes('restoring backup'), '替换失败还原旧版');
+  assert.ok(sh.includes('open "$APP"'), '完成后用 open 重启应用');
+  assert.ok(sh.includes('apply-update done'));
 });
 
 test('cleanupPendingPackage: 删除安装包及其 .part 分片残留', () => {

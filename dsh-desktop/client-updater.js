@@ -155,19 +155,39 @@ async function checkLatest(ctx, currentVersion) {
 
 // --- 资产选择 / 下载 -------------------------------------------------------
 
+// 部署平台：macos / win / null（其它平台不支持客户端自更新）。
+// DSH_DESKTOP_PLATFORM 可强制指定（仅用于资产选择等纯函数，供测试与排查；
+// 实际执行更新脚本仍以真实 process.platform 为准，避免测试误触发脚本）。
+function platformKind() {
+  const forced = String(process.env.DSH_DESKTOP_PLATFORM || '').trim();
+  if (forced === 'macos' || forced === 'win') return forced;
+  if (process.platform === 'darwin') return 'macos';
+  if (process.platform === 'win32') return 'win';
+  return null;
+}
+
 function selectAsset(release) {
   const arch = currentArch();
-  const wanted = isPortable()
-    ? new RegExp(`-portable-${arch}\\.exe$`, 'i')
-    : new RegExp(`-setup-(?:.*-)?${arch}\\.exe$`, 'i');
+  const mac = platformKind() === 'macos';
+  // macOS 资产命名：DSH-Desktop-<版本>-macos-<arch>.zip / .dmg（zip 优先级更高，
+  // 免挂载即可自更新；dmg 兜底）。Windows 资产命名：win-portable / win-setup
+  // 前缀（v0.3.9+），旧命名（无 win- 前缀）由 -setup- 正则兼容。
+  const wanted = mac
+    ? new RegExp(`-macos-${arch}\\.(?:zip|dmg)$`, 'i')
+    : isPortable()
+      ? new RegExp(`-portable-${arch}\\.exe$`, 'i')
+      : new RegExp(`-setup-(?:.*-)?${arch}\\.exe$`, 'i');
   const direct = release.assets.find((a) => wanted.test(a.name));
   if (direct) return { parts: [direct], name: direct.name, totalSize: direct.size };
 
-  // Gitee 单文件 100MB 限制：安装包拆分为 <file>.part1 / <file>.part2 …
-  // base 名必须与 GitHub 资产名一致（win- 前缀，v0.3.9+ 命名规则）。
-  const base = isPortable()
-    ? `DSH-Desktop-${release.version}-win-portable-${arch}.exe`
-    : `DSH-Desktop-${release.version}-win-setup-${arch}.exe`;
+  // Gitee 单文件 100MB 限制：安装包拆分为 <完整文件名>.part1 / .part2 …
+  // base 名必须与 GitHub 资产名一致（win-/macos- 前缀，v0.3.9+ 命名规则），
+  // 分片用 zip 为基准（与 zip 优先的直选规则一致；dmg 分片不预期出现）。
+  const base = mac
+    ? `DSH-Desktop-${release.version}-macos-${arch}.zip`
+    : isPortable()
+      ? `DSH-Desktop-${release.version}-win-portable-${arch}.exe`
+      : `DSH-Desktop-${release.version}-win-setup-${arch}.exe`;
   const parts = release.assets
     .filter((a) => a.name.startsWith(base + '.part'))
     .sort((a, b) => {
@@ -537,20 +557,116 @@ function buildNsisCmd() {
   ].join('\r\n');
 }
 
+// macOS 更新脚本（bash + 系统自带工具，无第三方依赖）：
+//   ditto  解压 zip（免挂载自更新；dmg 用 hdiutil attach/detach，脚本内分支）
+//   mv     同卷原子替换 /Applications/DSH Desktop.app（/tmp 与 /Applications
+//          在 macOS 同处数据卷，mv 不会跨卷失败；失败时用 ditto 复制兜底）
+//   xattr  解除 com.apple.quarantine（未签名构建首次启动不被 Gatekeeper 拦截）
+//   pgrep  等待当前 app 退出（quitForClientUpdate 已先退出主进程，兜底等待）
+//   open   替换完成后重启新版本
+// 失败自愈：备份 .bak → 替换失败还原旧版并启动；尽力保证应用绝不消失。
+function buildMacSh(logFile) {
+  return `#!/bin/bash
+LOG="$1"
+ASSET="$2"
+APP="$3"
+log() { printf '[%s] %s\\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG"; }
+log "apply-update start (macos)"
+log "asset=$ASSET"
+log "app=$APP"
+# wait for the old process to exit (quitForClientUpdate exits first; safety net)
+for i in $(seq 1 20); do
+  if ! pgrep -f "$APP/Contents/MacOS" >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+TMP="$(mktemp -d "\${TMPDIR:-/tmp}/dsh-update.XXXXXX")"
+NEWAPP=""
+IS_DMG=""
+case "$ASSET" in
+  *.dmg)
+    IS_DMG=1
+    MNT="$(hdiutil attach -nobrowse -readonly "$ASSET" | sed -n 's/.*\\/Volumes\\/\\(.*\\)$/\\/Volumes\\/\\1/p' | tail -1)"
+    if [ -z "$MNT" ]; then log "dmg attach failed"; rm -rf "$TMP"; exit 1; fi
+    NEWAPP="$(find "$MNT" -maxdepth 2 -name '*.app' -type d | head -1)"
+    ;;
+  *)
+    if ! ditto -x -k "$ASSET" "$TMP" 2>>"$LOG"; then
+      log "unzip failed with ditto"
+      rm -rf "$TMP" 2>/dev/null
+      exit 1
+    fi
+    NEWAPP="$(find "$TMP" -maxdepth 2 -name '*.app' -type d | head -1)"
+    ;;
+esac
+if [ -z "$NEWAPP" ]; then log "no .app found in archive"; fi
+if [ -n "$NEWAPP" ] && [ -d "$APP" ]; then
+  if [ -n "$IS_DMG" ]; then
+    mkdir -p "$TMP/copy" || true
+    ditto "$NEWAPP" "$TMP/copy/DSH Desktop.app" 2>>"$LOG" || true
+    NEWAPP="$TMP/copy/DSH Desktop.app"
+    hdiutil detach "$MNT" >/dev/null 2>&1 || true
+  fi
+  # clear quarantine: unsigned build must launch after auto-update without Gatekeeper blocking
+  xattr -dr com.apple.quarantine "$NEWAPP" 2>/dev/null || true
+  log "backing up current app"
+  BACKUP="$(dirname "$APP")/DSH Desktop.bak"
+  rm -rf "$BACKUP" 2>/dev/null || true
+  mv "$APP" "$BACKUP" 2>>"$LOG" || true
+  if ! mv "$NEWAPP" "$APP" 2>>"$LOG"; then
+    log "replace failed; copying instead"
+    rm -rf "$APP" 2>/dev/null || true
+    if ! ditto "$NEWAPP" "$APP" 2>>"$LOG"; then
+      log "replace failed; restoring backup"
+      rm -rf "$APP" 2>/dev/null || true
+      mv "$BACKUP" "$APP" 2>>"$LOG" || true
+    fi
+  fi
+  rm -rf "$BACKUP" 2>/dev/null || true
+fi
+rm -rf "$TMP" 2>/dev/null || true
+# launch the app whether or not replacement succeeded: never leave the user without a running app
+if [ -d "$APP" ]; then
+  log "launching app"
+  open "$APP" || true
+  log "apply-update done"
+  exit 0
+fi
+log "app missing after update; user must reinstall manually"
+exit 1
+`;
+}
+
 function applyUpdate(ctx, pending) {
-  // 更新脚本（cmd/ps1 + exe/安装器替换）为 Windows 专属；macOS 版暂不支持
-  // 自动更新（入口已降级为提示手动下载），此处兜底拒绝执行。
-  if (process.platform !== 'win32') {
+  // 更新脚本（Windows: cmd/ps1 + exe/安装器替换；macOS: bash + .app 替换）为
+  // 平台专属；其它平台（Linux 等）不支持客户端自更新，入口已降级为手动下载。
+  if (process.platform !== 'win32' && process.platform !== 'darwin') {
     throw new Error('当前平台暂不支持客户端自动更新（请手动下载新版安装包）');
   }
   const newExe = pending.path;
-  const portable = isPortable();
-  const oldExe = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
-  const procName = path.basename(oldExe, path.extname(oldExe)); // 如 "DSH Desktop"
   const dir = path.join(ctx.userDataDir, 'updates');
   const logFile = path.join(dir, 'apply-update.log');
   fs.mkdirSync(dir, { recursive: true });
   let script, child;
+  if (process.platform === 'darwin') {
+    // macOS：newExe = 下载的 .zip/.dmg；APP = 当前 .app 根（execPath 上溯三级）
+    const appPath = path.resolve(process.execPath, '..', '..', '..');
+    script = path.join(dir, 'apply-update.sh');
+    fs.writeFileSync(script, buildMacSh(logFile), { mode: 0o755 });
+    ctx.log('client-update', `启动 macOS 更新脚本: ${script}（资产: ${newExe}，app: ${appPath}）日志: ${logFile}`);
+    child = spawn('/bin/bash', [script, logFile, newExe, appPath], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.on('error', (err) => ctx.log('client-update', '启动 macOS 更新脚本失败: ' + err.message));
+    child.on('exit', (code) => {
+      if (code !== 0) ctx.log('client-update', `macOS 更新脚本提前退出（exit ${code}），日志: ${logFile}`);
+    });
+    child.unref();
+    return { script, logFile };
+  }
+  const portable = isPortable();
+  const oldExe = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
+  const procName = path.basename(oldExe, path.extname(oldExe)); // 如 "DSH Desktop"
   if (portable) {
     script = path.join(dir, 'apply-update.cmd');
     fs.writeFileSync(script, buildPortableCmd(logFile));
@@ -601,6 +717,8 @@ module.exports = {
   buildPortableCmd,
   buildNsisPs1,
   buildNsisCmd,
+  buildMacSh,
+  platformKind,
   isPortable,
   currentArch,
   resolveRepos,

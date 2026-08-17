@@ -4578,14 +4578,14 @@ function quitForClientUpdate(ctx, pending) {
 
 async function runClientUpdateFlow(manual) {
   if (quitting) return;
-  // macOS 第一版暂不支持自动更新（更新机制为 Windows 专属的 exe/安装器
-  // 替换）；入口优雅降级为提示手动下载，避免出现无法落地的更新流程。
-  if (process.platform !== 'win32') {
+  // 客户端自更新支持 Windows（安装版/便携版）与 macOS（.app 替换）；
+  // 其它平台（Linux 等）降级为提示手动下载，避免出现无法落地的更新流程。
+  if (process.platform !== 'win32' && process.platform !== 'darwin') {
     if (manual) {
       await showBox({
         type: 'info',
         title: '检查客户端更新',
-        message: 'macOS 版暂不支持自动更新。',
+        message: '当前平台暂不支持自动更新。',
         detail: '请前往 GitHub Releases 页面下载新版安装包：\nhttps://github.com/myYangyunfan/dsh_desktop/releases',
         buttons: ['确定'],
       });
@@ -4601,7 +4601,7 @@ async function runClientUpdateFlow(manual) {
   // 手动检查时优先处理已下载的待安装包：用户主动点「检查客户端更新」即表明
   // 更新意图，不应被 24h 静默期（clientUpdateSnoozeUntil）挡住——否则会出现
   // 「包已下载却没有任何安装入口，看起来像更新坏了」的体验。
-  if (manual && process.platform === 'win32' && settings.pendingClientUpdate && settings.pendingClientUpdate.path) {
+  if (manual && (process.platform === 'win32' || process.platform === 'darwin') && settings.pendingClientUpdate && settings.pendingClientUpdate.path) {
     const pend = settings.pendingClientUpdate;
     if (fs.existsSync(pend.path) && updater.compareVersions(pend.version, APP_VERSION) > 0) {
       const { response: rp } = await showBox({
@@ -4731,8 +4731,9 @@ async function runClientUpdateFlow(manual) {
 }
 
 function offerPendingClientUpdate() {
-  // macOS 暂不支持自动更新（见 runClientUpdateFlow），忽略历史遗留的待安装标记。
-  if (process.platform !== 'win32') return;
+  // 客户端自更新仅 Windows/macOS（见 runClientUpdateFlow），忽略其它平台的
+  // 历史遗留待安装标记。
+  if (process.platform !== 'win32' && process.platform !== 'darwin') return;
   const ctx = updCtx();
   const settings = updater.loadSettings(ctx);
   const pending = settings.pendingClientUpdate;
@@ -5140,9 +5141,9 @@ async function boot() {
         setTimeout(() => runUpdateFlow(false), 15000).unref();
         setInterval(() => runUpdateFlow(false), AUTO_UPDATE_INTERVAL_MS).unref();
       }
-      if (!process.env.DSH_DESKTOP_SKIP_CLIENT_UPDATE && process.platform === 'win32') {
+      if (!process.env.DSH_DESKTOP_SKIP_CLIENT_UPDATE && (process.platform === 'win32' || process.platform === 'darwin')) {
         // 客户端（封装）更新：启动 60 秒后 + 每 12 小时。
-        // macOS 暂不支持自动更新（见 runClientUpdateFlow），不注册周期检查。
+        // Windows（安装版/便携版）与 macOS（.app 替换）支持；其它平台不注册周期检查。
         setTimeout(() => runClientUpdateFlow(false), 60000).unref();
         setInterval(() => runClientUpdateFlow(false), 12 * 3600 * 1000).unref();
       }
