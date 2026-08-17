@@ -274,7 +274,19 @@ function showNotification({ title, body, onClick } = {}) {
     });
     activeNotifications.add(n);
     n.on('close', () => activeNotifications.delete(n));
-    if (onClick) n.on('click', onClick);
+    // 点击系统通知默认回到应用前台：Windows toast 的点击激活依赖
+    // AppUserModelID（boot() 里 setAppUserModelId）+ 开始菜单快捷方式
+    //（maintainShortcuts 同 id 创建），二者均已就绪。showMainWindow 覆盖
+    // 最小化/隐藏/失焦/关闭到托盘/窗口销毁后重建等全部恢复路径；调用方可
+    // 传自定义 onClick 覆盖（如通知里带操作语义时）。
+    n.on('click', () => {
+      try {
+        if (typeof onClick === 'function') onClick();
+        else showMainWindow();
+      } catch (err) {
+        log('notify', '通知点击处理失败: ' + err.message);
+      }
+    });
     n.show();
     return n;
   } catch {
@@ -2261,16 +2273,11 @@ function onSessionTurnEnd(info) {
   lastGlobalNotifyAt = now;
   log('notify', '任务完成: ' + JSON.stringify(info));
   try {
+    // 点击通知回前台：走 showNotification 的默认行为（showMainWindow 覆盖
+    // 最小化/托盘隐藏/窗口销毁重建/moveTop 等全部恢复路径）。
     showNotification({
       title: info.title || 'DSH 任务完成',
       body: info.body || '会话任务已完成',
-      onClick: () => {
-        if (mainWindow) {
-          if (mainWindow.isMinimized()) mainWindow.restore();
-          mainWindow.show();
-          mainWindow.focus();
-        }
-      },
     });
   } catch (err) {
     log('notify', '通知发送失败: ' + err.message);

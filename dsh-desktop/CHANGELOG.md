@@ -38,6 +38,7 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 - **余额栏消失（ReferenceError: parts is not defined）**：dsh-balance 客户端在对话底部统计栏渲染余额/费用 dock 时引用了已不存在的 `parts` 变量（组件重写把列表变量改名为 `items`/`joined` 时漏改一处）——组件渲染即抛异常，整个余额 dock 静默消失。已改回 `joined.join(" · ")` 并同步到安装副本与 web profile，重启应用即恢复。
 - **余额 dock 左侧显示「Object」**：修复上一处后 dock 恢复显示，但峰谷提示 chip（`peakChip`，React 元素）与文本一起经 `joined.join(" · ")` 拼接——数组 `join` 会把 React 元素 `toString` 成 `[object Object]`，于是 dock 最左侧出现一个「Object」。现 dock 的 `children` 直接传数组（React 原生渲染元素 + 字符串分隔符），高峰/空闲提示正常显示「⛰ 高峰价 / 🌙 空闲价」。
 - **本轮费用估算：未知模型按低价档计费**：`effectivePrice` 对价格表外的模型名（如 `deepseek-v4-max`）此前回退到 `deepseek-v4-flash`（低价档），与「未知模型按高单价估算、避免少报费用」的注释意图相反——现回退到 `deepseek-v4-pro`（最高档）。同时核对计费口径与官方公告一致：输入未命中（含缓存写入）按未命中价、输入缓存命中按命中价、输出按输出价；高峰价 = 北京时间 9:00-12:00 / 14:00-18:00 全价（v4-flash 未命中 3.0 / 命中 0.10 / 输出 9.0，v4-pro 未命中 9.0 / 命中 0.30 / 输出 27.0，¥/百万 token），空闲 = 高峰一半，2026-08-17 00:00（北京时间）起生效。
+- **点击系统通知回到应用前台**：所有系统通知（任务完成 / 崩溃自愈恢复 / 安全模式 / 配置自愈 / 渲染进程恢复）统一支持点击回到应用——`showNotification` 默认给通知挂 `onClick → showMainWindow()`（覆盖最小化、隐藏、关闭到托盘、窗口销毁后重建等全部恢复路径），调用方无需各自实现；任务完成通知的旧实现（仅 restore+show+focus，窗口销毁场景会失效）改为走统一默认。Windows toast 点击激活依赖的 `AppUserModelID`（`com.deepseek.dsh.desktop`）与开始菜单/桌面快捷方式同 id 创建已就绪，点击 toast 即恢复窗口到前台。
 
 ## [0.3.9] — 2026-08-16
 
