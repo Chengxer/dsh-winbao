@@ -128,7 +128,9 @@ function effectivePrice(model, date) {
   if (now.getTime() < PEAK_PRICING_SINCE_UTC) {
     return { ...(LEGACY_PRICES[key] || FALLBACK_PRICES) };
   }
-  const peak = PEAK_PRICES[key] || PEAK_PRICES['deepseek-v4-flash'];
+  // 未知模型名按 v4-pro（最高档）估算：与函数头注释一致，避免少报费用。
+  // （对应官方 53e0a4c 同批修复）
+  const peak = PEAK_PRICES[key] || PEAK_PRICES['deepseek-v4-pro'];
   if (isPeakHour(now)) return { ...peak };
   return {
     cacheMiss: peak.cacheMiss / 2,
