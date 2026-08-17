@@ -102,7 +102,10 @@ window.__ModuleLoader__.load({
 				target: "_blank",
 				rel: "noreferrer",
 				title,
-				children: joined.join(" · ")
+				// children 直接传数组：joined 里混有 React 元素（peakChip 的
+				// <span>）与字符串分隔符，join 会把元素 toString 成
+				// "[object Object]"（曾致 dock 左侧显示 Object）。
+				children: joined
 			});
 			if (!go) return dock;
 			const goDock = react_jsx_runtime.jsx("a", {

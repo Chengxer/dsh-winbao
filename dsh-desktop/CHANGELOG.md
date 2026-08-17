@@ -35,6 +35,8 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 - **插件中枢 dsh-hub（ARFCON/dsh-hub-DSH v1.1.2，内置）**：设置页新增「插件中枢」页签，整合四块能力——① **插件更新引擎**：已装插件版本对比（npm registry / GitHub release/tag）、一键更新与批量更新、sha512 校验 + 备份回滚、启动自检自动修复（损坏的 package.json / cordis.patch.yml 原子写恢复）；② **全局记忆**：5 个 `memory_*` 工具（save / search / list / get / delete），JSONL 存储 `~/.dsh/memory/memories.jsonl`；③ **graph-memory 挂载**：检测到 `plugin-src/graph-memory` 源码自动装配（profile bundles + link + junction，幂等），设置页展示记忆库统计（节点/边/社区）；④ **dsh-market 联动**与**自身更新检查**（raw.githubusercontent + jsDelivr + ghfast.top 多源）。原生适配 Gitee 版 DSH Desktop：客户端最新版本对比走 GitHub + Gitee 双源（与客户端同款「取最高版本」语义），国内用户可直接打开 Gitee 发布页下载。
 - **内置 dsh-hub 插件两处修复**（对齐 ARFCON/dsh-hub-DSH 生态）：插件卸载时先解析 entry id 再删 insert 行（此前先删行后查 id 永远查不到），避免 disable 块残留孤儿条目；客户端安装目录候选增加常见自定义路径（`D:\app\dsh\DSH Desktop`），使「DSH Desktop 客户端」检查与客户端插件更新在自定义安装位置生效。
 - **余额栏消失（ReferenceError: parts is not defined）**：dsh-balance 客户端在对话底部统计栏渲染余额/费用 dock 时引用了已不存在的 `parts` 变量（组件重写把列表变量改名为 `items`/`joined` 时漏改一处）——组件渲染即抛异常，整个余额 dock 静默消失。已改回 `joined.join(" · ")` 并同步到安装副本与 web profile，重启应用即恢复。
+- **余额 dock 左侧显示「Object」**：修复上一处后 dock 恢复显示，但峰谷提示 chip（`peakChip`，React 元素）与文本一起经 `joined.join(" · ")` 拼接——数组 `join` 会把 React 元素 `toString` 成 `[object Object]`，于是 dock 最左侧出现一个「Object」。现 dock 的 `children` 直接传数组（React 原生渲染元素 + 字符串分隔符），高峰/空闲提示正常显示「⛰ 高峰价 / 🌙 空闲价」。
+- **本轮费用估算：未知模型按低价档计费**：`effectivePrice` 对价格表外的模型名（如 `deepseek-v4-max`）此前回退到 `deepseek-v4-flash`（低价档），与「未知模型按高单价估算、避免少报费用」的注释意图相反——现回退到 `deepseek-v4-pro`（最高档）。同时核对计费口径与官方公告一致：输入未命中（含缓存写入）按未命中价、输入缓存命中按命中价、输出按输出价；高峰价 = 北京时间 9:00-12:00 / 14:00-18:00 全价（v4-flash 未命中 3.0 / 命中 0.10 / 输出 9.0，v4-pro 未命中 9.0 / 命中 0.30 / 输出 27.0，¥/百万 token），空闲 = 高峰一半，2026-08-17 00:00（北京时间）起生效。
 
 ## [0.3.9] — 2026-08-16
 
