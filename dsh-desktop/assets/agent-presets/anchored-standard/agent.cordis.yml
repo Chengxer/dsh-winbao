@@ -25,7 +25,7 @@
 # first request via the agent/pre-step waterfall, and waterfall after-next
 # transforms apply in reverse registration order. Registering first (plus the
 # plugin empty inject list and the listener's `prepend` flag) makes this filter
-# strip the final transform, so request #1 stays Minimal-exact (see issue #6).
+# strip the final transform, so request #1 stays Minimal-shaped (Minimal tool pair plus the complete persona's workspace anchor; see issue #6).
 #
 # V4 Pro conditions strongly on the API tool catalog AND the first request
 # output budget. Bootstrap request #1 with the OFFICIAL Minimal preset's real
@@ -69,14 +69,23 @@
 
 # ── identity ────────────────────────────────────────────────────────────────
 
-# Keep this text byte-identical to the Minimal preset. `complete` prevents the
-# Harness identity and per-tool guidance from changing the system prompt, while
-# runtime-context suppression leaves task and repository rules to user messages
-# and explicit file reads. Tool schemas and their runtime enforcement remain.
+# Minimal's base persona plus the desktop workspace anchor. `complete` prevents
+# the Harness identity and per-tool guidance from changing the system prompt,
+# while runtime-context suppression leaves task and repository rules to user
+# messages and explicit file reads. Tool schemas and their runtime enforcement
+# remain.
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: You are a helpful software engineer assistant.
+    text: |-
+      You are a helpful software engineer assistant.
+      Workspace: {{cwd}}.
+
+      Default working location:
+      - Keep file edits, builds, and deliverables under {{cwd}}.
+      - Prefer relative paths; they resolve against {{cwd}}.
+      - You may read or search anywhere. A search hit outside {{cwd}} is reference material, not a new project root.
+      - Work outside {{cwd}} only when the user explicitly named that path or it is genuinely unavoidable; then return to {{cwd}}.
     complete: true
     includeRuntimeContext: false
 

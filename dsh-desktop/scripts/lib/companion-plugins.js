@@ -32,6 +32,7 @@ const COMPANION_PLUGINS = [
   { id: 'conversation-tweaks', name: '@deepseek-ai/dsh-conversation-tweaks' },
   { id: 'super-injector', name: '@dsh-external/dsh-super-injector' },
   { id: 'prompt-custom', name: '@deepseek-ai/dsh-prompt-custom' },
+  { id: 'workspace-anchor', name: '@deepseek-ai/dsh-workspace-anchor' },
   { id: 'third-party-thinking', name: '@deepseek-ai/dsh-third-party-thinking' },
   { id: 'wsl-settings', name: '@deepseek-ai/dsh-wsl-settings' },
   { id: 'dsh-vision', name: '@dsh-external/dsh-vision' },
