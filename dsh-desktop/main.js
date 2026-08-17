@@ -53,7 +53,7 @@ const { reconcileProfileBundles, createEntryListYamlParser, resolveBundleDirLike
 const { COMPANION_PLUGINS } = require('./scripts/lib/companion-plugins');
 const { writeFileAtomic } = require('./scripts/lib/patch-io');
 const { applyPatchToFiles } = require('./scripts/lib/patch-engine');
-const { FLASH_PKG_REL, EXPOSE_PKG_REL, PW_REL, BASH_REL, CODE_PRESET_REL, patchTargets, localCopyFiles, guardCopyFiles, localNodeModulesRoots, transformFlashFix, transformExposeFix, transformShellDescriptionOptional, transformCodeModeCompat, transformAttachmentMimeTrust, ATTACH_LOCAL_REL } = require('./scripts/lib/runtime-patches');
+const { FLASH_PKG_REL, EXPOSE_PKG_REL, PW_REL, BASH_REL, CODE_PRESET_REL, patchTargets, localCopyFiles, guardCopyFiles, localNodeModulesRoots, slotCompatCopyFiles, slotCompatPatchTargets, transformFlashFix, transformExposeFix, transformShellDescriptionOptional, transformCodeModeCompat, transformAttachmentMimeTrust, transformLegacySlotKey, transformSlotUnkeyedCompat, ATTACH_LOCAL_REL } = require('./scripts/lib/runtime-patches');
 const { ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK, removeLegacyMarketplacePatchLines, removedPluginIdsFromPatch, ensureDisabledPatchEntry, registerCompanionPatchEntries, syncCompanionFiles } = require('./scripts/lib/companion-profile');
 const { patchWebSearchBaseUrl } = require('./scripts/patch-web-search-baseurl');
 const { patchMenuViewport } = require('./scripts/patch-menu-viewport');
@@ -2373,6 +2373,7 @@ async function runUpdateFlow(manual) {
         // 缺少壳内置模式的新版本启动。
         syncCompanionPlugins();
         syncBuiltinAgentPresets();
+        applySlotCompatFix();
         applyRuntimeFlashFix();
         applyPromptExposeFix();
         applyShellDescriptionCompatFix();
@@ -2397,6 +2398,7 @@ async function runUpdateFlow(manual) {
         // 点「重启 dsh web 服务」会用未修复的新版本启动（识图发送、设置暴露等回归）。
         // 同时把壳内置 Agent 预设补进新 overlay（干净 npm 包不含 8 个壳预设）。
         syncLocalAgentPresets();
+        applySlotCompatFix();
         applyRuntimeFlashFix();
         applyPromptExposeFix();
         applyShellDescriptionCompatFix();
@@ -4463,6 +4465,39 @@ function runtimeNodeModulesRoots() {
 }
 
 // ---------------------------------------------------------------------------
+// keyed slot 兼容补丁：rc.6 旧插件把 keyed slot 的注册身份放在 `id`，rc.7
+// 改为强制 `key`；dsh-advisor / dsh-llm-fallbacks 则 key/id 都不传，会导致
+// 单个第三方插件拖垮整个 loader（keyed slot "settings.plugin.item" requires
+// options.key）。ui-slots 侧把旧 `id` 提升为 `key`；runner 侧在真正调用
+// register 前为既无 key 又无 id 的注册派生包级兜底 key。两份补丁都幂等，
+// 并覆盖顶层与 dsh 嵌套依赖副本，dsh 更新后下次启动自动重打。
+// ---------------------------------------------------------------------------
+function applySlotCompatFix() {
+  const wslHome = effectiveDshHome();
+  const files = isWslMode()
+    ? slotCompatPatchTargets(wslHome)
+    : slotCompatCopyFiles(dshHome || path.join(os.homedir(), '.dsh'), __dirname, userDataDir);
+  applyPatchToFiles({
+    prefix: 'keyed slot 旧插件兼容补丁',
+    files,
+    log: (m) => log('boot', m),
+    transform: transformLegacySlotKey,
+    alreadyLog: (file) => '已应用，跳过 ' + file,
+    doneLog: (file) => '已兼容旧插件的 keyed slot id ' + file,
+    failLog: (file, err) => 'keyed slot 旧插件兼容补丁失败(' + file + '): ' + err.message,
+  });
+  applyPatchToFiles({
+    prefix: 'keyed slot 无 key 兼容补丁',
+    files,
+    log: (m) => log('boot', m),
+    transform: transformSlotUnkeyedCompat,
+    alreadyLog: (file) => '已应用，跳过 ' + file,
+    doneLog: (file) => '已兼容 keyed slot 无 key 注册 ' + file,
+    failLog: (file, err) => 'keyed slot 无 key 兼容补丁失败(' + file + '): ' + err.message,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // dsh web 运行时闪跳修复：官方 dsh-client-runtime 在会话列表刷新
 // （mergeOrderedBaseline）时会丢弃「本地已创建、宿主全量列表尚未回显」的
 // 新会话，使 current 瞬时变 undefined，UI 闪回「选择工作区/无会话」状态。
@@ -5764,6 +5799,7 @@ async function boot() {
     await wslBackend.ensureInstalled();
     syncCompanionPlugins();
     syncBuiltinAgentPresets();
+    applySlotCompatFix();
     applyRuntimeFlashFix();
     applyPromptExposeFix();
     applyShellDescriptionCompatFix();
@@ -5785,6 +5821,7 @@ async function boot() {
     await repairProfileFallback(home);
     syncCompanionPlugins();
     syncLocalAgentPresets();
+    applySlotCompatFix();
     applyRuntimeFlashFix();
     applyPromptExposeFix();
     applyShellDescriptionCompatFix();

@@ -76,3 +76,13 @@ try {
 } catch (err) {
   console.log('[patch-deps] session-persistence 尾部恢复补丁跳过: ' + (err && err.message ? err.message : err));
 }
+// rc.6 第三方客户端插件用 `id` 注册 keyed slot；rc.7 改为强制 `key`，而
+// dsh-advisor / dsh-llm-fallbacks key/id 都不传，单个插件就能拖垮整个 loader。
+// 只在 keyed slot 缺 key 时兜底；显式 key 与其它 slot 行为保持原样。
+try {
+  const { patchSlotCompat } = require('./patch-slot-compat');
+  const n = patchSlotCompat(path.join(root, 'node_modules'), (m) => console.log(m));
+  if (n > 0) console.log('[patch-deps] keyed slot 兼容补丁已应用（dev node_modules）');
+} catch (err) {
+  console.log('[patch-deps] keyed slot 兼容补丁跳过: ' + (err && err.message ? err.message : err));
+}

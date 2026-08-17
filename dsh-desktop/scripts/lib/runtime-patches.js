@@ -26,6 +26,35 @@ const SETTINGS_NAMESPACES = ['dsh-prompt', 'dsh-third-party-thinking', 'dsh-visi
 const FLASH_PKG_REL = path.join('dsh-client-runtime', 'lib', 'client.js');
 const EXPOSE_PKG_REL = path.join('dsh-host-apiproxy', 'lib', 'index.js');
 const PERSISTENCE_PKG_REL = path.join('dsh-session-persistence-jsonl', 'lib', 'index.js');
+const SLOT_KEY_COMPAT_PKG_REL = path.join('dsh-client-ui-slots', 'lib', 'index.js');
+const SLOT_UNKEYED_COMPAT_PKG_REL = path.join('dsh-cordis-client-runner', 'lib', 'client.js');
+const SLOT_COMPAT_PKG_RELS = [SLOT_KEY_COMPAT_PKG_REL, SLOT_UNKEYED_COMPAT_PKG_REL];
+// rc.6 keyed slots accepted the registration identity through `id`. rc.7 split
+// list identity (`id`) from keyed dispatch identity (`key`), which makes
+// otherwise compatible third-party browser plugins fail the whole loader. Some
+// even older plugins register keyed slots with neither field; the client runner
+// derives a package-scoped fallback key for those instead of letting one plugin
+// take the whole loader down.
+const SLOT_KEY_COMPAT_MARKER = 'dsh-desktop compat: accept legacy keyed-slot id as key';
+const SLOT_KEY_COMPAT_OLD = '\t\tconst spec = rec.spec;\n\t\tconst priority = options.priority ?? 0;';
+const SLOT_KEY_COMPAT_NEW = [
+  '\t\tconst spec = rec.spec;',
+  '\t\tif (spec.kind === "keyed" && options.key === void 0 && options.id !== void 0) {',
+  '\t\t\t// ' + SLOT_KEY_COMPAT_MARKER + '.',
+  '\t\t\toptions = { ...options, key: options.id };',
+  '\t\t}',
+  '\t\tconst priority = options.priority ?? 0;',
+].join('\n');
+const SLOT_UNKEYED_COMPAT_MARKER = 'dsh-desktop compat: derive keyed slot key for unkeyed registrations';
+const SLOT_UNKEYED_COMPAT_OLD = '\t\t\t\t\tconst spec = slots.spec(slot);\n\t\t\t\t\tlet priority = options.priority;';
+const SLOT_UNKEYED_COMPAT_NEW = [
+  '\t\t\t\t\tconst spec = slots.spec(slot);',
+  '\t\t\t\t\tif (spec !== void 0 && spec.kind === "keyed" && options.key === void 0) {',
+  '\t\t\t\t\t\t// ' + SLOT_UNKEYED_COMPAT_MARKER + ': explicit key wins; legacy id promotes; otherwise bind the package identity so one unkeyed plugin cannot fail the whole loader.',
+  '\t\t\t\t\t\toptions.key = options.id !== void 0 ? options.id : (typeof options.registrant === "string" && options.registrant.length > 0 ? options.registrant : env.pkg.pluginId || env.pkg.packageId);',
+  '\t\t\t\t\t}',
+  '\t\t\t\t\tlet priority = options.priority;',
+].join('\n');
 
 // A complete zstd frame can still end with a JSONL fragment when the writer is
 // interrupted after zstd has emitted the frame trailer.  The stock reader
@@ -125,6 +154,34 @@ function localNodeModulesRoots(home, appDir, userDataDir, extraRoots = []) {
 }
 
 /**
+ * Slot compatibility targets include the nested dependency copies shipped by a
+ * clean dsh overlay. Some npm layouts do not hoist client-ui-slots or
+ * cordis-client-runner to the agent/profile root, so patching only the top-level
+ * copies is insufficient.
+ */
+function slotCompatCopyFiles(home, appDir, userDataDir) {
+  const nested = (root, pkgRel) => path.join(root, 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai', pkgRel);
+  const files = [];
+  for (const pkgRel of SLOT_COMPAT_PKG_RELS) {
+    files.push(...localCopyFiles(home, appDir, userDataDir, pkgRel));
+    files.push(...guardCopyFiles(home, appDir, userDataDir, pkgRel));
+    files.push(nested(path.join(home, 'profiles'), pkgRel));
+    files.push(nested(appDir, pkgRel));
+  }
+  return [...new Set(files)];
+}
+function slotCompatPatchTargets(home) {
+  const nested = (root, pkgRel) => path.join(root, 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai', pkgRel);
+  const files = [];
+  for (const pkgRel of SLOT_COMPAT_PKG_RELS) {
+    files.push(...patchTargets(home, pkgRel));
+    files.push(nested(path.join(home, 'profiles'), pkgRel));
+    files.push(nested(path.join(home, 'agent'), pkgRel));
+  }
+  return [...new Set(files)];
+}
+
+/**
  * 闪跳修复变换（纯函数）。锚点失配的 detail 含文件路径，与两个调用方
  * （main.js / 同步脚本）的旧日志文案逐字一致。
  * @returns {{status:'already'} | {status:'anchor-missing', detail: string} | {status:'changed', src: string}}
@@ -184,6 +241,38 @@ function transformPersistenceTornTail(src, file) {
 }
 
 // ---------------------------------------------------------------------------
+/**
+ * Preserve the rc.6 keyed-slot registration contract for third-party client
+ * plugins: an explicit key wins, and a legacy `id` is promoted to `key`.
+ */
+function transformLegacySlotKey(src, file) {
+  if (src.includes(SLOT_KEY_COMPAT_MARKER)) return { status: 'already' };
+  if (!src.includes(SLOT_KEY_COMPAT_OLD)) {
+    return {
+      status: 'anchor-missing',
+      detail: '未找到 keyed slot 兼容锚点（版本可能已变更），跳过 ' + file,
+    };
+  }
+  return { status: 'changed', src: src.replace(SLOT_KEY_COMPAT_OLD, SLOT_KEY_COMPAT_NEW) };
+}
+/**
+ * dsh-advisor / dsh-llm-fallbacks register `settings.plugin.item` without both
+ * `key` and `id`, which makes the rc.7 slot core throw and the whole loader fail.
+ * The runner knows the owning package, so it derives a stable fallback key before
+ * the real register call. Deterministic and narrow: explicit key wins, legacy id
+ * promotes, and only keyed slots with neither field receive the package identity.
+ */
+function transformSlotUnkeyedCompat(src, file) {
+  if (src.includes(SLOT_UNKEYED_COMPAT_MARKER)) return { status: 'already' };
+  if (!src.includes(SLOT_UNKEYED_COMPAT_OLD)) {
+    return {
+      status: 'anchor-missing',
+      detail: '未找到 keyed slot 无 key 注册兼容锚点（版本可能已变更），跳过 ' + file,
+    };
+  }
+  return { status: 'changed', src: src.replace(SLOT_UNKEYED_COMPAT_OLD, SLOT_UNKEYED_COMPAT_NEW) };
+}
+
 // 模型工具兼容补丁（问题背景：code 模式的 run_code 程序经常省略 shell 工具
 // 的 `description`，而该字段只用于 UI/日志展示，不应让整个工具调用失败）。
 // 变换：validateBashArgs / validatePwshArgs 在缺省时用 command 首行自动补值。
@@ -281,6 +370,19 @@ module.exports = {
   PERSISTENCE_PKG_REL,
   PERSISTENCE_TORN_MARKER,
   transformPersistenceTornTail,
+  SLOT_KEY_COMPAT_PKG_REL,
+  SLOT_UNKEYED_COMPAT_PKG_REL,
+  SLOT_COMPAT_PKG_RELS,
+  SLOT_KEY_COMPAT_MARKER,
+  SLOT_KEY_COMPAT_OLD,
+  SLOT_KEY_COMPAT_NEW,
+  SLOT_UNKEYED_COMPAT_MARKER,
+  SLOT_UNKEYED_COMPAT_OLD,
+  SLOT_UNKEYED_COMPAT_NEW,
+  transformLegacySlotKey,
+  transformSlotUnkeyedCompat,
+  slotCompatCopyFiles,
+  slotCompatPatchTargets,
   SHELL_DESC_MARKER,
   SHELL_DESC_VALIDATE_OLD,
   SHELL_DESC_VALIDATE_NEW,

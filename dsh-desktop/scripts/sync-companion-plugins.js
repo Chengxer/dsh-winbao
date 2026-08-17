@@ -12,7 +12,7 @@
 //   node scripts/sync-companion-plugins.js [DSH_HOME] [--with-patches] [--dry-run] [--dsh-package <目录>]
 //     DSH_HOME       目标 dsh 数据目录，默认 ~/.dsh
 //     --with-patches 额外应用运行时补丁（会话列表闪跳、设置暴露白名单、
-//                    shell description 可选化、code preset both、会话日志尾部恢复）
+//                    shell description 可选化、code preset both、会话日志尾部恢复、keyed slot 兼容）
 //     --dry-run      只打印将要做的事，不落盘
 //     --dsh-package  内置 Agent 预设的目标 dsh 包目录（缺省自动探测
 //                    <DSH_HOME>/agent 与 PATH 上的 dsh 命令）
@@ -38,9 +38,11 @@ const { applyPatchToFiles } = require('./lib/patch-engine');
 const { reconcileProfileBundles, createEntryListYamlParser } = require('./lib/profile-reconcile');
 const {
   FLASH_PKG_REL, EXPOSE_PKG_REL, PW_REL, BASH_REL, CODE_PRESET_REL, patchTargets,
+  slotCompatPatchTargets,
   transformFlashFix, transformExposeFix,
   transformShellDescriptionOptional, transformCodeModeCompat,
   transformAttachmentMimeTrust, ATTACH_LOCAL_REL,
+  transformLegacySlotKey, transformSlotUnkeyedCompat,
   PERSISTENCE_PKG_REL, transformPersistenceTornTail,
 } = require('./lib/runtime-patches');
 const {
@@ -269,6 +271,36 @@ function syncPlugins(home, dryRun, dshPkgDir) {
 // ---------------------------------------------------------------------------
 
 function applyRuntimePatches(home, dryRun) {
+  // keyed slot 兼容：rc.6 旧插件把 keyed slot 的注册身份放在 `id`，rc.7
+  // 改为强制 `key`；更老的插件 key/id 都不传（dsh-advisor / dsh-llm-fallbacks），
+  // 会导致单个插件拖垮整个 loader。ui-slots 把旧 id 提升为 key；client-runner
+  // 为既无 key 又无 id 的注册派生包级兜底 key。覆盖顶层与嵌套依赖副本。
+  applyPatchToFiles({
+    prefix: 'keyed slot 旧插件兼容补丁',
+    files: slotCompatPatchTargets(home),
+    log: (m) => log(m),
+    anchorLog: (m) => warn(m),
+    transform: transformLegacySlotKey,
+    alreadyLog: (file) => '已应用，跳过 ' + file,
+    doneLog: (file) => '已兼容旧插件的 keyed slot id ' + file,
+    donePrefix: false,
+    failLog: (file, err) => 'keyed slot 旧插件兼容补丁失败(' + file + '): ' + err.message,
+    dryRun,
+    dryRunChangedLog: (file) => 'dry-run: 将兼容旧插件的 keyed slot id ' + file,
+  });
+  applyPatchToFiles({
+    prefix: 'keyed slot 无 key 兼容补丁',
+    files: slotCompatPatchTargets(home),
+    log: (m) => log(m),
+    anchorLog: (m) => warn(m),
+    transform: transformSlotUnkeyedCompat,
+    alreadyLog: (file) => '已应用，跳过 ' + file,
+    doneLog: (file) => '已兼容 keyed slot 无 key 注册 ' + file,
+    donePrefix: false,
+    failLog: (file, err) => 'keyed slot 无 key 兼容补丁失败(' + file + '): ' + err.message,
+    dryRun,
+    dryRunChangedLog: (file) => 'dry-run: 将兼容 keyed slot 无 key 注册 ' + file,
+  });
   // 会话列表刷新闪跳修复（mergeOrderedBaseline 保留本地新会话）。
   applyPatchToFiles({
     prefix: 'runtime 补丁',

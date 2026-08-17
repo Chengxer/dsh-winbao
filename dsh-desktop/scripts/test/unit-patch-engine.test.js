@@ -15,6 +15,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 
 const { writeFileAtomic, readFileCached } = require('../lib/patch-io');
 const { applyPatchToFiles } = require('../lib/patch-engine');
@@ -22,10 +23,14 @@ const {
   FLASH_OLD, FLASH_NEW, SETTINGS_NAMESPACES,
   FLASH_PKG_REL, EXPOSE_PKG_REL, patchTargets,
   localCopyFiles, guardCopyFiles, localNodeModulesRoots,
+  slotCompatCopyFiles, slotCompatPatchTargets,
   transformFlashFix, transformExposeFix,
-  SHELL_DESC_MARKER, PW_REL, BASH_REL, transformShellDescriptionOptional,
+  SHELL_DESC_MARKER, SHELL_DESC_VALIDATE_OLD, SHELL_DESC_VALIDATE_NEW, PW_REL, BASH_REL, transformShellDescriptionOptional,
   CODE_MODE_MARKER, CODE_MODE_OLD, CODE_MODE_NEW, CODE_PRESET_REL, transformCodeModeCompat,
   ATTACH_MIME_MARKER, ATTACH_MIME_OLD, ATTACH_MIME_NEW, ATTACH_LOCAL_REL, transformAttachmentMimeTrust,
+  SLOT_KEY_COMPAT_PKG_REL, SLOT_UNKEYED_COMPAT_PKG_REL,
+  SLOT_KEY_COMPAT_MARKER, SLOT_KEY_COMPAT_OLD, SLOT_KEY_COMPAT_NEW, transformLegacySlotKey,
+  SLOT_UNKEYED_COMPAT_MARKER, SLOT_UNKEYED_COMPAT_OLD, SLOT_UNKEYED_COMPAT_NEW, transformSlotUnkeyedCompat,
 } = require('../lib/runtime-patches');
 const { COMPANION_PLUGINS, companionDirName } = require('../lib/companion-plugins');
 const {
@@ -253,7 +258,9 @@ test('runtime-patches: 候选路径构造器（本地三副本/防护四副本/W
 test('tool-compat: shell description 兜底变换（真实 vendored 文件 + 幂等）', () => {
   for (const rel of [PW_REL, BASH_REL]) {
     const file = path.join(repoRoot, 'node_modules', '@deepseek-ai', rel);
-    const src = fs.readFileSync(file, 'utf8');
+    const src0 = fs.readFileSync(file, 'utf8');
+    // dev node_modules 可能已被运行时补丁打过：先还原为官方源再验证变换本身。
+    const src = src0.includes(SHELL_DESC_VALIDATE_NEW) ? src0.replace(SHELL_DESC_VALIDATE_NEW, SHELL_DESC_VALIDATE_OLD) : src0;
     const out = transformShellDescriptionOptional(src, file);
     assert.strictEqual(out.status, 'changed', rel + ' 应可补丁');
     assert.ok(out.src.includes(SHELL_DESC_MARKER), rel + ' 应写入幂等标记');
@@ -329,6 +336,69 @@ test('tool-compat: attachment 锚点缺失时跳过且不改写', () => {
   });
 });
 
+test('runtime-patches: keyed slot 旧 id 兼容变换（合成锚点/幂等/失配不改写）', () => {
+  const file = 'C:\\x\\slots.js';
+  const fake = 'before\n' + SLOT_KEY_COMPAT_OLD + '\nafter';
+  const out = transformLegacySlotKey(fake, file);
+  assert.strictEqual(out.status, 'changed');
+  assert.ok(out.src.includes(SLOT_KEY_COMPAT_MARKER), '应写入幂等标记');
+  assert.ok(out.src.includes('options = { ...options, key: options.id };'), '旧 id 应提升为 key');
+  assert.deepStrictEqual(transformLegacySlotKey(out.src, file), { status: 'already' }, '二次应用应幂等');
+  assert.deepStrictEqual(transformLegacySlotKey('export const x = 1;', file), {
+    status: 'anchor-missing',
+    detail: '未找到 keyed slot 兼容锚点（版本可能已变更），跳过 ' + file,
+  });
+});
+
+test('runtime-patches: keyed slot 无 key 注册兜底变换（合成锚点/幂等/失配不改写）', () => {
+  const file = 'C:\\x\\client.js';
+  const fake = 'before\n' + SLOT_UNKEYED_COMPAT_OLD + '\nafter';
+  const out = transformSlotUnkeyedCompat(fake, file);
+  assert.strictEqual(out.status, 'changed');
+  assert.ok(out.src.includes(SLOT_UNKEYED_COMPAT_MARKER), '应写入幂等标记');
+  assert.ok(out.src.includes('options.id !== void 0 ? options.id'), '显式/旧 id 优先，兼容 id→key');
+  assert.ok(out.src.includes('env.pkg.pluginId || env.pkg.packageId'), '既无 key 又无 id 时应派生包级兜底 key');
+  assert.ok(out.src.includes('options.key === void 0'), '仅在缺 key 时兜底');
+  assert.deepStrictEqual(transformSlotUnkeyedCompat(out.src, file), { status: 'already' }, '二次应用应幂等');
+  assert.deepStrictEqual(transformSlotUnkeyedCompat('export const x = 1;', file), {
+    status: 'anchor-missing',
+    detail: '未找到 keyed slot 无 key 注册兼容锚点（版本可能已变更），跳过 ' + file,
+  });
+});
+
+test('runtime-patches: keyed slot 兼容补丁产物可被 node --check 解析', (t) => {
+  const cases = [
+    { rel: SLOT_KEY_COMPAT_PKG_REL, oldText: SLOT_KEY_COMPAT_OLD, newText: SLOT_KEY_COMPAT_NEW, transform: transformLegacySlotKey },
+    { rel: SLOT_UNKEYED_COMPAT_PKG_REL, oldText: SLOT_UNKEYED_COMPAT_OLD, newText: SLOT_UNKEYED_COMPAT_NEW, transform: transformSlotUnkeyedCompat },
+  ];
+  for (const c of cases) {
+    const file = path.join(repoRoot, 'node_modules', '@deepseek-ai', c.rel);
+    const src0 = fs.readFileSync(file, 'utf8');
+    const src = src0.includes(c.newText) ? src0.replace(c.newText, c.oldText) : src0;
+    const out = c.transform(src, file);
+    assert.strictEqual(out.status, 'changed', c.rel + ' 应可补丁');
+    const checkFile = path.join(tmpdir(t), path.basename(file));
+    fs.writeFileSync(checkFile, out.src);
+    const res = spawnSync(process.execPath, ['--check', checkFile], { encoding: 'utf8' });
+    assert.strictEqual(res.status, 0, c.rel + ' 补丁产物必须语法合法: ' + (res.stderr || ''));
+  }
+});
+
+test('runtime-patches: keyed slot 兼容覆盖顶层与 dsh 嵌套依赖副本', () => {
+  const home = 'C:\\home';
+  const appDir = 'C:\\app';
+  const userData = 'C:\\ud';
+  const local = slotCompatCopyFiles(home, appDir, userData);
+  const wsl = slotCompatPatchTargets(home);
+  for (const rel of [SLOT_KEY_COMPAT_PKG_REL, SLOT_UNKEYED_COMPAT_PKG_REL]) {
+    assert.ok(local.includes(path.join(userData, 'agent', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai', rel)), '本地模式应覆盖 overlay 嵌套副本: ' + rel);
+    assert.ok(local.includes(path.join(appDir, 'node_modules', '@deepseek-ai', rel)), '本地模式应覆盖内置副本: ' + rel);
+    assert.ok(wsl.includes(path.join(home, 'profiles', 'node_modules', '@deepseek-ai', rel)), 'WSL 模式应覆盖 profile 副本: ' + rel);
+    assert.ok(wsl.includes(path.join(home, 'agent', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai', rel)), 'WSL 模式应覆盖 agent 嵌套副本: ' + rel);
+  }
+  assert.strictEqual(new Set(local).size, local.length, '本地候选路径不得重复');
+  assert.strictEqual(new Set(wsl).size, wsl.length, 'WSL 候选路径不得重复');
+});
 // D. companion-plugins 唯一数据源
 // ---------------------------------------------------------------------------
 
