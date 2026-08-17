@@ -66,3 +66,13 @@ try {
 } catch (err) {
   console.log('[patch-deps] session-manage 补丁跳过: ' + (err && err.message ? err.message : err));
 }
+
+// 会话进程在 frame 收尾后、JSONL 行写完前中断时，官方读取器会把可恢复的
+// 最终半条记录误判为永久损坏。让它复用已有 torn-tail repair 流程。
+try {
+  const { patchSessionPersistence } = require('./patch-session-persistence');
+  const n = patchSessionPersistence(root, (m) => console.log(m));
+  if (n > 0) console.log('[patch-deps] session-persistence 尾部恢复补丁已应用（dev node_modules）');
+} catch (err) {
+  console.log('[patch-deps] session-persistence 尾部恢复补丁跳过: ' + (err && err.message ? err.message : err));
+}

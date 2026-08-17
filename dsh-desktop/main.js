@@ -54,6 +54,7 @@ const { ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK, removeLegacyMarketplacePatchLines,
 const { patchWebSearchBaseUrl } = require('./scripts/patch-web-search-baseurl');
 const { patchMenuViewport } = require('./scripts/patch-menu-viewport');
 const { patchSessionManage } = require('./scripts/patch-session-manage');
+const { patchSessionPersistence } = require('./scripts/patch-session-persistence');
 const zlib = require('node:zlib');
 
 // ---------------------------------------------------------------------------
@@ -2226,6 +2227,7 @@ async function runUpdateFlow(manual) {
         applyWebSearchBaseUrlFix();
         applyMenuViewportFix();
         applySessionManageFix();
+        applySessionPersistenceFix();
       } else {
         await updater.applyUpdate(ctx, latest);
         // 新 overlay 已就位：立即重打运行时补丁（全部幂等），否则「稍后重启」后再
@@ -2247,6 +2249,7 @@ async function runUpdateFlow(manual) {
         applyWebSearchBaseUrlFix();
         applyMenuViewportFix();
         applySessionManageFix();
+        applySessionPersistenceFix();
       }
       // 进度窗已非模态，但完成对话框弹出前仍先关闭它，避免叠窗/对话框被遮挡。
       closeUpdateWindow(progressWin);
@@ -4574,6 +4577,23 @@ function applySessionManageFix() {
     }
   }
 }
+// ---------------------------------------------------------------------------
+// 会话历史尾部恢复补丁：进程中断可能留下一个结构完整的 zstd frame，但其
+// 解压文本以半条 JSONL 结束。只允许最终 frame 进入官方已有的 torn-tail
+// 截断/重放流程；中段损坏继续拒绝。
+// ---------------------------------------------------------------------------
+function applySessionPersistenceFix() {
+  const targets = runtimeNodeModulesRoots();
+  for (const root of targets) {
+    if (!root || !fs.existsSync(root)) continue;
+    try {
+      const n = patchSessionPersistence(root, (m) => log('boot', m));
+      if (n > 0) log('boot', '会话历史尾部恢复补丁: 已应用到 ' + root);
+    } catch (err) {
+      log('boot', '会话历史尾部恢复补丁失败(' + root + '): ' + err.message);
+    }
+  }
+}
 // 快捷方式维护：修复「没有桌面快捷方式 / 快捷方式指向的文件消失」，
 // 并让快捷方式图标跟随图标设计更新（.lnk 单独指定 icon.ico）。
 // ---------------------------------------------------------------------------
@@ -5293,6 +5313,7 @@ async function boot() {
     applyWebSearchBaseUrlFix();
     applyMenuViewportFix();
     applySessionManageFix();
+    applySessionPersistenceFix();
   } else {
     // 先修复 profile fallback 联接再同步/补丁依赖文件：EPERM 环境下补丁写不进去。
     await repairProfileFallback(home);
@@ -5313,6 +5334,7 @@ async function boot() {
     applyWebSearchBaseUrlFix();
     applyMenuViewportFix();
     applySessionManageFix();
+    applySessionPersistenceFix();
     setupTestChannel();
     if (runKoffiPreflight()) clearAutoPickerBrowseOverlay();
     else enablePickerBrowseOverlay();

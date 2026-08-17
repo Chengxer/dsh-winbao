@@ -36,6 +36,7 @@ const entryFiles = [
   'scripts/patch-web-search-baseurl.js',
   'scripts/patch-menu-viewport.js',
   'scripts/patch-session-manage.js',
+  'scripts/patch-session-persistence.js',
   'scripts/gpu-crash-guard.js',
   'scripts/install-minimal-win-preset.js',
   'scripts/patch-deps.js',

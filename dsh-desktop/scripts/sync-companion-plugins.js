@@ -11,8 +11,8 @@
 // 用法（WSL / Linux / Windows 均可执行）：
 //   node scripts/sync-companion-plugins.js [DSH_HOME] [--with-patches] [--dry-run] [--dsh-package <目录>]
 //     DSH_HOME       目标 dsh 数据目录，默认 ~/.dsh
-//     --with-patches 额外应用运行时补丁（会话列表闪跳修复、设置暴露白名单、
-//                    shell description 可选化、code preset both 兼容）
+//     --with-patches 额外应用运行时补丁（会话列表闪跳、设置暴露白名单、
+//                    shell description 可选化、code preset both、会话日志尾部恢复）
 //     --dry-run      只打印将要做的事，不落盘
 //     --dsh-package  内置 Agent 预设的目标 dsh 包目录（缺省自动探测
 //                    <DSH_HOME>/agent 与 PATH 上的 dsh 命令）
@@ -39,6 +39,7 @@ const {
   transformFlashFix, transformExposeFix,
   transformShellDescriptionOptional, transformCodeModeCompat,
   transformAttachmentMimeTrust, ATTACH_LOCAL_REL,
+  PERSISTENCE_PKG_REL, transformPersistenceTornTail,
 } = require('./lib/runtime-patches');
 const {
   ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK,
@@ -356,6 +357,21 @@ function applyRuntimePatches(home, dryRun) {
     failLog: (file, err) => '图片字节信任补丁失败(' + file + '): ' + err.message,
     dryRun,
     dryRunChangedLog: (file) => 'dry-run: 将信任图片解码字节 ' + file,
+  });
+
+  // 最终完整 zstd frame 内的半条 JSONL 走已有崩溃恢复流程。
+  applyPatchToFiles({
+    prefix: '会话历史尾部恢复补丁',
+    files: patchTargets(home, PERSISTENCE_PKG_REL),
+    log: (m) => log(m),
+    anchorLog: (m) => warn(m),
+    transform: transformPersistenceTornTail,
+    alreadyLog: (file) => '已应用，跳过 ' + file,
+    doneLog: (file) => '已恢复 zstd 尾部容错 ' + file,
+    donePrefix: false,
+    failLog: (file, err) => '会话历史尾部恢复补丁失败(' + file + '): ' + err.message,
+    dryRun,
+    dryRunChangedLog: (file) => 'dry-run: 将恢复 zstd 尾部容错 ' + file,
   });
 }
 

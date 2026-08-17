@@ -25,6 +25,51 @@ const SETTINGS_NAMESPACES = ['dsh-prompt', 'dsh-third-party-thinking', 'dsh-visi
 /** 各补丁目标包内的相对路径（@deepseek-ai/<rel>）。 */
 const FLASH_PKG_REL = path.join('dsh-client-runtime', 'lib', 'client.js');
 const EXPOSE_PKG_REL = path.join('dsh-host-apiproxy', 'lib', 'index.js');
+const PERSISTENCE_PKG_REL = path.join('dsh-session-persistence-jsonl', 'lib', 'index.js');
+
+// A complete zstd frame can still end with a JSONL fragment when the writer is
+// interrupted after zstd has emitted the frame trailer.  The stock reader
+// rejects that state even though the scanner already has a safe committed
+// prefix.  The patch below lets only the final complete frame go through the
+// existing torn-tail repair path.
+const PERSISTENCE_TORN_MARKER = 'dsh-desktop compat: recover complete zstd frame torn JSONL tail';
+const PERSISTENCE_FRAME_LOOP_OLD = 'let remainingFrames = frames.length - 1;\n\t\t\tfor (const plaintext of decodedFrames) {';
+const PERSISTENCE_FRAME_LOOP_NEW = [
+  'let remainingFrames = frames.length - 1;',
+  '\t\t\tlet frameIndex = 1;',
+  '\t\t\tlet tornCompleteFrameStart;',
+  '\t\t\tlet tornCompleteEventCount;',
+  '\t\t\tfor (const plaintext of decodedFrames) {',
+].join('\n');
+const PERSISTENCE_WRITE_OLD = '\t\t\t\tscanner.write(plaintext);\n\t\t\t\tremainingFrames -= 1;';
+const PERSISTENCE_WRITE_NEW = [
+  '\t\t\t\tconst frameCheckpoint = scanner.checkpoint();',
+  '\t\t\t\tscanner.write(plaintext);',
+  '\t\t\t\tconst frameAfter = scanner.checkpoint();',
+  '\t\t\t\tif (frameAfter.committedBytes !== frameAfter.inputBytes) {',
+  '\t\t\t\t\tconst hasTornRecord = scanner.fragmentBytes > 0;',
+  '\t\t\t\t\tif (!hasTornRecord || frameIndex !== frames.length - 1 || tornStart !== void 0 || scanner.issue !== void 0) throw new Error("corrupt Zstandard session log: complete frame contains a torn JSONL record");',
+  '\t\t\t\t\ttornCompleteFrameStart = frames[frameIndex].start;',
+  '\t\t\t\t\ttornCompleteEventCount = frameCheckpoint.eventCount;',
+  '\t\t\t\t}',
+  '\t\t\t\tremainingFrames -= 1;',
+  '\t\t\t\tframeIndex += 1;',
+].join('\n');
+const PERSISTENCE_COMPLETE_CHECK = '\t\t\tif (complete.committedBytes !== complete.inputBytes) throw new Error("corrupt Zstandard session log: complete frame contains a torn JSONL record");';
+const PERSISTENCE_COMPLETE_CHECK_NEW = [
+  '\t\t\tif (tornCompleteFrameStart !== void 0) {',
+  '\t\t\t\tconst prefix = scanner.finish();',
+  '\t\t\t\treturn {',
+  '\t\t\t\t\tmeta: prefix.meta,',
+  '\t\t\t\t\tevents: prefix.events,',
+  '\t\t\t\t\ttornMarker: {',
+  '\t\t\t\t\t\ttruncateTo: tornCompleteFrameStart,',
+  '\t\t\t\t\t\trecoveredEvents: prefix.events.slice(tornCompleteEventCount)',
+  '\t\t\t\t\t}',
+  '\t\t\t\t};',
+  '\t\t\t}',
+  PERSISTENCE_COMPLETE_CHECK,
+].join('\n');
 
 /**
  * WSL 托管模式 / sync CLI 共用目标：profile fallback + agent 两份副本。
@@ -114,6 +159,28 @@ function transformExposeFix(src, file) {
   const hasTrailingComma = /,\s*$/.test(arrText);
   const block = (hasTrailingComma ? '\n' : ',\n') + missing.map((ns) => '\t"' + ns + '"').join(',\n') + '\n';
   return { status: 'changed', src: src.slice(0, closeIdx) + block + src.slice(closeIdx), note: missing };
+}
+
+/**
+ * Treat a final structurally complete zstd frame with an unterminated JSONL
+ * record as a recoverable crash tail.  A torn record in any earlier frame, or
+ * alongside a physically torn frame, remains a hard corruption error.
+ */
+function transformPersistenceTornTail(src, file) {
+  if (src.includes(PERSISTENCE_TORN_MARKER)) return { status: 'already' };
+  if (!src.includes(PERSISTENCE_FRAME_LOOP_OLD)
+    || !src.includes(PERSISTENCE_WRITE_OLD)
+    || !src.includes(PERSISTENCE_COMPLETE_CHECK)) {
+    return {
+      status: 'anchor-missing',
+      detail: '未找到 zstd 会话尾部恢复锚点（版本可能已变更），跳过 ' + file,
+    };
+  }
+  let patched = src.replace(PERSISTENCE_FRAME_LOOP_OLD, PERSISTENCE_FRAME_LOOP_NEW);
+  patched = patched.replace(PERSISTENCE_WRITE_OLD, PERSISTENCE_WRITE_NEW);
+  patched = patched.replace(PERSISTENCE_COMPLETE_CHECK, PERSISTENCE_COMPLETE_CHECK_NEW);
+  patched = '// ' + PERSISTENCE_TORN_MARKER + '\n' + patched;
+  return { status: 'changed', src: patched };
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +278,9 @@ module.exports = {
   localNodeModulesRoots,
   transformFlashFix,
   transformExposeFix,
+  PERSISTENCE_PKG_REL,
+  PERSISTENCE_TORN_MARKER,
+  transformPersistenceTornTail,
   SHELL_DESC_MARKER,
   SHELL_DESC_VALIDATE_OLD,
   SHELL_DESC_VALIDATE_NEW,

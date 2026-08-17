@@ -35,6 +35,7 @@ const { installBuiltinPresets } = require('./install-minimal-win-preset');
 const { patchWebSearchBaseUrl } = require('./patch-web-search-baseurl');
 const { patchMenuViewport } = require('./patch-menu-viewport');
 const { patchSessionManage } = require('./patch-session-manage');
+const { patchSessionPersistence } = require('./patch-session-persistence');
 
 // Regexes for files that are safe to delete (pure metadata / dev artifacts).
 const DROP_BASENAME = /^(LICENSE.*|README.*|CHANGELOG.*|HISTORY.*|COPYING.*|NOTICE.*|AUTHORS.*|SECURITY.*|CONTRIBUTING.*|\.gitignore|\.npmignore|\.editorconfig|\.eslintrc.*|\.prettierrc.*|\.babelrc.*)$/i;
@@ -152,7 +153,9 @@ module.exports = async function afterPack(context) {
     // client-connection / client-ui-workspace）。
     const smChanged = patchSessionManage(appNm, (m) => console.log('afterPack: ' + m));
     console.log(`afterPack: session manage ${smChanged > 0 ? `patched (${smChanged} files)` : 'already up to date'}`);
+    const spChanged = patchSessionPersistence(appNm, (m) => console.log('afterPack: ' + m));
+    console.log(`afterPack: session torn-tail recovery ${spChanged > 0 ? 'patched' : 'already up to date'}`);
   } else {
-    console.warn('afterPack: bundled app node_modules not found — web-search baseURL / menu viewport / session manage patch skipped');
+    console.warn('afterPack: bundled app node_modules not found — web-search baseURL / menu viewport / session manage / session recovery patches skipped');
   }
 };
