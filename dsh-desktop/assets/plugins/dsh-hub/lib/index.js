@@ -39,7 +39,7 @@
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { spawn, spawnSync } from 'node:child_process'
 import {
-  copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync,
+  copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -1853,10 +1853,15 @@ function gmSourceStatus() {
   }
   // 随 DSH Desktop 内置分发：companion 同步器把 assets/plugins/graph-memory 复制进
   // profile node_modules 并登记 bundles，无需 plugin-src 源码目录。
-  const bundledPkg = path.join(profileDir(), 'node_modules', GRAPH_MEMORY_PKG, 'package.json')
+  const bundledDir = path.join(profileDir(), 'node_modules', GRAPH_MEMORY_PKG)
+  const bundledPkg = path.join(bundledDir, 'package.json')
   if (existsSync(bundledPkg)) {
-    const meta = readJson(bundledPkg)
-    return { present: true, version: meta?.version ?? null, dir: path.dirname(bundledPkg), source: 'bundled' }
+    let isJunction = false
+    try { isJunction = lstatSync(bundledDir).isSymbolicLink() } catch { /* 目录不可读按非 junction 处理 */ }
+    if (!isJunction) {
+      const meta = readJson(bundledPkg)
+      return { present: true, version: meta?.version ?? null, dir: bundledDir, source: 'bundled' }
+    }
   }
   return { present: false }
 }
