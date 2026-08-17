@@ -1,4 +1,5 @@
-// @deepseek-ai/dsh-vision 客户端半边：DSH 设置页的「识图插件」栏。
+// @deepseek-ai/dsh-vision 客户端半边：DSH 设置页的「识图插件」栏 +
+// composer 工具行的「🖼 添加图片」按钮（多模态体感入口）。
 // 字段与宿主半边 Config 一一对应：baseURL / apiKey / model /
 // fallbackModels / maxTokens / timeoutMs / maxImageBytes。
 window.__ModuleLoader__.load({
@@ -11,7 +12,7 @@ window.__ModuleLoader__.load({
     const react = require("react");
     const { jsx, jsxs } = require("react/jsx-runtime");
     const { bindSnapshotSelector } = require("@deepseek-ai/dsh-client-web-react");
-    const { Button } = require("@deepseek-ai/dsh-client-ui-primitives");
+    const { Button, Tooltip } = require("@deepseek-ai/dsh-client-ui-primitives");
 
     const NS = "dsh-vision";
     const DEFAULTS = {
@@ -24,7 +25,7 @@ window.__ModuleLoader__.load({
 
     const L = {
       nav: "识图插件（view_image）",
-      navSub: "为纯文本模型提供识图能力。填写任意 OpenAI 兼容 VLM 端点的地址与密钥后，会话中即可调用 view_image 工具。",
+      navSub: "为纯文本模型提供识图能力。填写任意 OpenAI 兼容 VLM 端点的地址与密钥后，会话中即可调用 view_image 工具；输入框旁的「🖼」按钮可直接发图，发送后由后台自动识别（识别结果以文本形式带入对话）。",
       baseURLLabel: "API 地址",
       baseURLHint: "OpenAI 兼容 base URL，例如 https://open.bigmodel.cn/api/paas/v4 或 http://localhost:11434/v1",
       apiKeyLabel: "API 密钥",
@@ -40,7 +41,8 @@ window.__ModuleLoader__.load({
       saving: "保存中…",
       saved: "已保存",
       loading: "加载中…",
-      unavailable: "设置不可用（需要在本机浏览器中打开）"
+      unavailable: "设置不可用（需要在本机浏览器中打开）",
+      imageButton: "添加图片（发送后自动识别）"
     };
 
     function fieldRow(label, hint, input) {
@@ -155,6 +157,32 @@ window.__ModuleLoader__.load({
       });
     }
 
+    // —— 多模态体感：composer 工具行「🖼 添加图片」按钮 ——
+    // 选文件 → 官方 createDraftImages 校验/注册（MIME 白名单、限额）→
+    // inputActions.addImages 加入草稿，与官方粘贴/拖放同一链路；发送后由
+    // 宿主半边 agent/pre-step 后台识别，图片不会到达纯文本模型。
+    // 组件 props 由 slots 渲染器注入 standard kit（session 作用域）：
+    // inputActions = 官方 InputActions（sessions.provide props 注入）。
+    const IMAGE_BUTTON_CSS = [
+      ".dsh-vision-image-btn{display:inline-flex;align-items:center;justify-content:center;",
+      "width:24px;height:24px;padding:0;border:none;border-radius:6px;background:transparent;",
+      "cursor:pointer;font-size:14px;line-height:1;color:var(--dsw-alias-label-tertiary);",
+      "transition:background-color .15s,color .15s}",
+      ".dsh-vision-image-btn:hover:not(:disabled){background:rgba(127,127,127,.14);color:var(--dsw-alias-label-secondary)}",
+      ".dsh-vision-image-btn:disabled{opacity:.45;cursor:default}"
+    ].join("");
+
+    const CSS_TAG = "@dsh-external/dsh-vision/client.css";
+    function ensureCss() {
+      if (typeof document === "undefined") return;
+      if (document.querySelector("style[data-plugin-css=" + JSON.stringify(CSS_TAG) + "]")) return;
+      const tag = document.createElement("style");
+      tag.dataset.plugin = "@dsh-external/dsh-vision";
+      tag.dataset.pluginCss = CSS_TAG;
+      tag.textContent = IMAGE_BUTTON_CSS;
+      document.head.appendChild(tag);
+    }
+
     function apply(ctx) {
       const scope = ctx.settingsScope.bind({ namespace: NS });
       const useScope = bindSnapshotSelector(scope);
@@ -165,6 +193,68 @@ window.__ModuleLoader__.load({
         label: () => L.nav,
         inject: () => ({ useScope, scope })
       }, VisionSettingsCard), "dsh-vision: settings section entry");
+
+      ensureCss();
+      // conversation 服务（createDraftImages/releaseDraftImages）由
+      // ui-conversation 注册在根上下文；缺失时按钮禁用而非崩溃。
+      let conversation;
+      try { conversation = ctx.get("conversation"); } catch { conversation = undefined; }
+      const canAttach = !!conversation && typeof conversation.createDraftImages === "function" &&
+        typeof conversation.releaseDraftImages === "function";
+
+      function VisionImageButton({ inputActions }) {
+        const fileRef = react.useRef(null);
+        const actions = inputActions || {};
+        const disabled = !canAttach || typeof actions.addImages !== "function";
+        const pick = () => {
+          if (!disabled && fileRef.current) fileRef.current.click();
+        };
+        const onChange = (e) => {
+          const files = Array.from(e.target.files || []);
+          e.target.value = "";
+          if (files.length === 0) return;
+          try {
+            const images = conversation.createDraftImages(files);
+            if (!actions.addImages(images.map((image) => image.id))) conversation.releaseDraftImages(images);
+          } catch (error) {
+            console.warn("[dsh-vision] 添加图片失败:", error);
+            if (typeof actions.notify === "function") {
+              actions.notify("error", error instanceof Error ? error.message : String(error));
+            }
+          }
+        };
+        return jsxs(react.Fragment, {
+          children: [
+            jsx("input", {
+              ref: fileRef,
+              type: "file",
+              accept: "image/*",
+              multiple: true,
+              style: { display: "none" },
+              onChange
+            }),
+            jsx(Tooltip, {
+              label: L.imageButton,
+              side: "top",
+              delayMs: 500,
+              children: jsx("button", {
+                type: "button",
+                className: "dsh-vision-image-btn",
+                "aria-label": L.imageButton,
+                disabled,
+                onClick: pick,
+                children: "🖼"
+              })
+            })
+          ]
+        });
+      }
+
+      ctx.slots.inject("conversation.input.left", () => ctx.slots.register({
+        name: "conversation.input.left",
+        id: "dsh-vision-image",
+        order: 80
+      }, VisionImageButton), "dsh-vision: image attach button");
     }
 
     exports.apply = apply;

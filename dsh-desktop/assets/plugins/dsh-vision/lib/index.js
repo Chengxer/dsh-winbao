@@ -4,6 +4,14 @@
  * endpoint and returns the answer as text. Backend is fully configurable —
  * Zhipu's free glm-4.6v-flash (default), DashScope, Ark, a local Ollama, or
  * DeepSeek's own vision API the day it ships (users' existing key then just works).
+ *
+ * Multimodal-feel layer: images the user attaches directly to a message
+ * (composer attach button / paste / drop) are intercepted at the
+ * `agent/pre-step` boundary and replaced with their VLM recognition text
+ * BEFORE the conversation reaches the (text-only) LLM adapter — sending a
+ * picture feels like a multimodal model, and the recognition stays in the
+ * background. Recognition failures degrade to an explanatory text block and
+ * never block the conversation.
  * @module dsh-vision
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
@@ -51,11 +59,155 @@ const NS = settingsNamespace('dsh-vision');
 let liveConfig = () => ({});
 
 const PROMPT_TEXT = `## Vision (view_image)
-The chat model itself cannot see images, but the view_image tool can. Whenever an image matters — a screenshot path the user mentions, an image URL, a chart, a UI mockup — call view_image instead of guessing or refusing. Ask it a specific question (extract text, count objects, read a chart, describe the layout); it answers arbitrary questions, not just captions. Prefer one focused call per thing you need to know; ask a follow-up call rather than one vague question.`;
+The chat model itself cannot see images, but the view_image tool can. Whenever an image matters — a screenshot path the user mentions, an image URL, a chart, a UI mockup — call view_image instead of guessing or refusing. Ask it a specific question (extract text, count objects, read a chart, describe the layout); it answers arbitrary questions, not just captions. Prefer one focused call per thing you need to know; ask a follow-up call rather than one vague question.
+Images the user attaches to a message are recognized automatically in the background and arrive as "[图片] 识别结果" text blocks — treat them as ordinary text context (the image itself never reaches the model).`;
 const TEXT_OUTPUT = {
     schema: { type: 'string' },
     render: (_args, value) => [{ type: 'text', text: String(value) }],
 };
+
+/**
+ * Cache cap for per-attachment recognition text. A turn re-claims messages on
+ * later steps and the same attachment can legitimately recur across a long
+ * session; caching the text avoids re-calling the VLM for the same bytes,
+ * while the cap keeps memory bounded.
+ */
+const IMAGE_TEXT_CACHE_LIMIT = 64;
+
+/**
+ * Ask the configured VLM chain one question about one image (primary model,
+ * then fallbacks on 429/404/5xx, plus the 1024-token downgrade retry for
+ * legacy models). Reused by both the `view_image` tool and the automatic
+ * attach-image recognition.
+ * @param resolved - effective config from {@link current}.
+ * @param apiKey - resolved key ('' for keyless local endpoints).
+ * @param source - image as http(s)/data: URL (auto path already base64s bytes).
+ * @param question - what to find out about the image.
+ * @param signal - turn cancellation.
+ * @returns the recognition text.
+ * @throws the last error when every model failed.
+ */
+export async function recognizeWithFallbacks(resolved, apiKey, source, question, signal) {
+    let lastError;
+    for (const model of [resolved.model, ...resolved.fallbackModels]) {
+        try {
+            return await visionChat({ ...resolved, model, apiKey, source, question, signal });
+        }
+        catch (error) {
+            lastError = error;
+            if (!(error instanceof Error)) throw error;
+            // 400（可能是 max_tokens 超上限，如智谱 code 1210）：降档到 1024
+            // 重试同一模型一次，而不是直接放弃——fallback 链只对 429/404/5xx 生效。
+            if (MAX_TOKENS_REJECTED.test(error.message) && resolved.maxTokens > 1024) {
+                try {
+                    return await visionChat({ ...resolved, model, apiKey, source, question, maxTokens: 1024, signal });
+                }
+                catch (error2) {
+                    lastError = error2;
+                    if (!(error2 instanceof Error) || !RETRIABLE.test(error2.message)) throw error2;
+                    continue;
+                }
+            }
+            if (!RETRIABLE.test(error.message)) throw error;
+        }
+    }
+    throw lastError;
+}
+
+/**
+ * Recognize one image block into text. NEVER throws: every failure (invalid
+ * ref, oversized image, attachment store outage, VLM error, abort) degrades
+ * to an explanatory text block so the conversation always proceeds.
+ * @param block - the image content block ({type:'image', attachment: ref}).
+ * @param question - user message text ('' when the message is image-only).
+ * @param deps - { readImage, recognize, signal, maxImageBytes, cache }.
+ */
+async function describeImageBlock(block, question, deps) {
+    const ref = block && block.attachment;
+    if (!ref || typeof ref !== 'object' || typeof ref.attachmentId !== 'string' || typeof ref.mediaType !== 'string') {
+        return '[图片未识别] 附件引用无效，该图片被跳过。';
+    }
+    const cache = deps.cache;
+    if (cache) {
+        const cached = cache.get(ref.attachmentId);
+        if (cached !== undefined) return cached;
+    }
+    let text;
+    try {
+        const maxBytes = typeof deps.maxImageBytes === 'number' ? deps.maxImageBytes : 10 * 1024 * 1024;
+        if (typeof ref.bytes === 'number' && ref.bytes > maxBytes) {
+            text = `[图片未识别] 图片 ${ref.bytes} 字节超过 ${maxBytes} 字节上限（可在识图插件设置中调大 maxImageBytes）。`;
+        }
+        else {
+            const { readImage, recognize } = deps;
+            const read = await readImage(ref, deps.signal);
+            const data = read && read.data instanceof Uint8Array ? read.data : read;
+            if (!(data instanceof Uint8Array)) throw new Error('附件读取未返回图像字节');
+            const source = `data:${ref.mediaType};base64,${Buffer.from(data).toString('base64')}`;
+            const questionText = typeof question === 'string' && question.trim() !== ''
+                ? question
+                : '请描述这张图片：包括所有可见文字（逐字）、整体布局与值得注意的细节。';
+            text = await recognize(source, questionText, deps.signal);
+        }
+    }
+    catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        text = `[图片识别失败] ${reason}（已跳过该图片，其余对话不受影响）。`;
+    }
+    if (cache) {
+        if (cache.size >= IMAGE_TEXT_CACHE_LIMIT) cache.clear();
+        cache.set(ref.attachmentId, text);
+    }
+    return text;
+}
+
+/**
+ * Replace every image block in the claimed messages with its recognition
+ * text. Pure over the injected deps, so it is unit-testable without cordis.
+ * Messages without images pass through untouched (changed=false, zero cost).
+ * @param messages - claimed message array (agent/pre-step payload.messages).
+ * @param deps - { readImage(ref, signal), recognize(source, question, signal),
+ *   signal?, maxImageBytes?, cache? (Map)}.
+ * @returns { messages, changed }.
+ */
+export async function convertMessagesWithImages(messages, deps) {
+    if (!Array.isArray(messages)) return { messages, changed: false };
+    let changed = false;
+    const out = [];
+    for (const message of messages) {
+        if (!message || !Array.isArray(message.content)) {
+            out.push(message);
+            continue;
+        }
+        const imageBlocks = message.content.filter((b) => b && b.type === 'image');
+        if (imageBlocks.length === 0) {
+            out.push(message);
+            continue;
+        }
+        changed = true;
+        // 用户消息里的文本部分就是识别问题（贴合「这张图里写了什么」这类问法）。
+        const question = message.content
+            .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+            .map((b) => b.text)
+            .join('')
+            .trim();
+        const blocks = [];
+        let index = 0;
+        for (const block of message.content) {
+            if (!block || block.type !== 'image') {
+                blocks.push(block);
+                continue;
+            }
+            index += 1;
+            const label = imageBlocks.length > 1 ? `[图片 ${index}/${imageBlocks.length}]` : '[图片]';
+            const description = await describeImageBlock(block, question, deps);
+            blocks.push({ type: 'text', text: `${label} 识别结果：\n${description}` });
+        }
+        out.push({ ...message, content: blocks });
+    }
+    return { messages: out, changed };
+}
+
 export function apply(ctx, config) {
     liveConfig = () => config || {};
     // settings 已在本插件 inject 中声明，apply 时服务必在；直接同步注册并
@@ -130,32 +282,7 @@ export function apply(ctx, config) {
             const question = typeof input.question === 'string' && input.question !== ''
                 ? input.question
                 : 'Describe this image thoroughly. Include any visible text verbatim, the overall layout, and notable details.';
-            const resolved = current();
-            const apiKey = resolveApiKey();
-            let lastError;
-            for (const model of [resolved.model, ...resolved.fallbackModels]) {
-                try {
-                    return await visionChat({ ...resolved, model, apiKey, source, question, signal: exec.signal });
-                }
-                catch (error) {
-                    lastError = error;
-                    if (!(error instanceof Error)) throw error;
-                    // 400（可能是 max_tokens 超上限，如智谱 code 1210）：降档到 1024
-                    // 重试同一模型一次，而不是直接放弃——fallback 链只对 429/404/5xx 生效。
-                    if (MAX_TOKENS_REJECTED.test(error.message) && resolved.maxTokens > 1024) {
-                        try {
-                            return await visionChat({ ...resolved, model, apiKey, source, question, maxTokens: 1024, signal: exec.signal });
-                        }
-                        catch (error2) {
-                            lastError = error2;
-                            if (!(error2 instanceof Error) || !RETRIABLE.test(error2.message)) throw error2;
-                            continue;
-                        }
-                    }
-                    if (!RETRIABLE.test(error.message)) throw error;
-                }
-            }
-            throw lastError;
+            return recognizeWithFallbacks(current(), resolveApiKey(), source, question, exec.signal);
         },
     })), 'dsh-vision.tool');
     ctx.effect(() => ctx.systemPrompt.section({
@@ -163,4 +290,32 @@ export function apply(ctx, config) {
         order: 116,
         text: PROMPT_TEXT,
     }), 'dsh-vision.prompt');
+    // —— 多模态体感：用户直接发图 → 后台 VLM 识别后以文本送入纯文本模型 ——
+    // agent/pre-step 是每次 step 前的 waterfall（payload={messages, turn, step,
+    // signal}）；监听器返回新 payload 即整体覆盖（非 reject 即 enter）。只在
+    // 有 image block 时才改写，否则 next(payload) 零开销放行。{global:true} 让
+    // 本插件（非 agent 作用域）也能收到 agent 作用域事件（与 llm/stream 同款）。
+    // 识别结果按 attachmentId 缓存（同图跨步/跨轮不重复请求 VLM）。
+    const imageTextCache = new Map();
+    ctx.effect(() => ctx.on('agent/pre-step', async (payload, next) => {
+        const messages = payload && Array.isArray(payload.messages) ? payload.messages : null;
+        if (!messages) return next(payload);
+        let attachments;
+        try { attachments = ctx.attachments; } catch { attachments = undefined; }
+        const converted = await convertMessagesWithImages(messages, {
+            readImage: async (ref, signal) => {
+                if (!attachments || typeof attachments.readImage !== 'function') {
+                    throw new Error('附件存储服务不可用（attachments.readImage 缺失）');
+                }
+                return attachments.readImage(ref, signal);
+            },
+            recognize: (source, question, signal) =>
+                recognizeWithFallbacks(current(), resolveApiKey(), source, question, signal),
+            signal: payload.signal,
+            cache: imageTextCache,
+            maxImageBytes: current().maxImageBytes,
+        });
+        if (!converted.changed) return next(payload);
+        return { ...payload, messages: converted.messages };
+    }, { global: true, prepend: true }), 'dsh-vision.agent-pre-step');
 }
