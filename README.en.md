@@ -1,4 +1,4 @@
-![DSH Desktop](https://cdn.jsdelivr.net/gh/myYangyunfan/dsh_desktop@main/docs/banner.en.svg)
+![DSH Desktop](https://cdn.jsdelivr.net/gh/myYangyunfan/dsh_desktop@5c673d6/docs/banner.en.svg)
 
 **A ready-to-use desktop client for DeepSeek Harness (Windows / macOS)**
 

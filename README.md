@@ -1,4 +1,4 @@
-![DSH Desktop](https://cdn.jsdelivr.net/gh/myYangyunfan/dsh_desktop@main/docs/banner.svg)
+![DSH Desktop](https://cdn.jsdelivr.net/gh/myYangyunfan/dsh_desktop@5c673d6/docs/banner.svg)
 
 **把 DeepSeek Harness 装进桌面（Windows / macOS）的开箱即用客户端**
 
