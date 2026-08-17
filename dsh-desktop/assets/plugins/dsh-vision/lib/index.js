@@ -6,12 +6,14 @@
  * DeepSeek's own vision API the day it ships (users' existing key then just works).
  *
  * Multimodal-feel layer: images the user attaches directly to a message
- * (composer attach button / paste / drop) are intercepted at the
- * `agent/pre-step` boundary and replaced with their VLM recognition text
- * BEFORE the conversation reaches the (text-only) LLM adapter — sending a
- * picture feels like a multimodal model, and the recognition stays in the
- * background. Recognition failures degrade to an explanatory text block and
- * never block the conversation.
+ * (composer attach button / paste / drop) are intercepted at the `llm/stream`
+ * waterfall — the LLM service's per-call boundary — and replaced with their
+ * VLM recognition text BEFORE the (text-only) LLM adapter sees them. The
+ * interception rewrites only the request copy that goes to the model; the
+ * session log keeps the original message with its image attachment, so the
+ * user interface always shows the picture cards and the recognition text
+ * never leaks back into the conversation. Recognition failures degrade to an
+ * explanatory text block and never block the conversation.
  * @module dsh-vision
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
@@ -60,7 +62,7 @@ let liveConfig = () => ({});
 
 const PROMPT_TEXT = `## Vision (view_image)
 The chat model itself cannot see images, but the view_image tool can. Whenever an image matters — a screenshot path the user mentions, an image URL, a chart, a UI mockup — call view_image instead of guessing or refusing. Ask it a specific question (extract text, count objects, read a chart, describe the layout); it answers arbitrary questions, not just captions. Prefer one focused call per thing you need to know; ask a follow-up call rather than one vague question.
-Images the user attaches to a message are recognized automatically in the background and arrive as "[图片] 识别结果" text blocks — treat them as ordinary text context (the image itself never reaches the model).`;
+Images the user attaches to a message are recognized automatically in the background and arrive as "[图片] 识别结果" text blocks — treat them as ordinary text context (the image itself never reaches the model). The user interface keeps showing the original picture; only the model sees the recognition text.`;
 const TEXT_OUTPUT = {
     schema: { type: 'string' },
     render: (_args, value) => [{ type: 'text', text: String(value) }],
@@ -291,31 +293,89 @@ export function apply(ctx, config) {
         text: PROMPT_TEXT,
     }), 'dsh-vision.prompt');
     // —— 多模态体感：用户直接发图 → 后台 VLM 识别后以文本送入纯文本模型 ——
-    // agent/pre-step 是每次 step 前的 waterfall（payload={messages, turn, step,
-    // signal}）；监听器返回新 payload 即整体覆盖（非 reject 即 enter）。只在
-    // 有 image block 时才改写，否则 next(payload) 零开销放行。{global:true} 让
-    // 本插件（非 agent 作用域）也能收到 agent 作用域事件（与 llm/stream 同款）。
-    // 识别结果按 attachmentId 缓存（同图跨步/跨轮不重复请求 VLM）。
+    // 拦截点选在 llm/stream（LLM 服务的每次流式调用 waterfall，payload 是
+    // request 信封，含 messages）。它比 agent/pre-step 更靠后、更干净：替换
+    // 只作用于「送进模型的消息副本」，session 里 append 的仍是原始消息
+    // （image block 原样）→ 用户界面始终显示图片卡片，识别文本永不回流 UI。
+    // llm/stream 是同步链（listener 必须同步返回流，fallback 是流工厂）；
+    // 识别是异步的，所以返回一个包装 async generator：先 await 识别，再以
+    // 转换后的消息重入 llm.stream()（带防重入标记，完整链含校验重走一遍）。
+    const VISION_CONVERTED = Symbol('dsh-vision.converted');
     const imageTextCache = new Map();
-    ctx.effect(() => ctx.on('agent/pre-step', async (payload, next) => {
-        const messages = payload && Array.isArray(payload.messages) ? payload.messages : null;
-        if (!messages) return next(payload);
-        let attachments;
-        try { attachments = ctx.attachments; } catch { attachments = undefined; }
-        const converted = await convertMessagesWithImages(messages, {
-            readImage: async (ref, signal) => {
-                if (!attachments || typeof attachments.readImage !== 'function') {
-                    throw new Error('附件存储服务不可用（attachments.readImage 缺失）');
+    const visionHandler = createLlmStreamHandler({
+        convert: async (messages, signal) => {
+            let attachments;
+            try { attachments = ctx.attachments; } catch { attachments = undefined; }
+            return convertMessagesWithImages(messages, {
+                readImage: async (ref, sig) => {
+                    if (!attachments || typeof attachments.readImage !== 'function') {
+                        throw new Error('附件存储服务不可用（attachments.readImage 缺失）');
+                    }
+                    return attachments.readImage(ref, sig);
+                },
+                recognize: (source, question, sig) =>
+                    recognizeWithFallbacks(current(), resolveApiKey(), source, question, sig),
+                signal,
+                cache: imageTextCache,
+                maxImageBytes: current().maxImageBytes,
+            });
+        },
+        getLlm: () => {
+            try { return ctx.get('llm'); } catch { return undefined; }
+        },
+        markerKey: VISION_CONVERTED,
+    });
+    ctx.effect(() => ctx.on('llm/stream', visionHandler, { global: true, prepend: true }), 'dsh-vision.llm-stream');
+}
+
+/**
+ * Build the `llm/stream` waterfall listener that rewrites image-bearing
+ * request messages into their recognition text. Pure over the injected deps,
+ * so it is unit-testable without cordis.
+ *
+ * Contract: the listener is synchronous (the waterfall returns its value
+ * verbatim and the consumer `for await`s it as a stream). Image recognition
+ * is async, so for requests that actually contain image blocks the listener
+ * returns a wrapping async generator that (1) awaits the conversion, (2)
+ * re-enters `llm.stream()` with the converted messages plus a re-entry marker
+ * when anything changed, or (3) falls through to the original chain via
+ * `next()` when nothing changed or the LLM service is unavailable. Requests
+ * without images (and already-marked re-entries) pass through untouched.
+ * @param deps - { convert(messages, signal) → Promise<{messages, changed}>,
+ *   getLlm() → {stream(options)}, markerKey (Symbol) }.
+ * @returns the (options, next) => stream listener.
+ */
+export function createLlmStreamHandler(deps) {
+    const hasImageBlocks = (messages) => Array.isArray(messages) && messages.some((m) =>
+        m && Array.isArray(m.content) && m.content.some((b) => b && b.type === 'image'));
+    return (options, next) => {
+        if (options === null || typeof options !== 'object') return next();
+        if (deps.markerKey !== undefined && options[deps.markerKey] === true) return next();
+        if (!hasImageBlocks(options.messages)) return next();
+        const signal = options && options.signal !== undefined ? options.signal : undefined;
+        return (async function* () {
+            let messages = options.messages;
+            try {
+                const converted = await deps.convert(options.messages, signal);
+                if (converted && converted.changed && Array.isArray(converted.messages)) {
+                    messages = converted.messages;
                 }
-                return attachments.readImage(ref, signal);
-            },
-            recognize: (source, question, signal) =>
-                recognizeWithFallbacks(current(), resolveApiKey(), source, question, signal),
-            signal: payload.signal,
-            cache: imageTextCache,
-            maxImageBytes: current().maxImageBytes,
-        });
-        if (!converted.changed) return next(payload);
-        return { ...payload, messages: converted.messages };
-    }, { global: true, prepend: true }), 'dsh-vision.agent-pre-step');
+            }
+            catch (error) {
+                console.warn('[dsh-vision] recognition failed, sending original messages: ' + ((error instanceof Error ? error.message : String(error)) || error));
+            }
+            if (messages === options.messages) {
+                yield* next();
+                return;
+            }
+            let llm;
+            try { llm = deps.getLlm(); } catch { llm = undefined; }
+            if (!llm || typeof llm.stream !== 'function') {
+                yield* next();
+                return;
+            }
+            const marked = deps.markerKey === undefined ? options : { ...options, [deps.markerKey]: true };
+            yield* llm.stream({ ...marked, messages });
+        })();
+    };
 }

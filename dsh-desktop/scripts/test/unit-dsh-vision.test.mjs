@@ -1,8 +1,8 @@
-// dsh-vision 图片自动识别（agent/pre-step 转换）单测。
+// dsh-vision 图片自动识别（llm/stream 转换 + 前端多文件上传纯函数）单测。
 // 运行：node --test scripts/test/unit-dsh-vision.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { convertMessagesWithImages } from "../../assets/plugins/dsh-vision/lib/index.js";
+import { convertMessagesWithImages, createLlmStreamHandler } from "../../assets/plugins/dsh-vision/lib/index.js";
 
 const enc = new TextEncoder();
 const ref = (id, extra = {}) => ({ attachmentId: id, mediaType: "image/png", bytes: 3, width: 2, height: 2, ...extra });
@@ -122,4 +122,199 @@ test("多消息：只转换含图的消息", async () => {
   assert.equal(result.messages[0], plain); // 未动
   assert.equal(result.messages[1].content.length, 1);
   assert.equal(calls.length, 1);
+});
+
+// —— createLlmStreamHandler：llm/stream 拦截（识别结果不进 session/UI） ——
+const MARKER = Symbol("dsh-vision.converted");
+const message = (content) => ({ role: "user", content });
+const img = (id = "a1") => ({ type: "image", attachment: ref(id) });
+
+function makeHandler(overrides = {}) {
+  const events = { next: 0, llm: 0 };
+  const next = () => { events.next++; return (async function* () { yield "fallback-chunk"; })(); };
+  const llm = {
+    stream(options) {
+      events.llm++;
+      events.lastOptions = options;
+      return (async function* () { yield "llm-chunk"; })();
+    }
+  };
+  const deps = {
+    convert: async (messages, signal) => ({ messages, changed: true }),
+    getLlm: () => llm,
+    markerKey: MARKER,
+    ...overrides,
+  };
+  const handler = createLlmStreamHandler(deps);
+  return { handler, events, next, llm };
+}
+
+const collect = async (stream) => { const out = []; for await (const chunk of stream) out.push(chunk); return out; };
+
+test("handler：无图请求直接透传 next，零转换", async () => {
+  const { handler, events, next } = makeHandler();
+  const stream = handler({ messages: [message([textBlock("hi")])] }, next);
+  assert.deepEqual(await collect(stream), ["fallback-chunk"]);
+  assert.equal(events.next, 1);
+  assert.equal(events.llm, 0);
+});
+
+test("handler：带防重入标记的请求直接透传 next", async () => {
+  const { handler, events, next } = makeHandler();
+  const stream = handler({ [MARKER]: true, messages: [message([img()])] }, next);
+  assert.deepEqual(await collect(stream), ["fallback-chunk"]);
+  assert.equal(events.next, 1);
+  assert.equal(events.llm, 0);
+});
+
+test("handler：非对象 options 透传 next", async () => {
+  const { handler, events, next } = makeHandler();
+  const s1 = handler(null, next);
+  const s2 = handler("x", next);
+  assert.deepEqual(await collect(s1), ["fallback-chunk"]);
+  assert.deepEqual(await collect(s2), ["fallback-chunk"]);
+  assert.equal(events.next, 2);
+});
+
+test("handler：有图且转换 changed → 重入 llm.stream 带标记与新消息", async () => {
+  const converted = [message([textBlock("[图片] 识别结果：\n描述")])];
+  const { handler, events, next } = makeHandler({
+    convert: async () => ({ messages: converted, changed: true })
+  });
+  const options = { provider: "deepseek", model: "v4-flash", messages: [message([img("x1")])] };
+  const stream = handler(options, next);
+  assert.deepEqual(await collect(stream), ["llm-chunk"]);
+  assert.equal(events.next, 0); // 未走 fallback
+  assert.equal(events.llm, 1);
+  assert.equal(events.lastOptions[MARKER], true); // 防重入标记
+  assert.equal(events.lastOptions.messages, converted); // 新消息
+  assert.equal(events.lastOptions.provider, "deepseek"); // 其余字段保留
+});
+
+test("handler：转换 changed=false → yield* next（原消息回退）", async () => {
+  const { handler, events, next } = makeHandler({
+    convert: async () => ({ messages: [message([img()])], changed: false })
+  });
+  const stream = handler({ messages: [message([img()])] }, next);
+  assert.deepEqual(await collect(stream), ["fallback-chunk"]);
+  assert.equal(events.next, 1);
+  assert.equal(events.llm, 0);
+});
+
+test("handler：convert 抛错 → 降级 yield* next，不中断对话", async () => {
+  const { handler, events, next } = makeHandler({
+    convert: async () => { throw new Error("no api key"); }
+  });
+  const stream = handler({ messages: [message([img()])] }, next);
+  assert.deepEqual(await collect(stream), ["fallback-chunk"]);
+  assert.equal(events.next, 1);
+});
+
+test("handler：llm 服务不可用 → yield* next", async () => {
+  const { handler, events, next } = makeHandler({ getLlm: () => undefined });
+  const stream = handler({ messages: [message([img()])] }, next);
+  assert.deepEqual(await collect(stream), ["fallback-chunk"]);
+  assert.equal(events.next, 1);
+});
+
+test("handler：识别期间 signal 传入 convert", async () => {
+  let seenSignal;
+  const { handler, events, next } = makeHandler({
+    convert: async (messages, signal) => { seenSignal = signal; return { messages: messages.slice(), changed: true }; }
+  });
+  const signal = new AbortController().signal;
+  await collect(handler({ messages: [message([img()])], signal }, next));
+  assert.equal(seenSignal, signal);
+  assert.equal(events.lastOptions.signal, signal); // 重入时 signal 保留
+});
+
+// —— 前端纯函数（复制自 lib/client.js；client 模块加载器不支持相对 require） ——
+const TEXT_FILE_EXTENSIONS = new Set([
+  "txt", "md", "markdown", "json", "jsonl", "csv", "tsv", "yml", "yaml",
+  "xml", "html", "htm", "css", "scss", "less", "js", "mjs", "cjs", "ts",
+  "jsx", "tsx", "py", "java", "c", "h", "cpp", "hpp", "cs", "go", "rs",
+  "rb", "php", "sh", "bash", "zsh", "ps1", "bat", "cmd", "ini", "cfg",
+  "conf", "log", "toml", "sql", "env", "svg", "diff", "patch", "vue",
+  "svelte", "dockerfile", "makefile", "gemfile", "rakefile", "justfile",
+  "license", "copying", "notice", "editorconfig", "properties", "proto", "graphql", "tex",
+  "gitignore", "gitattributes", "npmrc"
+]);
+const PLAIN_NAME_TEXT = new Set([
+  "dockerfile", "makefile", "gemfile", "rakefile", "justfile",
+  "license", "copying", "notice", "readme", "changelog", "contributing"
+]);
+function fileExtension(name) {
+  const base = String(name || "").toLowerCase();
+  const i = base.lastIndexOf(".");
+  if (i < 0) return base.startsWith(".") ? base.slice(1) : "";
+  const ext = base.slice(i + 1);
+  return ext === "" ? base.slice(1) : ext;
+}
+function classifyFile(file) {
+  const type = String((file && file.type) || "");
+  if (type.startsWith("image/")) return "image";
+  const ext = fileExtension(file && file.name);
+  if (TEXT_FILE_EXTENSIONS.has(ext)) return "text";
+  const base = String((file && file.name) || "").toLowerCase();
+  if (PLAIN_NAME_TEXT.has(base)) return "text";
+  return "unsupported";
+}
+function looksBinary(data) {
+  const n = Math.min(data.length, 512);
+  for (let i = 0; i < n; i++) if (data[i] === 0) return true;
+  return false;
+}
+function formatBytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1024 / 1024).toFixed(1) + " MB";
+}
+async function readFileText(file) {
+  if (file.size > 2 * 1024 * 1024) { const e = new Error("file-too-large"); e.fileName = file.name; throw e; }
+  const buf = new Uint8Array(await file.arrayBuffer());
+  if (looksBinary(buf)) { const e = new Error("binary-file"); e.fileName = file.name; throw e; }
+  let text = new TextDecoder("utf-8").decode(buf);
+  if (text.length > 64 * 1024) text = text.slice(0, 64 * 1024) + `\n…（内容过长已截断，原 ${buf.length} 字节）`;
+  return text;
+}
+function buildAttachmentInsertion(file, text) {
+  return `\n\n📎 附件：${file.name}（${formatBytes(file.size)}）\n---- 文件内容 ----\n${text}`;
+}
+const fakeFile = (name, { type = "", size = 0, bytes } = {}) => ({
+  name, type, size,
+  async arrayBuffer() { return Uint8Array.from(bytes || []).buffer; }
+});
+
+test("前端：classifyFile 图片/文本/未知分类", () => {
+  assert.equal(classifyFile({ name: "a.png", type: "image/png" }), "image");
+  assert.equal(classifyFile({ name: "a.PDF", type: "" }), "unsupported"); // pdf 不在白名单
+  assert.equal(classifyFile({ name: "note.TXT", type: "text/plain" }), "text");
+  assert.equal(classifyFile({ name: "main.js", type: "" }), "text");
+  assert.equal(classifyFile({ name: "Dockerfile", type: "" }), "text");
+  assert.equal(classifyFile({ name: ".gitignore", type: "" }), "text");
+  assert.equal(classifyFile({ name: "archive.zip", type: "" }), "unsupported");
+  assert.equal(classifyFile({ name: "x.bin", type: "application/octet-stream" }), "unsupported");
+});
+
+test("前端：fileExtension 边界", () => {
+  assert.equal(fileExtension("a.tar.gz"), "gz");
+  assert.equal(fileExtension(".gitignore"), "gitignore");
+  assert.equal(fileExtension("NOEXT"), "");
+  assert.equal(fileExtension(""), "");
+});
+
+test("前端：readFileText 读取/二进制检测/超限截断", async () => {
+  const enc = new TextEncoder();
+  assert.equal(await readFileText(fakeFile("a.txt", { size: 3, bytes: enc.encode("abc") })), "abc");
+  await assert.rejects(readFileText(fakeFile("b.bin", { size: 4, bytes: [1, 0, 2, 3] })), (e) => e.message === "binary-file");
+  await assert.rejects(readFileText(fakeFile("c.big", { size: 3 * 1024 * 1024, bytes: [1] })), (e) => e.message === "file-too-large");
+  const long = enc.encode("x".repeat(70 * 1024));
+  const out = await readFileText(fakeFile("d.txt", { size: long.length, bytes: long }));
+  assert.ok(out.includes("…（内容过长已截断"));
+  assert.ok(out.length <= 64 * 1024 + 64);
+});
+
+test("前端：buildAttachmentInsertion 结构", () => {
+  const out = buildAttachmentInsertion({ name: "readme.md", size: 2048 }, "内容");
+  assert.match(out, /^\n\n📎 附件：readme\.md（2\.0 KB）\n---- 文件内容 ----\n内容$/);
 });

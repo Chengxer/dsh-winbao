@@ -12,7 +12,7 @@ window.__ModuleLoader__.load({
     const react = require("react");
     const { jsx, jsxs } = require("react/jsx-runtime");
     const { bindSnapshotSelector } = require("@deepseek-ai/dsh-client-web-react");
-    const { Button, Tooltip } = require("@deepseek-ai/dsh-client-ui-primitives");
+    const { Button, Tooltip, IconPaperclipOutline16 } = require("@deepseek-ai/dsh-client-ui-primitives");
 
     const NS = "dsh-vision";
     const DEFAULTS = {
@@ -25,7 +25,7 @@ window.__ModuleLoader__.load({
 
     const L = {
       nav: "识图插件（view_image）",
-      navSub: "为纯文本模型提供识图能力。填写任意 OpenAI 兼容 VLM 端点的地址与密钥后，会话中即可调用 view_image 工具；输入框旁的「🖼」按钮可直接发图，发送后由后台自动识别（识别结果以文本形式带入对话）。",
+      navSub: "为纯文本模型提供识图能力。填写任意 OpenAI 兼容 VLM 端点的地址与密钥后，会话中即可调用 view_image 工具；输入框旁的「📎」按钮可直接发图或发送文本文件——图片发送后由后台自动识别（识别结果以文本带入模型，界面仍显示原图），文本文件内容自动追加到输入框。",
       baseURLLabel: "API 地址",
       baseURLHint: "OpenAI 兼容 base URL，例如 https://open.bigmodel.cn/api/paas/v4 或 http://localhost:11434/v1",
       apiKeyLabel: "API 密钥",
@@ -42,7 +42,10 @@ window.__ModuleLoader__.load({
       saved: "已保存",
       loading: "加载中…",
       unavailable: "设置不可用（需要在本机浏览器中打开）",
-      imageButton: "添加图片（发送后自动识别）"
+      attachButton: "添加图片或文件（图片发送后自动识别；文本文件内容追加到输入框）",
+      unsupportedFile: "「{name}」不支持：请选择图片或常见文本文件（txt / md / json / csv / 代码 / 日志等）",
+      fileTooLarge: "「{name}」超过 2 MB 上限",
+      binaryFile: "「{name}」是二进制文件，暂不支持（支持图片与常见文本文件）"
     };
 
     function fieldRow(label, hint, input) {
@@ -157,19 +160,101 @@ window.__ModuleLoader__.load({
       });
     }
 
-    // —— 多模态体感：composer 工具行「🖼 添加图片」按钮 ——
-    // 选文件 → 官方 createDraftImages 校验/注册（MIME 白名单、限额）→
-    // inputActions.addImages 加入草稿，与官方粘贴/拖放同一链路；发送后由
-    // 宿主半边 agent/pre-step 后台识别，图片不会到达纯文本模型。
+    // —— 多模态体感：composer 工具行「📎 添加图片或文件」按钮 ——
+    // 图片 → 官方 createDraftImages 校验/注册（MIME 白名单、限额）→
+    // inputActions.addImages 加入草稿（与官方粘贴/拖放同一链路）；发送后由
+    // 宿主半边 llm/stream 后台识别，界面始终显示原图、识别文本不进会话。
+    // 文本文件 → 浏览器端读取（纯前端，无需宿主通道）→ 截断后经
+    // inputActions.setDraft 追加进草稿（用户发送前可见、可编辑、可删除）。
+    // 二进制/未知类型 → 错误提示。按钮外观完全复刻官方「/」命令按钮
+    // （InputBar .add：28×28 圆形、--dsw-specific-selector、hover 实心）。
     // 组件 props 由 slots 渲染器注入 standard kit（session 作用域）：
-    // inputActions = 官方 InputActions（sessions.provide props 注入）。
-    const IMAGE_BUTTON_CSS = [
-      ".dsh-vision-image-btn{display:inline-flex;align-items:center;justify-content:center;",
-      "width:24px;height:24px;padding:0;border:none;border-radius:6px;background:transparent;",
-      "cursor:pointer;font-size:14px;line-height:1;color:var(--dsw-alias-label-tertiary);",
-      "transition:background-color .15s,color .15s}",
-      ".dsh-vision-image-btn:hover:not(:disabled){background:rgba(127,127,127,.14);color:var(--dsw-alias-label-secondary)}",
-      ".dsh-vision-image-btn:disabled{opacity:.45;cursor:default}"
+    // inputActions = 官方 InputActions（sessions.provide props 注入）；
+    // input = InputState 快照（zone owner 提供，含当前草稿 draft）。
+    const TEXT_FILE_EXTENSIONS = new Set([
+      "txt", "md", "markdown", "json", "jsonl", "csv", "tsv", "yml", "yaml",
+      "xml", "html", "htm", "css", "scss", "less", "js", "mjs", "cjs", "ts",
+      "jsx", "tsx", "py", "java", "c", "h", "cpp", "hpp", "cs", "go", "rs",
+      "rb", "php", "sh", "bash", "zsh", "ps1", "bat", "cmd", "ini", "cfg",
+      "conf", "log", "toml", "sql", "env", "svg", "diff", "patch", "vue",
+      "svelte", "dockerfile", "makefile", "gemfile", "rakefile", "justfile",
+      "license", "copying", "notice", "editorconfig", "properties", "proto", "graphql", "tex",
+      "gitignore", "gitattributes", "npmrc"
+    ]);
+    // 无扩展名的约定俗成文件名（Dockerfile/LICENSE…）走全名小写匹配。
+    const PLAIN_NAME_TEXT = new Set([
+      "dockerfile", "makefile", "gemfile", "rakefile", "justfile",
+      "license", "copying", "notice", "readme", "changelog", "contributing"
+    ]);
+    const MAX_FILE_TEXT_BYTES = 64 * 1024; // 单文件注入草稿的文本上限（截断尾部）
+    const MAX_ATTACH_BYTES = 2 * 1024 * 1024; // 单文件读取上限（防大文件卡顿）
+    const BINARY_PROBE_BYTES = 512; // 前 512 字节含 NUL → 判为二进制
+
+    /** 文件扩展名（小写；.gitignore 这类点开头名字返回点后整段）。 */
+    function fileExtension(name) {
+      const base = String(name || "").toLowerCase();
+      const i = base.lastIndexOf(".");
+      if (i < 0) return base.startsWith(".") ? base.slice(1) : "";
+      const ext = base.slice(i + 1);
+      return ext === "" ? base.slice(1) : ext;
+    }
+
+    /** 分类：image（官方草稿通道）/ text（读取追加草稿）/ unsupported（提示）。 */
+    function classifyFile(file) {
+      const type = String((file && file.type) || "");
+      if (type.startsWith("image/")) return "image";
+      const ext = fileExtension(file && file.name);
+      if (TEXT_FILE_EXTENSIONS.has(ext)) return "text";
+      const base = String((file && file.name) || "").toLowerCase();
+      if (PLAIN_NAME_TEXT.has(base)) return "text";
+      return "unsupported";
+    }
+
+    function looksBinary(data) {
+      const n = Math.min(data.length, BINARY_PROBE_BYTES);
+      for (let i = 0; i < n; i++) {
+        if (data[i] === 0) return true;
+      }
+      return false;
+    }
+
+    function formatBytes(n) {
+      if (n < 1024) return n + " B";
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+      return (n / 1024 / 1024).toFixed(1) + " MB";
+    }
+
+    /** 读取文本文件内容（UTF-8；二进制检测；超限截断）。失败抛错。 */
+    async function readFileText(file) {
+      if (file.size > MAX_ATTACH_BYTES) {
+        const error = new Error("file-too-large");
+        error.fileName = file.name;
+        throw error;
+      }
+      const buf = new Uint8Array(await file.arrayBuffer());
+      if (looksBinary(buf)) {
+        const error = new Error("binary-file");
+        error.fileName = file.name;
+        throw error;
+      }
+      let text = new TextDecoder("utf-8").decode(buf);
+      if (text.length > MAX_FILE_TEXT_BYTES) {
+        text = text.slice(0, MAX_FILE_TEXT_BYTES) + `\n…（内容过长已截断，原 ${buf.length} 字节）`;
+      }
+      return text;
+    }
+
+    /** 拼装追加进草稿的附件文本块。 */
+    function buildAttachmentInsertion(file, text) {
+      return `\n\n📎 附件：${file.name}（${formatBytes(file.size)}）\n---- 文件内容 ----\n${text}`;
+    }
+
+    const ATTACH_BUTTON_CSS = [
+      ".dsh-vision-attach-btn{background:var(--dsw-specific-selector);width:28px;height:28px;",
+      "color:var(--dsw-alias-label-primary);cursor:pointer;border:none;border-radius:999px;",
+      "flex:none;place-items:center;display:grid;padding:0}",
+      ".dsh-vision-attach-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid)}",
+      ".dsh-vision-attach-btn:disabled{opacity:.5;cursor:default}"
     ].join("");
 
     const CSS_TAG = "@dsh-external/dsh-vision/client.css";
@@ -179,7 +264,7 @@ window.__ModuleLoader__.load({
       const tag = document.createElement("style");
       tag.dataset.plugin = "@dsh-external/dsh-vision";
       tag.dataset.pluginCss = CSS_TAG;
-      tag.textContent = IMAGE_BUTTON_CSS;
+      tag.textContent = ATTACH_BUTTON_CSS;
       document.head.appendChild(tag);
     }
 
@@ -202,24 +287,51 @@ window.__ModuleLoader__.load({
       const canAttach = !!conversation && typeof conversation.createDraftImages === "function" &&
         typeof conversation.releaseDraftImages === "function";
 
-      function VisionImageButton({ inputActions }) {
+      function VisionImageButton({ inputActions, input }) {
         const fileRef = react.useRef(null);
         const actions = inputActions || {};
-        const disabled = !canAttach || typeof actions.addImages !== "function";
+        const disabled = !canAttach || typeof actions.addImages !== "function" || typeof actions.setDraft !== "function";
         const pick = () => {
           if (!disabled && fileRef.current) fileRef.current.click();
         };
-        const onChange = (e) => {
+        const notify = (level, message) => {
+          if (typeof actions.notify === "function") actions.notify(level, message);
+        };
+        const appendDraft = (text) => {
+          const current = input && typeof input.draft === "string" ? input.draft : "";
+          actions.setDraft(current + text);
+        };
+        const onChange = async (e) => {
           const files = Array.from(e.target.files || []);
           e.target.value = "";
           if (files.length === 0) return;
-          try {
-            const images = conversation.createDraftImages(files);
-            if (!actions.addImages(images.map((image) => image.id))) conversation.releaseDraftImages(images);
-          } catch (error) {
-            console.warn("[dsh-vision] 添加图片失败:", error);
-            if (typeof actions.notify === "function") {
-              actions.notify("error", error instanceof Error ? error.message : String(error));
+          const images = files.filter((file) => classifyFile(file) === "image");
+          if (images.length > 0) {
+            try {
+              const drafts = conversation.createDraftImages(images);
+              if (!actions.addImages(drafts.map((draft) => draft.id))) conversation.releaseDraftImages(drafts);
+            } catch (error) {
+              console.warn("[dsh-vision] 添加图片失败:", error);
+              notify("error", error instanceof Error ? error.message : String(error));
+            }
+          }
+          for (const file of files) {
+            const kind = classifyFile(file);
+            if (kind === "image") continue;
+            if (kind !== "text") {
+              notify("error", L.unsupportedFile.replace("{name}", file.name));
+              continue;
+            }
+            try {
+              const text = await readFileText(file);
+              appendDraft(buildAttachmentInsertion(file, text));
+            } catch (error) {
+              const reason = error && error.message === "file-too-large"
+                ? L.fileTooLarge.replace("{name}", file.name)
+                : error && error.message === "binary-file"
+                  ? L.binaryFile.replace("{name}", file.name)
+                  : error instanceof Error ? error.message : String(error);
+              notify("error", reason);
             }
           }
         };
@@ -228,22 +340,22 @@ window.__ModuleLoader__.load({
             jsx("input", {
               ref: fileRef,
               type: "file",
-              accept: "image/*",
+              accept: "image/*,.txt,.md,.markdown,.json,.jsonl,.csv,.tsv,.yml,.yaml,.xml,.html,.htm,.css,.scss,.less,.js,.mjs,.cjs,.ts,.jsx,.tsx,.py,.java,.c,.h,.cpp,.hpp,.cs,.go,.rs,.rb,.php,.sh,.bash,.zsh,.ps1,.bat,.cmd,.ini,.cfg,.conf,.log,.toml,.sql,.svg,.diff,.patch,.vue,.svelte,.tex,.env,.properties,.proto,.graphql",
               multiple: true,
               style: { display: "none" },
               onChange
             }),
             jsx(Tooltip, {
-              label: L.imageButton,
+              label: L.attachButton,
               side: "top",
               delayMs: 500,
               children: jsx("button", {
                 type: "button",
-                className: "dsh-vision-image-btn",
-                "aria-label": L.imageButton,
+                className: "dsh-vision-attach-btn",
+                "aria-label": L.attachButton,
                 disabled,
                 onClick: pick,
-                children: "🖼"
+                children: jsx(IconPaperclipOutline16, { size: 14 })
               })
             })
           ]
@@ -254,7 +366,7 @@ window.__ModuleLoader__.load({
         name: "conversation.input.left",
         id: "dsh-vision-image",
         order: 80
-      }, VisionImageButton), "dsh-vision: image attach button");
+      }, VisionImageButton), "dsh-vision: attach button");
     }
 
     exports.apply = apply;
