@@ -84,6 +84,8 @@ const DESKTOP_APP_DIRS = [
   ...(process.env.DSH_CLIENT_APP_DIR ? [String(process.env.DSH_CLIENT_APP_DIR).trim()] : []),
   join(process.env.LOCALAPPDATA || '', 'Programs', 'DSH Desktop', 'resources', 'app'),
   'C:\\Users\\OwO\\AppData\\Local\\Programs\\DSH Desktop\\resources\\app',
+  // 常见自定义安装位置（D:\app\dsh 是 DSH Desktop 社区常见安装目录）
+  'D:\\app\\dsh\\DSH Desktop\\resources\\app',
   // macOS（Electron 应用资源目录；打包成 asar 时读不到 package.json，自动跳过）
   '/Applications/DSH Desktop.app/Contents/Resources/app',
   join(homedir(), 'Applications', 'DSH Desktop.app', 'Contents/Resources', 'app'),
@@ -2317,8 +2319,11 @@ class HubGateway extends TypertRemoteService {
       manifest.dsh.profile.bundles = manifest.dsh.profile.bundles.filter((bundle) => bundle !== safeName)
       writeJson(path, manifest)
     }
+    // 先解析 entry id 再删行：removeRow 会改写 patch，之后 findEntryIdForName
+    // 就找不到 insert 行了，导致 disable 块残留成孤儿条目（卸载不彻底）。
+    const entryId = findEntryIdForName(safeName)
     removeRow(safeName)
-    removeDisableForId(findEntryIdForName(safeName))
+    removeDisableForId(entryId)
     try {
       const cache = this.readCache()
       if (cache && Array.isArray(cache.entries)) {
