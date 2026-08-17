@@ -17,6 +17,7 @@ const { COMPANION_PLUGINS, companionDirName } = require('./companion-plugins');
 const { dropBlocksByIds } = require('../../profile-patch-heal');
 const { writeFileAtomic } = require('./patch-io');
 const { bundlePatchRel, verifyBundleDir } = require('../../profile-bundle-heal');
+const { compareVersions } = require('../plugin-manager-update');
 
 // 同步进 profile 的固定文件清单（旧 main.js copyFiles / 同步脚本 PLUGIN_FILES）。
 const PLUGIN_FILES = [
@@ -287,6 +288,7 @@ function syncCompanionFiles(opts) {
     assetsRoot,
     profileDir,
     vendorRoot,
+    removedIds,
     log,
     fail,
     onMissingSource,
@@ -328,6 +330,9 @@ function syncCompanionFiles(opts) {
     }
   }
   for (const p of plugins) {
+    // 插件管理「卸载」标记（removed: true）：已卸载插件不复制、不装配，
+    // 避免「卸载后一重启又被复活」。bundle 登记也跳过（manifest 移除由调用方处理）。
+    if (removedIds && removedIds.has(p.id)) continue;
     const rel = companionDirName(p);
     const src = path.join(assetsRoot, rel);
     if (!fs.existsSync(path.join(src, 'package.json'))) continue;
@@ -338,6 +343,22 @@ function syncCompanionFiles(opts) {
     // node_modules 下；配套包自身的依赖由 dsh 的 profiles/node_modules
     // fallback（healProfilesModuleFallback）解析。
     const dest = path.join(profileModules, '..', p.name);
+    // 用户已把插件更新到比安装包更新的版本（插件管理器「更新」）→ 保留
+    // profile 副本，否则每次启动会把更新版本覆盖回安装包版本。
+    if (!dryRun) {
+      try {
+        const aPkg = JSON.parse(fs.readFileSync(path.join(src, 'package.json'), 'utf8'));
+        const dPkgFile = path.join(dest, 'package.json');
+        if (aPkg && aPkg.version && fs.existsSync(dPkgFile)) {
+          const dPkg = JSON.parse(fs.readFileSync(dPkgFile, 'utf8'));
+          if (dPkg && dPkg.version && compareVersions(dPkg.version, aPkg.version) > 0) {
+            if (log) log('插件 ' + p.id + ' 版本 ' + dPkg.version + ' 高于安装包 ' + aPkg.version + '，保留更新版本');
+            if (isBundle) bundleNames.add(p.name); // manifest 登记不因保留而缺失
+            continue;
+          }
+        }
+      } catch { /* 版本读取失败按正常复制处理 */ }
+    }
     if (dryRun) {
       if (plan) plan(`dry-run: 将安装 ${p.name} → ${dest}${isBundle ? '（bundle 插件）' : ''}`);
       continue;
