@@ -32,7 +32,7 @@ import z from '@deepseek-ai/schemastery';
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings';
 import { visionChat } from './vlm.js';
 export const name = 'dsh-vision';
-export const inject = ['tools', 'systemPrompt', 'settings', 'llm'];
+export const inject = ['tools', 'systemPrompt', 'settings', 'llm', 'attachments'];
 const DEFAULT_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4';
 /** Zhipu's free tier gets congested (HTTP 429 code 1305); older free models still answer. */
 const DEFAULT_FREE_FALLBACKS = ['glm-4.1v-thinking-flash', 'glm-4v-flash'];
@@ -447,8 +447,11 @@ export function apply(ctx, config) {
     const nativeImageSupport = new Map();
     const visionHandler = createLlmStreamHandler({
         convert: async (messages, signal) => {
-            let attachments;
-            try { attachments = ctx.attachments; } catch { attachments = undefined; }
+            // attachments 已在 inject 中声明，cordis 会在装配时校验服务存在
+            // （宿主 prompt 入口的 saveImage 依赖同一服务，必然已装配）；
+            // 此前用 try/catch 可选访问反而把 Proxy 的
+            // "cannot get property "attachments" without inject" 吞成 undefined。
+            const attachments = ctx.attachments;
             return convertMessagesWithImages(messages, {
                 readImage: async (ref, sig) => {
                     if (!attachments || typeof attachments.readImage !== 'function') {
