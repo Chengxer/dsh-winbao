@@ -43,7 +43,7 @@ const { SessionWatcher, scanZstdFrames } = require('./session-watcher');
 const { RendererRecovery } = require('./renderer-recovery');
 const { ensureCoreBundles, CORE_BUNDLE_NAMES } = require('./profile-manifest');
 const { dedupePatchEntries, parseFailedLoaderIds, mapPackagesToPatchIds } = require('./profile-patch-heal');
-const { PROFILE_BUNDLE_GUARD_MARKER, PROFILE_BOOT_GUARD_MARKER, verifyBundleDir, packageDirUpward, scanProfileBundles, recoverManifestBundles, applyAppBootBundleGuard, applyProfileBootBundleGuard } = require('./profile-bundle-heal');
+const { PROFILE_BUNDLE_GUARD_MARKER, PROFILE_BOOT_GUARD_MARKER, verifyBundleDir, packageDirUpward, scanProfileBundles, recoverManifestBundles, applyAppBootBundleGuard, applyProfileBootBundleGuard, applyProfileBootHealGuard } = require('./profile-bundle-heal');
 // 统一补丁引擎与共享数据源（scripts/lib/）：main.js 的运行时补丁、同步脚本
 // 与 after-pack 共用同一实现，杜绝重复与漂移。
 const { COMPANION_PLUGINS } = require('./scripts/lib/companion-plugins');
@@ -4386,14 +4386,18 @@ function applyProfileBundleGuard() {
     for (const name of names) profileBootFiles.push(path.join(dir, name));
   }
   const profileBootTransform = (src, file) => {
-    const out = applyProfileBootBundleGuard(src);
-    if (!out.changed) {
-      if (!src.includes(PROFILE_BOOT_GUARD_MARKER)) {
-        return { status: 'anchor-missing', detail: file + ' 锚点未匹配（dsh 版本可能已变化），跳过' };
-      }
-      return { status: 'already' }; // 已注入（幂等，静默）
+    let current = src;
+    let changed = false;
+    // heal 调用防护（独立幂等标记）：入口 bundle 无 heal 调用时静默。
+    const heal = applyProfileBootHealGuard(current);
+    if (heal.changed) { current = heal.src; changed = true; }
+    const bundle = applyProfileBootBundleGuard(current);
+    if (bundle.changed) { current = bundle.src; changed = true; }
+    if (changed) return { status: 'changed', src: current };
+    if (!current.includes(PROFILE_BOOT_GUARD_MARKER)) {
+      return { status: 'anchor-missing', detail: file + ' 锚点未匹配（dsh 版本可能已变化），跳过' };
     }
-    return { status: 'changed', src: out.src };
+    return { status: 'already' }; // 已注入（幂等，静默）
   };
   applyPatchToFiles({
     prefix: 'profile bundle 防护',

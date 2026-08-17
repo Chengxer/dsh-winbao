@@ -29,6 +29,8 @@ const {
   writeFileAtomic,
   applyAppBootBundleGuard,
   applyProfileBootBundleGuard,
+  applyProfileBootHealGuard,
+  PROFILE_BOOT_HEAL_MARKER,
 } = require('../../profile-bundle-heal');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
@@ -261,5 +263,37 @@ test('applyProfileBootBundleGuard: 真实 vendored 文件（两种状态均成�
     assert.ok(out.src.includes('function loadUserPatchLayerSafe'));
     syntaxCheck('profile-boot', out.src);
     assert.equal(applyProfileBootBundleGuard(out.src).changed, false);
+  }
+});
+
+
+test('applyProfileBootHealGuard: 合成源命中 heal 调用并替换', () => {
+  const src = 'function prepareProfile(name) {\n\thealProfilesModuleFallback(INSTALL_ANCHOR);\n\treturn name;\n}';
+  const out = applyProfileBootHealGuard(src);
+  assert.equal(out.changed, true, 'heal 调用锚点应命中');
+  assert.ok(out.src.includes("try {"), '调用应包进 try/catch');
+  assert.ok(out.src.includes(PROFILE_BOOT_HEAL_MARKER), '幂等标记应写入');
+  assert.equal(applyProfileBootHealGuard(out.src).changed, false, '二次应用应为幂等空操作');
+});
+
+test('applyProfileBootHealGuard: 无 heal 调用时静默原样返回（入口 bundle）', () => {
+  const src = 'export { runProfile as o } from "./x.js";';
+  assert.deepEqual(applyProfileBootHealGuard(src), { changed: false, src });
+  assert.deepEqual(applyProfileBootHealGuard(null), { changed: false, src: null });
+});
+
+test('applyProfileBootHealGuard: 真实 vendored 文件（两种状态均成立）', () => {
+  const src = fs.readFileSync(profileBootFile, 'utf8');
+  const out = applyProfileBootHealGuard(src);
+  if (src.includes(PROFILE_BOOT_HEAL_MARKER)) {
+    assert.equal(out.changed, false);
+    assert.equal(out.src, src);
+  } else if (!src.includes('\thealProfilesModuleFallback(INSTALL_ANCHOR);')) {
+    assert.equal(out.changed, false, '入口 bundle 无 heal 调用应静默');
+  } else {
+    assert.equal(out.changed, true, 'vendored profile-boot heal 锚点应命中（dsh 版本变更时需同步更新锚点）');
+    assert.ok(out.src.includes(PROFILE_BOOT_HEAL_MARKER));
+    syntaxCheck('profile-boot-heal', out.src);
+    assert.equal(applyProfileBootHealGuard(out.src).changed, false);
   }
 });

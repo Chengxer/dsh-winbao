@@ -301,6 +301,34 @@ function applyAppBootBundleGuard(src) {
 // @deepseek-ai/dsh/lib/profile-boot-*.js 变换（家级补丁层自愈）
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// dsh/lib/profile-boot-*.js 变换（heal 调用防护）
+// ---------------------------------------------------------------------------
+
+// prepareProfile 每次 boot 无条件调用官方 healProfilesModuleFallback(INSTALL_ANCHOR)：
+// 它 BFS 依赖闭包并 readFileSync 每个 package.json，客户机器上（便携版解压不完整、
+// 杀软锁定、云同步抽风）可能 ENOENT，未捕获即 dsh web exit 1（启动失败页）。
+// main.js 的 repairProfileFallback 只保护壳自己的那次调用，挡不住引擎 boot 内部
+// 的这次。这里把调用包 try/catch：heal 失败只告警，绝不 brick 启动。
+// 幂等标记 = dsh-desktop guard: healProfilesModuleFallback failed。
+const PROFILE_BOOT_HEAL_MARKER = 'dsh-desktop guard: healProfilesModuleFallback failed';
+const PROFILE_BOOT_HEAL_ANCHOR = '\thealProfilesModuleFallback(INSTALL_ANCHOR);';
+const PROFILE_BOOT_HEAL_GUARDED = [
+  'try {',
+  '\thealProfilesModuleFallback(INSTALL_ANCHOR);',
+  '} catch (error) {',
+  '\tprocess.stderr.write(`dsh-desktop guard: healProfilesModuleFallback failed (${String(error?.message ?? error)}); continuing boot without fallback healing\n`);',
+  '}',
+].join('\n');
+
+/** heal 调用防护变换：入口 bundle 无该调用时静默原样返回（不算锚点失配）。 */
+function applyProfileBootHealGuard(src) {
+  if (typeof src !== 'string') return { changed: false, src };
+  if (src.includes(PROFILE_BOOT_HEAL_MARKER)) return { changed: false, src };
+  if (!src.includes(PROFILE_BOOT_HEAL_ANCHOR)) return { changed: false, src };
+  return { changed: true, src: src.replace(PROFILE_BOOT_HEAL_ANCHOR, PROFILE_BOOT_HEAL_GUARDED) };
+}
+
 const PROFILE_BOOT_IMPORT_ANCHOR = 'import { writeFileSync } from "node:fs";';
 const PROFILE_BOOT_HOME_ANCHOR = '\tconst homePatches = loadOptionalPatches(NAME, homePatchPath()) ?? [];';
 const PROFILE_BOOT_LIVE_PROFILE_ANCHOR = '\t\t...loadOptionalPatches(NAME, composed.profile.patchPath) ?? [],';
@@ -365,4 +393,6 @@ module.exports = {
   writeFileAtomic,
   applyAppBootBundleGuard,
   applyProfileBootBundleGuard,
+  applyProfileBootHealGuard,
+  PROFILE_BOOT_HEAL_MARKER,
 };
