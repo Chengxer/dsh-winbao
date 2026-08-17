@@ -75,11 +75,26 @@ window.__ModuleLoader__.load({
 			// PR #44 形态：独立状态栏 chip，链接 opencode.ai；percent=已用比例非剩余）。
 			const go = data && data.opencodeGo && data.opencodeGo.ok && data.opencodeGo.usage ? data.opencodeGo.usage : null;
 			if (!hasBalance && !usageKnown && !go) return null;
-			const parts = [];
-			if (usageKnown) parts.push("本轮 ¥" + money(sessionCost(usage, prices)));
-			if (hasBalance) parts.push("余额 ¥" + money(primary.total));
+			const peak = typeof data?.peak === "boolean";
+			// 峰谷提醒：主进程按当前时刻推送 peak（高峰=全价，空闲=高峰一半）。
+			// 可见文本放最前；高峰橙/空闲绿着色。
+			const peakChip = peak
+				? react_jsx_runtime.jsx("span", {
+					className: data.peak ? "dsh-balance-peak" : "dsh-balance-offpeak",
+					children: data.peak ? "⛰ 高峰价" : "🌙 空闲价"
+				}, "peak")
+				: null;
+			const items = [];
+			if (peakChip) items.push(peakChip);
+			if (usageKnown) items.push("本轮 ¥" + money(sessionCost(usage, prices)));
+			if (hasBalance) items.push("余额 ¥" + money(primary.total));
+			const joined = [];
+			items.forEach((it, i) => {
+				if (i > 0) joined.push(" · ");
+				joined.push(it);
+			});
 			const title = hasBalance
-				? `${primary.currency} 余额 ¥${money(primary.total)}（充值 ¥${money(primary.toppedUp)} · 赠送 ¥${money(primary.granted)}）；本轮费用按 token 用量估算（¥/百万 token：命中 ${prices?.cacheHit ?? FALLBACK_PRICES.cacheHit} / 未命中 ${prices?.cacheMiss ?? FALLBACK_PRICES.cacheMiss} / 输出 ${prices?.output ?? FALLBACK_PRICES.output}${data.model ? " · " + data.model : ""}${typeof data.peak === "boolean" ? (data.peak ? " · 高峰价" : " · 空闲价") : ""}），点击前往充值`
+				? `${primary.currency} 余额 ¥${money(primary.total)}（充值 ¥${money(primary.toppedUp)} · 赠送 ¥${money(primary.granted)}）；本轮费用按 token 用量估算（¥/百万 token：命中 ${prices?.cacheHit ?? FALLBACK_PRICES.cacheHit} / 未命中 ${prices?.cacheMiss ?? FALLBACK_PRICES.cacheMiss} / 输出 ${prices?.output ?? FALLBACK_PRICES.output}${data.model ? " · " + data.model : ""}${peak ? (data.peak ? " · 高峰价（北京时间 9:00-12:00 / 14:00-18:00，全价）" : " · 空闲价（高峰价的一半）") : ""}），点击前往充值`
 				: "本轮费用按 token 用量估算；未读取到 DeepSeek API Key，无法显示余额";
 			const dock = react_jsx_runtime.jsx("a", {
 				className: "dsh-balance-dock",
@@ -137,7 +152,9 @@ window.__ModuleLoader__.load({
 			"white-space:nowrap;border:1px solid var(--dsw-alias-border-l1);border-radius:999px;",
 			"padding:1px 8px;margin:0 2px;cursor:pointer;font-variant-numeric:tabular-nums;",
 			"transition:color .15s,border-color .15s}",
-			".dsh-balance-dock:hover{color:var(--dsw-alias-label-secondary);border-color:var(--dsw-alias-border-l2)}"
+			".dsh-balance-dock:hover{color:var(--dsw-alias-label-secondary);border-color:var(--dsw-alias-border-l2)}",
+			".dsh-balance-peak{color:#e8590c;font-weight:600}",
+			".dsh-balance-offpeak{color:#2f9e44}"
 		].join("");
 
 		const TAG = "@deepseek-ai/dsh-balance/client.css";
