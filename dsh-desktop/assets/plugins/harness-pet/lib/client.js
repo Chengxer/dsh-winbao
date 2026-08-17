@@ -1461,7 +1461,10 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 				if (!disposed && dialogResponse.textContent === reply) dialogResponse.scrollTop = dialogResponse.scrollHeight;
 			});
 			followAssistantTail = false;
-			render();
+			// 动画循环在跑（启用且非减少动态效果）时每帧已在绘制，这里无需
+			// 再同步重绘整幅 canvas（消除双绘制源）；rAF 未跑（关闭/减少动态
+			// 效果/隐藏）时画一帧静态画面。
+			if (animationRequest === void 0) render();
 			placeDialog();
 		}
 		function place() {
@@ -1849,14 +1852,18 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 					conversationIdentity = nextConversationIdentity;
 					setDialogVisible(true);
 				}
+				const nextTitle = nextConversationTitle?.trim() || conversationTitle;
+				const nextReply = nextAssistantText?.trim() || void 0;
+				// 状态与展示内容都没变（如 runningCalls/派生细节变化）→ 跳过
+				// DOM 写入、canvas 重绘与强制 reflow，静态期零开销。
+				if (status === harnessStatus && nextTitle === conversationTitle && nextReply === assistantReply) return;
 				const previousStatus = harnessStatus;
 				harnessStatus = status;
 				// 只在状态跃迁时响一声；状态持续期间不重复响；autoCycle 轮播
 				// 模式（调试预览）不响，避免每轮循环都叮咚两次。
 				if (!soundPrimed) soundPrimed = true;
 				else if (!settings.autoCycle && previousStatus !== status && (status === "waiting" || status === "success")) playPetSound(status);
-				conversationTitle = nextConversationTitle?.trim() || conversationTitle;
-				const nextReply = nextAssistantText?.trim() || void 0;
+				conversationTitle = nextTitle;
 				followAssistantTail = shouldFollowAssistantTail(assistantReply, nextReply);
 				assistantReply = nextReply;
 				updateStatus();
@@ -1984,7 +1991,17 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 			window.addEventListener("storage", onStorage);
 			unlistenStorage = () => window.removeEventListener("storage", onStorage);
 		}
-		const unsubscribe = observeHarnessSignals(context, (snapshot) => {
+		// 流式输出期间 SessionFace 快照按帧 flush（dsh-client-runtime 的
+		// Notifier.markFrameDirty：每帧至多一次、帧内合并），agent 长回复/
+		// 工具调用时持续触发——若每次快照都跑完整状态映射 + DOM 写入 +
+		// canvas 整幅重绘 + 强制 reflow，软渲染/低配机上渲染进程主线程饱和，
+		// 界面卡死（“半崩溃”）。对 listener 做时间节流（120ms）+ trailing 合并：
+		// 流式期间每 ~120ms 处理一次最新快照，肉眼无感知，CPU 开销降一个量级。
+		const SNAPSHOT_THROTTLE_MS = 120;
+		let pendingSnapshot;
+		let snapshotTimer;
+		let lastSnapshotAt = 0;
+		const handleSnapshot = (snapshot) => {
 			const identity = harnessSignalIdentity(snapshot);
 			if (identity !== conversationIdentity) {
 				conversationIdentity = identity;
@@ -2001,9 +2018,31 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 			pet.setStatus(status, conversationTitle, assistantText, identity);
 			if (successTimer !== void 0) clearTimeout(successTimer);
 			successTimer = status === "success" ? setTimeout(() => pet.setStatus(machine.tick(), conversationTitle, assistantText, conversationIdentity), 3010) : void 0;
-		});
+		};
+		const deliverSnapshot = () => {
+			snapshotTimer = void 0;
+			if (pendingSnapshot === void 0) return;
+			lastSnapshotAt = performance.now();
+			const snapshot = pendingSnapshot;
+			pendingSnapshot = void 0;
+			handleSnapshot(snapshot);
+		};
+		const onSnapshot = (snapshot) => {
+			pendingSnapshot = snapshot;
+			const now = performance.now();
+			const wait = lastSnapshotAt === 0 ? 0 : SNAPSHOT_THROTTLE_MS - (now - lastSnapshotAt);
+			if (wait <= 0) {
+				if (snapshotTimer === void 0) deliverSnapshot();
+			} else {
+				if (snapshotTimer !== void 0) clearTimeout(snapshotTimer);
+				snapshotTimer = setTimeout(deliverSnapshot, wait);
+			}
+		};
+		const unsubscribe = observeHarnessSignals(context, onSnapshot);
 		return { dispose: () => {
 			if (successTimer !== void 0) clearTimeout(successTimer);
+			if (snapshotTimer !== void 0) { clearTimeout(snapshotTimer); snapshotTimer = void 0; }
+			pendingSnapshot = void 0;
 			unsubscribe();
 			unlistenStorage?.();
 			pet.dispose();

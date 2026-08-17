@@ -14,6 +14,7 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 - **插件管理界面打磨**：「可更新」分类标签仅在有可更新项时出现（全部更新完后自动回到「全部」）；工具栏按钮组重排（简洁/详情切换高亮、检查更新为主操作样式、刷新按钮统一）；操作结果提示条、分组标题（组名+说明+计数）与空态框统一样式；修复「已卸载（可恢复）」分类切换导致页面空白的问题（分组标题映射补全 `removed` 键，并对缺失映射做兜底防崩溃）
 
 ### 修复
+- **客户端自动更新「下载完成后不弹安装 / 更新脚本终端闪一下」**：① 更新脚本启动全程无窗口（`spawn` detached + `stdio: ignore` + `windowsHide`，覆盖安装版 cmd→powershell 与便携版 cmd）；② 残留安装包清理——已处理（安装成功 / 当前版本已不低于待安装版本 / 文件丢失）的待安装标记现在会**连带删除 updates 目录里的过时安装包与 .part 分片**（每包 120+MB），不再让「下载了却从不安装」的旧包永久占用磁盘、误导用户；③ 手动「检查客户端更新」时**优先处理已下载的待安装包**（弹「立即重启」按钮），不再被 24h 静默期挡住——用户主动检查即表明更新意图；④ 端到端脚本级验证：`buildNsisCmd` + `buildNsisPs1` 生成的更新脚本在真实 `cmd /c` 下秒级走完「启动→等待退出→拉起安装器（失败 catch）→兜底恢复」全部分支并逐行写日志，无静默退出（历史「点安装没反应」根因是无控制台进程下控制台程序输出丢失，PR #46 起已用 PowerShell/.NET 流规避）
 - **侧边临时会话大日志解析风暴 → 聊天响应偶发延迟**（dsh-side-session v0.2.4）：面板展开时每 2s 轮询会对整个会话日志做全量 zstd 解压+逐行解析（实测 7MB 压缩 ≈ 20MB 文本 ≈ **600ms 同步阻塞**），会话进行中 mtime 持续变化导致反复全量解析，与聊天请求同进程排队。改为**增量解析**（只解自上次帧边界以来的新帧并累计，结果与全量解析逐字节等价；文件整体替换自动回退全量）+ 客户端**全量拉取 4s 节流**（切换会话立即拉取）。新增 6 个增量/全量等价性单测
 - **侧边临时会话升级 v0.2.5（合入上游更新）**：左侧栏图标对齐、浮窗展开/收起动画档位（0/300/500/800/1200ms，默认 500）、输入框与发送按钮样式与主会话同款、移除「停止回答」按钮；服务端**热重载自愈**（`settings.registrations.delete(NS)` + 路由重注册，开发热重载后不再残留重复注册）。保留本地增量解析与 4s 拉取节流。版本号定为 0.2.5 与上游 0.2.4 区分
 - **桌面宠物默认关闭（插件级）**：harness-pet 常驻 canvas 逐帧绘制在软渲染/流式输出下持续占用主进程，且旧版保存的开关值会覆盖客户端默认关闭。现启动同步时幂等写入 profile patch `- id: harness-pet\n  disabled: true`（一票否决任何已保存状态），需要时在 设置 → 插件 → 管理 一键开启
@@ -24,6 +25,7 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
   - **用户插件数据恢复**（issue #48）：manifest 损坏被重置后，用户手动安装的第三方 bundle 仍实际落在 profile node_modules 里——启动自愈会扫描、校验并把它们合并回 manifest（`bundles` + `dependencies`），用户插件照常装配；普通依赖与损坏包不恢复登记。同时弹「配置自愈」系统通知（集成测试态抑制），不再静默。
   - **启动前健康检查**：`dsh web` 启动前把每个 bundles 条目的装配状态落到 `desktop.log`（缺失 / 未声明 / 补丁层缺失一目了然），`dsh-web.log` 保留完整 stderr 诊断。
   变换与恢复逻辑收口为纯模块 `profile-bundle-heal.js`（`node --test` 单测 13 项 + 7 个新集成场景：heal-missing-bundle / heal-manifestless-bundle / heal-broken-manifest / heal-broken-manifest-recovers / heal-broken-home-patch / heal-broken-bundle-patch / companion-bundle-invariant）。
+- **宠物插件流式输出期间界面卡死（「半崩溃」）根治**：dsh 客户端运行时对会话快照按帧合并推送（`Notifier.markFrameDirty` 每帧至多一次，长回复/工具调用期间持续触发），harness-pet 每次快照都跑完整状态映射 + 6 处 DOM 写入 + 320×320 canvas 整幅重绘 + 强制 reflow（`offsetWidth/offsetHeight`），软渲染/低配机上渲染进程主线程饱和。三处修复：① 快照 listener 120ms 节流 + trailing 合并（流式期间每 ~120ms 处理一次最新快照，60Hz 输入实测降到 ~8Hz，不丢尾）；② `setStatus` 内容相等早退（状态/标题/回复都没变时跳过全部 DOM 写与重绘，静态期零开销）；③ `updateStatus` 的同步 `render()` 改为仅在动画循环未运行（关闭/减少动态效果）时绘制，消除 rAF 动画与快照重绘的双绘制源
 - **运行时补丁引擎与配套插件同步统一收口（PR #51）**：12 个运行时补丁（闪跳修复 / 设置暴露 / 识图密钥 / profile bundle 防护 / workspace 搜索栏 / 插件页标签合并 / web-search baseURL / menu 视口 / 会话管理）与配套插件同步（清理 / 复制 / bundle 登记 / patch 条目注册 / 默认禁用）收口为 `scripts/lib/` 单一实现（patch-io / patch-engine / companion-plugins / companion-profile / runtime-patches），main.js 与 `sync-companion-plugins.js` 共用同一数据源，杜绝两处实现逐步漂移；WSL·overlay 覆盖缺口补齐（识图 / web-search / menu / 会话删除 / 插件页标签在 WSL 更新分支同样应用）；`dshDesktop.appVersion` 回填与菜单 IPC 防未处理拒绝；补丁候选路径构造器新增单测逐项断言；同步收口时保留插件卸载标记（removedIds）与「profile 版本高于安装包则保留」的更新版本防覆盖。
 
 ## [0.3.9] — 2026-08-16
