@@ -44,6 +44,10 @@ files:
   # the 创造模式 skills. Re-include them: later patterns override earlier ones.
   - "**/SKILL.md"
 
+# 顶层 artifactName 作用于没有专属命名的 target（zip 无独立配置段）；
+# dmg 有自己的 dmg.artifactName（优先级更高）。
+artifactName: DSH-Desktop-${version}-${arch}.${ext}
+
 extraResources:
   # macOS 用无后缀的 node 可执行文件（scripts/fetch-node.js 在 macos runner
   # 上以本地复制模式写入 vendor/node/node）。
@@ -69,9 +73,6 @@ mac:
         - arm64
 
 dmg:
-  artifactName: DSH-Desktop-${version}-${arch}.${ext}
-
-zip:
   artifactName: DSH-Desktop-${version}-${arch}.${ext}
 
 publish: null
