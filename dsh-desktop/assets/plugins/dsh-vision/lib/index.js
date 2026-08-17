@@ -14,6 +14,17 @@
  * user interface always shows the picture cards and the recognition text
  * never leaks back into the conversation. Recognition failures degrade to an
  * explanatory text block and never block the conversation.
+ *
+ * Prompt-gate cooperation: the host apiproxy rejects image content at
+ * prompt time when the selected model's inputModalities exclude "image"
+ * (MODEL_DOES_NOT_SUPPORT_IMAGES), which fires BEFORE this plugin's
+ * llm/stream interception ever runs. This plugin therefore wraps every LLM
+ * adapter's resolveModel/listModels to declare image input for models that
+ * claim text-only — the image is admitted, then converted to text here, so
+ * the text-only model never actually sees it. The wrap records each model's
+ * ORIGINAL capability in a native-support cache; the llm/stream interception
+ * consults that cache and passes images through untouched for models that
+ * are natively multimodal (e.g. pi-ai).
  * @module dsh-vision
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
@@ -21,7 +32,7 @@ import z from '@deepseek-ai/schemastery';
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings';
 import { visionChat } from './vlm.js';
 export const name = 'dsh-vision';
-export const inject = ['tools', 'systemPrompt', 'settings'];
+export const inject = ['tools', 'systemPrompt', 'settings', 'llm'];
 const DEFAULT_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4';
 /** Zhipu's free tier gets congested (HTTP 429 code 1305); older free models still answer. */
 const DEFAULT_FREE_FALLBACKS = ['glm-4.1v-thinking-flash', 'glm-4v-flash'];
@@ -62,7 +73,7 @@ let liveConfig = () => ({});
 
 const PROMPT_TEXT = `## Vision (view_image)
 The chat model itself cannot see images, but the view_image tool can. Whenever an image matters — a screenshot path the user mentions, an image URL, a chart, a UI mockup — call view_image instead of guessing or refusing. Ask it a specific question (extract text, count objects, read a chart, describe the layout); it answers arbitrary questions, not just captions. Prefer one focused call per thing you need to know; ask a follow-up call rather than one vague question.
-Images the user attaches to a message are recognized automatically in the background and arrive as "[图片] 识别结果" text blocks — treat them as ordinary text context (the image itself never reaches the model). The user interface keeps showing the original picture; only the model sees the recognition text.`;
+Images the user attaches to a message are recognized automatically in the background and arrive as "[图片] 识别结果" text blocks — treat them as ordinary text context (the image itself never reaches a text-only model; natively multimodal models receive the original image). The user interface keeps showing the original picture.`;
 const TEXT_OUTPUT = {
     schema: { type: 'string' },
     render: (_args, value) => [{ type: 'text', text: String(value) }],
@@ -210,6 +221,78 @@ export async function convertMessagesWithImages(messages, deps) {
     return { messages: out, changed };
 }
 
+/**
+ * Wrap one LLM adapter so text-only models declare image input. The host
+ * apiproxy's prompt-time gate (inputModalities check) would otherwise reject
+ * attached images as MODEL_DOES_NOT_SUPPORT_IMAGES before this plugin's
+ * llm/stream interception can convert them to text. Prototype-inherited
+ * (Object.create) like dsh-third-party-thinking, so wrapper chains from other
+ * plugins compose: each wrap overrides only resolveModel/listModels.
+ *
+ * The ORIGINAL capability of every resolved model is recorded in
+ * nativeImageSupport (provider+"\0"+model -> boolean). The llm/stream
+ * interception reads that cache to pass images through untouched for natively
+ * multimodal models; asking the wrapped resolveModel again would be polluted
+ * (it now always includes "image").
+ * @param adapter - the registration's current adapter (possibly already
+ *   wrapped by another plugin).
+ * @param provider - provider id the adapter is registered under.
+ * @param nativeImageSupport - Map<string, boolean> recording native capability.
+ * @returns the wrapped adapter (same reference when already wrapped).
+ */
+export function wrapVisionAdapter(adapter, provider, nativeImageSupport) {
+    if (!adapter || adapter.__dshVisionWrapped) return adapter;
+    const wrapped = Object.create(adapter);
+    wrapped.__dshVisionWrapped = true;
+    wrapped.resolveModel = async (providerId, model, signal) => {
+        const info = await adapter.resolveModel(providerId, model, signal);
+        const modalities = info && Array.isArray(info.inputModalities) ? info.inputModalities : undefined;
+        const nativeSupportsImages = modalities !== undefined && modalities.includes('image');
+        if (typeof providerId === 'string' && typeof model === 'string') {
+            nativeImageSupport.set(providerId + '\0' + model, nativeSupportsImages);
+        }
+        if (nativeSupportsImages) return info;
+        // Text-only (or undeclared): admit the image at the prompt gate — this
+        // plugin converts it to recognition text before the adapter sees it.
+        return { ...info, inputModalities: [...(modalities ?? ['text']), 'image'] };
+    };
+    wrapped.listModels = async (providerId) => {
+        const models = await adapter.listModels(providerId);
+        if (!Array.isArray(models)) return models;
+        return models.map((m) => {
+            const mods = m && Array.isArray(m.inputModalities) ? m.inputModalities : undefined;
+            if (mods !== undefined && mods.includes('image')) return m;
+            return { ...m, inputModalities: [...(mods ?? ['text']), 'image'] };
+        });
+    };
+    return wrapped;
+}
+
+/**
+ * Wrap every registered LLM adapter for vision admission. Re-runs on
+ * llm/adapters-updated so adapters registered after this plugin's apply are
+ * covered too. Never throws (logging only) — a wrap failure must not take
+ * the plugin fiber down.
+ */
+function applyVisionAdapterWrap(ctx, nativeImageSupport) {
+    try {
+        if (!ctx.llm || !ctx.llm.adapters) return;
+        let wrappedCount = 0;
+        for (const [provider, registration] of ctx.llm.adapters) {
+            if (!registration || !registration.adapter) continue;
+            if (registration.adapter.__dshVisionWrapped) continue;
+            registration.adapter = wrapVisionAdapter(registration.adapter, provider, nativeImageSupport);
+            wrappedCount += 1;
+        }
+        if (wrappedCount > 0) {
+            console.log('[dsh-vision] wrapped ' + wrappedCount + ' LLM adapter(s) for image-input admission');
+        }
+    }
+    catch (error) {
+        console.warn('[dsh-vision] adapter wrap failed: ' + ((error && error.message) || error));
+    }
+}
+
 export function apply(ctx, config) {
     liveConfig = () => config || {};
     // settings 已在本插件 inject 中声明，apply 时服务必在；直接同步注册并
@@ -302,6 +385,10 @@ export function apply(ctx, config) {
     // 转换后的消息重入 llm.stream()（带防重入标记，完整链含校验重走一遍）。
     const VISION_CONVERTED = Symbol('dsh-vision.converted');
     const imageTextCache = new Map();
+    // 原生能力缓存：adapter wrap 时记录「模型本身是否支持 image」（不被本
+    // 插件的 inputModalities 声明污染）。llm/stream 拦截据此决定：原生多模
+    // 态模型（如 pi-ai）原图透传；文本型模型走 VLM 识别替换。
+    const nativeImageSupport = new Map();
     const visionHandler = createLlmStreamHandler({
         convert: async (messages, signal) => {
             let attachments;
@@ -324,8 +411,20 @@ export function apply(ctx, config) {
             try { return ctx.get('llm'); } catch { return undefined; }
         },
         markerKey: VISION_CONVERTED,
+        supportsImages: async (options) => {
+            const provider = options && options.provider;
+            const model = options && options.model;
+            if (typeof provider !== 'string' || typeof model !== 'string') return false;
+            // 未命中时保守 false（识别替换）——DeepSeek 等文本型模型最常见；
+            // host 的 prompt 检查会先调 resolveModel（本插件 wrap 版）填好缓存。
+            return nativeImageSupport.get(provider + '\0' + model) === true;
+        },
     });
     ctx.effect(() => ctx.on('llm/stream', visionHandler, { global: true, prepend: true }), 'dsh-vision.llm-stream');
+    // 放行 prompt 入口的 inputModalities 检查：文本型模型由本插件声明 image
+    // （图片会在 llm/stream 转成文本）。adapter 后注册的（热装配）也覆盖。
+    applyVisionAdapterWrap(ctx, nativeImageSupport);
+    ctx.effect(() => ctx.on('llm/adapters-updated', () => applyVisionAdapterWrap(ctx, nativeImageSupport)), 'dsh-vision.adapter-wrap');
 }
 
 /**
@@ -341,8 +440,12 @@ export function apply(ctx, config) {
  * when anything changed, or (3) falls through to the original chain via
  * `next()` when nothing changed or the LLM service is unavailable. Requests
  * without images (and already-marked re-entries) pass through untouched.
+ * When `deps.supportsImages` is provided and resolves true for a request
+ * (natively multimodal model, e.g. pi-ai), the request falls through to
+ * `next()` untouched so the model receives the real image.
  * @param deps - { convert(messages, signal) → Promise<{messages, changed}>,
- *   getLlm() → {stream(options)}, markerKey (Symbol) }.
+ *   getLlm() → {stream(options)}, markerKey (Symbol),
+ *   supportsImages?(options) → Promise<boolean> }.
  * @returns the (options, next) => stream listener.
  */
 export function createLlmStreamHandler(deps) {
@@ -354,6 +457,18 @@ export function createLlmStreamHandler(deps) {
         if (!hasImageBlocks(options.messages)) return next();
         const signal = options && options.signal !== undefined ? options.signal : undefined;
         return (async function* () {
+            // 原生多模态模型：原图透传（不做识别替换）；判定失败时保守走识别。
+            if (typeof deps.supportsImages === 'function') {
+                try {
+                    if (await deps.supportsImages(options)) {
+                        yield* next();
+                        return;
+                    }
+                }
+                catch (error) {
+                    console.warn('[dsh-vision] native image support check failed, converting images anyway: ' + ((error instanceof Error ? error.message : String(error)) || error));
+                }
+            }
             let messages = options.messages;
             try {
                 const converted = await deps.convert(options.messages, signal);

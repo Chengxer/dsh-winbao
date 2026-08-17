@@ -2,7 +2,7 @@
 // 运行：node --test scripts/test/unit-dsh-vision.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { convertMessagesWithImages, createLlmStreamHandler } from "../../assets/plugins/dsh-vision/lib/index.js";
+import { convertMessagesWithImages, createLlmStreamHandler, wrapVisionAdapter } from "../../assets/plugins/dsh-vision/lib/index.js";
 
 const enc = new TextEncoder();
 const ref = (id, extra = {}) => ({ attachmentId: id, mediaType: "image/png", bytes: 3, width: 2, height: 2, ...extra });
@@ -217,6 +217,53 @@ test("handler：llm 服务不可用 → yield* next", async () => {
   assert.equal(events.next, 1);
 });
 
+test("handler：supportsImages=true（原生多模态模型）→ 原图透传 next，不调 convert", async () => {
+  let convertCalls = 0;
+  const { handler, events, next } = makeHandler({
+    convert: async () => { convertCalls++; return { messages: [], changed: true }; },
+    supportsImages: async () => true,
+  });
+  const stream = handler({ provider: "pi-ai", model: "gpt-image", messages: [message([img("native")])] }, next);
+  assert.deepEqual(await collect(stream), ["fallback-chunk"]);
+  assert.equal(events.next, 1);
+  assert.equal(events.llm, 0);
+  assert.equal(convertCalls, 0);
+});
+
+test("handler：supportsImages=false（文本型模型）→ 走识别替换重入 llm.stream", async () => {
+  let convertCalls = 0;
+  const { handler, events, next } = makeHandler({
+    convert: async () => { convertCalls++; return { messages: [message([textBlock("[图片] 识别结果")])], changed: true }; },
+    supportsImages: async () => false,
+  });
+  const stream = handler({ provider: "deepseek", model: "v4-flash", messages: [message([img("t1")])] }, next);
+  assert.deepEqual(await collect(stream), ["llm-chunk"]);
+  assert.equal(events.llm, 1);
+  assert.equal(convertCalls, 1);
+});
+
+test("handler：supportsImages 抛错 → 保守走识别替换", async () => {
+  let convertCalls = 0;
+  const { handler, events, next } = makeHandler({
+    convert: async () => { convertCalls++; return { messages: [message([textBlock("识别")])], changed: true }; },
+    supportsImages: async () => { throw new Error("resolve failed"); },
+  });
+  const stream = handler({ provider: "x", model: "y", messages: [message([img()])] }, next);
+  assert.deepEqual(await collect(stream), ["llm-chunk"]);
+  assert.equal(events.llm, 1);
+  assert.equal(convertCalls, 1);
+});
+
+test("handler：未提供 supportsImages（默认）→ 走识别替换", async () => {
+  let convertCalls = 0;
+  const { handler, events, next } = makeHandler({
+    convert: async () => { convertCalls++; return { messages: [message([textBlock("识别")])], changed: true }; },
+  });
+  const stream = handler({ messages: [message([img()])] }, next);
+  assert.deepEqual(await collect(stream), ["llm-chunk"]);
+  assert.equal(convertCalls, 1);
+});
+
 test("handler：识别期间 signal 传入 convert", async () => {
   let seenSignal;
   const { handler, events, next } = makeHandler({
@@ -317,4 +364,75 @@ test("前端：readFileText 读取/二进制检测/超限截断", async () => {
 test("前端：buildAttachmentInsertion 结构", () => {
   const out = buildAttachmentInsertion({ name: "readme.md", size: 2048 }, "内容");
   assert.match(out, /^\n\n📎 附件：readme\.md（2\.0 KB）\n---- 文件内容 ----\n内容$/);
+});
+
+// —— wrapVisionAdapter：prompt 入口 inputModalities 放行 + 原生能力记录 ——
+test("wrap：text-only 模型声明 image（放行 prompt 检查）并记录原生 false", async () => {
+  const native = new Map();
+  const adapter = {
+    resolveModel: async () => ({ model: "v4-flash", inputModalities: ["text"] }),
+    listModels: async () => [{ model: "v4-flash", inputModalities: ["text"] }],
+  };
+  const wrapped = wrapVisionAdapter(adapter, "deepseek", native);
+  assert.notEqual(wrapped, adapter);
+  const info = await wrapped.resolveModel("deepseek", "v4-flash");
+  assert.deepEqual(info.inputModalities, ["text", "image"]);
+  assert.equal(native.get("deepseek\0v4-flash"), false);
+  const listed = await wrapped.listModels("deepseek");
+  assert.deepEqual(listed[0].inputModalities, ["text", "image"]);
+  // 原生 adapter 未被修改（原型继承）
+  assert.deepEqual(await adapter.resolveModel("deepseek", "v4-flash"), { model: "v4-flash", inputModalities: ["text"] });
+});
+
+test("wrap：原生多模态模型原样返回并记录原生 true", async () => {
+  const native = new Map();
+  const adapter = {
+    resolveModel: async () => ({ model: "gpt-image", inputModalities: ["text", "image"] }),
+  };
+  const wrapped = wrapVisionAdapter(adapter, "pi-ai", native);
+  const info = await wrapped.resolveModel("pi-ai", "gpt-image");
+  assert.deepEqual(info.inputModalities, ["text", "image"]);
+  assert.equal(native.get("pi-ai\0gpt-image"), true);
+});
+
+test("wrap：inputModalities 未声明 → 声明 text+image 并记录原生 false（保守）", async () => {
+  const native = new Map();
+  const adapter = { resolveModel: async () => ({ model: "x" }) };
+  const wrapped = wrapVisionAdapter(adapter, "p", native);
+  const info = await wrapped.resolveModel("p", "x");
+  assert.deepEqual(info.inputModalities, ["text", "image"]);
+  assert.equal(native.get("p\0x"), false);
+});
+
+test("wrap：幂等（已 wrap 的原引用返回）", async () => {
+  const native = new Map();
+  const adapter = { resolveModel: async () => ({ inputModalities: ["text"] }) };
+  const once = wrapVisionAdapter(adapter, "p", native);
+  const twice = wrapVisionAdapter(once, "p", native);
+  assert.equal(once, twice);
+  const twice2 = wrapVisionAdapter(adapter, "p", native); // 原始 adapter 无标记时会再包一层（防串）
+  assert.notEqual(adapter, twice2);
+});
+
+test("wrap：与第三方 wrap 链式兼容（wrap 一个已 Object.create 的 adapter）", async () => {
+  const native = new Map();
+  const base = {
+    resolveModel: async () => ({ model: "m", inputModalities: ["text"], reasoning: { efforts: ["off", "high"] } }),
+  };
+  const thinkingWrapped = Object.create(base);
+  thinkingWrapped.__dshThirdPartyThinkingWrapped = true;
+  thinkingWrapped.resolveModel = async (p, m, s) => ({ ...await base.resolveModel(p, m, s), reasoning: { efforts: ["off", "high", "max"] } });
+  const visionWrapped = wrapVisionAdapter(thinkingWrapped, "deepseek", native);
+  const info = await visionWrapped.resolveModel("deepseek", "m");
+  assert.deepEqual(info.inputModalities, ["text", "image"]); // dsh-vision 注入
+  assert.deepEqual(info.reasoning.efforts, ["off", "high", "max"]); // thinking 注入保留
+  assert.equal(native.get("deepseek\0m"), false);
+});
+
+test("wrap：resolveModel 抛错时原生传播", async () => {
+  const native = new Map();
+  const adapter = { resolveModel: async () => { throw new Error("NO_ADAPTER"); } };
+  const wrapped = wrapVisionAdapter(adapter, "p", native);
+  await assert.rejects(wrapped.resolveModel("p", "m"), /NO_ADAPTER/);
+  assert.equal(native.has("p\0m"), false); // 异常不写缓存 → llm/stream 拦截保守识别
 });
