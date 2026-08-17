@@ -410,7 +410,7 @@ SCENARIOS['heal-stale-manifest'] = async (t) => {
   const badManifest = {
     name: 'dsh-profile-web',
     private: true,
-    dsh: { profile: { bundles: ['@dsh-external/dsh-super-injector', 'zat-dsh-engine'] } },
+    dsh: { profile: { bundles: ['@dsh-external/dsh-super-injector', 'harness-pet'] } },
   };
   fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify(badManifest, null, 2) + '\n');
   await t.waitFor('boot-ready', 240000, '坏 manifest 应被自愈后正常启动');
@@ -421,7 +421,7 @@ SCENARIOS['heal-stale-manifest'] = async (t) => {
   t.assert(Array.isArray(bundles), 'manifest bundles 应为数组');
   t.assert(bundles[0] === '@deepseek-ai/dsh-base' && bundles[1] === '@deepseek-ai/dsh-web-app',
     `核心 bundles 应补齐到最前，实际=${JSON.stringify(bundles)}`);
-  t.assert(bundles.includes('@dsh-external/dsh-super-injector') && bundles.includes('zat-dsh-engine'),
+  t.assert(bundles.includes('@dsh-external/dsh-super-injector') && bundles.includes('harness-pet'),
     '既有配套 bundle 应原样保留');
   const q = await t.quitAndCheck();
   t.assert(q.exit.code === 0 && q.cleanExit === true, '干净退出');

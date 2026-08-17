@@ -55,6 +55,8 @@ const { writeFileAtomic } = require('./scripts/lib/patch-io');
 const { applyPatchToFiles } = require('./scripts/lib/patch-engine');
 const { FLASH_PKG_REL, EXPOSE_PKG_REL, PW_REL, BASH_REL, CODE_PRESET_REL, patchTargets, localCopyFiles, guardCopyFiles, localNodeModulesRoots, slotCompatCopyFiles, slotCompatPatchTargets, transformFlashFix, transformExposeFix, transformShellDescriptionOptional, transformCodeModeCompat, transformAttachmentMimeTrust, transformLegacySlotKey, transformSlotUnkeyedCompat, ATTACH_LOCAL_REL } = require('./scripts/lib/runtime-patches');
 const { ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK, removeLegacyMarketplacePatchLines, removedPluginIdsFromPatch, ensureDisabledPatchEntry, registerCompanionPatchEntries, syncCompanionFiles } = require('./scripts/lib/companion-profile');
+// 内置 Agent 预设保护：客户端更新（覆盖安装）前快照用户改过的预设，更新后恢复。
+const presetGuard = require('./scripts/lib/preset-guard');
 const { patchWebSearchBaseUrl } = require('./scripts/patch-web-search-baseurl');
 const { patchMenuViewport } = require('./scripts/patch-menu-viewport');
 const { patchSessionManage } = require('./scripts/patch-session-manage');
@@ -3804,6 +3806,11 @@ function syncCompanionPlugins() {
       }
     } catch {}
 
+    // v0.3.11 起内置插件市场 zat-dsh-engine 默认移除（用户要求）：存量 profile
+    // 里已装配的副本一次性清理（目录 + manifest bundles 登记）。settings 标记
+    // zatEngineRetired 保证只清一次——用户之后从 dshmarket 主动重装不受影响。
+    retireZatEngine(profileDir);
+
     // billion-context-dsh（compaction-acp）是模型驱动的 ACP 压缩后端：同一
     // realm 内与 dsh 默认的 compaction-basic 不能并存（插件 README 的官方
     // 安装说明）。幂等写入禁用条目：patch 中已存在 compaction-basic 条目
@@ -3893,6 +3900,118 @@ function syncCompanionPlugins() {
 // 插件管理数据与写盘（设置页「插件」页「管理」标签；IPC 见 dsh:plugin-list /
 // dsh:plugin-set-enabled）
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 退役插件一次性清理：v0.3.11 起内置插件市场 zat-dsh-engine 默认移除。
+// 存量 profile 里已装配的副本（profile node_modules 目录 + manifest bundles
+// 登记）清一次；settings 标记 zatEngineRetired 保证幂等且不再干预——用户
+// 之后从 dshmarket 主动重装不受影响。
+// ---------------------------------------------------------------------------
+function retireZatEngine(profileDir) {
+  const RETIRED_NAME = 'zat-dsh-engine';
+  try {
+    const s = updater.loadSettings(updCtx());
+    if (s.zatEngineRetired) return;
+    const pkgDir = path.join(profileDir, 'node_modules', RETIRED_NAME);
+    if (fs.existsSync(pkgDir)) {
+      // 只清内置装配特征（dsh.bundle.patch 声明）的副本，避免误删同名第三方包。
+      let isBuiltin = false;
+      try {
+        const p = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'));
+        isBuiltin = !!(p && p.dsh && p.dsh.bundle && p.dsh.bundle.patch);
+      } catch {}
+      if (isBuiltin) {
+        fs.rmSync(pkgDir, { recursive: true, force: true });
+        log('boot', '已移除内置插件市场 ' + RETIRED_NAME + '（v0.3.11 起默认移除）');
+      }
+    }
+    const manifestFile = path.join(profileDir, 'package.json');
+    try {
+      const m = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+      if (m && m.dsh && m.dsh.profile && Array.isArray(m.dsh.profile.bundles) && m.dsh.profile.bundles.includes(RETIRED_NAME)) {
+        m.dsh.profile.bundles = m.dsh.profile.bundles.filter((n) => n !== RETIRED_NAME);
+        writeFileAtomic(manifestFile, JSON.stringify(m, null, 2) + '\n');
+        log('boot', '已从 web profile bundles 移除 ' + RETIRED_NAME + ' 登记');
+      }
+    } catch (err) {
+      log('boot', '清理 ' + RETIRED_NAME + ' manifest 登记失败: ' + err.message);
+    }
+    s.zatEngineRetired = true;
+    updater.saveSettings(updCtx(), s);
+  } catch (err) {
+    log('boot', '退役清理 ' + RETIRED_NAME + ' 失败: ' + err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 内置 Agent 预设保护（assets/agent-presets）：用户会直接改安装目录里的内置
+// 预设，客户端更新（NSIS/portable 覆盖安装）会整体替换 resources/app 把这些
+// 改动冲掉。基线按版本管理（userData/preset-guard/baseline.json）：
+//   - 启动：版本未变 → 保持基线（悬挂恢复标记清理）；版本变了且有快照 →
+//     恢复用户改动（官方改过同一文件以用户版为准），基线 = 恢复前官方指纹；
+//     版本变了无快照 → 基线 = 当前内容（正常升级/首装）。
+//   - 更新安装前（quitForClientUpdate）：把「用户改过」的文件快照到
+//     userData/preset-guard/backup，settings 写 pendingPresetRestore。
+// ---------------------------------------------------------------------------
+function presetGuardRootDir() {
+  return path.join(__dirname, 'assets', 'agent-presets');
+}
+
+function applyPresetGuard() {
+  try {
+    const s = updater.loadSettings(updCtx());
+    const pending = s.pendingPresetRestore || null;
+    const baseline = presetGuard.loadBaseline(userDataDir);
+    if (baseline && baseline.version === APP_VERSION) {
+      // 版本未变：正常重启。上次更新未实际发生（用户取消/安装被拦）→
+      // 丢弃快照与标记，避免残留。
+      if (pending && pending.version !== APP_VERSION) {
+        presetGuard.discardBackup(userDataDir);
+        s.pendingPresetRestore = null;
+        updater.saveSettings(updCtx(), s);
+        log('boot', '已丢弃未完成的预设保护快照（客户端未更新）');
+      }
+      return;
+    }
+    if (pending && pending.version === APP_VERSION) {
+      // 更新后首启：恢复用户改动；新基线 = 恢复前的官方新版指纹，保证
+      // 下一轮更新仍能区分「用户改动」与「官方改动」。
+      const { restored, baselineFiles } = presetGuard.restoreUserModifiedFiles(
+        presetGuardRootDir(),
+        presetGuard.backupRoot(userDataDir),
+        (rel, err) => log('boot', '恢复用户预设失败 ' + rel + ': ' + err.message),
+      );
+      presetGuard.saveBaseline(userDataDir, { version: APP_VERSION, files: baselineFiles });
+      presetGuard.discardBackup(userDataDir);
+      s.pendingPresetRestore = null;
+      updater.saveSettings(updCtx(), s);
+      if (restored.length) log('boot', '已恢复用户修改过的内置 Agent 预设: ' + restored.join(', '));
+      return;
+    }
+    // 正常升级/首装（没有用户改动快照）：基线 = 当前内容。
+    presetGuard.saveBaseline(userDataDir, { version: APP_VERSION, files: presetGuard.computeFingerprints(presetGuardRootDir()) });
+  } catch (err) {
+    log('boot', '内置 Agent 预设保护失败: ' + err.message);
+  }
+}
+
+function stagePresetGuardBackup(nextVersion) {
+  try {
+    const s = updater.loadSettings(updCtx());
+    const baseline = presetGuard.loadBaseline(userDataDir);
+    const { count } = presetGuard.stageUserModifiedFiles(presetGuardRootDir(), baseline, presetGuard.backupRoot(userDataDir));
+    if (count > 0) {
+      s.pendingPresetRestore = { version: nextVersion, count, at: Date.now() };
+      log('client-update', '已快照 ' + count + ' 个用户修改过的内置 Agent 预设，更新完成后自动恢复');
+    } else {
+      s.pendingPresetRestore = null;
+      presetGuard.discardBackup(userDataDir);
+    }
+    updater.saveSettings(updCtx(), s);
+  } catch (err) {
+    log('client-update', '快照用户预设失败: ' + err.message);
+  }
+}
 
 /** web profile 目录（与 profilePatchFile 同源，WSL 模式下走 UNC 写穿）。 */
 function pluginManagerProfileDir() {
@@ -5259,6 +5378,9 @@ function quitForClientUpdate(ctx, pending) {
   }
   updater.abort();
   if (sessionWatcher) sessionWatcher.stop();
+  // 内置 Agent 预设保护：安装覆盖 resources/app 前，快照用户改过的
+  // assets/agent-presets 文件到 userData（覆盖安装不触碰），新版本首启恢复。
+  if (pending && pending.version) stagePresetGuardBackup(pending.version);
   let logFile = '';
   try {
     const applied = clientUpdater.applyUpdate(ctx, pending);
@@ -5789,6 +5911,11 @@ async function boot() {
   // 托盘图标被 explorer 重启等外部因素清掉后，周期性自愈。
   trayRecoveryTimer = setInterval(ensureTray, 30 * 1000);
   if (uncleanPrev) notifyUncleanRestart(uncleanPrev);
+  // 内置 Agent 预设保护：更新后首启恢复用户改过的预设（与后端模式无关，
+  // assets/agent-presets 始终在 Windows 侧安装目录）。放在预设同步之前，
+  // 恢复后的内容再由 syncLocalAgentPresets / syncBuiltinAgentPresets 以
+  // 「源为尊」同步进 dsh 包。
+  applyPresetGuard();
   const home = dshHome || process.env.DSH_HOME || require('node:path').join(require('node:os').homedir(), '.dsh');
   if (isWslMode()) {
     // WSL 托管模式：先建窗口显示加载页（首次 npm 安装可能耗时数分钟），

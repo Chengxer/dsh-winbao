@@ -34,6 +34,7 @@ const entryFiles = [
   'scripts/lib/companion-profile.js',
   'scripts/lib/profile-reconcile.js',
   'scripts/lib/versions.js',
+  'scripts/lib/preset-guard.js',
   'scripts/patch-web-search-baseurl.js',
   'scripts/patch-menu-viewport.js',
   'scripts/patch-session-manage.js',

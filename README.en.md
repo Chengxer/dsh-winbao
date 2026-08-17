@@ -141,7 +141,6 @@ Shipped with the installer (full third-party inventory: [THIRD_PARTY_NOTICES.md]
 | `dsh-navbar` | Navbar replacement | [vlln/dsh-navbar](https://github.com/vlln/dsh-navbar) |
 | `dsh-hub` | Plugin hub: update engine / global memory / graph & market mount | [ARFCON/dsh-hub-DSH](https://github.com/ARFCON/dsh-hub-DSH) |
 | `harness-pet` | Desktop pet | [cakeni/harness-pet](https://github.com/cakeni/harness-pet) |
-| `zat-dsh-engine` | Engine enhancements | [mishibeikejie/zat-dsh-engine](https://github.com/mishibeikejie/zat-dsh-engine) |
 
 ## 🏗 Architecture
 

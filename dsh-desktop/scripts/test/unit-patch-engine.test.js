@@ -183,6 +183,11 @@ test('runtime-patches: 白名单变换 声明缺失/收尾缺失/部分缺失/�
     status: 'anchor-missing',
     detail: '未找到 WEB_SETTINGS_NAMESPACES（版本可能已变更），跳过 ' + file,
   });
+  assert.deepStrictEqual(
+    transformExposeFix('namespaces: settings.describe({ redactSecrets: true }).map(namespaceView)', file),
+    { status: 'already' },
+    'rc.7 动态设置描述已原生支持插件命名空间',
+  );
   // 声明存在但缺少 `];` 收尾 → anchor-missing（收尾缺失）
   assert.deepStrictEqual(
     transformExposeFix('const WEB_SETTINGS_NAMESPACES = [\n\t"a"\n', file),
@@ -399,6 +404,7 @@ test('runtime-patches: keyed slot 兼容覆盖顶层与 dsh 嵌套依赖副本',
   assert.strictEqual(new Set(local).size, local.length, '本地候选路径不得重复');
   assert.strictEqual(new Set(wsl).size, wsl.length, 'WSL 候选路径不得重复');
 });
+
 // D. companion-plugins 唯一数据源
 // ---------------------------------------------------------------------------
 
@@ -407,14 +413,15 @@ test('companion-plugins: 既有前缀顺序与 workspace-anchor 位置唯一（�
   assert.deepStrictEqual(
     ids.slice(0, 18),
     [
-      'balance', 'file-changes', 'client-file-changes', 'terminal', 'plugin-market',
+      'balance', 'file-changes', 'client-file-changes', 'terminal',
       'better-sidebar', 'harness-pet', 'float-window', 'dsh-navbar', 'dsh-session-manager',
       'conversation-tweaks', 'super-injector', 'prompt-custom', 'workspace-anchor',
       'third-party-thinking', 'wsl-settings', 'dsh-vision', 'side-session',
+      'compaction-acp',
     ],
     '既有前缀顺序不得漂移（新增/改名须同步更新本测试）'
   );
-  assert.strictEqual(ids.indexOf('workspace-anchor'), 13, 'workspace-anchor 应固定在 prompt-custom 之后');
+  assert.strictEqual(ids.indexOf('workspace-anchor'), 12, 'workspace-anchor 应固定在 prompt-custom 之后');
   assert.strictEqual(ids.filter((id) => id === 'workspace-anchor').length, 1, 'workspace-anchor 不得重复');
   assert.strictEqual(companionDirName({ name: '@deepseek-ai/dsh-balance' }), 'dsh-balance');
   assert.strictEqual(companionDirName({ name: 'harness-pet' }), 'harness-pet');

@@ -58,7 +58,6 @@
 | @dsh-external/dsh-vision | 0.1.0 | BSD-3-Clause | https://github.com/dsh-external (社区 @dsh-external scope) |
 | dsh-navbar | 0.3.0 | MIT | https://github.com/vlln/dsh-navbar |
 | harness-pet | 0.1.0 | MIT | https://github.com/cakeni/harness-pet |
-| zat-dsh-engine | 0.4.0 | MIT | https://github.com/mishibeikejie/zat-dsh-engine |
 | dsh-side-session | 0.2.5 | MIT | https://github.com/hzhz314159/dsh-side-session |
 | billion-context-dsh | 0.2.1 | MIT | https://github.com/Tyan66666/billion-context-dsh |
 | dsh-hub | 1.1.2 | MIT | https://github.com/ARFCON/dsh-hub-DSH |
@@ -101,7 +100,7 @@
 | Node.js | MIT（含 ISC/BSD 等组件） | 便携版内置 `node.exe` 运行时，目标机器无需预装 Node.js |
 | npm CLI | Artistic-2.0 | 内置 npm 命令行，用于插件安装与官方 dsh overlay 更新 |
 
-## 5. 兼容但非内置的社区插件（经 zat-dsh-engine 插件市场由用户自行安装）
+## 5. 兼容但非内置的社区插件（经社区插件市场由用户自行安装）
 
 本项目未打包以下插件，仅对其写入的自定义会话事件做了兼容性补丁（修复 `SessionFormatUnsupportedError`）：
 
@@ -115,7 +114,7 @@
 
 ## 6. 完整依赖清单（Full Dependency List，含间接依赖，按字母排序）
 
-> 共 772 个 `包名@版本`。许可证字段取自各包 `package.json` 的 `license` 声明；标注为组合表达式（如 `MIT AND BSD-3-Clause`）者以其 SPDX 含义为准。
+> 共 771 个 `包名@版本`。许可证字段取自各包 `package.json` 的 `license` 声明；标注为组合表达式（如 `MIT AND BSD-3-Clause`）者以其 SPDX 含义为准。
 
 | 组件 | 版本 | 许可证 | 来源 |
 |---|---|---|---|
@@ -885,7 +884,6 @@
 | yargs | 17.7.3 | MIT | https://github.com/yargs/yargs |
 | yargs-parser | 21.1.1 | ISC | https://github.com/yargs/yargs-parser |
 | yocto-queue | 0.1.0 | MIT | sindresorhus/yocto-queue |
-| zat-dsh-engine | 0.4.0 | MIT | https://github.com/mishibeikejie/zat-dsh-engine |
 | zod | 4.4.3 | MIT | https://github.com/colinhacks/zod |
 | zod-to-json-schema | 3.25.2 | ISC | https://github.com/StefanTerdell/zod-to-json-schema |
 | zstddec | 0.2.0 | MIT AND BSD-3-Clause | https://github.com/donmccurdy/zstddec |
