@@ -2523,13 +2523,23 @@ function registerChromeIpc() {
   // 小窗搬窗：绝对目标位置（光标屏幕坐标 + 抓取偏移），钳制在当前显示器
   // 可视区（至少露出 80px，防止拖出视口找不回来）+ 取整（校验发送者是小窗）。
   ipcMain.on('pet:move-to', (event, { x, y } = {}) => {
-    if (!petWindow || petWindow.isDestroyed() || petWindow.webContents !== event.sender) return;
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-    const probe = { x: Math.round(x), y: Math.round(y), width: PET_WINDOW_W, height: PET_WINDOW_H };
-    const area = screen.getDisplayMatching(probe).workArea;
-    const nx = Math.min(Math.max(x, area.x - PET_WINDOW_W + 80), area.x + area.width - 80);
-    const ny = Math.min(Math.max(y, area.y - PET_WINDOW_H + 80), area.y + area.height - 80);
-    petWindow.setPosition(Math.round(nx), Math.round(ny));
+    try {
+      if (!petWindow || petWindow.isDestroyed() || petWindow.webContents !== event.sender) return;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      let area;
+      try {
+        const probe = { x: Math.round(x), y: Math.round(y), width: PET_WINDOW_W, height: PET_WINDOW_H };
+        const display = screen.getDisplayMatching(probe);
+        area = display && display.workArea;
+      } catch { return; }
+      if (!area || !Number.isFinite(area.x) || !Number.isFinite(area.y) || !Number.isFinite(area.width) || !Number.isFinite(area.height)) return;
+      const nx = Math.min(Math.max(x, area.x - PET_WINDOW_W + 80), area.x + area.width - 80);
+      const ny = Math.min(Math.max(y, area.y - PET_WINDOW_H + 80), area.y + area.height - 80);
+      if (!Number.isFinite(nx) || !Number.isFinite(ny)) return;
+      petWindow.setPosition(Math.round(nx), Math.round(ny));
+    } catch (err) {
+      log('warn', 'pet:move-to failed: ' + String((err && err.message) || err));
+    }
   });
 
   // 主窗插件上报「最小化自动弹出小窗」开关（校验发送者必须是主窗）。

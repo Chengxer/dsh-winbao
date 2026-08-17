@@ -1742,7 +1742,13 @@ body { background: radial-gradient(circle at 50% 68%, rgba(231, 247, 253, .96), 
 			if (!dragged) return;
 			if (PET_MODE && nativePet) {
 				// 小窗模式：搬动整个小窗（光标屏幕坐标 + 抓取偏移 = 绝对目标位置）。
+				// 防御：pointermove 在拖动/捕获边缘 event.screenX 可能为 NaN（或 grabOffset 未初始化），
+			// NaN 经 IPC structured clone 会触发主进程 native 参数转换异常（「Error processing
+			// argument at index 1, conversion failure from」），跳过本次移动，等下一个合法事件再落位。
+			if (Number.isFinite(event.screenX) && Number.isFinite(event.screenY) &&
+				Number.isFinite(dragStart.grabOffsetX) && Number.isFinite(dragStart.grabOffsetY)) {
 				nativePet.moveTo(event.screenX + dragStart.grabOffsetX, event.screenY + dragStart.grabOffsetY);
+			}
 				// 朝向：小窗中心相对所在屏幕水平中线判定（用拖动起点窗口位置
 				// + 累计位移计算，精确无延迟）；只有越过中线才调转一次。
 				const boundary = window.screen.availLeft + window.screen.availWidth / 2;
