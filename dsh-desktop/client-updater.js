@@ -21,9 +21,10 @@
 //      · 安装版：等 DSH Desktop 进程退出 → 以向导方式启动新 Setup 安装包
 //        （安装器会记录原安装目录并在完成后自动启动新版本）。
 //
-// 脚本全程写日志到 <userData>/updates/apply-update.log，并全部使用
-// System32 完整路径，避免应用 PATH 精简时 cmd/tasklist/find/ping/taskkill
-// 找不到导致更新脚本静默失败（“点安装没反应”的根因之一）。
+// 脚本全程写日志到 <userData>/updates/apply-update.log。cmd 脚本内统一用
+// System32 完整路径引用 ping（set "PG=...ping.exe"）与 PowerShell（PSEXE），
+// 避免应用 PATH 精简时找不到这些可执行文件导致更新脚本静默失败
+// （“点安装没反应”的根因之一）。
 
 const https = require('node:https');
 const fs = require('node:fs');
@@ -86,6 +87,7 @@ function httpGetJson(url, headers = {}, timeoutMs = 20000, redirects = 0) {
       }
       let body = '';
       res.setEncoding('utf8');
+      res.on('error', reject); // 响应流自身错误（罕见）同样收敛为 rejection
       res.on('data', (c) => {
         body += c;
         if (body.length > 4 * 1024 * 1024) req.destroy(new Error('响应过大'));
@@ -181,23 +183,34 @@ function selectAsset(release) {
   if (direct) return { parts: [direct], name: direct.name, totalSize: direct.size };
 
   // Gitee 单文件 100MB 限制：安装包拆分为 <完整文件名>.part1 / .part2 …
-  // base 名必须与 GitHub 资产名一致（win-/macos- 前缀，v0.3.9+ 命名规则），
-  // 分片用 zip 为基准（与 zip 优先的直选规则一致；dmg 分片不预期出现）。
-  const base = mac
-    ? `DSH-Desktop-${release.version}-macos-${arch}.zip`
+  // 优先匹配 v0.3.9+ 新命名（win-/macos- 前缀），同时兼容 Gitee 已发布的
+  // v0.3.9 旧命名分片（portable 与 Setup 均为无 win- 前缀的老命名）。
+  const bases = mac
+    ? [`DSH-Desktop-${release.version}-macos-${arch}.zip`]
     : isPortable()
-      ? `DSH-Desktop-${release.version}-win-portable-${arch}.exe`
-      : `DSH-Desktop-${release.version}-win-setup-${arch}.exe`;
-  const parts = release.assets
-    .filter((a) => a.name.startsWith(base + '.part'))
-    .sort((a, b) => {
-      const n = (s) => parseInt(s.split('part').pop(), 10) || 0;
-      return n(a.name) - n(b.name);
-    });
-  if (!parts.length) {
-    throw new Error('未找到匹配的安装包资产（' + release.assets.map((a) => a.name).join(', ') + '）');
+      ? [
+          `DSH-Desktop-${release.version}-win-portable-${arch}.exe`,
+          `DSH-Desktop-${release.version}-portable-${arch}.exe`,
+        ]
+      : [
+          `DSH-Desktop-${release.version}-win-setup-${arch}.exe`,
+          `DSH-Desktop-Setup-${release.version}-${arch}.exe`,
+        ];
+  for (const base of bases) {
+    const n = (s) => parseInt(s.split('part').pop(), 10) || 0;
+    const parts = release.assets
+      .filter((a) => a.name.startsWith(base + '.part'))
+      .sort((a, b) => n(a.name) - n(b.name));
+    // 分片序号必须连续（1..N）：缺中间分片时拼接出的安装包损坏。下载侧
+    // 每片有 content-length 完整性校验，但缺块导致的「总大小恰好超过
+    // MIN_VALID_BYTES 下限」仍可能放行坏包（如仅缺尾部小块），这里直接
+    // 拒绝不连续的分片集，宁可用下一个命名候选或报错，也不拼坏包。
+    const seqOk = parts.every((p, i) => n(p.name) === i + 1);
+    if (parts.length && seqOk) {
+      return { parts, name: base, totalSize: parts.reduce((s, p) => s + p.size, 0) };
+    }
   }
-  return { parts, name: base, totalSize: parts.reduce((s, p) => s + p.size, 0) };
+  throw new Error('未找到匹配的安装包资产（' + release.assets.map((a) => a.name).join(', ') + '）');
 }
 
 function downloadFile(url, dest, { onProgress } = {}) {
@@ -208,8 +221,12 @@ function downloadFile(url, dest, { onProgress } = {}) {
     let settled = false;
     const finish = (fn, value) => { if (!settled) { settled = true; fn(value); } };
     const fail = (err) => {
-      file.close(() => {});
-      try { fs.rmSync(tmp, { force: true }); } catch {}
+      if (settled) return;
+      // 先关句柄再删临时文件：Windows 上句柄未关时 rmSync 会 EBUSY 被吞，
+      // 留下 .part 残留；等 close 回调再删（或删失败也无碍，下次覆盖）。
+      file.close(() => {
+        try { fs.rmSync(tmp, { force: true }); } catch {}
+      });
       finish(reject, err);
     };
     const request = (url2, redirects) => {
@@ -228,6 +245,13 @@ function downloadFile(url, dest, { onProgress } = {}) {
         res.on('aborted', () => fail(new Error('下载连接被中断（服务器提前断开）')));
         res.on('error', fail);
         const total = Number(res.headers['content-length'] || 0);
+        // 有 content-length 时校验完整性：静默截断（chunked 收尾但字节不齐）
+        // 不触发 aborted，历史实现会把残缺 exe 放行安装。
+        res.on('end', () => {
+          if (total > 0 && received !== total) {
+            return fail(new Error(`下载不完整（收到 ${received} / 声明 ${total} 字节）`));
+          }
+        });
         res.on('data', (c) => {
           received += c.length;
           if (onProgress) { try { onProgress(received, total); } catch {} }
@@ -236,6 +260,10 @@ function downloadFile(url, dest, { onProgress } = {}) {
       });
       req.setTimeout(60000, () => req.destroy(new Error('下载超时')));
       req.on('error', fail);
+      // 整体截止时间兜底：socket 空闲超时会在慢速「滴流」下不断复位（每次
+      // 数据都 <60s 到达时永不触发），没有整体上限的下载会永久转圈。
+      const deadline = setTimeout(() => req.destroy(new Error('下载总时长超过上限')), 60 * 60 * 1000);
+      req.on('close', () => clearTimeout(deadline));
     };
     request(url, 0);
     file.on('finish', () => {
@@ -248,20 +276,28 @@ function downloadFile(url, dest, { onProgress } = {}) {
 }
 
 async function concatFiles(sources, dest) {
+  // 写流从第一刻起挂 error 监听：合并期间磁盘满/EACCES 若无监听器会以
+  // 未捕获异常直接崩掉主进程（历史缺陷），且残留半截目标文件。
   const out = fs.createWriteStream(dest);
-  for (const s of sources) {
+  try {
+    for (const s of sources) {
+      await new Promise((res, rej) => {
+        const rs = fs.createReadStream(s);
+        rs.on('error', rej);
+        rs.on('end', res);
+        rs.pipe(out, { end: false });
+      });
+      fs.rmSync(s, { force: true });
+    }
     await new Promise((res, rej) => {
-      const rs = fs.createReadStream(s);
-      rs.on('error', rej);
-      rs.on('end', res);
-      rs.pipe(out, { end: false });
+      out.on('error', rej);
+      out.end(res);
     });
-    fs.rmSync(s, { force: true });
+  } catch (err) {
+    out.destroy();
+    try { fs.rmSync(dest, { force: true }); } catch {}
+    throw err;
   }
-  await new Promise((res, rej) => {
-    out.on('error', rej);
-    out.end(res);
-  });
 }
 
 async function downloadRelease(ctx, release, { onProgress } = {}) {
@@ -272,27 +308,42 @@ async function downloadRelease(ctx, release, { onProgress } = {}) {
   const finalPath = path.join(dir, sel.name);
   const partPaths = [];
   let merged = 0;
-  for (let i = 0; i < sel.parts.length; i++) {
-    const p = sel.parts[i];
-    ctx.log('client-update', `下载 ${p.name}（${Math.round(p.size / 1048576)} MB）`);
-    const dest = split ? finalPath + '.part' + (i + 1) : finalPath;
-    const res = await downloadFile(p.url, dest, {
-      onProgress: (r) => {
-        if (onProgress) onProgress(split ? merged + r : r, sel.totalSize);
-      },
-    });
-    if (split) { merged += res.size; partPaths.push(dest); }
-  }
-  if (split) {
-    ctx.log('client-update', `合并 ${partPaths.length} 个分片 → ${sel.name}`);
-    await concatFiles(partPaths, finalPath);
+  try {
+    for (let i = 0; i < sel.parts.length; i++) {
+      const p = sel.parts[i];
+      ctx.log('client-update', `下载 ${p.name}（${Math.round(p.size / 1048576)} MB）`);
+      const dest = split ? finalPath + '.part' + (i + 1) : finalPath;
+      const res = await downloadFile(p.url, dest, {
+        onProgress: (r) => {
+          if (onProgress) onProgress(split ? merged + r : r, sel.totalSize);
+        },
+      });
+      if (split) { merged += res.size; partPaths.push(dest); }
+    }
+    if (split) {
+      ctx.log('client-update', `合并 ${partPaths.length} 个分片 → ${sel.name}`);
+      await concatFiles(partPaths, finalPath);
+      partPaths.length = 0; // 分片已删除并合并
+    }
+  } catch (err) {
+    // 中途失败：已下载的分片不再有用，全部清理，避免 updates 目录堆积残片。
+    for (const p of partPaths) { try { fs.rmSync(p, { force: true }); } catch {} }
+    throw err;
   }
   const stat = fs.statSync(finalPath);
   if (stat.size < MIN_VALID_BYTES) {
     fs.rmSync(finalPath, { force: true });
     throw new Error('下载文件异常（仅 ' + Math.round(stat.size / 1048576) + ' MB），已丢弃');
   }
-  if (sel.totalSize > 0 && Math.abs(stat.size - sel.totalSize) > 2 * 1024 * 1024) {
+  if (split && sel.totalSize > 0 && stat.size !== sel.totalSize) {
+    // 分片场景：每片都按 content-length 完整校验过，合并后大小与上游声明
+    // 不一致只可能是分片集本身不完整/声明错误——宁可丢弃重试，也不能把
+    // 残缺安装包标记为「已下载待安装」（安装器失败后用户会看到
+    // 「下载了但从不弹安装」的经典困惑）。
+    fs.rmSync(finalPath, { force: true });
+    throw new Error('分片合并后大小与声明不一致（期望 ' + sel.totalSize + ' 实际 ' + stat.size + '），已丢弃，将重试');
+  }
+  if (!split && sel.totalSize > 0 && Math.abs(stat.size - sel.totalSize) > 2 * 1024 * 1024) {
     ctx.log('client-update', `大小与上游声明不一致：期望 ${sel.totalSize} 实际 ${stat.size}（继续，安装器会自校验）`);
   }
   ctx.log('client-update', `下载完成: ${finalPath}（${Math.round(stat.size / 1048576)} MB）`);
@@ -343,7 +394,9 @@ const SYS = [
 //     的只读/目录型探针路径同样有效）：只读目录不再空等 10 分钟，直接降级
 //     为启动新 exe（与 README 承诺一致），并保留下载文件；
 //   · 替换失败且目录可写时，尽力用 .bak 还原当前版本并启动，绝不留坏 exe。
-function buildPortableCmd(logFile) {
+// 日志路径经 `%~1` 位置参数传入（脚本自身不内嵌任何路径，规避含空格路径的
+// cmd 引号剥离问题）。
+function buildPortableCmd() {
   return [
     '@echo off',
     SYS,
@@ -719,7 +772,6 @@ module.exports = {
   buildNsisCmd,
   buildMacSh,
   platformKind,
-  isPortable,
   currentArch,
   resolveRepos,
   DEFAULT_REPOS,

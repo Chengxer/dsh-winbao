@@ -105,8 +105,6 @@ window.__ModuleLoader__.load({
 				// children 直接传数组：joined 里混有 React 元素（peakChip 的
 				// <span>）与字符串分隔符，join 会把元素 toString 成
 				// "[object Object]"（曾致 dock 左侧显示 Object）。
-				// 以前版本此处引用已删除的 parts 变量，导致 ReferenceError、
-				// 整个余额栏（含 Go 用量 chip）静默消失（对应官方 5bcfbed/53e0a4c）。
 				children: joined
 			});
 			if (!go) return dock;

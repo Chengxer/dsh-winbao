@@ -1,16 +1,15 @@
 # The `warmupbetter` preset: a copy of `warmup` whose first-round message
 # asks the model to warm up its own chain of thought as long as possible and
 # list self-reminders before the real prompt arrives. Everything else —
-# Standard capabilities with the Minimal fixed system prompt, plus a warmup
-# round that guarantees the session's first model request runs in a PURE
-# Minimal state — is unchanged. DeepSeek V4 Pro reaches its capability
-# ceiling only under a Minimal prompt, but on real projects AGENTS.md/CLAUDE.md
-# baselines and skill injections enter the first request and pollute that
-# state. The warmup listener replaces the first step's messages outermost on
-# the pre-step waterfall — ahead of the instruction and skill injections — so
-# that first request carries ONLY the fixed minimal prompt and Minimal's exact
-# two tools (`bash` + `str_replace_editor`, same names, descriptions, and
-# schemas as a real Minimal session), and the discarded injections never
+# Standard capabilities with the Minimal-base fixed system prompt — is unchanged.
+# The complete persona carries Minimal's base text plus the desktop workspace
+# anchor, so the first request stays free of AGENTS.md/CLAUDE.md baselines and
+# skill injections while still naming {{cwd}} as the default working location.
+# The warmup listener replaces the first step's messages outermost on the
+# pre-step waterfall — ahead of the instruction and skill injections — so
+# that first request carries ONLY the fixed minimal-base prompt and Minimal's
+# exact two tools (`bash` + `str_replace_editor`, same names, descriptions,
+# and schemas as a real Minimal session), and the discarded injections never
 # reach it.
 # After the warmup turn completes, the user's first prompt is processed
 # normally with the full Standard catalog.
@@ -34,27 +33,38 @@
 
 # ── identity ────────────────────────────────────────────────────────────────
 
-# Keep this text byte-identical to the Minimal preset. `complete` prevents the
-# Harness identity and per-tool guidance from changing the system prompt, while
-# runtime-context suppression leaves task and repository rules to user messages
-# and explicit file reads. Tool schemas and their runtime enforcement remain.
+# Minimal's base persona plus the desktop workspace anchor. `complete` prevents
+# the Harness identity and per-tool guidance from changing the system prompt,
+# while runtime-context suppression leaves task and repository rules to user
+# messages and explicit file reads. Tool schemas and their runtime enforcement
+# remain.
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: You are a helpful software engineer assistant.
+    text: |-
+      You are a helpful software engineer assistant.
+      Workspace: {{cwd}}.
+
+      Default working location:
+      - Keep file edits, builds, and deliverables under {{cwd}}.
+      - Prefer relative paths; they resolve against {{cwd}}.
+      - You may read or search anywhere. A search hit outside {{cwd}} is reference material, not a new project root.
+      - Work outside {{cwd}} only when the user explicitly named that path or it is genuinely unavoidable; then return to {{cwd}}.
     complete: true
     includeRuntimeContext: false
 
 # This row is the point of the preset: it guarantees the session's first model
-# request is PURE Minimal — no AGENTS.md/CLAUDE.md baseline, no skill catalog,
+# request uses the fixed complete persona — Minimal's base text plus the
+# workspace anchor — with no AGENTS.md/CLAUDE.md baseline, no skill catalog,
 # no skill content — however polluted a real repository's instruction files
 # would make a normally-assembled first request.
 #
 # The session's very first step becomes a WARMUP ROUND run by
 # `warmup-bootstrap.mjs` through the normal agent loop: that step's
-# request/header carries ONLY the Minimal fixed system prompt and Minimal's
-# exact two tools (`bash` + `str_replace_editor`) — no AGENTS.md/CLAUDE.md
-# baseline, no skill catalog, no skill content. The `message` below
+# request/header carries ONLY the fixed complete-persona system prompt
+# (Minimal base + workspace anchor) and Minimal's exact two tools
+# (`bash` + `str_replace_editor`) — no AGENTS.md/CLAUDE.md baseline, no skill
+# catalog, no skill content. The `message` below
 # asks the model to warm up its own chain-of-thought as long as
 # possible and list self-reminders before the real prompt arrives. The
 # user's first prompt is deferred to the following turn, which is processed
@@ -83,7 +93,7 @@
 # same tool name, and the byte-identical description as the shipped `minimal`
 # preset. Standard `tool-bash` is gone — both packages register the tool name
 # `bash`, so they cannot coexist — and the persistent shell is the schema the
-# pure Minimal state must present. `shell-env` stays in the HOST composition
+# Minimal tool state must present. `shell-env` stays in the HOST composition
 # (`apps/cli/src/web.ts` injects it to publish `DSH_WEB_URL`/`DSH_WEB_MODE`);
 # the backend still consumes the host sandbox policy and subprocess
 # implementation.

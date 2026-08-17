@@ -99,6 +99,68 @@ test('selectAsset: Gitee 分片按 part 序号排序并拼接为完整文件名'
   });
 });
 
+test('selectAsset: 分片缺中间序号（part1+part3）→ 拒绝，不拼坏包', () => {
+  withEnv('PORTABLE_EXECUTABLE_DIR', 'C:\\tools\\dsh-desktop', () => {
+    const release = {
+      version: '0.4.1',
+      assets: [
+        { name: 'DSH-Desktop-0.4.1-win-portable-x64.exe.part1', url: 'https://example/p1', size: 1 },
+        { name: 'DSH-Desktop-0.4.1-win-portable-x64.exe.part3', url: 'https://example/p3', size: 3 },
+      ],
+    };
+    assert.throws(() => selectAsset(release), /未找到匹配的安装包资产/);
+  });
+});
+
+test('selectAsset: 分片从 part2 开始（缺 part1）→ 拒绝', () => {
+  withEnv('PORTABLE_EXECUTABLE_DIR', 'C:\\tools\\dsh-desktop', () => {
+    const release = {
+      version: '0.4.1',
+      assets: [
+        { name: 'DSH-Desktop-0.4.1-win-portable-x64.exe.part2', url: 'https://example/p2', size: 2 },
+        { name: 'DSH-Desktop-0.4.1-win-portable-x64.exe.part3', url: 'https://example/p3', size: 3 },
+      ],
+    };
+    assert.throws(() => selectAsset(release), /未找到匹配的安装包资产/);
+  });
+});
+
+test('selectAsset: Gitee v0.3.9 旧命名分片（安装版）仍可排序拼接', () => {
+  withEnv('PORTABLE_EXECUTABLE_DIR', undefined, () => {
+    const release = {
+      version: '0.3.9',
+      assets: [
+        { name: 'DSH-Desktop-Setup-0.3.9-x64.exe.part2', url: 'https://example/s2', size: 2 },
+        { name: 'DSH-Desktop-Setup-0.3.9-x64.exe.part1', url: 'https://example/s1', size: 1 },
+      ],
+    };
+    const sel = selectAsset(release);
+    assert.strictEqual(sel.name, 'DSH-Desktop-Setup-0.3.9-x64.exe');
+    assert.deepStrictEqual(sel.parts.map((p) => p.name), [
+      'DSH-Desktop-Setup-0.3.9-x64.exe.part1',
+      'DSH-Desktop-Setup-0.3.9-x64.exe.part2',
+    ]);
+  });
+});
+
+test('selectAsset: Gitee v0.3.9 旧命名分片（便携版）仍可排序拼接', () => {
+  withEnv('PORTABLE_EXECUTABLE_DIR', 'C:\tools\dsh-desktop', () => {
+    const release = {
+      version: '0.3.9',
+      assets: [
+        { name: 'DSH-Desktop-0.3.9-portable-x64.exe.part2', url: 'https://example/p2', size: 2 },
+        { name: 'DSH-Desktop-0.3.9-portable-x64.exe.part1', url: 'https://example/p1', size: 1 },
+      ],
+    };
+    const sel = selectAsset(release);
+    assert.strictEqual(sel.name, 'DSH-Desktop-0.3.9-portable-x64.exe');
+    assert.deepStrictEqual(sel.parts.map((p) => p.name), [
+      'DSH-Desktop-0.3.9-portable-x64.exe.part1',
+      'DSH-Desktop-0.3.9-portable-x64.exe.part2',
+    ]);
+  });
+});
+
 test('selectAsset: arm64 机器选择 win-portable-arm64 资产', () => {
   withEnv('PORTABLE_EXECUTABLE_DIR', 'C:\\tools\\dsh-desktop', () => {
     withEnv('DSH_DESKTOP_ARCH', 'arm64', () => {
@@ -191,7 +253,7 @@ test('resolveRepos: 非法配置回退默认仓库，合法配置原样保留', 
 });
 
 test('buildPortableCmd: 纯 ASCII，含替换重试与只读目录降级分支', () => {
-  const cmd = buildPortableCmd('C:\\data\\updates\\apply-update.log');
+  const cmd = buildPortableCmd();
   assert.ok(ASCII.test(cmd), '便携版更新脚本必须是纯 ASCII');
   assert.ok(cmd.includes(':retry_replace'), '替换失败需要重试标签');
   assert.ok(cmd.includes('if %rtry% lss 12'), '替换失败需要有限次重试');

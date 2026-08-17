@@ -11,8 +11,8 @@
 // 用法（WSL / Linux / Windows 均可执行）：
 //   node scripts/sync-companion-plugins.js [DSH_HOME] [--with-patches] [--dry-run] [--dsh-package <目录>]
 //     DSH_HOME       目标 dsh 数据目录，默认 ~/.dsh
-//     --with-patches 额外应用两个运行时补丁（会话列表闪跳修复、
-//                    dsh-prompt / 第三方思考设置暴露白名单）
+//     --with-patches 额外应用运行时补丁（会话列表闪跳修复、设置暴露白名单、
+//                    shell description 可选化、code preset both 兼容）
 //     --dry-run      只打印将要做的事，不落盘
 //     --dsh-package  内置 Agent 预设的目标 dsh 包目录（缺省自动探测
 //                    <DSH_HOME>/agent 与 PATH 上的 dsh 命令）
@@ -35,13 +35,15 @@ const { COMPANION_PLUGINS } = require('./lib/companion-plugins');
 const { writeFileAtomic } = require('./lib/patch-io');
 const { applyPatchToFiles } = require('./lib/patch-engine');
 const {
-  FLASH_PKG_REL, EXPOSE_PKG_REL, patchTargets,
+  FLASH_PKG_REL, EXPOSE_PKG_REL, PW_REL, BASH_REL, CODE_PRESET_REL, patchTargets,
   transformFlashFix, transformExposeFix,
+  transformShellDescriptionOptional, transformCodeModeCompat,
+  transformAttachmentMimeTrust, ATTACH_LOCAL_REL,
 } = require('./lib/runtime-patches');
 const {
   ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK,
   ensureDisabledPatchEntry, removeLegacyMarketplacePatchLines,
-  registerCompanionPatchEntries, syncCompanionFiles,
+  registerCompanionPatchEntries, syncCompanionFiles, removedPluginIdsFromPatch,
 } = require('./lib/companion-profile');
 
 function log(msg) {
@@ -146,12 +148,19 @@ function syncPlugins(home, dryRun) {
   if (dryRun) {
     log(`dry-run: 目标 profile ${profileDir}`);
   }
+  const patchFile = path.join(profileDir, 'cordis.patch.yml');
+  let patch = '';
+  try { patch = fs.readFileSync(patchFile, 'utf8'); } catch { patch = ''; }
+  // 插件管理「卸载」标记（removed: true 的顶层条目）：与 main.js 同一语义，
+  // 本次同步跳过文件复制与注册，避免 CLI 把用户在桌面端卸载的插件装回。
+  const removedIds = removedPluginIdsFromPatch(patch);
   // 文件同步 + 过期清理 + bundle 完整性校验（共享实现，文案经 hooks 注入，
   // 与旧版本脚本输出逐字一致）。
   const { bundleNames, missingNames } = syncCompanionFiles({
     assetsRoot: path.join(__dirname, '..', 'assets', 'plugins'),
     profileDir,
     vendorRoot: path.join(__dirname, '..', 'node_modules'),
+    removedIds,
     dryRun,
     log: (m) => log(m),
     fail: (m) => warn(m),
@@ -201,14 +210,14 @@ function syncPlugins(home, dryRun) {
   }
 
   // 非 bundle 插件注册到 profile 补丁层（共享实现：幂等、尊重用户已有条目、
-  // bundle 迁移去重与源缺失残留移除；旧插件市场条目一并清理）。
-  const patchFile = path.join(profileDir, 'cordis.patch.yml');
-  let patch = '';
-  try { patch = fs.readFileSync(patchFile, 'utf8'); } catch { patch = ''; }
+  // bundle 迁移去重、源缺失残留移除与卸载标记跳过；旧插件市场条目一并清理）。
+  // patch 文本沿用函数入口的快照（文件同步/清单步骤不改写 patch），最后统一
+  // 原子写一次。
   const reg = registerCompanionPatchEntries(patch, {
     plugins: COMPANION_PLUGINS,
     bundleNames,
     missingNames,
+    removedIds,
     onDrop: (m) => log(m),
     onEntry: (m) => log(m),
   });
@@ -300,6 +309,53 @@ function applyRuntimePatches(home, dryRun) {
     failLog: (file, err) => '提示词暴露补丁失败(' + file + '): ' + err.message,
     dryRun,
     dryRunChangedLog: (file, note) => 'dry-run: 将把 ' + note.join(', ') + ' 加入设置白名单 ' + file,
+  });
+
+  // shell 工具 description 可选化补丁（code 模式 run_code 程序常省略 description）。
+  for (const rel of [PW_REL, BASH_REL]) {
+    applyPatchToFiles({
+      prefix: 'shell description 兼容补丁',
+      files: patchTargets(home, rel),
+      log: (m) => log(m),
+      anchorLog: (m) => warn(m),
+      transform: transformShellDescriptionOptional,
+      alreadyLog: (file) => '已应用，跳过 ' + file,
+      doneLog: (file) => '已把 description 改为可选 ' + file,
+      donePrefix: false,
+      failLog: (file, err) => 'shell description 兼容补丁失败(' + file + '): ' + err.message,
+      dryRun,
+      dryRunChangedLog: (file) => 'dry-run: 将把 description 改为可选 ' + file,
+    });
+  }
+
+  // code preset 兼容补丁（code → both：保留 run_code，同时允许直接调用原生工具）。
+  applyPatchToFiles({
+    prefix: 'code 模式兼容补丁',
+    files: patchTargets(home, CODE_PRESET_REL),
+    log: (m) => log(m),
+    anchorLog: (m) => warn(m),
+    transform: transformCodeModeCompat,
+    alreadyLog: (file) => '已应用，跳过 ' + file,
+    doneLog: (file) => '已把 code preset 切换为 both ' + file,
+    donePrefix: false,
+    failLog: (file, err) => 'code 模式兼容补丁失败(' + file + '): ' + err.message,
+    dryRun,
+    dryRunChangedLog: (file) => 'dry-run: 将把 code preset 切换为 both ' + file,
+  });
+
+  // 图片字节信任补丁（浏览器声明的 MIME 跟随扩展名不可信，以解码字节为准）。
+  applyPatchToFiles({
+    prefix: '图片字节信任补丁',
+    files: patchTargets(home, ATTACH_LOCAL_REL),
+    log: (m) => log(m),
+    anchorLog: (m) => warn(m),
+    transform: transformAttachmentMimeTrust,
+    alreadyLog: (file) => '已应用，跳过 ' + file,
+    doneLog: (file) => '已信任图片解码字节 ' + file,
+    donePrefix: false,
+    failLog: (file, err) => '图片字节信任补丁失败(' + file + '): ' + err.message,
+    dryRun,
+    dryRunChangedLog: (file) => 'dry-run: 将信任图片解码字节 ' + file,
   });
 }
 

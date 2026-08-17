@@ -43,13 +43,20 @@ function bundlePatchRel(pkg) {
 /**
  * 取 bundle 包的入口文件（exports["."] 优先，其次 main）；解析不出返回空串。
  * dsh 装配 bundle 时会 import 该入口，入口文件缺失即整棵插件树加载失败。
+ * 契约（与既有单测一致）：exports["."] 是条件导出对象但没有字符串
+ * import/default 时，Node 无法 import 该包，入口判定为空（不回落到 main）；
+ * 且条件导出值只允许字符串——直接返回对象会让调用方 path.join 抛 TypeError。
  */
 function bundleEntryOf(pkg) {
   const ex = pkg && pkg.exports;
   if (ex && typeof ex === 'object' && !Array.isArray(ex)) {
     const dot = ex['.'];
     if (typeof dot === 'string') return dot;
-    if (dot && typeof dot === 'object') return dot.import || dot.default || '';
+    if (dot && typeof dot === 'object') {
+      if (typeof dot.import === 'string') return dot.import;
+      if (typeof dot.default === 'string') return dot.default;
+      return '';
+    }
   }
   return (pkg && typeof pkg.main === 'string') ? pkg.main : '';
 }
@@ -72,10 +79,17 @@ function verifyBundleDir(dir) {
   }
   const patchRel = bundlePatchRel(pkg);
   if (!patchRel) return { ok: false, reason: 'package.json 未声明 dsh.bundle.patch' };
-  const patchFile = path.join(dir, patchRel);
+  // 路径归一化围栏：补丁层必须仍落在 bundle 目录内（防 `../../x` 越界读取）。
+  const patchFile = path.resolve(dir, patchRel);
+  const dirRoot = path.resolve(dir) + path.sep;
+  if (!patchFile.startsWith(dirRoot)) return { ok: false, reason: '补丁层路径越界: ' + patchRel };
   if (!fs.existsSync(patchFile)) return { ok: false, reason: '补丁层缺失: ' + patchRel };
   const entry = bundleEntryOf(pkg);
-  if (entry && !fs.existsSync(path.join(dir, entry))) return { ok: false, reason: '入口文件缺失: ' + entry };
+  if (entry) {
+    const entryFile = path.resolve(dir, entry);
+    if (!entryFile.startsWith(dirRoot)) return { ok: false, reason: '入口文件路径越界: ' + entry };
+    if (!fs.existsSync(entryFile)) return { ok: false, reason: '入口文件缺失: ' + entry };
+  }
   return { ok: true, reason: '' };
 }
 
@@ -142,9 +156,13 @@ function scanProfileBundles(modulesDir, excludeNames) {
  * @returns 本次实际恢复的包名列表。
  */
 function recoverManifestBundles(manifest, found) {
-  const bundles = Array.isArray(manifest && manifest.dsh && manifest.dsh.profile && manifest.dsh.profile.bundles)
-    ? manifest.dsh.profile.bundles : [];
-  const dependencies = (manifest && manifest.dependencies && typeof manifest.dependencies === 'object' && !Array.isArray(manifest.dependencies))
+  // 防御非法入参：调用方（main.js）虽有多重前置校验，本函数自身不抛错
+  // 的契约让其它调用方（单测/同步脚本）不必重复兜底。
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return [];
+  if (!manifest.dsh || typeof manifest.dsh !== 'object') manifest.dsh = {};
+  if (!manifest.dsh.profile || typeof manifest.dsh.profile !== 'object') manifest.dsh.profile = {};
+  const bundles = Array.isArray(manifest.dsh.profile.bundles) ? manifest.dsh.profile.bundles : [];
+  const dependencies = (manifest.dependencies && typeof manifest.dependencies === 'object' && !Array.isArray(manifest.dependencies))
     ? manifest.dependencies : {};
   const recovered = [];
   for (const item of found) {
@@ -283,6 +301,34 @@ function applyAppBootBundleGuard(src) {
 // @deepseek-ai/dsh/lib/profile-boot-*.js 变换（家级补丁层自愈）
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// dsh/lib/profile-boot-*.js 变换（heal 调用防护）
+// ---------------------------------------------------------------------------
+
+// prepareProfile 每次 boot 无条件调用官方 healProfilesModuleFallback(INSTALL_ANCHOR)：
+// 它 BFS 依赖闭包并 readFileSync 每个 package.json，客户机器上（便携版解压不完整、
+// 杀软锁定、云同步抽风）可能 ENOENT，未捕获即 dsh web exit 1（启动失败页）。
+// main.js 的 repairProfileFallback 只保护壳自己的那次调用，挡不住引擎 boot 内部
+// 的这次。这里把调用包 try/catch：heal 失败只告警，绝不 brick 启动。
+// 幂等标记 = dsh-desktop guard: healProfilesModuleFallback failed。
+const PROFILE_BOOT_HEAL_MARKER = 'dsh-desktop guard: healProfilesModuleFallback failed';
+const PROFILE_BOOT_HEAL_ANCHOR = '\thealProfilesModuleFallback(INSTALL_ANCHOR);';
+const PROFILE_BOOT_HEAL_GUARDED = [
+  'try {',
+  '\thealProfilesModuleFallback(INSTALL_ANCHOR);',
+  '} catch (error) {',
+  '\tprocess.stderr.write(`dsh-desktop guard: healProfilesModuleFallback failed (${String(error?.message ?? error)}); continuing boot without fallback healing\n`);',
+  '}',
+].join('\n');
+
+/** heal 调用防护变换：入口 bundle 无该调用时静默原样返回（不算锚点失配）。 */
+function applyProfileBootHealGuard(src) {
+  if (typeof src !== 'string') return { changed: false, src };
+  if (src.includes(PROFILE_BOOT_HEAL_MARKER)) return { changed: false, src };
+  if (!src.includes(PROFILE_BOOT_HEAL_ANCHOR)) return { changed: false, src };
+  return { changed: true, src: src.replace(PROFILE_BOOT_HEAL_ANCHOR, PROFILE_BOOT_HEAL_GUARDED) };
+}
+
 const PROFILE_BOOT_IMPORT_ANCHOR = 'import { writeFileSync } from "node:fs";';
 const PROFILE_BOOT_HOME_ANCHOR = '\tconst homePatches = loadOptionalPatches(NAME, homePatchPath()) ?? [];';
 const PROFILE_BOOT_LIVE_PROFILE_ANCHOR = '\t\t...loadOptionalPatches(NAME, composed.profile.patchPath) ?? [],';
@@ -347,4 +393,6 @@ module.exports = {
   writeFileAtomic,
   applyAppBootBundleGuard,
   applyProfileBootBundleGuard,
+  applyProfileBootHealGuard,
+  PROFILE_BOOT_HEAL_MARKER,
 };

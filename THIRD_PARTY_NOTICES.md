@@ -59,6 +59,9 @@
 | dsh-navbar | 0.3.0 | MIT | https://github.com/vlln/dsh-navbar |
 | harness-pet | 0.1.0 | MIT | https://github.com/cakeni/harness-pet |
 | zat-dsh-engine | 0.4.0 | MIT | https://github.com/mishibeikejie/zat-dsh-engine |
+| dsh-side-session | 0.2.5 | MIT | https://github.com/hzhz314159/dsh-side-session |
+| billion-context-dsh | 0.2.1 | MIT | https://github.com/Tyan66666/billion-context-dsh |
+| dsh-hub | 1.1.2 | MIT | https://github.com/ARFCON/dsh-hub-DSH |
 
 ### 2.2 DeepSeek 官方配套插件（@deepseek-ai/dsh-*，MIT）
 

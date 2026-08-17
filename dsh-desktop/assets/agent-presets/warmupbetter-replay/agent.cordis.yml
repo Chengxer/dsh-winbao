@@ -1,7 +1,8 @@
 # The `warmupbetter-replay` preset: Warmup Better's composition unchanged,
 # except that the first round no longer calls the real model. The warmup
-# round still carries the Minimal fixed system prompt and Minimal's exact two
-# tools (`bash` + `str_replace_editor`), but its chain of thought and visible
+# round still carries the fixed complete-persona system prompt (Minimal base
+# + workspace anchor) and Minimal's exact two tools
+# (`bash` + `str_replace_editor`), but its chain of thought and visible
 # reply are replayed from the pre-recorded `replay.json` produced by a real
 # Warmup Better session. `warmup-replay.mjs` short-circuits that session's
 # first `llm/stream` waterfall call with the recorded chunks, so the loop logs
@@ -29,21 +30,31 @@
 
 # ── identity ────────────────────────────────────────────────────────────────
 
-# Keep this text byte-identical to the Minimal preset. `complete` prevents the
-# Harness identity and per-tool guidance from changing the system prompt, while
-# runtime-context suppression leaves task and repository rules to user messages
-# and explicit file reads. Tool schemas and their runtime enforcement remain.
+# Minimal's base persona plus the desktop workspace anchor. `complete` prevents
+# the Harness identity and per-tool guidance from changing the system prompt,
+# while runtime-context suppression leaves task and repository rules to user
+# messages and explicit file reads. Tool schemas and their runtime enforcement
+# remain.
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: You are a helpful software engineer assistant.
+    text: |-
+      You are a helpful software engineer assistant.
+      Workspace: {{cwd}}.
+
+      Default working location:
+      - Keep file edits, builds, and deliverables under {{cwd}}.
+      - Prefer relative paths; they resolve against {{cwd}}.
+      - You may read or search anywhere. A search hit outside {{cwd}} is reference material, not a new project root.
+      - Work outside {{cwd}} only when the user explicitly named that path or it is genuinely unavoidable; then return to {{cwd}}.
     complete: true
     includeRuntimeContext: false
 
-# This row guarantees the session's first model request is PURE Minimal and
-# replayed instead of generated. The first step becomes a WARMUP ROUND run by
+# This row guarantees the session's first model request uses the fixed
+# complete persona (Minimal base + workspace anchor) and is replayed instead
+# of generated. The first step becomes a WARMUP ROUND run by
 # `warmup-replay.mjs` through the normal agent loop: its request/header
-# carries ONLY the Minimal fixed system prompt and Minimal's exact two tools,
+# carries ONLY that fixed system prompt and Minimal's exact two tools,
 # and its model call yields the recorded reasoning + reply from
 # `./replay.json`. The `message` below is the same warmup prompt that produced
 # the recording. The user's first prompt is deferred to the following turn,
@@ -73,7 +84,7 @@
 # same tool name, and the byte-identical description as the shipped `minimal`
 # preset. Standard `tool-bash` is gone — both packages register the tool name
 # `bash`, so they cannot coexist — and the persistent shell is the schema the
-# pure Minimal state must present. `shell-env` stays in the HOST composition
+# Minimal tool state must present. `shell-env` stays in the HOST composition
 # (`apps/cli/src/web.ts` injects it to publish `DSH_WEB_URL`/`DSH_WEB_MODE`);
 # the backend still consumes the host sandbox policy and subprocess
 # implementation.

@@ -1,4 +1,4 @@
-![DSH Desktop](https://cdn.jsdelivr.net/gh/myYangyunfan/dsh_desktop@main/docs/banner.en.svg)
+![DSH Desktop](https://cdn.jsdelivr.net/gh/myYangyunfan/dsh_desktop@5c673d6/docs/banner.en.svg)
 
 **A ready-to-use desktop client for DeepSeek Harness (Windows / macOS)**
 
@@ -139,6 +139,7 @@ Shipped with the installer (full third-party inventory: [THIRD_PARTY_NOTICES.md]
 | `dsh-side-session` | Side session popup, three context levels | [hzhz314159/dsh-side-session](https://github.com/hzhz314159/dsh-side-session) |
 | `billion-context-dsh` | Context compaction enhancements | [Tyan66666/billion-context-dsh](https://github.com/Tyan66666/billion-context-dsh) |
 | `dsh-navbar` | Navbar replacement | [vlln/dsh-navbar](https://github.com/vlln/dsh-navbar) |
+| `dsh-hub` | Plugin hub: update engine / global memory / graph & market mount | [ARFCON/dsh-hub-DSH](https://github.com/ARFCON/dsh-hub-DSH) |
 | `harness-pet` | Desktop pet | [cakeni/harness-pet](https://github.com/cakeni/harness-pet) |
 | `zat-dsh-engine` | Engine enhancements | [mishibeikejie/zat-dsh-engine](https://github.com/mishibeikejie/zat-dsh-engine) |
 

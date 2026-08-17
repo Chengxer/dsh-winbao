@@ -2,7 +2,7 @@
 
 // sync-companion-plugins.js CLI 的端到端测试（node --test，全部落在隔离临时
 // 目录，绝不触碰真实 ~/.dsh）：
-//   A. 空 DSH_HOME 首次同步：19 个配套包落盘、patch 条目/禁用块/bundle 登记
+//   A. 空 DSH_HOME 首次同步：20 个配套包落盘、patch 条目/禁用块/bundle 登记
 //      与共享实现一致；
 //   B. 二次同步零写入（全树 size+mtime 不变）；
 //   C. dry-run 零落盘；

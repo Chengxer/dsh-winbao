@@ -72,6 +72,14 @@
 - **生效范围**：应用到 standard 完整 Agent 基准预设；设置保存后新创建会话即刻生效，运行中会话沿用注入时的提示词。
 - 自定义文本按原样注入，可用 `{{model}}` 等占位符；未启用或内容为空时回落为官方默认。
 
+## 工作区锚点（workspace-anchor）
+
+- 新增配套插件 `@deepseek-ai/dsh-workspace-anchor`：在每个 agent 的**稳定 system prompt** 中注入一段约 70 token 的工作区偏好，以 `{{cwd}}` 渲染真实工作区路径，每次请求重复、不被会话滚动或压缩吞掉。
+- 锚点规则：默认在 cwd 内编辑/构建/交付；优先使用相对路径（工具会按 cwd 解析）；允许读取或搜索任何位置，但搜索命中的外部目录只是参考材料，不是新项目根；仅当用户显式指定路径或确有必要时才离开 cwd，随后返回。
+- 纯提示词偏好，**不修改任何权限/沙箱行为**。
+- `minimal-win`、`anchored-standard`、`zero-anchored-standard`、`whoami-standard`、`warmupbetter`、`warmupbetter-replay` 六个 complete-persona 预设会丢弃插件注入节，因此同一锚点已直接写入它们各自的 `agent.cordis.yml` persona 文本；`standard`、`code`、`router-standard`、`v4-flash-godmode-opencode-go` 等非 complete 预设由插件节覆盖。
+
+
 ## 识图插件（dsh-vision）
 
 - 设置 →「识图插件（view_image）」：填写任意 OpenAI 兼容 VLM 的 **API 地址 / 密钥 / 模型 / 备用模型**，保存后热生效。
@@ -256,7 +264,7 @@ npm run dist                   # 构建 portable + NSIS 安装包，输出到 di
 
 ### 把配套插件装进你自己 WSL 里的 dsh（可选，与后端模式无关）
 
-如果你在 WSL 里另有自己装的 dsh（checkout 开发版或 npm 版）——壳自带的配套插件（余额、文件视图、终端、浮窗、插件市场、自定义提示词、第三方思考、识图等）是壳私有打包的（不进 npm），想让它也用上，在 WSL 里执行：
+如果你在 WSL 里另有自己装的 dsh（checkout 开发版或 npm 版）——壳自带的配套插件（余额、文件视图、终端、浮窗、插件市场、自定义提示词、工作区锚点、第三方思考、识图等）是壳私有打包的（不进 npm），想让它也用上，在 WSL 里执行：
 
 ```bash
 node dsh-desktop/scripts/sync-companion-plugins.js ~/.dsh --with-patches
