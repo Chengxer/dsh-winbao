@@ -178,7 +178,7 @@ async function describeImageBlock(block, question, deps) {
  * Replace every image block in the claimed messages with its recognition
  * text. Pure over the injected deps, so it is unit-testable without cordis.
  * Messages without images pass through untouched (changed=false, zero cost).
- * @param messages - claimed message array (agent/pre-step payload.messages).
+ * @param messages - request message array (llm/stream options.messages).
  * @param deps - { readImage(ref, signal), recognize(source, question, signal),
  *   signal?, maxImageBytes?, cache? (Map)}.
  * @returns { messages, changed }.
@@ -227,13 +227,18 @@ export async function convertMessagesWithImages(messages, deps) {
  * attached images as MODEL_DOES_NOT_SUPPORT_IMAGES before this plugin's
  * llm/stream interception can convert them to text. Prototype-inherited
  * (Object.create) like dsh-third-party-thinking, so wrapper chains from other
- * plugins compose: each wrap overrides only resolveModel/listModels.
+ * plugins compose.
  *
  * The ORIGINAL capability of every resolved model is recorded in
  * nativeImageSupport (provider+"\0"+model -> boolean). The llm/stream
  * interception reads that cache to pass images through untouched for natively
- * multimodal models; asking the wrapped resolveModel again would be polluted
- * (it now always includes "image").
+ * multimodal models.
+ *
+ * IMPORTANT: resolveModel here only RECORDS capability and returns the info
+ * UNCHANGED. Adding "image" is done exclusively by the llm service instance
+ * wrap (wrapVisionResolveModelInfo below) — if both wraps added "image", each
+ * would pollute the other's native-capability reading. listModels adds "image"
+ * for UI consistency only (model pickers never drive the prompt gate).
  * @param adapter - the registration's current adapter (possibly already
  *   wrapped by another plugin).
  * @param provider - provider id the adapter is registered under.
@@ -251,10 +256,7 @@ export function wrapVisionAdapter(adapter, provider, nativeImageSupport) {
         if (typeof providerId === 'string' && typeof model === 'string') {
             nativeImageSupport.set(providerId + '\0' + model, nativeSupportsImages);
         }
-        if (nativeSupportsImages) return info;
-        // Text-only (or undeclared): admit the image at the prompt gate — this
-        // plugin converts it to recognition text before the adapter sees it.
-        return { ...info, inputModalities: [...(modalities ?? ['text']), 'image'] };
+        return info;
     };
     wrapped.listModels = async (providerId) => {
         const models = await adapter.listModels(providerId);
@@ -269,27 +271,81 @@ export function wrapVisionAdapter(adapter, provider, nativeImageSupport) {
 }
 
 /**
- * Wrap every registered LLM adapter for vision admission. Re-runs on
- * llm/adapters-updated so adapters registered after this plugin's apply are
- * covered too. Never throws (logging only) — a wrap failure must not take
- * the plugin fiber down.
+ * Wrap the llm SERVICE instance method `resolveModelInfo` so the host prompt
+ * gate (dsh-host-apiproxy) sees "image" in inputModalities for every model.
+ * This is the reliable admission path: the host gate always calls
+ * `ctx.llm.resolveModelInfo`, and the llm service instance already exists when
+ * this plugin applies (it is declared in `inject`), so the wrap cannot miss
+ * its window the way the adapter-registry wrap did (adapters may register
+ * after this plugin's apply).
+ *
+ * The ORIGINAL capability is recorded into nativeImageSupport for the
+ * llm/stream handler (asking the wrapped method again would be polluted — it
+ * now always includes "image"). Idempotent per service instance via
+ * `service.__dshVisionResolveWrapped`. Returns a restore function, or
+ * undefined when nothing was wrapped (missing method / already wrapped).
+ * @param service - the llm service object (ctx.llm).
+ * @param nativeImageSupport - Map<string, boolean> recording native capability.
+ * @returns restore function | undefined.
  */
-function applyVisionAdapterWrap(ctx, nativeImageSupport) {
-    try {
-        if (!ctx.llm || !ctx.llm.adapters) return;
-        let wrappedCount = 0;
-        for (const [provider, registration] of ctx.llm.adapters) {
-            if (!registration || !registration.adapter) continue;
-            if (registration.adapter.__dshVisionWrapped) continue;
-            registration.adapter = wrapVisionAdapter(registration.adapter, provider, nativeImageSupport);
-            wrappedCount += 1;
+export function wrapVisionResolveModelInfo(service, nativeImageSupport) {
+    if (!service || typeof service.resolveModelInfo !== 'function') return undefined;
+    if (service.__dshVisionResolveWrapped) return undefined;
+    const hadOwn = Object.prototype.hasOwnProperty.call(service, 'resolveModelInfo');
+    const original = service.resolveModelInfo;
+    const bound = typeof original.bind === 'function' ? original.bind(service) : original;
+    const wrapped = async (provider, model, signal) => {
+        const info = await bound(provider, model, signal);
+        const modalities = info && Array.isArray(info.inputModalities) ? info.inputModalities : undefined;
+        const nativeSupportsImages = modalities !== undefined && modalities.includes('image');
+        if (typeof provider === 'string' && typeof model === 'string') {
+            nativeImageSupport.set(provider + '\0' + model, nativeSupportsImages);
         }
-        if (wrappedCount > 0) {
-            console.log('[dsh-vision] wrapped ' + wrappedCount + ' LLM adapter(s) for image-input admission');
+        if (modalities === undefined || nativeSupportsImages) return info;
+        // Text-only model: admit the image at the prompt gate — this plugin
+        // converts it to recognition text in llm/stream before the adapter
+        // ever sees it.
+        return { ...info, inputModalities: [...modalities, 'image'] };
+    };
+    service.__dshVisionResolveWrapped = { hadOwn, bound };
+    service.resolveModelInfo = wrapped;
+    console.log('[dsh-vision] wrapped llm.resolveModelInfo service method for image-input admission');
+    return () => {
+        if (!service.__dshVisionResolveWrapped) return;
+        const entry = service.__dshVisionResolveWrapped;
+        delete service.__dshVisionResolveWrapped;
+        if (entry.hadOwn) service.resolveModelInfo = entry.bound;
+        else delete service.resolveModelInfo; // fall back to the prototype method
+    };
+}
+
+/**
+ * Apply every vision admission wrap: the llm service instance method
+ * (reliable gate admission) plus every registered adapter (listModels UI
+ * consistency + native-capability recording). Re-runs on llm/adapters-updated
+ * so adapters registered after this plugin's apply are covered too. Never
+ * throws (logging only) — a wrap failure must not take the plugin fiber down.
+ */
+function applyVisionWraps(ctx, nativeImageSupport) {
+    try {
+        if (ctx.llm) {
+            wrapVisionResolveModelInfo(ctx.llm, nativeImageSupport);
+            if (ctx.llm.adapters) {
+                let wrappedCount = 0;
+                for (const [provider, registration] of ctx.llm.adapters) {
+                    if (!registration || !registration.adapter) continue;
+                    if (registration.adapter.__dshVisionWrapped) continue;
+                    registration.adapter = wrapVisionAdapter(registration.adapter, provider, nativeImageSupport);
+                    wrappedCount += 1;
+                }
+                if (wrappedCount > 0) {
+                    console.log('[dsh-vision] wrapped ' + wrappedCount + ' LLM adapter(s) for vision admission');
+                }
+            }
         }
     }
     catch (error) {
-        console.warn('[dsh-vision] adapter wrap failed: ' + ((error && error.message) || error));
+        console.warn('[dsh-vision] vision wrap failed: ' + ((error && error.message) || error));
     }
 }
 
@@ -422,9 +478,24 @@ export function apply(ctx, config) {
     });
     ctx.effect(() => ctx.on('llm/stream', visionHandler, { global: true, prepend: true }), 'dsh-vision.llm-stream');
     // 放行 prompt 入口的 inputModalities 检查：文本型模型由本插件声明 image
-    // （图片会在 llm/stream 转成文本）。adapter 后注册的（热装配）也覆盖。
-    applyVisionAdapterWrap(ctx, nativeImageSupport);
-    ctx.effect(() => ctx.on('llm/adapters-updated', () => applyVisionAdapterWrap(ctx, nativeImageSupport)), 'dsh-vision.adapter-wrap');
+    // （图片会在 llm/stream 转成文本）。服务实例方法 wrap 在 apply 时立即生
+    // 效（llm 服务已在 inject 中装配）；adapter 后注册的（热装配）经
+    // llm/adapters-updated 重打——必须 {global:true}：该事件从 llm 服务作用
+    // 域发出，插件作用域不在其祖先链上，非 global 监听永远收不到（上一版
+    // 修复失败的根因）。
+    applyVisionWraps(ctx, nativeImageSupport);
+    ctx.effect(() => ctx.on('llm/adapters-updated', () => applyVisionWraps(ctx, nativeImageSupport), { global: true }), 'dsh-vision.vision-wrap');
+    // 插件 fiber 卸载时恢复服务方法（防热重载叠加/污染）。
+    ctx.effect(() => () => {
+        try {
+            if (ctx.llm && ctx.llm.__dshVisionResolveWrapped) {
+                const entry = ctx.llm.__dshVisionResolveWrapped;
+                delete ctx.llm.__dshVisionResolveWrapped;
+                if (entry.hadOwn) ctx.llm.resolveModelInfo = entry.bound;
+                else delete ctx.llm.resolveModelInfo;
+            }
+        } catch { /* 清理失败不阻断卸载 */ }
+    }, 'dsh-vision.vision-unwrap');
 }
 
 /**

@@ -2,7 +2,7 @@
 // 运行：node --test scripts/test/unit-dsh-vision.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { convertMessagesWithImages, createLlmStreamHandler, wrapVisionAdapter } from "../../assets/plugins/dsh-vision/lib/index.js";
+import { convertMessagesWithImages, createLlmStreamHandler, wrapVisionAdapter, wrapVisionResolveModelInfo } from "../../assets/plugins/dsh-vision/lib/index.js";
 
 const enc = new TextEncoder();
 const ref = (id, extra = {}) => ({ attachmentId: id, mediaType: "image/png", bytes: 3, width: 2, height: 2, ...extra });
@@ -366,8 +366,9 @@ test("前端：buildAttachmentInsertion 结构", () => {
   assert.match(out, /^\n\n📎 附件：readme\.md（2\.0 KB）\n---- 文件内容 ----\n内容$/);
 });
 
-// —— wrapVisionAdapter：prompt 入口 inputModalities 放行 + 原生能力记录 ——
-test("wrap：text-only 模型声明 image（放行 prompt 检查）并记录原生 false", async () => {
+// —— wrapVisionAdapter / wrapVisionResolveModelInfo：prompt 入口 inputModalities
+// 放行 + 原生能力记录（加 image 只由服务实例 wrap 负责，adapter wrap 只记录） ——
+test("wrapAdapter：resolveModel 只记录不改，listModels 加 image", async () => {
   const native = new Map();
   const adapter = {
     resolveModel: async () => ({ model: "v4-flash", inputModalities: ["text"] }),
@@ -376,15 +377,15 @@ test("wrap：text-only 模型声明 image（放行 prompt 检查）并记录原�
   const wrapped = wrapVisionAdapter(adapter, "deepseek", native);
   assert.notEqual(wrapped, adapter);
   const info = await wrapped.resolveModel("deepseek", "v4-flash");
-  assert.deepEqual(info.inputModalities, ["text", "image"]);
-  assert.equal(native.get("deepseek\0v4-flash"), false);
+  assert.deepEqual(info.inputModalities, ["text"]); // 原样：加 image 由服务实例 wrap 负责
+  assert.equal(native.get("deepseek\0v4-flash"), false); // 原生能力已记录
   const listed = await wrapped.listModels("deepseek");
-  assert.deepEqual(listed[0].inputModalities, ["text", "image"]);
+  assert.deepEqual(listed[0].inputModalities, ["text", "image"]); // listModels 仅 UI 一致性
   // 原生 adapter 未被修改（原型继承）
   assert.deepEqual(await adapter.resolveModel("deepseek", "v4-flash"), { model: "v4-flash", inputModalities: ["text"] });
 });
 
-test("wrap：原生多模态模型原样返回并记录原生 true", async () => {
+test("wrapAdapter：原生多模态模型原样返回并记录原生 true", async () => {
   const native = new Map();
   const adapter = {
     resolveModel: async () => ({ model: "gpt-image", inputModalities: ["text", "image"] }),
@@ -395,16 +396,16 @@ test("wrap：原生多模态模型原样返回并记录原生 true", async () =>
   assert.equal(native.get("pi-ai\0gpt-image"), true);
 });
 
-test("wrap：inputModalities 未声明 → 声明 text+image 并记录原生 false（保守）", async () => {
+test("wrapAdapter：inputModalities 未声明 → 原样返回并记录原生 false（保守）", async () => {
   const native = new Map();
   const adapter = { resolveModel: async () => ({ model: "x" }) };
   const wrapped = wrapVisionAdapter(adapter, "p", native);
   const info = await wrapped.resolveModel("p", "x");
-  assert.deepEqual(info.inputModalities, ["text", "image"]);
+  assert.deepEqual(info, { model: "x" });
   assert.equal(native.get("p\0x"), false);
 });
 
-test("wrap：幂等（已 wrap 的原引用返回）", async () => {
+test("wrapAdapter：幂等（已 wrap 的原引用返回）", async () => {
   const native = new Map();
   const adapter = { resolveModel: async () => ({ inputModalities: ["text"] }) };
   const once = wrapVisionAdapter(adapter, "p", native);
@@ -414,7 +415,7 @@ test("wrap：幂等（已 wrap 的原引用返回）", async () => {
   assert.notEqual(adapter, twice2);
 });
 
-test("wrap：与第三方 wrap 链式兼容（wrap 一个已 Object.create 的 adapter）", async () => {
+test("wrapAdapter：与第三方 wrap 链式兼容（不污染 thinking 注入）", async () => {
   const native = new Map();
   const base = {
     resolveModel: async () => ({ model: "m", inputModalities: ["text"], reasoning: { efforts: ["off", "high"] } }),
@@ -424,15 +425,97 @@ test("wrap：与第三方 wrap 链式兼容（wrap 一个已 Object.create 的 a
   thinkingWrapped.resolveModel = async (p, m, s) => ({ ...await base.resolveModel(p, m, s), reasoning: { efforts: ["off", "high", "max"] } });
   const visionWrapped = wrapVisionAdapter(thinkingWrapped, "deepseek", native);
   const info = await visionWrapped.resolveModel("deepseek", "m");
-  assert.deepEqual(info.inputModalities, ["text", "image"]); // dsh-vision 注入
+  assert.deepEqual(info.inputModalities, ["text"]); // 记录不改
   assert.deepEqual(info.reasoning.efforts, ["off", "high", "max"]); // thinking 注入保留
   assert.equal(native.get("deepseek\0m"), false);
 });
 
-test("wrap：resolveModel 抛错时原生传播", async () => {
+test("wrapAdapter：resolveModel 抛错时原生传播，不写缓存", async () => {
   const native = new Map();
   const adapter = { resolveModel: async () => { throw new Error("NO_ADAPTER"); } };
   const wrapped = wrapVisionAdapter(adapter, "p", native);
   await assert.rejects(wrapped.resolveModel("p", "m"), /NO_ADAPTER/);
   assert.equal(native.has("p\0m"), false); // 异常不写缓存 → llm/stream 拦截保守识别
+});
+
+// —— wrapVisionResolveModelInfo：服务实例方法 wrap（prompt 入口放行的可靠路径） ——
+test("wrapService：text-only 模型加 image 并记录原生 false", async () => {
+  const native = new Map();
+  const service = {
+    resolveModelInfo: async (provider, model) => ({ model, inputModalities: ["text"] }),
+  };
+  const restore = wrapVisionResolveModelInfo(service, native);
+  assert.equal(typeof restore, "function");
+  const info = await service.resolveModelInfo("deepseek", "v4-flash");
+  assert.deepEqual(info.inputModalities, ["text", "image"]); // 放行 host prompt 检查
+  assert.equal(native.get("deepseek\0v4-flash"), false);
+});
+
+test("wrapService：原生多模态原样返回并记录 true", async () => {
+  const native = new Map();
+  const service = {
+    resolveModelInfo: async (provider, model) => ({ model, inputModalities: ["text", "image"] }),
+  };
+  wrapVisionResolveModelInfo(service, native);
+  const info = await service.resolveModelInfo("pi-ai", "gpt-image");
+  assert.deepEqual(info.inputModalities, ["text", "image"]);
+  assert.equal(native.get("pi-ai\0gpt-image"), true);
+});
+
+test("wrapService：inputModalities 未声明 → 原样（host 检查本就跳过）并记录 false", async () => {
+  const native = new Map();
+  const service = { resolveModelInfo: async () => ({ model: "x" }) };
+  wrapVisionResolveModelInfo(service, native);
+  const info = await service.resolveModelInfo("p", "x");
+  assert.deepEqual(info, { model: "x" });
+  assert.equal(native.get("p\0x"), false);
+});
+
+test("wrapService：this 绑定保持（服务方法内部用 this）", async () => {
+  const native = new Map();
+  const service = {
+    baseModalities: ["text"],
+    resolveModelInfo(provider, model) {
+      return { model, inputModalities: this.baseModalities };
+    },
+  };
+  wrapVisionResolveModelInfo(service, native);
+  const info = await service.resolveModelInfo("p", "m");
+  assert.deepEqual(info.inputModalities, ["text", "image"]);
+});
+
+test("wrapService：幂等（第二次调用返回 undefined，行为不叠加）", async () => {
+  const native = new Map();
+  const service = { resolveModelInfo: async () => ({ inputModalities: ["text"] }) };
+  assert.equal(typeof wrapVisionResolveModelInfo(service, native), "function");
+  assert.equal(wrapVisionResolveModelInfo(service, native), undefined);
+  const info = await service.resolveModelInfo("p", "m");
+  assert.deepEqual(info.inputModalities, ["text", "image"]); // 只加一次
+});
+
+test("wrapService：restore 恢复原方法（own property 与原型方法两种形态）", async () => {
+  const native = new Map();
+  // own property 形态
+  const own = { resolveModelInfo: async () => ({ inputModalities: ["text"] }) };
+  const r1 = wrapVisionResolveModelInfo(own, native);
+  assert.equal((await own.resolveModelInfo("p", "m")).inputModalities.length, 2);
+  r1();
+  assert.equal((await own.resolveModelInfo("p", "m")).inputModalities.length, 1); // 已恢复
+  assert.equal(own.__dshVisionResolveWrapped, undefined);
+  // 原型方法形态：恢复后 own property 被删除，回退原型
+  class ServiceClass {
+    async resolveModelInfo() { return { inputModalities: ["text"] }; }
+  }
+  const proto = new ServiceClass();
+  const r2 = wrapVisionResolveModelInfo(proto, native);
+  assert.ok(Object.prototype.hasOwnProperty.call(proto, "resolveModelInfo"));
+  r2();
+  assert.ok(!Object.prototype.hasOwnProperty.call(proto, "resolveModelInfo")); // 回退原型
+  assert.deepEqual((await proto.resolveModelInfo("p", "m")).inputModalities, ["text"]);
+});
+
+test("wrapService：无 resolveModelInfo 方法 → undefined 不抛错", () => {
+  const native = new Map();
+  assert.equal(wrapVisionResolveModelInfo({}, native), undefined);
+  assert.equal(wrapVisionResolveModelInfo(undefined, native), undefined);
 });
