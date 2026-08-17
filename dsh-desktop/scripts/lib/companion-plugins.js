@@ -39,6 +39,10 @@ const COMPANION_PLUGINS = [
   { id: 'side-session', name: '@dsh-external/dsh-side-session' },
   { id: 'compaction-acp', name: 'billion-context-dsh' },
   { id: 'plugin-manager', name: '@deepseek-ai/dsh-plugin-manager' },
+  // 插件中枢（ARFCON/dsh-hub-DSH，MIT）：插件更新引擎（版本对比/一键更新/
+  // 启停/卸载/启动自检修复）+ 全局记忆 + graph-memory / dsh-market 挂载 +
+  // 自身更新检查；原生适配 Gitee 版客户端版本双源对比。
+  { id: 'dsh-hub', name: 'dsh-hub' },
 ];
 
 /** 包名 → assets/plugins 下的目录名（去 scope 前缀）。 */

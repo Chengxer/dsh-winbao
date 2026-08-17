@@ -139,6 +139,7 @@ git tag v0.4.0 && git push origin v0.4.0
 | `dsh-side-session` | 侧边会话浮窗，三档上下文 | [hzhz314159/dsh-side-session](https://github.com/hzhz314159/dsh-side-session) |
 | `billion-context-dsh` | 上下文压缩（compaction）增强 | [Tyan66666/billion-context-dsh](https://github.com/Tyan66666/billion-context-dsh) |
 | `dsh-navbar` | 导航栏替换 | [vlln/dsh-navbar](https://github.com/vlln/dsh-navbar) |
+| `dsh-hub` | 插件中枢：更新引擎 / 全局记忆 / 图谱与市场挂载 | [ARFCON/dsh-hub-DSH](https://github.com/ARFCON/dsh-hub-DSH) |
 | `harness-pet` | 桌面宠物 | [cakeni/harness-pet](https://github.com/cakeni/harness-pet) |
 | `zat-dsh-engine` | 引擎增强 | [mishibeikejie/zat-dsh-engine](https://github.com/mishibeikejie/zat-dsh-engine) |
 
