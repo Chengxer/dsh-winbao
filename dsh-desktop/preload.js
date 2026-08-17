@@ -23,6 +23,21 @@ const FLOAT_BAR_HEIGHT = 24;
 // legacy dshDesktop.appVersion field working).
 // ---------------------------------------------------------------------------
 
+// 会话完成通知点击跳转：主进程把 sessionId 推到渲染层。页面插件尚未就绪时
+// 保留最后一次 jump，等订阅方注册后再补发，避免错过通知点击。
+let notificationJumpListener = null;
+let pendingNotificationJump = null;
+
+ipcRenderer.on('dsh:notification-jump', (_event, payload) => {
+  const sessionId = payload && typeof payload.sessionId === 'string' ? payload.sessionId.trim() : '';
+  if (!sessionId || sessionId.length > 256) return;
+  const jump = Object.freeze({ sessionId });
+  if (notificationJumpListener) {
+    try { notificationJumpListener(jump); } catch {}
+  } else {
+    pendingNotificationJump = jump;
+  }
+});
 const dshDesktop = {
   appVersion: '', // 由 chrome:init 回填；旧字段保持存在
   windowControls: {
@@ -41,6 +56,19 @@ const dshDesktop = {
   },
   getInfo: () => ipcRenderer.invoke('chrome:init'),
   refreshBalance: () => ipcRenderer.invoke('dsh:balance-refresh'),
+  // 会话完成通知点击跳转：页面插件订阅后，主进程通知点击事件会推送 sessionId。
+  onNotificationJump: (cb) => {
+    if (typeof cb !== 'function') return () => {};
+    notificationJumpListener = cb;
+    if (pendingNotificationJump) {
+      const payload = pendingNotificationJump;
+      pendingNotificationJump = null;
+      try { cb(payload); } catch {}
+    }
+    return () => {
+      if (notificationJumpListener === cb) notificationJumpListener = null;
+    };
+  },
   // WSL 后端配置（设置页 dsh-wsl-settings 插件消费）。
   wsl: {
     getConfig: () => ipcRenderer.invoke('dsh:wsl-config'),

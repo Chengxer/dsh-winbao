@@ -2323,6 +2323,18 @@ function onSessionTurnEnd(info) {
     showNotification({
       title: info.title || 'DSH 任务完成',
       body: info.body || '会话任务已完成',
+      onClick: () => {
+        showMainWindow();
+        const sessionId = typeof info.sessionId === 'string' ? info.sessionId.trim() : '';
+        if (!sessionId || sessionId.length > 256) return;
+        try {
+          if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+            mainWindow.webContents.send('dsh:notification-jump', { sessionId });
+          }
+        } catch (err) {
+          log('notify', '通知跳转会话失败: ' + err.message);
+        }
+      },
     });
   } catch (err) {
     log('notify', '通知发送失败: ' + err.message);
@@ -5466,4 +5478,4 @@ if (!gotLock) {
     if (!IS_WIN || !tray) app.quit();
   });
   app.whenReady().then(boot).catch((err) => fatal('应用初始化失败', err));
-}
+}
