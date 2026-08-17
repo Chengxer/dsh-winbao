@@ -24,6 +24,7 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
   - **用户插件数据恢复**（issue #48）：manifest 损坏被重置后，用户手动安装的第三方 bundle 仍实际落在 profile node_modules 里——启动自愈会扫描、校验并把它们合并回 manifest（`bundles` + `dependencies`），用户插件照常装配；普通依赖与损坏包不恢复登记。同时弹「配置自愈」系统通知（集成测试态抑制），不再静默。
   - **启动前健康检查**：`dsh web` 启动前把每个 bundles 条目的装配状态落到 `desktop.log`（缺失 / 未声明 / 补丁层缺失一目了然），`dsh-web.log` 保留完整 stderr 诊断。
   变换与恢复逻辑收口为纯模块 `profile-bundle-heal.js`（`node --test` 单测 13 项 + 7 个新集成场景：heal-missing-bundle / heal-manifestless-bundle / heal-broken-manifest / heal-broken-manifest-recovers / heal-broken-home-patch / heal-broken-bundle-patch / companion-bundle-invariant）。
+- **运行时补丁引擎与配套插件同步统一收口（PR #51）**：12 个运行时补丁（闪跳修复 / 设置暴露 / 识图密钥 / profile bundle 防护 / workspace 搜索栏 / 插件页标签合并 / web-search baseURL / menu 视口 / 会话管理）与配套插件同步（清理 / 复制 / bundle 登记 / patch 条目注册 / 默认禁用）收口为 `scripts/lib/` 单一实现（patch-io / patch-engine / companion-plugins / companion-profile / runtime-patches），main.js 与 `sync-companion-plugins.js` 共用同一数据源，杜绝两处实现逐步漂移；WSL·overlay 覆盖缺口补齐（识图 / web-search / menu / 会话删除 / 插件页标签在 WSL 更新分支同样应用）；`dshDesktop.appVersion` 回填与菜单 IPC 防未处理拒绝；补丁候选路径构造器新增单测逐项断言；同步收口时保留插件卸载标记（removedIds）与「profile 版本高于安装包则保留」的更新版本防覆盖。
 
 ## [0.3.9] — 2026-08-16
 
