@@ -74,6 +74,12 @@
 
 **数据位置**：便携版在 exe 旁 `data\`；安装版在 `%APPDATA%\DSH Desktop\`。设置环境变量 `DSH_HOME` 可强制指定 dsh 配置目录。
 
+## 💬 社区交流
+
+遇到问题、想反馈建议或与其他用户交流？欢迎加入 QQ 交流群（群号 **926561802**）：
+
+![QQ 交流群](https://cdn.jsdelivr.net/gh/myYangyunfan/dsh_desktop@main/docs/qq-group-qr.png)
+
 ## 🛠 从源码构建
 
 ```powershell

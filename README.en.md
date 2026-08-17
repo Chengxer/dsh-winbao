@@ -74,6 +74,12 @@ Merge tool: [merge.bat](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/do
 
 **Data location**: Portable keeps data in `data\` next to the exe; the installer uses `%APPDATA%\DSH Desktop\`. Set the `DSH_HOME` environment variable to override the dsh config directory.
 
+## 💬 Community
+
+Questions, feedback, or just want to chat with other users? Join our QQ group (**926561802**):
+
+![QQ Group](https://cdn.jsdelivr.net/gh/myYangyunfan/dsh_desktop@main/docs/qq-group-qr.png)
+
 ## 🛠 Build from Source
 
 ```powershell
