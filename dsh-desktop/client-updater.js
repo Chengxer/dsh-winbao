@@ -9,6 +9,8 @@
 //      release 的 tag 作为版本号，与当前 APP_VERSION 比较。
 //   2. selectAsset(): 按当前部署形态与 CPU 架构选择安装包 —— 便携版选
 //      *-portable-<arch>.exe（x64/arm64）；安装版选 Setup-*-<arch>.exe。
+// 资产命名（v0.3.9+ 规则，带平台前缀）：DSH-Desktop-<版本>-win-portable-<arch>.exe、
+// DSH-Desktop-<版本>-win-setup-<arch>.exe；macOS 为 ...-macos-<arch>.dmg/.zip。
 //      Gitee 因单文件 100MB 限制把安装包拆成 .part1/.part2 分片，此时自动
 //      按序下载并拼接。
 //   3. downloadRelease(): 流式下载（带进度回调）到 <userData>/updates/。
@@ -157,14 +159,15 @@ function selectAsset(release) {
   const arch = currentArch();
   const wanted = isPortable()
     ? new RegExp(`-portable-${arch}\\.exe$`, 'i')
-    : new RegExp(`-setup-.*-${arch}\\.exe$`, 'i');
+    : new RegExp(`-setup-(?:.*-)?${arch}\\.exe$`, 'i');
   const direct = release.assets.find((a) => wanted.test(a.name));
   if (direct) return { parts: [direct], name: direct.name, totalSize: direct.size };
 
   // Gitee 单文件 100MB 限制：安装包拆分为 <file>.part1 / <file>.part2 …
+  // base 名必须与 GitHub 资产名一致（win- 前缀，v0.3.9+ 命名规则）。
   const base = isPortable()
-    ? `DSH-Desktop-${release.version}-portable-${arch}.exe`
-    : `DSH-Desktop-Setup-${release.version}-${arch}.exe`;
+    ? `DSH-Desktop-${release.version}-win-portable-${arch}.exe`
+    : `DSH-Desktop-${release.version}-win-setup-${arch}.exe`;
   const parts = release.assets
     .filter((a) => a.name.startsWith(base + '.part'))
     .sort((a, b) => {

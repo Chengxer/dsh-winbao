@@ -72,9 +72,9 @@
 
 [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases) 提供完整单文件安装包（便携版 + 安装版 + blockmap），无大小限制，直接下载。
 
-**支持架构**：x64 与 arm64（ARM 设备请选 `*-arm64.exe`），文件命名 `DSH-Desktop-<版本>-portable-arm64.exe` / `DSH-Desktop-Setup-<版本>-arm64.exe`。
+**支持架构**：x64 与 arm64（ARM 设备请选 `*-arm64.exe`）。文件命名带平台前缀，一眼区分：`DSH-Desktop-<版本>-win-portable-x64.exe`（x64 便携版）、`-win-portable-arm64.exe`（arm64 便携版）、`-win-setup-x64.exe`（x64 安装版）、`-win-setup-arm64.exe`（arm64 安装版）。
 
-**macOS**：提供 `DSH-Desktop-<版本>-x64.dmg` / `-arm64.dmg`（另有同架构 `.zip`）。Intel Mac 选 x64，Apple Silicon 选 arm64，将 App 拖入「应用程序」即可。macOS 版暂未签名，Apple Silicon 首次打开会提示「无法验证开发者」——请**右键点击 App → 打开**，或终端执行：
+**macOS**：提供 `DSH-Desktop-<版本>-macos-x64.dmg` / `-macos-arm64.dmg`（另有同架构 `.zip`）。Intel Mac 选 x64，Apple Silicon 选 arm64，将 App 拖入「应用程序」即可。macOS 版暂未签名，Apple Silicon 首次打开会提示「无法验证开发者」——请**右键点击 App → 打开**，或终端执行：
 
 ```bash
 xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"

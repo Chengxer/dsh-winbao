@@ -221,7 +221,24 @@ jobs:
           for ($i = 0; $i -lt 6; $i++) {
             gh release view $tag --json id 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) { break }
-            gh release create $tag --title "DSH Desktop $tag" --generate-notes 2>$null
+          $notes = @"
+          ## 📦 怎么选安装包（平台 / 芯片对照）
+
+          | 平台 | 芯片 | 文件 |
+          | --- | --- | --- |
+          | Windows 便携版（免安装） | x64 | DSH-Desktop-$tag-win-portable-x64.exe |
+          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$tag-win-portable-arm64.exe |
+          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-$tag-win-setup-x64.exe |
+          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-$tag-win-setup-arm64.exe |
+          | macOS（Intel） | x64 | DSH-Desktop-$tag-macos-x64.dmg / .zip |
+          | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$tag-macos-arm64.dmg / .zip |
+
+          - Windows 用户：x64 设备选 x64 文件；ARM 设备（如 Surface Pro X）选 arm64 文件。
+          - macOS 用户：Intel Mac 选 x64；Apple Silicon（M1/M2/M3/M4）选 arm64。将 App 拖入「应用程序」。
+          - macOS 版未签名：首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"。
+          - 客户端自动更新仅 Windows；macOS 请手动下载新版。
+          "@
+          gh release create $tag --title "DSH Desktop $tag" --notes $notes 2>$null
             if ($LASTEXITCODE -eq 0) { break }
             Start-Sleep -Seconds 5
           }
@@ -420,7 +437,24 @@ jobs:
           for ($i = 0; $i -lt 6; $i++) {
             gh release view $tag --json id 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) { break }
-            gh release create $tag --title "DSH Desktop $tag" --generate-notes 2>$null
+          $notes = @"
+          ## 📦 怎么选安装包（平台 / 芯片对照）
+
+          | 平台 | 芯片 | 文件 |
+          | --- | --- | --- |
+          | Windows 便携版（免安装） | x64 | DSH-Desktop-$tag-win-portable-x64.exe |
+          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$tag-win-portable-arm64.exe |
+          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-$tag-win-setup-x64.exe |
+          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-$tag-win-setup-arm64.exe |
+          | macOS（Intel） | x64 | DSH-Desktop-$tag-macos-x64.dmg / .zip |
+          | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$tag-macos-arm64.dmg / .zip |
+
+          - Windows 用户：x64 设备选 x64 文件；ARM 设备（如 Surface Pro X）选 arm64 文件。
+          - macOS 用户：Intel Mac 选 x64；Apple Silicon（M1/M2/M3/M4）选 arm64。将 App 拖入「应用程序」。
+          - macOS 版未签名：首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"。
+          - 客户端自动更新仅 Windows；macOS 请手动下载新版。
+          "@
+          gh release create $tag --title "DSH Desktop $tag" --notes $notes 2>$null
             if ($LASTEXITCODE -eq 0) { break }
             Start-Sleep -Seconds 5
           }
@@ -577,7 +611,24 @@ jobs:
           for ($i = 0; $i -lt 6; $i++) {
             gh release view $tag --json id 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) { break }
-            gh release create $tag --title "DSH Desktop $tag" --generate-notes 2>$null
+          $notes = @"
+          ## 📦 怎么选安装包（平台 / 芯片对照）
+
+          | 平台 | 芯片 | 文件 |
+          | --- | --- | --- |
+          | Windows 便携版（免安装） | x64 | DSH-Desktop-$tag-win-portable-x64.exe |
+          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$tag-win-portable-arm64.exe |
+          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-$tag-win-setup-x64.exe |
+          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-$tag-win-setup-arm64.exe |
+          | macOS（Intel） | x64 | DSH-Desktop-$tag-macos-x64.dmg / .zip |
+          | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$tag-macos-arm64.dmg / .zip |
+
+          - Windows 用户：x64 设备选 x64 文件；ARM 设备（如 Surface Pro X）选 arm64 文件。
+          - macOS 用户：Intel Mac 选 x64；Apple Silicon（M1/M2/M3/M4）选 arm64。将 App 拖入「应用程序」。
+          - macOS 版未签名：首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"。
+          - 客户端自动更新仅 Windows；macOS 请手动下载新版。
+          "@
+          gh release create $tag --title "DSH Desktop $tag" --notes $notes 2>$null
             if ($LASTEXITCODE -eq 0) { break }
             Start-Sleep -Seconds 5
           }
@@ -711,7 +762,24 @@ jobs:
           for ($i = 0; $i -lt 6; $i++) {
             gh release view $tag --json id 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) { break }
-            gh release create $tag --title "DSH Desktop $tag" --generate-notes 2>$null
+          $notes = @"
+          ## 📦 怎么选安装包（平台 / 芯片对照）
+
+          | 平台 | 芯片 | 文件 |
+          | --- | --- | --- |
+          | Windows 便携版（免安装） | x64 | DSH-Desktop-$tag-win-portable-x64.exe |
+          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-$tag-win-portable-arm64.exe |
+          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-$tag-win-setup-x64.exe |
+          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-$tag-win-setup-arm64.exe |
+          | macOS（Intel） | x64 | DSH-Desktop-$tag-macos-x64.dmg / .zip |
+          | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$tag-macos-arm64.dmg / .zip |
+
+          - Windows 用户：x64 设备选 x64 文件；ARM 设备（如 Surface Pro X）选 arm64 文件。
+          - macOS 用户：Intel Mac 选 x64；Apple Silicon（M1/M2/M3/M4）选 arm64。将 App 拖入「应用程序」。
+          - macOS 版未签名：首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"。
+          - 客户端自动更新仅 Windows；macOS 请手动下载新版。
+          "@
+          gh release create $tag --title "DSH Desktop $tag" --notes $notes 2>$null
             if ($LASTEXITCODE -eq 0) { break }
             Start-Sleep -Seconds 5
           }

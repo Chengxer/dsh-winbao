@@ -61,13 +61,15 @@ win:
         - x64
 
 portable:
-  artifactName: DSH-Desktop-${version}-portable-${arch}.${ext}
+  # 命名规则：<平台>-<形态>-<架构>，Release 页面一眼区分 win/mac 与芯片。
+  # 注意保持「-portable-<arch>.exe」后缀，兼容已发布版本的客户端更新正则。
+  artifactName: DSH-Desktop-${version}-win-portable-${arch}.${ext}
   # 稳定缓存目录名：配合 scripts/patch-portable-template.js 复用已解压目录，
   # 避免每次启动都解压 app-64.7z（Defender 扫描 2.4 万文件导致分钟级冷启动）。
   unpackDirName: dsh-desktop-portable
 
 nsis:
-  artifactName: DSH-Desktop-Setup-${version}-${arch}.${ext}
+  artifactName: DSH-Desktop-${version}-win-setup-${arch}.${ext}
   oneClick: false
   perMachine: false
   runAfterFinish: true

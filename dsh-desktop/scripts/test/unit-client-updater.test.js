@@ -32,32 +32,46 @@ function withEnv(name, value, fn) {
 
 const ASCII = /^[\x00-\x7F]*$/;
 
-test('selectAsset: 便携版选择 portable-x64 资产', () => {
+test('selectAsset: 便携版选择 win-portable-x64 资产', () => {
   withEnv('PORTABLE_EXECUTABLE_DIR', 'C:\\tools\\dsh-desktop', () => {
     const release = {
       version: '0.4.0',
       assets: [
-        { name: 'DSH-Desktop-0.4.0-portable-x64.exe', url: 'https://example/p', size: 1 },
-        { name: 'DSH-Desktop-Setup-0.4.0-x64.exe', url: 'https://example/s', size: 1 },
+        { name: 'DSH-Desktop-0.4.0-win-portable-x64.exe', url: 'https://example/p', size: 1 },
+        { name: 'DSH-Desktop-0.4.0-win-setup-x64.exe', url: 'https://example/s', size: 1 },
       ],
     };
     const sel = selectAsset(release);
-    assert.strictEqual(sel.name, 'DSH-Desktop-0.4.0-portable-x64.exe');
+    assert.strictEqual(sel.name, 'DSH-Desktop-0.4.0-win-portable-x64.exe');
     assert.strictEqual(sel.parts.length, 1);
   });
 });
 
-test('selectAsset: 安装版选择 Setup 资产（大小写不敏感）', () => {
+test('selectAsset: 旧命名（无 win- 前缀）仍兼容，不破坏已发布版本的更新', () => {
+  withEnv('PORTABLE_EXECUTABLE_DIR', 'C:\\tools\\dsh-desktop', () => {
+    const release = {
+      version: '0.3.9',
+      assets: [
+        { name: 'DSH-Desktop-0.3.9-portable-x64.exe', url: 'https://example/p', size: 1 },
+        { name: 'DSH-Desktop-Setup-0.3.9-x64.exe', url: 'https://example/s', size: 1 },
+      ],
+    };
+    const sel = selectAsset(release);
+    assert.strictEqual(sel.name, 'DSH-Desktop-0.3.9-portable-x64.exe');
+  });
+});
+
+test('selectAsset: 安装版选择 win-setup 资产（大小写不敏感）', () => {
   withEnv('PORTABLE_EXECUTABLE_DIR', undefined, () => {
     const release = {
       version: '0.4.0',
       assets: [
-        { name: 'DSH-Desktop-0.4.0-portable-x64.exe', url: 'https://example/p', size: 1 },
-        { name: 'DSH-Desktop-SETUP-0.4.0-x64.exe', url: 'https://example/s', size: 1 },
+        { name: 'DSH-Desktop-0.4.0-win-portable-x64.exe', url: 'https://example/p', size: 1 },
+        { name: 'DSH-Desktop-0.4.0-win-SETUP-x64.exe', url: 'https://example/s', size: 1 },
       ],
     };
     const sel = selectAsset(release);
-    assert.strictEqual(sel.name, 'DSH-Desktop-SETUP-0.4.0-x64.exe');
+    assert.strictEqual(sel.name, 'DSH-Desktop-0.4.0-win-SETUP-x64.exe');
   });
 });
 
@@ -66,50 +80,50 @@ test('selectAsset: Gitee 分片按 part 序号排序并拼接为完整文件名'
     const release = {
       version: '0.4.1',
       assets: [
-        { name: 'DSH-Desktop-0.4.1-portable-x64.exe.part2', url: 'https://example/p2', size: 2 },
-        { name: 'DSH-Desktop-0.4.1-portable-x64.exe.part1', url: 'https://example/p1', size: 1 },
+        { name: 'DSH-Desktop-0.4.1-win-portable-x64.exe.part2', url: 'https://example/p2', size: 2 },
+        { name: 'DSH-Desktop-0.4.1-win-portable-x64.exe.part1', url: 'https://example/p1', size: 1 },
       ],
     };
     const sel = selectAsset(release);
-    assert.strictEqual(sel.name, 'DSH-Desktop-0.4.1-portable-x64.exe');
+    assert.strictEqual(sel.name, 'DSH-Desktop-0.4.1-win-portable-x64.exe');
     assert.deepStrictEqual(sel.parts.map((p) => p.name), [
-      'DSH-Desktop-0.4.1-portable-x64.exe.part1',
-      'DSH-Desktop-0.4.1-portable-x64.exe.part2',
+      'DSH-Desktop-0.4.1-win-portable-x64.exe.part1',
+      'DSH-Desktop-0.4.1-win-portable-x64.exe.part2',
     ]);
   });
 });
 
-test('selectAsset: arm64 机器选择 portable-arm64 资产', () => {
+test('selectAsset: arm64 机器选择 win-portable-arm64 资产', () => {
   withEnv('PORTABLE_EXECUTABLE_DIR', 'C:\\tools\\dsh-desktop', () => {
     withEnv('DSH_DESKTOP_ARCH', 'arm64', () => {
       const release = {
         version: '0.3.9',
         assets: [
-          { name: 'DSH-Desktop-0.3.9-portable-x64.exe', url: 'https://example/px64', size: 1 },
-          { name: 'DSH-Desktop-0.3.9-portable-arm64.exe', url: 'https://example/parm64', size: 1 },
-          { name: 'DSH-Desktop-Setup-0.3.9-x64.exe', url: 'https://example/sx64', size: 1 },
-          { name: 'DSH-Desktop-Setup-0.3.9-arm64.exe', url: 'https://example/sarm64', size: 1 },
+          { name: 'DSH-Desktop-0.3.9-win-portable-x64.exe', url: 'https://example/px64', size: 1 },
+          { name: 'DSH-Desktop-0.3.9-win-portable-arm64.exe', url: 'https://example/parm64', size: 1 },
+          { name: 'DSH-Desktop-0.3.9-win-setup-x64.exe', url: 'https://example/sx64', size: 1 },
+          { name: 'DSH-Desktop-0.3.9-win-setup-arm64.exe', url: 'https://example/sarm64', size: 1 },
         ],
       };
       const sel = selectAsset(release);
-      assert.strictEqual(sel.name, 'DSH-Desktop-0.3.9-portable-arm64.exe');
+      assert.strictEqual(sel.name, 'DSH-Desktop-0.3.9-win-portable-arm64.exe');
       assert.strictEqual(sel.parts.length, 1);
     });
   });
 });
 
-test('selectAsset: arm64 安装版选择 Setup-arm64（大小写不敏感）', () => {
+test('selectAsset: arm64 安装版选择 win-setup-arm64（大小写不敏感）', () => {
   withEnv('PORTABLE_EXECUTABLE_DIR', undefined, () => {
     withEnv('DSH_DESKTOP_ARCH', 'arm64', () => {
       const release = {
         version: '0.3.9',
         assets: [
-          { name: 'DSH-Desktop-0.3.9-portable-arm64.exe', url: 'https://example/p', size: 1 },
-          { name: 'DSH-Desktop-SETUP-0.3.9-ARM64.exe', url: 'https://example/s', size: 1 },
+          { name: 'DSH-Desktop-0.3.9-win-portable-arm64.exe', url: 'https://example/p', size: 1 },
+          { name: 'DSH-Desktop-0.3.9-win-SETUP-ARM64.exe', url: 'https://example/s', size: 1 },
         ],
       };
       const sel = selectAsset(release);
-      assert.strictEqual(sel.name, 'DSH-Desktop-SETUP-0.3.9-ARM64.exe');
+      assert.strictEqual(sel.name, 'DSH-Desktop-0.3.9-win-SETUP-ARM64.exe');
     });
   });
 });
@@ -120,15 +134,15 @@ test('selectAsset: arm64 分片资产按 part 序号排序', () => {
       const release = {
         version: '0.3.9',
         assets: [
-          { name: 'DSH-Desktop-Setup-0.3.9-arm64.exe.part2', url: 'https://example/s2', size: 2 },
-          { name: 'DSH-Desktop-Setup-0.3.9-arm64.exe.part1', url: 'https://example/s1', size: 1 },
+          { name: 'DSH-Desktop-0.3.9-win-setup-arm64.exe.part2', url: 'https://example/s2', size: 2 },
+          { name: 'DSH-Desktop-0.3.9-win-setup-arm64.exe.part1', url: 'https://example/s1', size: 1 },
         ],
       };
       const sel = selectAsset(release);
-      assert.strictEqual(sel.name, 'DSH-Desktop-Setup-0.3.9-arm64.exe');
+      assert.strictEqual(sel.name, 'DSH-Desktop-0.3.9-win-setup-arm64.exe');
       assert.deepStrictEqual(sel.parts.map((p) => p.name), [
-        'DSH-Desktop-Setup-0.3.9-arm64.exe.part1',
-        'DSH-Desktop-Setup-0.3.9-arm64.exe.part2',
+        'DSH-Desktop-0.3.9-win-setup-arm64.exe.part1',
+        'DSH-Desktop-0.3.9-win-setup-arm64.exe.part2',
       ]);
     });
   });
@@ -140,8 +154,8 @@ test('selectAsset: x64 机器不误选 arm64 资产（回归）', () => {
       const release = {
         version: '0.3.9',
         assets: [
-          { name: 'DSH-Desktop-0.3.9-portable-arm64.exe', url: 'https://example/p', size: 1 },
-          { name: 'DSH-Desktop-Setup-0.3.9-arm64.exe', url: 'https://example/s', size: 1 },
+          { name: 'DSH-Desktop-0.3.9-win-portable-arm64.exe', url: 'https://example/p', size: 1 },
+          { name: 'DSH-Desktop-0.3.9-win-setup-arm64.exe', url: 'https://example/s', size: 1 },
         ],
       };
       assert.throws(() => selectAsset(release), /未找到匹配的安装包资产/);

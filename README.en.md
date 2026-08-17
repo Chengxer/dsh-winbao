@@ -59,9 +59,9 @@ Ships the full dsh runtime and official plugins — no Node.js install required,
 
 [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases) hosts the complete single-file installers (Portable + Setup + blockmap) with no size limit — download directly.
 
-**Supported architectures**: x64 and arm64 (pick `*-arm64.exe` on ARM devices), named `DSH-Desktop-<version>-portable-arm64.exe` / `DSH-Desktop-Setup-<version>-arm64.exe`.
+**Supported architectures**: x64 and arm64 (pick `*-arm64.exe` on ARM devices). File names carry a platform prefix so you can tell them apart at a glance: `DSH-Desktop-<version>-win-portable-x64.exe` (x64 portable), `-win-portable-arm64.exe` (arm64 portable), `-win-setup-x64.exe` (x64 setup), `-win-setup-arm64.exe` (arm64 setup).
 
-**macOS**: grab `DSH-Desktop-<version>-x64.dmg` / `-arm64.dmg` (or the same-arch `.zip`). Intel Macs take x64, Apple Silicon takes arm64; drag the app into "Applications". The macOS build is not code-signed yet — on Apple Silicon, the first launch shows "cannot verify developer". **Right-click the app → Open**, or run:
+**macOS**: grab `DSH-Desktop-<version>-macos-x64.dmg` / `-macos-arm64.dmg` (or the same-arch `.zip`). Intel Macs take x64, Apple Silicon takes arm64; drag the app into "Applications". The macOS build is not code-signed yet — on Apple Silicon, the first launch shows "cannot verify developer". **Right-click the app → Open**, or run:
 
 ```bash
 xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"

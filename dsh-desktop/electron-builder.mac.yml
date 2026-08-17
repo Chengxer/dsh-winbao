@@ -46,7 +46,8 @@ files:
 
 # 顶层 artifactName 作用于没有专属命名的 target（zip 无独立配置段）；
 # dmg 有自己的 dmg.artifactName（优先级更高）。
-artifactName: DSH-Desktop-${version}-${arch}.${ext}
+# 命名规则：macos-<架构>，与 Windows 的 win- 前缀区分（macOS 无自更新，命名随意改）。
+artifactName: DSH-Desktop-${version}-macos-${arch}.${ext}
 
 extraResources:
   # macOS 用无后缀的 node 可执行文件（scripts/fetch-node.js 在 macos runner
@@ -71,6 +72,6 @@ mac:
     - zip
 
 dmg:
-  artifactName: DSH-Desktop-${version}-${arch}.${ext}
+  artifactName: DSH-Desktop-${version}-macos-${arch}.${ext}
 
 publish: null
