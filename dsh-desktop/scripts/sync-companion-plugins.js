@@ -11,8 +11,8 @@
 // 用法（WSL / Linux / Windows 均可执行）：
 //   node scripts/sync-companion-plugins.js [DSH_HOME] [--with-patches] [--dry-run] [--dsh-package <目录>]
 //     DSH_HOME       目标 dsh 数据目录，默认 ~/.dsh
-//     --with-patches 额外应用两个运行时补丁（会话列表闪跳修复、
-//                    dsh-prompt / 第三方思考设置暴露白名单）
+//     --with-patches 额外应用运行时补丁（会话列表闪跳修复、设置暴露白名单、
+//                    shell description 可选化、code preset both 兼容）
 //     --dry-run      只打印将要做的事，不落盘
 //     --dsh-package  内置 Agent 预设的目标 dsh 包目录（缺省自动探测
 //                    <DSH_HOME>/agent 与 PATH 上的 dsh 命令）
@@ -35,8 +35,9 @@ const { COMPANION_PLUGINS } = require('./lib/companion-plugins');
 const { writeFileAtomic } = require('./lib/patch-io');
 const { applyPatchToFiles } = require('./lib/patch-engine');
 const {
-  FLASH_PKG_REL, EXPOSE_PKG_REL, patchTargets,
+  FLASH_PKG_REL, EXPOSE_PKG_REL, PW_REL, BASH_REL, CODE_PRESET_REL, patchTargets,
   transformFlashFix, transformExposeFix,
+  transformShellDescriptionOptional, transformCodeModeCompat,
 } = require('./lib/runtime-patches');
 const {
   ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK,
@@ -307,6 +308,38 @@ function applyRuntimePatches(home, dryRun) {
     failLog: (file, err) => '提示词暴露补丁失败(' + file + '): ' + err.message,
     dryRun,
     dryRunChangedLog: (file, note) => 'dry-run: 将把 ' + note.join(', ') + ' 加入设置白名单 ' + file,
+  });
+
+  // shell 工具 description 可选化补丁（code 模式 run_code 程序常省略 description）。
+  for (const rel of [PW_REL, BASH_REL]) {
+    applyPatchToFiles({
+      prefix: 'shell description 兼容补丁',
+      files: patchTargets(home, rel),
+      log: (m) => log(m),
+      anchorLog: (m) => warn(m),
+      transform: transformShellDescriptionOptional,
+      alreadyLog: (file) => '已应用，跳过 ' + file,
+      doneLog: (file) => '已把 description 改为可选 ' + file,
+      donePrefix: false,
+      failLog: (file, err) => 'shell description 兼容补丁失败(' + file + '): ' + err.message,
+      dryRun,
+      dryRunChangedLog: (file) => 'dry-run: 将把 description 改为可选 ' + file,
+    });
+  }
+
+  // code preset 兼容补丁（code → both：保留 run_code，同时允许直接调用原生工具）。
+  applyPatchToFiles({
+    prefix: 'code 模式兼容补丁',
+    files: patchTargets(home, CODE_PRESET_REL),
+    log: (m) => log(m),
+    anchorLog: (m) => warn(m),
+    transform: transformCodeModeCompat,
+    alreadyLog: (file) => '已应用，跳过 ' + file,
+    doneLog: (file) => '已把 code preset 切换为 both ' + file,
+    donePrefix: false,
+    failLog: (file, err) => 'code 模式兼容补丁失败(' + file + '): ' + err.message,
+    dryRun,
+    dryRunChangedLog: (file) => 'dry-run: 将把 code preset 切换为 both ' + file,
   });
 }
 

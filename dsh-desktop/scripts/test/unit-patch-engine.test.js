@@ -23,6 +23,8 @@ const {
   FLASH_PKG_REL, EXPOSE_PKG_REL, patchTargets,
   localCopyFiles, guardCopyFiles, localNodeModulesRoots,
   transformFlashFix, transformExposeFix,
+  SHELL_DESC_MARKER, PW_REL, BASH_REL, transformShellDescriptionOptional,
+  CODE_MODE_MARKER, CODE_PRESET_REL, transformCodeModeCompat,
 } = require('../lib/runtime-patches');
 const { COMPANION_PLUGINS, companionDirName } = require('../lib/companion-plugins');
 const {
@@ -247,7 +249,48 @@ test('runtime-patches: 候选路径构造器（本地三副本/防护四副本/W
   ]);
 });
 
-// ---------------------------------------------------------------------------
+test('tool-compat: shell description 可选化变换（真实 vendored 文件 + 幂等）', () => {
+  for (const rel of [PW_REL, BASH_REL]) {
+    const file = path.join(repoRoot, 'node_modules', '@deepseek-ai', rel);
+    const src = fs.readFileSync(file, 'utf8');
+    const out = transformShellDescriptionOptional(src, file);
+    assert.strictEqual(out.status, 'changed', rel + ' 应可补丁');
+    assert.ok(out.src.includes(SHELL_DESC_MARKER), rel + ' 应写入幂等标记');
+    assert.ok(out.src.includes('required: false'), rel + ' 的 schema description 应改为可选');
+    assert.ok(out.src.includes('args.description = args.command.trim().split'), rel + ' 缺省 description 应从 command 生成');
+    assert.deepStrictEqual(transformShellDescriptionOptional(out.src, file), { status: 'already' }, rel + ' 二次应用应幂等');
+  }
+});
+
+test('tool-compat: shell description 锚点缺失时跳过且不改写', () => {
+  const file = path.join('C:', 'x', 'tool.js');
+  const out = transformShellDescriptionOptional('export const x = 1;', file);
+  assert.deepStrictEqual(out, {
+    status: 'anchor-missing',
+    detail: '未找到 shell description 锚点（版本可能已变更），跳过 ' + file,
+  });
+});
+
+test('tool-compat: code preset code→both 变换（真实 vendored 文件 + 幂等）', () => {
+  const file = path.join(repoRoot, 'node_modules', '@deepseek-ai', CODE_PRESET_REL);
+  const src = fs.readFileSync(file, 'utf8');
+  const out = transformCodeModeCompat(src, file);
+  assert.strictEqual(out.status, 'changed');
+  assert.ok(out.src.includes(CODE_MODE_MARKER), '应写入幂等标记');
+  assert.ok(out.src.includes('    mode: both'), 'mode 应切换为 both');
+  assert.ok(!out.src.includes('    mode: code'), '原 mode: code 不得残留');
+  assert.deepStrictEqual(transformCodeModeCompat(out.src, file), { status: 'already' }, '二次应用应幂等');
+});
+
+test('tool-compat: code preset 锚点缺失时跳过且不改写', () => {
+  const file = path.join('C:', 'x', 'code.yml');
+  const out = transformCodeModeCompat(['- id: tool-presentation', '  name: other', ''].join(String.fromCharCode(10)), file);
+  assert.deepStrictEqual(out, {
+    status: 'anchor-missing',
+    detail: '未找到 code preset 的 tool-presentation 锚点（版本可能已变更），跳过 ' + file,
+  });
+});
+
 // D. companion-plugins 唯一数据源
 // ---------------------------------------------------------------------------
 

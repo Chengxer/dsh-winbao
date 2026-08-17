@@ -116,6 +116,58 @@ function transformExposeFix(src, file) {
   return { status: 'changed', src: src.slice(0, closeIdx) + block + src.slice(closeIdx), note: missing };
 }
 
+// ---------------------------------------------------------------------------
+// 模型工具兼容补丁（问题背景：code 模式的 run_code 程序经常省略 shell 工具
+// 的 `description`，而该字段只用于 UI/日志展示，不应让整个工具调用失败）。
+// 两个变换共享同一套锚点：
+//   - schema 中 description.required: true → false（code-mode SDK 变为可选）；
+//   - validateBashArgs / validatePwshArgs 在缺省时用 command 首行自动补值。
+// 幂等标记 = dsh-desktop compat: optional shell description。
+// ---------------------------------------------------------------------------
+
+const SHELL_DESC_MARKER = "dsh-desktop compat: optional shell description";
+const SHELL_DESC_VALIDATE_OLD = "\tif (args.description.trim().length === 0) throw new Error(\"invalid description: expected a non-empty string\");";
+const SHELL_DESC_VALIDATE_NEW = "\tif (typeof args.description !== \"string\" || args.description.trim().length === 0) {\n\t\t// " + SHELL_DESC_MARKER + ": description is only for UI/log; derive one when the model omits it.\n\t\targs.description = args.command.trim().split(/\r?\n/)[0].slice(0, 80) || \"Run shell command\";\n\t}";
+const SHELL_DESC_SCHEMA_OLD = "\t\t\tdescription: {\n\t\t\t\ttype: \"string\",\n\t\t\t\trequired: true,\n\t\t\t\tdescription: \"Clear, concise description of what this command does in active voice, 5-10 words (shown in the UI). Examples:";
+const SHELL_DESC_SCHEMA_NEW = "\t\t\tdescription: {\n\t\t\t\ttype: \"string\",\n\t\t\t\trequired: false, // " + SHELL_DESC_MARKER + "\n\t\t\t\tdescription: \"Clear, concise description of what this command does in active voice, 5-10 words (shown in the UI). Examples:";
+
+const PW_REL = path.join("dsh-tool-pwsh", "lib", "index.js");
+const BASH_REL = path.join("dsh-tool-bash", "lib", "index.js");
+
+/** shell 工具 description 可选化变换（pwsh/bash 共用，锚点逐字节一致）。 */
+function transformShellDescriptionOptional(src, file) {
+  if (src.includes(SHELL_DESC_MARKER)) return { status: "already" };
+  if (!src.includes(SHELL_DESC_VALIDATE_OLD) || !src.includes(SHELL_DESC_SCHEMA_OLD)) {
+    return { status: "anchor-missing", detail: "未找到 shell description 锚点（版本可能已变更），跳过 " + file };
+  }
+  return {
+    status: "changed",
+    src: src.replace(SHELL_DESC_VALIDATE_OLD, SHELL_DESC_VALIDATE_NEW).replace(SHELL_DESC_SCHEMA_OLD, SHELL_DESC_SCHEMA_NEW),
+  };
+}
+
+const CODE_MODE_MARKER = 'dsh-desktop compat: direct tools alongside run_code';
+const CODE_MODE_OLD = `- id: tool-presentation
+  name: '@deepseek-ai/dsh-agent-tool-presentation'
+  config:
+    mode: code`;
+const CODE_MODE_NEW = `- id: tool-presentation
+  name: '@deepseek-ai/dsh-agent-tool-presentation'
+  config:
+    # ${CODE_MODE_MARKER}
+    mode: both`;
+
+const CODE_PRESET_REL = path.join('dsh', 'config', 'agent-presets', 'code', 'agent.cordis.yml');
+
+/** code preset `mode: code` → `mode: both` 变换（幂等，锚点失配跳过）。 */
+function transformCodeModeCompat(src, file) {
+  if (src.includes(CODE_MODE_MARKER)) return { status: 'already' };
+  if (!src.includes(CODE_MODE_OLD)) {
+    return { status: 'anchor-missing', detail: '未找到 code preset 的 tool-presentation 锚点（版本可能已变更），跳过 ' + file };
+  }
+  return { status: 'changed', src: src.replace(CODE_MODE_OLD, CODE_MODE_NEW) };
+}
+
 module.exports = {
   FLASH_OLD,
   FLASH_NEW,
@@ -128,4 +180,11 @@ module.exports = {
   localNodeModulesRoots,
   transformFlashFix,
   transformExposeFix,
+  SHELL_DESC_MARKER,
+  PW_REL,
+  BASH_REL,
+  transformShellDescriptionOptional,
+  CODE_MODE_MARKER,
+  CODE_PRESET_REL,
+  transformCodeModeCompat,
 };

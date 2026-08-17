@@ -21,8 +21,8 @@ test('effectivePrice: 峰谷切换与旧版固定价（按 UTC 时刻精确断�
   // 空闲时段半价。
   const offDate = new Date('2026-08-17T05:00:00Z'); // 北京 13:00
   assert.deepStrictEqual(balance.effectivePrice('deepseek-v4-flash', offDate), { cacheMiss: 1.5, cacheHit: 0.05, output: 4.5 });
-  // 未知模型：现价表回退 flash 高峰价。
-  assert.deepStrictEqual(balance.effectivePrice('unknown-model', peakDate), { cacheMiss: 3, cacheHit: 0.1, output: 9 });
+  // 未知模型：按 pro 最高档兜底，避免少报费用。
+  assert.deepStrictEqual(balance.effectivePrice('unknown-model', peakDate), { cacheMiss: 9, cacheHit: 0.3, output: 27 });
   // 空模型：按 pro 兜底（与 main.js 调用方回退一致）。
   assert.deepStrictEqual(balance.effectivePrice('', peakDate), { cacheMiss: 9, cacheHit: 0.3, output: 27 });
 });

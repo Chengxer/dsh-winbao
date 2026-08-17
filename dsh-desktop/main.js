@@ -49,7 +49,7 @@ const { PROFILE_BUNDLE_GUARD_MARKER, PROFILE_BOOT_GUARD_MARKER, verifyBundleDir,
 const { COMPANION_PLUGINS } = require('./scripts/lib/companion-plugins');
 const { writeFileAtomic } = require('./scripts/lib/patch-io');
 const { applyPatchToFiles } = require('./scripts/lib/patch-engine');
-const { FLASH_PKG_REL, EXPOSE_PKG_REL, patchTargets, localCopyFiles, guardCopyFiles, localNodeModulesRoots, transformFlashFix, transformExposeFix } = require('./scripts/lib/runtime-patches');
+const { FLASH_PKG_REL, EXPOSE_PKG_REL, PW_REL, BASH_REL, CODE_PRESET_REL, patchTargets, localCopyFiles, guardCopyFiles, localNodeModulesRoots, transformFlashFix, transformExposeFix, transformShellDescriptionOptional, transformCodeModeCompat } = require('./scripts/lib/runtime-patches');
 const { ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK, removeLegacyMarketplacePatchLines, removedPluginIdsFromPatch, ensureDisabledPatchEntry, registerCompanionPatchEntries, syncCompanionFiles } = require('./scripts/lib/companion-profile');
 const { patchWebSearchBaseUrl } = require('./scripts/patch-web-search-baseurl');
 const { patchMenuViewport } = require('./scripts/patch-menu-viewport');
@@ -2177,6 +2177,8 @@ async function runUpdateFlow(manual) {
       syncBuiltinAgentPresets();
       applyRuntimeFlashFix();
       applyPromptExposeFix();
+      applyShellDescriptionCompatFix();
+      applyCodeModeCompatFix();
       applyImageSendFix();
       applyVisionKeyFix();
       applyProfilePatchGuard();
@@ -2197,6 +2199,8 @@ async function runUpdateFlow(manual) {
       syncLocalAgentPresets();
       applyRuntimeFlashFix();
       applyPromptExposeFix();
+      applyShellDescriptionCompatFix();
+      applyCodeModeCompatFix();
       applyImageSendFix();
       applyVisionKeyFix();
       applyProfilePatchGuard();
@@ -4005,6 +4009,53 @@ function applyPromptExposeFix() {
 }
 
 // ---------------------------------------------------------------------------
+// shell 工具 description 可选化补丁：code 模式的 run_code 程序经常省略
+// `description`（该字段只用于 UI/日志，不影响执行），但官方 schema 与
+// validate 都强制要求，导致大量 INVALID_ARGS。本补丁把 pwsh/bash 的
+// description 改为可选，缺省时用 command 首行生成。幂等；覆盖三份运行副本，
+// WSL 覆盖 profile fallback + agent。
+// ---------------------------------------------------------------------------
+function applyShellDescriptionCompatFix() {
+  const wslHome = effectiveDshHome();
+  for (const rel of [PW_REL, BASH_REL]) {
+    const files = isWslMode()
+      ? patchTargets(wslHome, rel)
+      : runtimeCopyFiles(rel);
+    applyPatchToFiles({
+      prefix: 'shell description 兼容补丁',
+      files,
+      log: (m) => log('boot', m),
+      transform: transformShellDescriptionOptional,
+      alreadyLog: (file) => '已应用，跳过 ' + file,
+      doneLog: (file) => '已把 description 改为可选 ' + file,
+      failLog: (file, err) => 'shell description 兼容补丁失败(' + file + '): ' + err.message,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// code preset 兼容补丁：官方 code 模式只允许直接调用 run_code，但 DeepSeek
+// 模型会直接调用 read/grep/todo_write/report 而收到 UNKNOWN_TOOL。把
+// tool-presentation 从 code 改为 both：run_code 保留，原生工具也可直接调用。
+// 幂等；覆盖三份运行副本，WSL 覆盖 profile fallback + agent。
+// ---------------------------------------------------------------------------
+function applyCodeModeCompatFix() {
+  const wslHome = effectiveDshHome();
+  const files = isWslMode()
+    ? patchTargets(wslHome, CODE_PRESET_REL)
+    : runtimeCopyFiles(CODE_PRESET_REL);
+  applyPatchToFiles({
+    prefix: 'code 模式兼容补丁',
+    files,
+    log: (m) => log('boot', m),
+    transform: transformCodeModeCompat,
+    alreadyLog: (file) => '已应用，跳过 ' + file,
+    doneLog: (file) => '已把 code preset 切换为 both ' + file,
+    failLog: (file, err) => 'code 模式兼容补丁失败(' + file + '): ' + err.message,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // 文本模型自动识图补丁：官方 apiproxy 在 session.prompt 入口检查模型是否支持
 // image 输入，不支持就直接拒绝。本补丁复用已安装的 dsh-vision 插件配置
 // （设置 → 识图插件（view_image）的 VLM baseURL/model/apiKey），把图片转述为
@@ -5159,6 +5210,8 @@ async function boot() {
     syncBuiltinAgentPresets();
     applyRuntimeFlashFix();
     applyPromptExposeFix();
+    applyShellDescriptionCompatFix();
+    applyCodeModeCompatFix();
     applyImageSendFix();
     applyVisionKeyFix();
     applyProfilePatchGuard();
@@ -5176,6 +5229,8 @@ async function boot() {
     syncLocalAgentPresets();
     applyRuntimeFlashFix();
     applyPromptExposeFix();
+    applyShellDescriptionCompatFix();
+    applyCodeModeCompatFix();
     applyImageSendFix();
     applyVisionKeyFix();
     applyProfilePatchGuard();
