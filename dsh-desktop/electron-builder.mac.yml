@@ -1,0 +1,77 @@
+appId: com.deepseek.dsh.desktop
+productName: DSH Desktop
+copyright: MIT License
+# 仅保留中英文，移除 Electron 其余 53 个语言包（.pak，约 80MB），
+# 不影响功能体验（右键菜单/DevTools 等界面语言随系统 locale 取 en-US/zh-CN）。
+electronLanguages:
+  - en-US
+  - zh-CN
+directories:
+  output: dist
+  buildResources: build
+
+# electron-builder strips nested node_modules from extraResources; this hook
+# restores the bundled npm CLI's own dependencies after packing.
+afterPack: scripts/after-pack.js
+
+# Native modules (sharp / node-pty / koffi) are loaded by the bundled plain
+# node, so keep everything as real files and never rebuild for Electron.
+asar: false
+npmRebuild: false
+buildDependenciesFromSource: false
+
+files:
+  - main.js
+  - updater.js
+  - client-updater.js
+  - balance.js
+  - session-watcher.js
+  - preload.js
+  - renderer-recovery.js
+  - profile-manifest.js
+  - profile-patch-heal.js
+  - profile-bundle-heal.js
+  - wsl-backend.js
+  - watchdog.js
+  - assets/**/*
+  # 运行时依赖：koffi 预检、依赖自愈补丁等脚本必须在成品里存在。
+  - scripts/**/*
+  - package.json
+  - "!**/*.md"
+  # `!**/*.md` above would strip every .md from node_modules too, which removes
+  # the SKILL.md files the bundled @deepseek-ai/dsh ships for its agent presets
+  # (editing-cordis-compositions, cordis-plugin-development) and silently breaks
+  # the 创造模式 skills. Re-include them: later patterns override earlier ones.
+  - "**/SKILL.md"
+
+extraResources:
+  # macOS 用无后缀的 node 可执行文件（scripts/fetch-node.js 在 macos runner
+  # 上以本地复制模式写入 vendor/node/node）。
+  - from: vendor/node/node
+    to: node/node
+  - from: vendor/npm
+    to: npm
+
+mac:
+  icon: build/icon.png
+  category: public.app-category.developer-tools
+  # 未签名构建：无 Apple Developer 证书。首次启动需右键→打开，
+  # 或 `xattr -dr com.apple.quarantine /Applications/DSH Desktop.app`。
+  identity: null
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+
+dmg:
+  artifactName: DSH-Desktop-${version}-${arch}.${ext}
+
+zip:
+  artifactName: DSH-Desktop-${version}-${arch}.${ext}
+
+publish: null

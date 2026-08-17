@@ -1,26 +1,32 @@
 'use strict';
 
-// Copies the system Node executable into vendor/node/node.exe.
+// Copies the system Node executable into vendor/node/ (node.exe on Windows,
+// node on macOS/Linux).
 //
-// Why: the packaged app boots the dsh CLI with a real node.exe so prebuilt
-// native modules (sharp, node-pty, koffi, ...) keep the exact Node ABI they
-// were compiled for. Electron's embedded Node has a different ABI and would
-// refuse to load them; rebuilding against Electron would break them for
-// plain node. Bundling the same node.exe used at install time is the
+// Why: the packaged app boots the dsh CLI with a real Node executable so
+// prebuilt native modules (sharp, node-pty, koffi, ...) keep the exact Node
+// ABI they were compiled for. Electron's embedded Node has a different ABI
+// and would refuse to load them; rebuilding against Electron would break
+// them for plain node. Bundling the same Node used at install time is the
 // zero-config way to guarantee a match.
 //
 // Usage (must run under system Node, not Electron):
-//   npm run fetch-node                          # copy the local node.exe
+//   npm run fetch-node                          # copy the local Node binary
 //   node scripts/fetch-node.js --arch=arm64     # download the SAME node
-//                                               # version for win32-arm64 from
-//                                               # nodejs.org (used by the
+//                                               # version for win32-arm64
+//                                               # (nodejs.org zip; used by the
 //                                               # cross-built ARM64 package)
+//   node scripts/fetch-node.js --platform=darwin --arch=x64
+//                                               # download for darwin-x64
+//                                               # (nodejs.org .tar.gz; used by
+//                                               # the macOS x64 package built on
+//                                               # an arm64 runner)
 //
-// ARM64 mode: a Windows x64 build machine cannot produce an arm64 node.exe by
-// copying, so instead we fetch the official win-arm64 build of the exact same
-// node version (process.version) from nodejs.org. All runtime native modules
-// (koffi / sharp / node-pty / node-addon-require-builtin) are N-API addons,
-// so any modern Node version matches their ABI.
+// Cross mode: a build machine of one platform/arch cannot produce a Node
+// binary for another by copying, so instead we fetch the official build of
+// the exact same node version (process.version) from nodejs.org. All runtime
+// native modules (koffi / sharp / node-pty / node-addon-require-builtin) are
+// N-API addons, so any modern Node version matches their ABI.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -28,9 +34,18 @@ const https = require('node:https');
 const os = require('node:os');
 const { execFileSync } = require('node:child_process');
 
-const dest = path.resolve(__dirname, '..', 'vendor', 'node', 'node.exe');
-
 const MAX_REDIRECTS = 5;
+
+function argValue(name) {
+  const flag = process.argv.find((a) => a.startsWith(`--${name}=`));
+  return flag ? flag.slice(`--${name}=`.length) : null;
+}
+
+function destPath() {
+  const platform = argValue('platform') || process.platform;
+  const exeName = platform === 'win32' ? 'node.exe' : 'node';
+  return path.resolve(__dirname, '..', 'vendor', 'node', exeName);
+}
 
 function httpDownload(url, destPath, redirects = 0) {
   return new Promise((resolve, reject) => {
@@ -57,22 +72,38 @@ function httpDownload(url, destPath, redirects = 0) {
   });
 }
 
-function extractNodeExe(zipPath, tmpDir) {
-  // Prefer bsdtar (ships with Windows 10 1803+ and every GH runner);
-  // fall back to PowerShell Expand-Archive if tar is unavailable.
+// Extract the node binary from an archive. zip (win32) via tar or
+// PowerShell Expand-Archive fallback; .tar.gz (darwin/linux) via tar -xzf.
+// The binary inside is node.exe (zip) or <pkg>/bin/node (tar.gz).
+function extractNodeBinary(archivePath, tmpDir, isZip, pkgTop) {
   let ok = false;
-  try {
-    execFileSync('tar', ['-xf', zipPath, '-C', tmpDir], { stdio: 'pipe' });
-    ok = true;
-  } catch (err) {
-    console.warn('tar 解压失败，改用 PowerShell Expand-Archive: ' + err.message);
+  if (!isZip && pkgTop) {
+    // .tar.gz：只提取 bin/node 单文件。Windows 的 bsdtar 无法在 NTFS 上
+    // 创建 tar.gz 内的 symlink（bin/npm、bin/npx、bin/corepack），全量
+    // 解压会报 "Invalid argument" 而失败；单文件提取完全避开 symlink，
+    // 在 macOS 与 Windows 上都能工作。
+    try {
+      execFileSync('tar', ['-xzf', archivePath, '-C', tmpDir, `${pkgTop}/bin/node`], { stdio: 'pipe' });
+      ok = true;
+    } catch (err) {
+      console.warn('tar 单文件提取失败，尝试全量解压: ' + err.message);
+    }
   }
   if (!ok) {
-    const script = `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${tmpDir}' -Force`;
+    const args = isZip ? ['-xf', archivePath, '-C', tmpDir] : ['-xzf', archivePath, '-C', tmpDir];
+    try {
+      execFileSync('tar', args, { stdio: 'pipe' });
+      ok = true;
+    } catch (err) {
+      console.warn('tar 解压失败，改用 PowerShell Expand-Archive: ' + err.message);
+    }
+  }
+  if (!ok) {
+    const script = `Expand-Archive -LiteralPath '${archivePath}' -DestinationPath '${tmpDir}' -Force`;
     try {
       execFileSync('powershell.exe', ['-NoProfile', '-Command', script], { stdio: 'pipe' });
     } catch (err) {
-      console.error('解压 node zip 失败: ' + err.message);
+      console.error('解压 node 压缩包失败: ' + err.message);
       process.exit(1);
     }
   }
@@ -81,56 +112,67 @@ function extractNodeExe(zipPath, tmpDir) {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, e.name);
       if (e.isDirectory()) walk(full);
-      else if (/^node(\.exe)?$/i.test(e.name)) found.push(full);
+      else if (isZip && /^node\.exe$/i.test(e.name)) found.push(full);
+      else if (!isZip && e.name === 'node') found.push(full);
     }
   };
   walk(tmpDir);
   if (!found.length) {
-    console.error('zip 内未找到 node.exe: ' + zipPath);
+    console.error('压缩包内未找到 node 二进制: ' + archivePath);
     process.exit(1);
   }
+  // Prefer the deepest match (tar.gz layout: node-<v>-<platform>-<arch>/bin/node;
+  // npm's bin shims may also match 'node' — depth sorting keeps this robust).
+  found.sort((a, b) => b.split(path.sep).length - a.split(path.sep).length);
   return found[0];
 }
 
-async function fetchArm64() {
+async function fetchCross(platform, arch) {
   const version = process.version; // e.g. v24.3.0
-  const url = `https://nodejs.org/dist/${version}/node-${version}-win-arm64.zip`;
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fetch-node-arm64-'));
-  const zip = path.join(tmpDir, 'node-win-arm64.zip');
+  const isWin = platform === 'win32';
+  const archiveName = isWin
+    ? `node-${version}-win-${arch}.zip`
+    : `node-${version}-${platform}-${arch}.tar.gz`;
+  const url = `https://nodejs.org/dist/${version}/${archiveName}`;
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `fetch-node-${platform}-${arch}-`));
+  const archive = path.join(tmpDir, archiveName);
   console.log(`下载 ${url}`);
-  await httpDownload(url, zip);
-  const size = fs.statSync(zip).size;
+  await httpDownload(url, archive);
+  const size = fs.statSync(archive).size;
   if (!size) {
-    console.error('下载产物为空（0 bytes）: ' + zip);
+    console.error('下载产物为空（0 bytes）: ' + archive);
     process.exit(1);
   }
-  console.log(`    -> ${zip} (${size} bytes)`);
-  const exe = extractNodeExe(zip, tmpDir);
+  console.log(`    -> ${archive} (${size} bytes)`);
+  // tar.gz 顶层目录名 = node-<version>-<platform>-<arch>（如
+  // node-v24.15.0-darwin-x64），单文件提取需要它定位 bin/node。
+  const pkgTop = isWin ? null : `node-${version}-${platform}-${arch}`;
+  const bin = extractNodeBinary(archive, tmpDir, isWin, pkgTop);
+  const dest = destPath();
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.copyFileSync(exe, dest);
+  fs.copyFileSync(bin, dest);
   fs.rmSync(tmpDir, { recursive: true, force: true });
   console.log(`已写入 ${dest}`);
-  console.log(`Node ${version} / win32-arm64 / ${fs.statSync(dest).size} bytes`);
+  console.log(`Node ${version} / ${platform}-${arch} / ${fs.statSync(dest).size} bytes`);
 }
 
 (async () => {
-  const archFlag = process.argv.find((a) => a.startsWith('--arch='));
-  const arch = archFlag ? archFlag.slice('--arch='.length) : process.arch;
-  if (arch === 'arm64') {
-    await fetchArm64();
+  const platform = argValue('platform') || process.platform;
+  const arch = argValue('arch') || process.arch;
+
+  const cross = (platform !== process.platform) || (arch !== process.arch);
+  if (cross) {
+    await fetchCross(platform, arch);
     return;
   }
-  if (arch !== process.arch) {
-    console.error(`fetch-node 仅支持 --arch=${process.arch}（本地复制）或 --arch=arm64（下载）。`);
-    process.exit(1);
-  }
 
-  // Native path: copy the running node.exe (original behavior).
+  // Native path: copy the running Node binary (original behavior).
   const src = process.execPath;
   if (!/node(\.exe)?$/i.test(path.basename(src))) {
     console.error('fetch-node 必须在系统 Node 下运行（npm run fetch-node），不能在 Electron 内运行。');
     process.exit(1);
   }
+  const dest = destPath();
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.copyFileSync(src, dest);
   console.log(`已复制 ${src}`);

@@ -1,15 +1,24 @@
 name: Release Build
 
-# 双架构发布流水线（x64 + arm64）：
-#   · 推 v* tag（如 v0.4.0）时自动在云端构建 Windows x64 与 arm64 安装包，
-#     一并上传到对应 GitHub Release；
-#   · 手动触发（workflow_dispatch）可指定 tag 与架构，用于给已发布的版本
-#     补传某个架构的安装包（例如给 v0.3.9 补 arm64）。
+# 双平台发布流水线（Windows x64/arm64 + macOS x64/arm64）：
+#   · 推 v* tag（如 v0.4.0）时自动在云端构建 Windows 与 macOS 全部架构
+#     安装包，一并上传到对应 GitHub Release；
+#   · 手动触发（workflow_dispatch）可指定 tag、Windows 架构与 macOS 架构，
+#     用于给已发布的版本补传某个平台/架构的安装包（例如给 v0.3.9 补 mac）。
 # 用法：git tag v0.4.0 && git push origin v0.4.0（push gitee v0.4.0 同步 tag）
 #
 # 注意：GitHub Actions 的 job 级 if 无法引用 matrix context（解析期报
 # "Unrecognized named-value: 'matrix'"），故不用 matrix 裁剪，而是拆成
-# x64 / arm64 两个显式 job，各自用 if 按 inputs.arch 决定是否运行。
+# 四个显式 job（win-x64 / win-arm64 / mac-x64 / mac-arm64），各自用 if
+# 按 inputs.arch / inputs.mac 决定是否运行。
+#
+# macOS 构建在 macos-14（Apple Silicon）runner 上交叉完成：
+#   · arm64 腿：npm ci 装 darwin-arm64 原生变体，vendor/node 本地复制；
+#   · x64 腿：npm ci 后由 install-darwin-x64-prebuilds.js 补装 darwin-x64
+#     变体（koffi/sharp/libvips/narb），vendor/node 从 nodejs.org 下载
+#     darwin-x64（Intel runner 已退役，不再依赖 macos-13/macos-15-intel）。
+# macOS 产物未签名（无 Apple Developer 证书）：Apple Silicon 首次启动需
+# 右键→打开，或 `xattr -dr com.apple.quarantine` 后正常打开。
 on:
   push:
     tags:
@@ -21,9 +30,13 @@ on:
         required: false
         default: 'v0.3.9'
       arch:
-        description: '构建架构：both / x64 / arm64'
+        description: 'Windows 构建架构：both / x64 / arm64'
         required: false
         default: 'both'
+      mac:
+        description: 'macOS 构建：none / both / x64 / arm64'
+        required: false
+        default: 'none'
 
 permissions:
   contents: write
@@ -415,6 +428,297 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "无法创建或读取 release $tag" }
           $arch = $env:ARCH
           gh release upload $tag "dist/DSH-Desktop-*-$arch.exe" "dist/DSH-Desktop-*-$arch.exe.blockmap" --clobber
+          Write-Output '=== release assets ==='
+          gh release view $tag --json assets --jq '.assets[].name'
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+
+  # --- macOS -------------------------------------------------------------
+  # 两个 mac job 都跑在 macos-14（Apple Silicon）公共 runner 上：
+  # arm64 腿原生构建；x64 腿交叉构建（补装 darwin-x64 原生变体 + 下载
+  # darwin-x64 node）。Mach-O 架构用 lipo 校验（PE 的 Get-MachineType
+  # 不适用于 mac 二进制）。
+
+  build-mac-x64:
+    name: build-mac-x64
+    if: >-
+      github.event_name == 'push' ||
+      inputs.mac == 'both' ||
+      inputs.mac == 'x64'
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: dsh-desktop
+    env:
+      ARCH: x64
+      UNPACKED: mac
+      DIST_SUFFIX: '--x64'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dsh-desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 交叉构建：arm64 构建机补装 darwin-x64 原生预编译包（koffi / sharp /
+      # sharp-libvips / node-addon-require-builtin；node-pty 的 darwin-x64
+      # 预编译已随主包分发）。脚本自带 lipo 架构校验，装错会直接失败。
+      - name: Install x64 native prebuilds
+        run: node scripts/install-darwin-x64-prebuilds.js
+
+      # vendor/ 不进 git（.gitignore 排除），构建前现场生成：
+      # x64：从 nodejs.org 下载同版本 darwin-x64 node（arm64 构建机无法
+      # 本地复制出 x64 的 node）。npm CLI（纯 JS）两架构通用。
+      - name: Fetch runtime (vendor/node + vendor/npm)
+        shell: pwsh
+        run: |
+          node scripts/fetch-node.js --platform=darwin --arch=x64
+          npm run fetch-npm
+
+      # 打包前校验所有运行时原生二进制确实是目标架构（Mach-O，lipo）。
+      - name: Verify native binaries architecture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-MachOArchs([string]$Path) {
+            $out = (& lipo -archs $Path 2>$null) -join ' '
+            if ($LASTEXITCODE -ne 0) { throw "lipo 失败: $Path" }
+            return ($out -split '\s+' | Where-Object { $_ })
+          }
+          $want = $env:ARCH
+          $wantToken = if ($want -eq 'x64') { 'x86_64' } else { 'arm64' }
+          # node-pty 的 x64/arm64 预编译同包并存，glob 必须精确到目标架构目录
+          $targets = @(
+            'vendor/node/node',
+            "node_modules/@koromix/koffi-darwin-$want/**/*.node",
+            "node_modules/@img/sharp-darwin-$want/**/*.node",
+            "node_modules/@img/sharp-libvips-darwin-$want/**/*.dylib",
+            "node_modules/node-addon-require-builtin-darwin-$want/prebuilt/*.node",
+            "node_modules/node-pty/prebuilds/darwin-$want/pty.node",
+            "node_modules/node-pty/prebuilds/darwin-$want/spawn-helper"
+          )
+          $checked = 0
+          foreach ($pattern in $targets) {
+            Get-ChildItem $pattern -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+              $archs = Get-MachOArchs $_.FullName
+              Write-Output ("{0,-72} [{1}]" -f $_.FullName, ($archs -join ' '))
+              if ($archs -notcontains $wantToken) { throw "架构不符: $($_.FullName) = $($archs -join ' ') (期望 $wantToken)" }
+              $checked++
+            }
+          }
+          if ($checked -eq 0) { throw '未找到任何待校验的原生二进制' }
+          Write-Output "OK: $checked 个原生二进制均为 $want"
+
+      - name: Build (macOS x64, dmg + zip)
+        run: npm run dist:mac -- ${{ env.DIST_SUFFIX }}
+        timeout-minutes: 45
+        env:
+          # 无代码签名证书：禁止自动发现 Apple 证书，避免误签或构建失败
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      # 校验「打进 .app」的原生二进制（构建机上的 node_modules 不等于打包
+      # 产物，防止原生模块静默漏出）。
+      - name: Verify packaged app natives
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-MachOArchs([string]$Path) {
+            $out = (& lipo -archs $Path 2>$null) -join ' '
+            if ($LASTEXITCODE -ne 0) { throw "lipo 失败: $Path" }
+            return ($out -split '\s+' | Where-Object { $_ })
+          }
+          $want = $env:ARCH
+          $wantToken = if ($want -eq 'x64') { 'x86_64' } else { 'arm64' }
+          # electron-builder 解包目录：默认架构（arm64 腿，macos-14 原生）为
+          # mac-arm64，非默认架构（x64 交叉腿）为 mac（getArchSuffix 规则）。
+          # 实际产物是 <unpacked>/DSH Desktop.app 包。
+          $bundle = Get-ChildItem "dist/$env:UNPACKED/*.app" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $bundle) { throw "未找到 .app 包: dist/$env:UNPACKED" }
+          $res = Join-Path $bundle.FullName 'Contents/Resources'
+          $app = Join-Path $res 'app'
+          # extraResources 落在 Contents/Resources/<to>，原生依赖在 app/node_modules
+          $targets = @(
+            "$res/node/node",
+            "$app/node_modules/@koromix/koffi-darwin-$want/**/*.node",
+            "$app/node_modules/@img/sharp-darwin-$want/**/*.node",
+            "$app/node_modules/@img/sharp-libvips-darwin-$want/**/*.dylib",
+            "$app/node_modules/node-addon-require-builtin-darwin-$want/prebuilt/*.node",
+            "$app/node_modules/node-pty/prebuilds/darwin-$want/pty.node",
+            "$app/node_modules/node-pty/prebuilds/darwin-$want/spawn-helper"
+          )
+          $checked = 0
+          foreach ($pattern in $targets) {
+            $files = @(Get-ChildItem $pattern -Recurse -ErrorAction SilentlyContinue)
+            if ($files.Count -eq 0) { throw "打包产物缺少: $pattern" }
+            foreach ($f in $files) {
+              $archs = Get-MachOArchs $f.FullName
+              Write-Output ("{0,-84} [{1}]" -f $f.FullName, ($archs -join ' '))
+              if ($archs -notcontains $wantToken) { throw "架构不符: $($f.FullName) = $($archs -join ' ') (期望 $wantToken)" }
+              $checked++
+            }
+          }
+          Write-Output "OK: $checked 个打包内原生二进制均为 $want"
+          # 顺手确认 extraResources 的 npm 目录也进了包
+          if (-not (Test-Path "$res/npm")) {
+            throw "打包产物缺少: $res/npm"
+          }
+
+      - name: Publish to GitHub Release
+        shell: pwsh
+        run: |
+          $tag = $env:TAG
+          # 多任务并行发布到同一 release：创建时容忍竞态（重复创建报错则重试）
+          for ($i = 0; $i -lt 6; $i++) {
+            gh release view $tag --json id 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { break }
+            gh release create $tag --title "DSH Desktop $tag" --generate-notes 2>$null
+            if ($LASTEXITCODE -eq 0) { break }
+            Start-Sleep -Seconds 5
+          }
+          gh release view $tag --json id --jq .id | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "无法创建或读取 release $tag" }
+          $arch = $env:ARCH
+          gh release upload $tag "dist/DSH-Desktop-*-$arch.dmg" "dist/DSH-Desktop-*-$arch.zip" --clobber
+          Write-Output '=== release assets ==='
+          gh release view $tag --json assets --jq '.assets[].name'
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+
+  build-mac-arm64:
+    name: build-mac-arm64
+    if: >-
+      github.event_name == 'push' ||
+      inputs.mac == 'both' ||
+      inputs.mac == 'arm64'
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: dsh-desktop
+    env:
+      ARCH: arm64
+      UNPACKED: mac-arm64
+      DIST_SUFFIX: '--arm64'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dsh-desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # vendor/ 不进 git（.gitignore 排除），构建前现场生成：
+      # arm64：本地复制 runner 的 Node 24（darwin-arm64，ABI 与 npm ci 的
+      # 原生模块匹配）。npm CLI（纯 JS）两架构通用。
+      - name: Fetch runtime (vendor/node + vendor/npm)
+        shell: pwsh
+        run: |
+          npm run fetch-node
+          npm run fetch-npm
+
+      - name: Verify native binaries architecture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-MachOArchs([string]$Path) {
+            $out = (& lipo -archs $Path 2>$null) -join ' '
+            if ($LASTEXITCODE -ne 0) { throw "lipo 失败: $Path" }
+            return ($out -split '\s+' | Where-Object { $_ })
+          }
+          $want = $env:ARCH
+          $wantToken = if ($want -eq 'x64') { 'x86_64' } else { 'arm64' }
+          $targets = @(
+            'vendor/node/node',
+            "node_modules/@koromix/koffi-darwin-$want/**/*.node",
+            "node_modules/@img/sharp-darwin-$want/**/*.node",
+            "node_modules/@img/sharp-libvips-darwin-$want/**/*.dylib",
+            "node_modules/node-addon-require-builtin-darwin-$want/prebuilt/*.node",
+            "node_modules/node-pty/prebuilds/darwin-$want/pty.node",
+            "node_modules/node-pty/prebuilds/darwin-$want/spawn-helper"
+          )
+          $checked = 0
+          foreach ($pattern in $targets) {
+            Get-ChildItem $pattern -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+              $archs = Get-MachOArchs $_.FullName
+              Write-Output ("{0,-72} [{1}]" -f $_.FullName, ($archs -join ' '))
+              if ($archs -notcontains $wantToken) { throw "架构不符: $($_.FullName) = $($archs -join ' ') (期望 $wantToken)" }
+              $checked++
+            }
+          }
+          if ($checked -eq 0) { throw '未找到任何待校验的原生二进制' }
+          Write-Output "OK: $checked 个原生二进制均为 $want"
+
+      - name: Build (macOS arm64, dmg + zip)
+        run: npm run dist:mac -- ${{ env.DIST_SUFFIX }}
+        timeout-minutes: 45
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Verify packaged app natives
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-MachOArchs([string]$Path) {
+            $out = (& lipo -archs $Path 2>$null) -join ' '
+            if ($LASTEXITCODE -ne 0) { throw "lipo 失败: $Path" }
+            return ($out -split '\s+' | Where-Object { $_ })
+          }
+          $want = $env:ARCH
+          $wantToken = if ($want -eq 'x64') { 'x86_64' } else { 'arm64' }
+          $bundle = Get-ChildItem "dist/$env:UNPACKED/*.app" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $bundle) { throw "未找到 .app 包: dist/$env:UNPACKED" }
+          $res = Join-Path $bundle.FullName 'Contents/Resources'
+          $app = Join-Path $res 'app'
+          $targets = @(
+            "$res/node/node",
+            "$app/node_modules/@koromix/koffi-darwin-$want/**/*.node",
+            "$app/node_modules/@img/sharp-darwin-$want/**/*.node",
+            "$app/node_modules/@img/sharp-libvips-darwin-$want/**/*.dylib",
+            "$app/node_modules/node-addon-require-builtin-darwin-$want/prebuilt/*.node",
+            "$app/node_modules/node-pty/prebuilds/darwin-$want/pty.node",
+            "$app/node_modules/node-pty/prebuilds/darwin-$want/spawn-helper"
+          )
+          $checked = 0
+          foreach ($pattern in $targets) {
+            $files = @(Get-ChildItem $pattern -Recurse -ErrorAction SilentlyContinue)
+            if ($files.Count -eq 0) { throw "打包产物缺少: $pattern" }
+            foreach ($f in $files) {
+              $archs = Get-MachOArchs $f.FullName
+              Write-Output ("{0,-84} [{1}]" -f $f.FullName, ($archs -join ' '))
+              if ($archs -notcontains $wantToken) { throw "架构不符: $($f.FullName) = $($archs -join ' ') (期望 $wantToken)" }
+              $checked++
+            }
+          }
+          Write-Output "OK: $checked 个打包内原生二进制均为 $want"
+          if (-not (Test-Path "$res/npm")) {
+            throw "打包产物缺少: $res/npm"
+          }
+
+      - name: Publish to GitHub Release
+        shell: pwsh
+        run: |
+          $tag = $env:TAG
+          for ($i = 0; $i -lt 6; $i++) {
+            gh release view $tag --json id 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { break }
+            gh release create $tag --title "DSH Desktop $tag" --generate-notes 2>$null
+            if ($LASTEXITCODE -eq 0) { break }
+            Start-Sleep -Seconds 5
+          }
+          gh release view $tag --json id --jq .id | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "无法创建或读取 release $tag" }
+          $arch = $env:ARCH
+          gh release upload $tag "dist/DSH-Desktop-*-$arch.dmg" "dist/DSH-Desktop-*-$arch.zip" --clobber
           Write-Output '=== release assets ==='
           gh release view $tag --json assets --jq '.assets[].name'
         env:

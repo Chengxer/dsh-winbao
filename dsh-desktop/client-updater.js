@@ -514,6 +514,11 @@ function buildNsisCmd() {
 }
 
 function applyUpdate(ctx, pending) {
+  // 更新脚本（cmd/ps1 + exe/安装器替换）为 Windows 专属；macOS 版暂不支持
+  // 自动更新（入口已降级为提示手动下载），此处兜底拒绝执行。
+  if (process.platform !== 'win32') {
+    throw new Error('当前平台暂不支持客户端自动更新（请手动下载新版安装包）');
+  }
   const newExe = pending.path;
   const portable = isPortable();
   const oldExe = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;

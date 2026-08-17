@@ -9,10 +9,11 @@
 //   4. Checks for official @deepseek-ai/dsh releases and, with the user's
 //      consent, self-updates the agent (see updater.js).
 //
-// The dsh CLI is spawned with the bundled node.exe (vendor/node/node.exe in
-// dev, resources/node/node.exe when packaged) so that prebuilt native
-// modules (sharp, node-pty, koffi, ...) match the Node ABI they were
-// installed for. We deliberately never rebuild them against Electron.
+// The dsh CLI is spawned with the bundled Node runtime (vendor/node/node.exe
+// on Windows, vendor/node/node on macOS/Linux in dev; resources/node/...
+// when packaged) so that prebuilt native modules (sharp, node-pty, koffi,
+// ...) match the Node ABI they were installed for. We deliberately never
+// rebuild them against Electron.
 
 const { app, BrowserWindow, Menu, Tray, shell, dialog, Notification, ipcMain, clipboard, crashReporter, screen } = require('electron');
 const { spawn, spawnSync } = require('node:child_process');
@@ -481,8 +482,10 @@ process.on('exit', (code) => {
 });
 
 function nodeExe() {
-  if (app.isPackaged) return path.join(process.resourcesPath, 'node', 'node.exe');
-  return path.resolve(__dirname, 'vendor', 'node', 'node.exe');
+  // Windows 用 node.exe，macOS/Linux 用无后缀的 node 可执行文件。
+  const exeName = process.platform === 'win32' ? 'node.exe' : 'node';
+  if (app.isPackaged) return path.join(process.resourcesPath, 'node', exeName);
+  return path.resolve(__dirname, 'vendor', 'node', exeName);
 }
 
 function npmCli() {
@@ -4575,6 +4578,20 @@ function quitForClientUpdate(ctx, pending) {
 
 async function runClientUpdateFlow(manual) {
   if (quitting) return;
+  // macOS 第一版暂不支持自动更新（更新机制为 Windows 专属的 exe/安装器
+  // 替换）；入口优雅降级为提示手动下载，避免出现无法落地的更新流程。
+  if (process.platform !== 'win32') {
+    if (manual) {
+      await showBox({
+        type: 'info',
+        title: '检查客户端更新',
+        message: 'macOS 版暂不支持自动更新。',
+        detail: '请前往 GitHub Releases 页面下载新版安装包：\nhttps://github.com/myYangyunfan/dsh_desktop/releases',
+        buttons: ['确定'],
+      });
+    }
+    return;
+  }
   if (clientUpdateBusy) {
     if (manual) await showBox({ type: 'info', title: '更新', message: '客户端更新正在进行中，请稍候。', buttons: ['确定'] });
     return;
@@ -4686,6 +4703,8 @@ async function runClientUpdateFlow(manual) {
 }
 
 function offerPendingClientUpdate() {
+  // macOS 暂不支持自动更新（见 runClientUpdateFlow），忽略历史遗留的待安装标记。
+  if (process.platform !== 'win32') return;
   const ctx = updCtx();
   const settings = updater.loadSettings(ctx);
   const pending = settings.pendingClientUpdate;
@@ -5088,8 +5107,9 @@ async function boot() {
         setTimeout(() => runUpdateFlow(false), 15000).unref();
         setInterval(() => runUpdateFlow(false), AUTO_UPDATE_INTERVAL_MS).unref();
       }
-      if (!process.env.DSH_DESKTOP_SKIP_CLIENT_UPDATE) {
+      if (!process.env.DSH_DESKTOP_SKIP_CLIENT_UPDATE && process.platform === 'win32') {
         // 客户端（封装）更新：启动 60 秒后 + 每 12 小时。
+        // macOS 暂不支持自动更新（见 runClientUpdateFlow），不注册周期检查。
         setTimeout(() => runClientUpdateFlow(false), 60000).unref();
         setInterval(() => runClientUpdateFlow(false), 12 * 3600 * 1000).unref();
       }
