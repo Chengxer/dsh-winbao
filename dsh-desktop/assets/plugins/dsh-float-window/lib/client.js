@@ -137,6 +137,56 @@ window.__ModuleLoader__.load({
 		}
 
 		// ------------------------------------------------------------------
+		// 主窗口：启动时强制展开左侧栏
+		//
+		// DSH 布局默认在 AppFrame 宽度 < 1024px 时自动把左侧栏收起成 56px rail。
+		// 本仓库默认打开右侧 dsh-better-sidebar（约 420px），会把主框架压到
+		// 1024 以下，导致左侧栏启动即收起。这里在渲染稳定后检测到
+		// data-sidebar-collapsed 时调用 layout.toggleSidebar()：
+		//  - 窄屏下 toggleSidebar 会把 narrowExpanded 置为 true，强制展开；
+		//  - 非窄屏下会把 sidebar 从 0 恢复为 280px。
+		// 窗口本来够宽、左侧栏已经展开时，轮询静默结束，不做任何操作。
+		// ------------------------------------------------------------------
+		function setupForceSidebar(ctx) {
+			let disposed = false;
+			let timer = null;
+			let openTicks = 0;
+			const tick = () => {
+				if (disposed) return;
+				const layout = typeof ctx.get === "function" ? ctx.get("layout", false) : undefined;
+				if (!layout || typeof layout.toggleSidebar !== "function" || typeof document === "undefined") {
+					timer = setTimeout(tick, 100);
+					return;
+				}
+				// AppFrame 尚未挂载时继续等；挂载后再根据 collapsed 标记判断。
+				if (!document.querySelector("[data-shell-overlay]")) {
+					timer = setTimeout(tick, 100);
+					return;
+				}
+				if (document.querySelector("[data-sidebar-collapsed]")) {
+					try {
+						layout.toggleSidebar();
+						return;
+					} catch {
+						timer = setTimeout(tick, 100);
+						return;
+					}
+				}
+				// 帧已挂载但尚未出现折叠标记：可能是首帧还没跑 ResizeObserver，
+				// 也可能是窗口本来就够宽、左侧栏已展开。连续观察一段时间仍无
+				// 折叠标记就视为“已展开”，停止轮询。
+				openTicks += 1;
+				if (openTicks >= 10) return;
+				timer = setTimeout(tick, 100);
+			};
+			timer = setTimeout(tick, 0);
+			return () => {
+				disposed = true;
+				if (timer !== null) clearTimeout(timer);
+			};
+		}
+
+		// ------------------------------------------------------------------
 		// 浮窗：沉浸折叠 + 选中目标会话
 		// 窗口标题由壳层在 page-title-updated 时跟随 document.title 处理，
 		// 插件无需监听。
@@ -334,6 +384,7 @@ window.__ModuleLoader__.load({
 				}, PopOutButton), "dsh-float-window: pop-out button");
 				ctx.effect(() => setupDragOut(), "dsh-float-window: drag-out proxy");
 				ctx.effect(() => setupNotificationJump(ctx), "dsh-float-window: notification jump");
+				ctx.effect(() => setupForceSidebar(ctx), "dsh-float-window: startup force sidebar expanded");
 				return;
 			}
 			// 浮窗：沉浸折叠 + 选中会话 + 标题。
