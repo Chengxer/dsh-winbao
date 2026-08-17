@@ -62,15 +62,13 @@ mac:
   # 未签名构建：无 Apple Developer 证书。首次启动需右键→打开，
   # 或 `xattr -dr com.apple.quarantine /Applications/DSH Desktop.app`。
   identity: null
+  # 注意：target 不声明 arch —— CLI 的 --x64 / --arm64 决定构建架构。
+  # 若在此写死 arch 列表，computeArchToTargetNamesMap 会无条件采用
+  # config 列表（覆盖 CLI 过滤），导致 x64 腿连带构建出装着 x64
+  # 原生模块的 arm64 包。
   target:
-    - target: dmg
-      arch:
-        - x64
-        - arm64
-    - target: zip
-      arch:
-        - x64
-        - arm64
+    - dmg
+    - zip
 
 dmg:
   artifactName: DSH-Desktop-${version}-${arch}.${ext}
