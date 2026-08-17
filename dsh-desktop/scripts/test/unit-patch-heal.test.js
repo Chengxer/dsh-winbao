@@ -4,12 +4,23 @@
 // 用法：node --test scripts/test/unit-patch-heal.test.js
 // 覆盖：注册行级去重（双缺/三同名/零修改/注释保留/块内重复/部分重复行级手术）、
 //       config 覆盖与 disabled 禁用条目绝不删除、定向 insert 块不动、
-//       loader 日志三种 id 形态解析、包名→patch id 映射、
-//       bundle 迁移双登记移除（整块/部分行级/直注册条目/用户配置保留/零修改）。
+//       loader 日志四种 id 形态解析（含 bundle 契约形态）、包名→patch id 映射、
+//       bundle 迁移双登记移除（整块/部分行级/直注册条目/用户配置保留/零修改）、
+//       坏 bundle 二次确认（findMissingBundleDeclarations）、manifest 直扫
+//       （scanBundleContracts，不依赖日志）与
+//       manifest 原子移除（removeBundlesFromProfile）。
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { dedupePatchEntries, dropBlocksByIds, parseFailedLoaderIds, mapPackagesToPatchIds } = require('../../profile-patch-heal');
+const {
+  dedupePatchEntries,
+  dropBlocksByIds,
+  parseFailedLoaderIds,
+  mapPackagesToPatchIds,
+  findMissingBundleDeclarations,
+  scanBundleContracts,
+  removeBundlesFromProfile,
+} = require('../../profile-patch-heal');
 
 test('dedupePatchEntries: 两个重复 insert 块 → 移除后出现的块', () => {
   const input = [
@@ -291,4 +302,166 @@ test('dropBlocksByIds: 直注册条目带任意自定义键时不删除（用户
   const r = dropBlocksByIds(input, ['better-sidebar']);
   assert.deepStrictEqual(r.removed, []);
   assert.strictEqual(r.text, input, '携带自定义键的直条目保留');
+});
+
+// ---------- 第四形态：profile bundle declares no dsh.bundle ----------
+
+test('parseFailedLoaderIds: 第四形态（bundle 契约）裸名与 @scope 名', () => {
+  const logText = [
+    'Error: dsh: profile bundle "dsh-newapi-deepsseek" declares no dsh.bundle in its package.json',
+    'Error: dsh: profile bundle "@scope/dsh-plugin" declares no dsh.bundle in its package.json',
+    'some other line',
+  ].join('\n');
+  const ids = parseFailedLoaderIds(logText);
+  assert.ok(ids.includes('dsh-newapi-deepsseek'), '裸包名形态识别');
+  assert.ok(ids.includes('@scope/dsh-plugin'), '@scope 包名形态识别');
+  assert.strictEqual((logText.match(/declares no dsh\.bundle/g) || []).length, 2);
+});
+
+// ---------- findMissingBundleDeclarations：坏 bundle 二次确认 ----------
+
+/** 内存假 fs：初始文件 Map（路径 → 内容字符串）；键统一正斜杠（Windows path.join 会产出反斜杠）。 */
+function memFs(files) {
+  const norm = (p) => String(p).replace(/\\/g, '/');
+  const store = new Map(files ? Object.entries(files).map(([k, v]) => [norm(k), v]) : []);
+  return {
+    readFileSync(p) {
+      const k = norm(p);
+      if (!store.has(k)) { const err = new Error('ENOENT: ' + k); err.code = 'ENOENT'; throw err; }
+      return store.get(k);
+    },
+    writeFileSync(p, s) { store.set(norm(p), String(s)); },
+    copyFileSync(a, b) {
+      const ka = norm(a);
+      if (!store.has(ka)) { const err = new Error('ENOENT: ' + ka); err.code = 'ENOENT'; throw err; }
+      store.set(norm(b), store.get(ka));
+    },
+    existsSync(p) { return store.has(norm(p)); },
+    keys() { return store.keys(); },
+  };
+}
+
+const mkManifest = (bundles, deps) => JSON.stringify({
+  name: 'dsh-web-profile',
+  dsh: { profile: { bundles } },
+  dependencies: deps || {},
+}, null, 2) + '\n';
+
+test('findMissingBundleDeclarations: 日志无第四形态 → 空名单（不读文件）', () => {
+  const fs = memFs({});
+  assert.deepStrictEqual(findMissingBundleDeclarations('X:/profiles/web', 'normal log line', fs), []);
+});
+
+test('findMissingBundleDeclarations: 二次确认只收「bundle 清单内 + 缺 dsh.bundle.patch」的包', () => {
+  const profileDir = 'X:/profiles/web';
+  const fs = memFs({
+    [profileDir + '/package.json']: mkManifest(['dsh-bad', 'dsh-ok', '@deepseek-ai/dsh-core']),
+    [profileDir + '/node_modules/dsh-bad/package.json']: JSON.stringify({ name: 'dsh-bad', main: 'lib/index.js' }),
+    [profileDir + '/node_modules/dsh-ok/package.json']: JSON.stringify({ name: 'dsh-ok', dsh: { bundle: { patch: 'cordis.yml' } } }),
+    [profileDir + '/node_modules/@deepseek-ai/dsh-core/package.json']: JSON.stringify({ name: '@deepseek-ai/dsh-core', dsh: { bundle: { patch: 'cordis.yml' } } }),
+  });
+  const logText = 'Error: dsh: profile bundle "dsh-bad" declares no dsh.bundle in its package.json';
+  const r = findMissingBundleDeclarations(profileDir, logText, fs);
+  assert.deepStrictEqual(r, ['dsh-bad'], '缺声明的坏包收入名单；好包与官方包不收');
+});
+
+test('findMissingBundleDeclarations: 日志点名但不在 bundles 清单 → 不收', () => {
+  const profileDir = 'X:/profiles/web';
+  const fs = memFs({
+    [profileDir + '/package.json']: mkManifest(['dsh-ok']),
+    [profileDir + '/node_modules/dsh-other/package.json']: JSON.stringify({ name: 'dsh-other' }),
+  });
+  const logText = 'Error: dsh: profile bundle "dsh-other" declares no dsh.bundle in its package.json';
+  assert.deepStrictEqual(findMissingBundleDeclarations(profileDir, logText, fs), []);
+});
+
+test('findMissingBundleDeclarations: 包目录缺失（cannot-resolve 家族）→ 不收', () => {
+  const profileDir = 'X:/profiles/web';
+  const fs = memFs({
+    [profileDir + '/package.json']: mkManifest(['dsh-gone']),
+  });
+  const logText = 'Error: dsh: profile bundle "dsh-gone" declares no dsh.bundle in its package.json';
+  assert.deepStrictEqual(findMissingBundleDeclarations(profileDir, logText, fs), [], '二级确认读不到 package.json → 交给 cannot-resolve 路线');
+});
+
+test('findMissingBundleDeclarations: @deepseek-ai/* 官方包即使缺声明也被过滤', () => {
+  const profileDir = 'X:/profiles/web';
+  const fs = memFs({
+    [profileDir + '/package.json']: mkManifest(['@deepseek-ai/dsh-core']),
+    [profileDir + '/node_modules/@deepseek-ai/dsh-core/package.json']: JSON.stringify({ name: '@deepseek-ai/dsh-core' }),
+  });
+  const logText = 'Error: dsh: profile bundle "@deepseek-ai/dsh-core" declares no dsh.bundle in its package.json';
+  assert.deepStrictEqual(findMissingBundleDeclarations(profileDir, logText, fs), []);
+});
+
+// ---------- scanBundleContracts：不依赖日志的 manifest 直扫 ----------
+
+test('scanBundleContracts: 不依赖日志，直接扫清单收缺声明包（好包/官方包不收）', () => {
+  const profileDir = 'X:/profiles/web';
+  const fs = memFs({
+    [profileDir + '/package.json']: mkManifest(['dsh-bad', 'dsh-ok', '@deepseek-ai/dsh-core']),
+    [profileDir + '/node_modules/dsh-bad/package.json']: JSON.stringify({ name: 'dsh-bad', main: 'lib/index.js' }),
+    [profileDir + '/node_modules/dsh-ok/package.json']: JSON.stringify({ name: 'dsh-ok', dsh: { bundle: { patch: 'cordis.yml' } } }),
+    [profileDir + '/node_modules/@deepseek-ai/dsh-core/package.json']: JSON.stringify({ name: '@deepseek-ai/dsh-core' }),
+  });
+  // 关键：日志为空也能发现（日志轮转/截断场景）
+  assert.deepStrictEqual(scanBundleContracts(profileDir, fs), ['dsh-bad']);
+});
+
+test('scanBundleContracts: 声明存在但值为非字符串（对象/数字）也视为缺声明', () => {
+  const profileDir = 'X:/profiles/web';
+  const fs = memFs({
+    [profileDir + '/package.json']: mkManifest(['dsh-obj', 'dsh-num']),
+    [profileDir + '/node_modules/dsh-obj/package.json']: JSON.stringify({ name: 'dsh-obj', dsh: { bundle: { patch: { file: 'cordis.yml' } } } }),
+    [profileDir + '/node_modules/dsh-num/package.json']: JSON.stringify({ name: 'dsh-num', dsh: { bundle: { patch: 42 } } }),
+  });
+  assert.deepStrictEqual(scanBundleContracts(profileDir, fs).sort(), ['dsh-num', 'dsh-obj']);
+});
+
+test('scanBundleContracts: 包目录缺失（cannot-resolve 家族）→ 不收', () => {
+  const profileDir = 'X:/profiles/web';
+  const fs = memFs({
+    [profileDir + '/package.json']: mkManifest(['dsh-gone']),
+  });
+  assert.deepStrictEqual(scanBundleContracts(profileDir, fs), [], '二级确认读不到 package.json → 交给 cannot-resolve 路线');
+});
+
+test('scanBundleContracts: manifest 缺失/读失败 → 空名单（不抛错）', () => {
+  const profileDir = 'X:/profiles/web';
+  const fs = memFs({});
+  assert.deepStrictEqual(scanBundleContracts(profileDir, fs), []);
+});
+
+// ---------- removeBundlesFromProfile：manifest 原子移除 ----------
+
+test('removeBundlesFromProfile: 移除 bundles + dependencies 条目，备份存在，返回名单', () => {
+  const profileDir = 'X:/profiles/web';
+  const pkgFile = profileDir + '/package.json';
+  const fs = memFs({
+    [pkgFile]: mkManifest(['dsh-bad', 'dsh-ok'], { 'dsh-bad': '1.0.0', 'dsh-ok': '1.0.0' }),
+  });
+  const before = fs.readFileSync(pkgFile);
+  const r = removeBundlesFromProfile(profileDir, ['dsh-bad'], fs);
+  assert.deepStrictEqual(r, ['dsh-bad'], '返回实际移除名单');
+  const after = JSON.parse(fs.readFileSync(pkgFile));
+  assert.deepStrictEqual(after.dsh.profile.bundles, ['dsh-ok'], 'bundles 剔除坏包');
+  assert.deepStrictEqual(Object.keys(after.dependencies), ['dsh-ok'], 'dependencies 同步剔除');
+  const baks = [...fs.keys()].filter((p) => p.startsWith(pkgFile + '.bak-'));
+  assert.strictEqual(baks.length, 1, '备份文件存在');
+  assert.strictEqual(fs.readFileSync(baks[0]), before, '备份内容是原 manifest');
+});
+
+test('removeBundlesFromProfile: 空名单/无命中 → 零写入', () => {
+  const profileDir = 'X:/profiles/web';
+  const pkgFile = profileDir + '/package.json';
+  const fs = memFs({ [pkgFile]: mkManifest(['dsh-ok']) });
+  assert.deepStrictEqual(removeBundlesFromProfile(profileDir, [], fs), []);
+  assert.deepStrictEqual(removeBundlesFromProfile(profileDir, ['dsh-other'], fs), []);
+  assert.strictEqual([...fs.keys()].filter((p) => p.startsWith(pkgFile + '.bak-')).length, 0, '无变化不产生备份');
+  assert.ok(fs.readFileSync(pkgFile).includes('dsh-ok'));
+});
+
+test('removeBundlesFromProfile: manifest 读失败 → 空名单', () => {
+  const fs = memFs({}); // 无 package.json
+  assert.deepStrictEqual(removeBundlesFromProfile('X:/profiles/web', ['dsh-bad'], fs), []);
 });

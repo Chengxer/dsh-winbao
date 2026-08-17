@@ -45,6 +45,10 @@ const entryFiles = [
   'scripts/patch-portable-template.js',
   'scripts/plugin-manager-patch.js',
   'scripts/plugin-manager-update.js',
+  'scripts/desktop-diagnostics.js',
+  'scripts/desktop-backup.js',
+  'scripts/desktop-ordering.js',
+  'scripts/desktop-validity.js',
 ];
 
 // 匹配「async/await 关键字与紧随其后的 function 声明之间被空行/注释行拆开」：

@@ -42,7 +42,7 @@ const { installBuiltinPresets } = require('./scripts/install-minimal-win-preset'
 const { SessionWatcher, scanZstdFrames } = require('./session-watcher');
 const { RendererRecovery } = require('./renderer-recovery');
 const { ensureCoreBundles, CORE_BUNDLE_NAMES } = require('./profile-manifest');
-const { dedupePatchEntries, parseFailedLoaderIds, mapPackagesToPatchIds } = require('./profile-patch-heal');
+const { dedupePatchEntries, parseFailedLoaderIds, mapPackagesToPatchIds, findMissingBundleDeclarations, scanBundleContracts, removeBundlesFromProfile } = require('./profile-patch-heal');
 const { PROFILE_BUNDLE_GUARD_MARKER, PROFILE_BOOT_GUARD_MARKER, verifyBundleDir, packageDirUpward, scanProfileBundles, recoverManifestBundles, applyAppBootBundleGuard, applyProfileBootBundleGuard, applyProfileBootHealGuard } = require('./profile-bundle-heal');
 // 统一补丁引擎与共享数据源（scripts/lib/）：main.js 的运行时补丁、同步脚本
 // 与 after-pack 共用同一实现，杜绝重复与漂移。
@@ -54,6 +54,12 @@ const { ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK, removeLegacyMarketplacePatchLines,
 const { patchWebSearchBaseUrl } = require('./scripts/patch-web-search-baseurl');
 const { patchMenuViewport } = require('./scripts/patch-menu-viewport');
 const { patchSessionManage } = require('./scripts/patch-session-manage');
+// 「设置 → 插件 → 诊断与管理」：诊断 / 备份与恢复 / 日志包导出 / 防砖体检 /
+// bundle 顺序检测与重排（纯函数模块，node --test 单测覆盖）。
+const desktopDiagnostics = require('./scripts/desktop-diagnostics');
+const desktopBackup = require('./scripts/desktop-backup');
+const desktopOrdering = require('./scripts/desktop-ordering');
+const desktopValidity = require('./scripts/desktop-validity');
 const zlib = require('node:zlib');
 
 // ---------------------------------------------------------------------------
@@ -192,6 +198,12 @@ let recovery = null; // 渲染进程崩溃/挂起自恢复状态机（renderer-r
 let crashDumpsDir = "";
 let pickerBrowseOverlay = null; // koffi 预检失败时注入的目录选择器降级 overlay
 let epermRepairAttempted = false; // EPERM/symlink 自愈每次运行只尝试一次
+// 诊断与管理的互斥写（恢复 / bundle 顺序写回 / 移除失效条目）：都是写 profile
+// 文件的操作，并发执行会互相覆盖，串行化。
+let diagMutationBusy = false;
+// bundle 契约（declares no dsh.bundle）自愈每次运行只尝试一次（主动扫描挂
+// 在启动成功路径、失败兜底挂在 handleBootFailure，共用同一守卫防重复）。
+let bundleContractRepairAttempted = false;
 
 // ---------------------------------------------------------------------------
 // 会话浮窗（分屏）：把会话弹出到独立窗口
@@ -984,6 +996,71 @@ function notifySafeBoot(ids) {
   }
 }
 
+function notifyBundleRepair(removed) {
+  try {
+    const n = new Notification({
+      title: 'DSH Desktop 启动自愈',
+      body: '检测到启动层（dsh.profile.bundles）中存在未声明 dsh.bundle 的插件，已自动移除并备份配置：' + removed.join(', ') + '。正在重试启动。',
+      icon: path.join(__dirname, 'assets', 'icon.png'),
+    });
+    n.show();
+  } catch (err) {
+    log('boot', 'bundle 自愈通知失败: ' + err.message);
+  }
+}
+
+// 自愈事件持久化：模态框/系统通知都是一次性的，错过就没了；写入
+// userData/self-heal-history.json 后，用户随时可在「设置 → 插件 →
+// 诊断与管理 → 诊断」中回看「上次启动自愈了什么」。
+function appendSelfHealHistory(kind, names) {
+  try {
+    const file = path.join(userDataDir, 'self-heal-history.json');
+    let items = [];
+    if (fs.existsSync(file)) {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (Array.isArray(parsed)) items = parsed;
+    }
+    items.unshift({
+      kind: kind === 'overlay' ? 'overlay' : 'bundle',
+      names: Array.isArray(names) ? names : [names],
+      ts: Date.now(),
+    });
+    fs.writeFileSync(file, JSON.stringify(items.slice(0, 5), null, 2) + '\n', 'utf8');
+  } catch (err) {
+    log('boot', '自愈历史写入失败: ' + err.message);
+  }
+}
+
+// 自愈成功后的模态提示：系统通知可能被折叠/错过，模态框保证用户看到
+// 「应用曾自动修复过启动问题」，并说明做了什么、是否还需要操作。
+// kind: 'bundle'（移除无声明插件）| 'overlay'（禁用失败插件）。
+function showSelfHealNotice(kind, names) {
+  const list = Array.isArray(names) && names.length > 0 ? names.join('、') : '';
+  const isBundle = kind === 'bundle';
+  // 弹窗前确保主窗口已显示并置前：窗口若刚创建还未 show，模态框挂到隐藏
+  // 窗口上用户会看不到（「好像是单纯打开」的根因之一）。
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (!mainWindow.isVisible()) mainWindow.show();
+      mainWindow.focus();
+    }
+  } catch { /* 窗口操作失败不阻塞提示 */ }
+  showBox({
+    type: 'info',
+    title: 'DSH Desktop 已自动修复启动问题',
+    message: isBundle
+      ? '检测到启动清单中有插件缺少启动声明（会导致应用启动失败），已自动移除并恢复启动。'
+      : '检测到上次启动失败的插件，已自动禁用并恢复启动。',
+    detail: (isBundle ? '已移除的插件：' : '已禁用的插件：') + list +
+      '\n\n原配置已自动备份，无需任何操作。' +
+      '修复对应插件后可在「设置 → 插件 → 诊断与管理」中重新启用或查看。',
+    buttons: ['知道了'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  }).catch((err) => log('boot', '自愈提示框失败: ' + err.message));
+}
+
 // issue #48：profile manifest 重置是数据丢失类事件，除了日志还要给用户可见
 // 提示。集成测试实例与用户正在使用的桌面端并存（showBox 抑制的同一原因），
 // 测试态不弹真实通知，断言走 desktop.log。
@@ -1363,6 +1440,31 @@ function waitUntilUp(url, timeoutMs = 120000) {
   });
 }
 
+// 启动成功后主动清理坏 bundle 条目（软跳过保证不崩，但坏条目会每次启动
+// 告警；清理后 manifest 干净）。异步执行不阻塞 UI；守卫与失败兜底共用。
+function runBundleContractMaintenance() {
+  if (bundleContractRepairAttempted) return;
+  bundleContractRepairAttempted = true;
+  setImmediate(() => {
+    try {
+      const home = effectiveDshHome() || dshHome || process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+      const profileDir = path.join(home, 'profiles', 'web');
+      const missing = scanBundleContracts(profileDir);
+      if (missing.length > 0) {
+        const removed = removeBundlesFromProfile(profileDir, missing);
+        if (removed.length > 0) {
+          log('boot', '已从 profile 启动层移除无声明插件（备份于 package.json.bak-*）: ' + removed.join(', '));
+          notifyBundleRepair(removed);
+          appendSelfHealHistory('bundle', removed);
+          showSelfHealNotice('bundle', removed);
+        }
+      }
+    } catch (err) {
+      log('boot', 'bundle 契约维护失败: ' + ((err && err.message) || err));
+    }
+  });
+}
+
 function startAndShow(overlays = []) {
   const merged = [];
   if (pickerBrowseOverlay && fs.existsSync(pickerBrowseOverlay)) merged.push(pickerBrowseOverlay);
@@ -1374,6 +1476,10 @@ function startAndShow(overlays = []) {
     .then((url) => {
       webUrl = url;
       log('boot', 'Web UI 就绪: ' + url);
+      // 启动成功后主动清理无 dsh.bundle 声明的坏 bundle 条目：维护者软跳过
+      // 保证「不崩」但不清理，坏条目会每次启动告警；这里顺带清理 + 留痕 +
+      // 提示。旧世代 boot 的失败兜底在 handleBootFailure，两路共用守卫。
+      runBundleContractMaintenance();
       if (mainWindow && !mainWindow.isDestroyed()) return mainWindow.loadURL(url).then(() => url);
       return url;
     });
@@ -1516,8 +1622,37 @@ async function handleBootFailure(err, overlays = []) {
   const safeOverlay = ensureSafeBootOverlay(failedIds);
   if (safeOverlay && !overlays.includes(safeOverlay)) {
     notifySafeBoot(failedIds);
+    appendSelfHealHistory('overlay', failedIds);
     const next = [...overlays, safeOverlay];
-    return startAndShow(next).catch((e2) => handleBootFailure(e2, next));
+    return startAndShow(next)
+      .then(() => showSelfHealNotice('overlay', failedIds))
+      .catch((e2) => handleBootFailure(e2, next));
+  }
+  // bundle 契约缺失自愈（旧世代 boot fail-loud 兜底）：维护者软跳过（
+  // profile-bundle-heal 注入防护）保证新世代启动不崩；此分支只为旧世代
+  // boot / 防护锚点失配（dsh 更新后）时兜底——备份 manifest → 移除坏条目 →
+  // 重试；绝不触碰 @deepseek-ai/*。
+  if (!bundleContractRepairAttempted) {
+    bundleContractRepairAttempted = true;
+    const home = effectiveDshHome() || dshHome || process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+    const profileDir = path.join(home, 'profiles', 'web');
+    // 主路径：直接扫 manifest（不依赖日志，日志轮转/截断也能发现坏条目）；
+    // 兜底：日志形态匹配（旧逻辑），两者合并去重。
+    const missing = scanBundleContracts(profileDir);
+    for (const n of findMissingBundleDeclarations(profileDir, readDshWebLogTail(120))) {
+      if (!missing.includes(n)) missing.push(n);
+    }
+    if (missing.length > 0) {
+      const removed = removeBundlesFromProfile(profileDir, missing);
+      if (removed.length > 0) {
+        log('boot', '已从 profile 启动层移除无声明插件（备份于 package.json.bak-*）: ' + removed.join(', '));
+        notifyBundleRepair(removed);
+        appendSelfHealHistory('bundle', removed);
+        return startAndShow(overlays)
+          .then(() => showSelfHealNotice('bundle', removed))
+          .catch((e2) => handleBootFailure(e2, overlays));
+      }
+    }
   }
   // settings.yaml 整体损坏（settings 服务起不来）时给出「备份并重置」的一键
   // 恢复（用户同意才动文件），而不是让用户面对无从下手的失败弹窗。
@@ -2834,6 +2969,327 @@ function registerChromeIpc() {
       return await pluginManagerUpdate(String(id));
     } catch (err) {
       log('plugin-manager', '更新插件 ' + id + ' 失败: ' + ((err && err.message) || err));
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  });
+
+  // ----------------------- 诊断与管理（设置 → 插件 → 诊断与管理） -----------------------
+
+  ipcMain.handle('dsh:diag-run', async (event) => {
+    if (!pluginManagerIpcAllowed(event)) return { ok: false, error: 'unauthorized' };
+    try {
+      const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
+      const profileDir = path.join(home, 'profiles', 'web');
+      const report = desktopDiagnostics.runDiagnostics({
+        profileDir,
+        patchFile: path.join(profileDir, 'cordis.patch.yml'),
+        assetsDir: path.join(__dirname, 'assets', 'plugins'),
+        coreDirDshAt: path.join(__dirname, 'node_modules', '@deepseek-ai'),
+        crashDir: crashDumpsDir || null,
+        logs: {
+          desktop: logsDir ? path.join(logsDir, 'desktop.log') : null,
+          web: logsDir ? path.join(logsDir, 'dsh-web.log') : null,
+        },
+        selfHealHistoryFile: path.join(userDataDir, 'self-heal-history.json'),
+        yaml: loadDshYamlDialect(),
+        env: {
+          appVersion: app.getVersion(),
+          electron: process.versions.electron || '',
+          node: process.versions.node || '',
+          platform: process.platform,
+          arch: process.arch,
+          home,
+          profileName: 'web',
+        },
+      });
+      return { ok: true, report };
+    } catch (err) {
+      log('diagnostics', '运行诊断失败: ' + ((err && err.message) || err));
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  });
+
+  // 备份：收集 profile 配置 + 全局设置 → 用户选保存路径 → 写 JSON 备份文件。
+  // 返回 { ok, file, files, secretFiles }。
+  ipcMain.handle('dsh:backup-export', async (event, { label } = {}) => {
+    if (!pluginManagerIpcAllowed(event)) return { ok: false, error: 'unauthorized' };
+    try {
+      const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
+      const profileDir = path.join(home, 'profiles', 'web');
+      const backup = desktopBackup.createBackup({ profileDir, homeDir: home, label: String(label || '') }, fs, path);
+      const defaultName = 'dsh-desktop-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+      const chosen = await dialog.showSaveDialog(mainWindow, {
+        title: '导出 DSH 配置备份',
+        defaultPath: defaultName,
+        filters: [{ name: 'DSH 备份文件', extensions: ['json'] }],
+        properties: ['createDirectory', 'showOverwriteConfirmation'],
+      });
+      if (chosen.canceled || !chosen.filePath) return { ok: false, canceled: true };
+      const json = JSON.stringify(backup, null, 2) + '\n';
+      writeFileAtomic(chosen.filePath, json); // tmp+rename 原子写，避免写一半断电损坏备份
+      log('diagnostics', '已导出备份: ' + chosen.filePath + ' (' + backup.files.length + ' 文件)');
+      return {
+        ok: true,
+        file: chosen.filePath,
+        files: backup.files.length,
+        secretFiles: backup.secretFiles,
+        bytes: Buffer.byteLength(json),
+      };
+    } catch (err) {
+      log('diagnostics', '导出备份失败: ' + ((err && err.message) || err));
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  });
+
+  // 恢复：预览（preview=true，只读展示）→ 确认（preview=false 执行写入）。
+  // UI 流程：先 preview 弹窗选文件并拿回 filePath，确认后再用同一路径执行，
+  // 不重复弹窗；无 filePath 时（直接执行）仍弹一次选择框。
+  ipcMain.handle('dsh:backup-restore', async (event, { preview = false, filePath = '' } = {}) => {
+    if (!pluginManagerIpcAllowed(event)) return { ok: false, error: 'unauthorized' };
+    try {
+      const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
+      const profileDir = path.join(home, 'profiles', 'web');
+      let file = String(filePath || '');
+      if (!file) {
+        const chosen = await dialog.showOpenDialog(mainWindow, {
+          title: '选择要恢复的 DSH 备份文件',
+          filters: [{ name: 'DSH 备份文件', extensions: ['json'] }],
+          properties: ['openFile'],
+        });
+        if (chosen.canceled || !chosen.filePaths || chosen.filePaths.length === 0) return { ok: false, canceled: true };
+        file = chosen.filePaths[0];
+      } else if (!fs.existsSync(file)) {
+        return { ok: false, error: '备份文件不存在（' + file + '）' };
+      }
+      const stat0 = fs.statSync(file);
+      if (stat0.size > 4 * 1024 * 1024) {
+        return { ok: false, error: `备份文件过大（${stat0.size} 字节 > 4MB），拒绝恢复` };
+      }
+      const text = fs.readFileSync(file, 'utf8');
+      const parsed = JSON.parse(text);
+      const backup = desktopBackup.validatedBackup(parsed); // 严格校验（格式/路径/体积）
+      if (backup.secretFiles && backup.secretFiles.length > 0) {
+        log('diagnostics', '恢复备份含密钥文件，需用户确认: ' + backup.secretFiles.join(', '));
+      }
+      if (preview) {
+        return {
+          ok: true,
+          preview: {
+            file,
+            files: backup.files.length,
+            secretFiles: backup.secretFiles || [],
+            createdAt: backup.createdAt,
+            label: backup.label || '',
+          },
+        };
+      }
+      if (diagMutationBusy) return { ok: false, error: '另有恢复/重排任务进行中，请稍候' };
+      diagMutationBusy = true;
+      try {
+        const result = desktopBackup.restoreBackup(backup, { profileDir, homeDir: home }, fs, path);
+        log('diagnostics', '已恢复备份 ' + file + '（' + result.files + ' 文件），需要完全重启后生效');
+        return { ok: true, files: result.files, restartRequired: true };
+      } finally {
+        diagMutationBusy = false;
+      }
+    } catch (err) {
+      log('diagnostics', '恢复备份失败: ' + ((err && err.message) || err));
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  });
+
+  // 一键导出诊断日志包：诊断报告 + 日志尾部聚合 + 崩溃转储元信息 + 环境，
+  // 打码 home/userData 路径后存为单个 JSON 文件（本地操作，不上传任何数据）。
+  ipcMain.handle('dsh:diag-export', async (event) => {
+    if (!pluginManagerIpcAllowed(event)) return { ok: false, error: 'unauthorized' };
+    try {
+      const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
+      const profileDir = path.join(home, 'profiles', 'web');
+      const report = desktopDiagnostics.runDiagnostics({
+        profileDir,
+        patchFile: path.join(profileDir, 'cordis.patch.yml'),
+        assetsDir: path.join(__dirname, 'assets', 'plugins'),
+        coreDirDshAt: path.join(__dirname, 'node_modules', '@deepseek-ai'),
+        crashDir: crashDumpsDir || null,
+        logs: {
+          desktop: logsDir ? path.join(logsDir, 'desktop.log') : null,
+          web: logsDir ? path.join(logsDir, 'dsh-web.log') : null,
+        },
+        selfHealHistoryFile: path.join(userDataDir, 'self-heal-history.json'),
+        yaml: loadDshYamlDialect(),
+        env: {
+          appVersion: app.getVersion(),
+          electron: process.versions.electron || '',
+          node: process.versions.node || '',
+          platform: process.platform,
+          arch: process.arch,
+          home,
+          profileName: 'web',
+        },
+      });
+      const bundle = {
+        format: 'dsh-desktop-diagnostics',
+        version: 1,
+        generatedAt: new Date().toISOString(),
+        appVersion: app.getVersion(),
+        report,
+      };
+      // 脱敏：在 JSON.stringify 之前对对象内全部字符串做路径打码。
+      // 关键：不能在 stringify 之后 split——JSON.stringify 会把 Windows 单反斜杠
+      // 转义为双反斜杠（C:\Users → C:\\Users），split(home) 永远匹配不上（静默失效）。
+      // 掩码集合：home（DSH 数据）、userDataDir（日志/崩溃）、os.homedir()、应用安装目录、
+      // 可执行文件路径；顺序先具体后宽泛（userDataDir 在 home 内、home 在 homedir 内）。
+      const maskPairs = [
+        [String(userDataDir), '<USERDATA>'],
+        [String(home), '<HOME>'],
+        [String(os.homedir() || ''), '<HOME2>'],
+        [String(__dirname), '<APPDIR>'],
+        [String(process.execPath || ''), '<APPDIR>'],
+      ].filter(([k]) => k && k.length > 1);
+      const maskStr = (s) => {
+        let t = String(s);
+        for (const [key, label] of maskPairs) {
+          if (!t.includes(key)) continue;
+          const esc = key.replace(/\\/g, '\\\\').replace(/\//g, '\\/'); // JSON 转义后形态（保守双替换防绕）
+          if (esc !== key) t = t.split(esc).join(label);
+          t = t.split(key).join(label);
+        }
+        return t;
+      };
+      const maskDeep = (o) => {
+        if (typeof o === 'string') return maskStr(o);
+        if (Array.isArray(o)) return o.map(maskDeep);
+        if (o && typeof o === 'object') {
+          const r = {};
+          for (const k of Object.keys(o)) r[k] = maskDeep(o[k]);
+          return r;
+        }
+        return o;
+      };
+      const json = JSON.stringify(maskDeep(bundle), null, 2) + '\n';
+      const defaultName = 'dsh-diagnostics-' + new Date().toISOString().slice(0, 10) + '.json';
+      const chosen = await dialog.showSaveDialog(mainWindow, {
+        title: '导出诊断日志包',
+        defaultPath: defaultName,
+        filters: [{ name: '诊断日志包', extensions: ['json'] }],
+        properties: ['createDirectory', 'showOverwriteConfirmation'],
+      });
+      if (chosen.canceled || !chosen.filePath) return { ok: false, canceled: true };
+      writeFileAtomic(chosen.filePath, json);
+      log('diagnostics', '已导出诊断日志包: ' + chosen.filePath);
+      return { ok: true, file: chosen.filePath, bytes: Buffer.byteLength(json) };
+    } catch (err) {
+      log('diagnostics', '导出诊断日志包失败: ' + ((err && err.message) || err));
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  });
+
+  // 防砖体检：逐个检查已装配的社区/配套插件包（dsh 清单 / 补丁入口 / 跨包 loader id 冲突）。
+  // 只读；返回每个包的 issue 清单与冲突列表。
+  ipcMain.handle('dsh:diag-validate', async (event) => {
+    if (!pluginManagerIpcAllowed(event)) return { ok: false, error: 'unauthorized' };
+    try {
+      const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
+      const profileDir = path.join(home, 'profiles', 'web');
+      const result = desktopValidity.validatePlugins(
+        profileDir,
+        path.join(__dirname, 'node_modules', '@deepseek-ai'),
+        path.join(__dirname, 'assets', 'plugins'),
+        loadDshYamlDialect(),
+        fs
+      );
+      return { ok: true, report: result };
+    } catch (err) {
+      log('diagnostics', '防砖体检失败: ' + ((err && err.message) || err));
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  });
+
+  // bundle 顺序检测：只读分析当前顺序 vs 声明规则/依赖，给出建议顺序（拓扑排序）。
+  ipcMain.handle('dsh:diag-order', async (event) => {
+    if (!pluginManagerIpcAllowed(event)) return { ok: false, error: 'unauthorized' };
+    try {
+      const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
+      const profileDir = path.join(home, 'profiles', 'web');
+      const opts = {
+        coreDirDshAt: path.join(__dirname, 'node_modules', '@deepseek-ai'),
+        assetsDir: path.join(__dirname, 'assets', 'plugins'),
+      };
+      const stack = desktopOrdering.readBundleStack(profileDir, fs);
+      const rules = desktopOrdering.readBundleRules(profileDir, fs, opts);
+      const edges = desktopOrdering.collectDependencyEdges(profileDir, fs, opts);
+      const conflicts = desktopOrdering.validateOrder(stack.bundles, rules);
+      const suggested = desktopOrdering.suggestOrder(stack.bundles, rules, edges);
+      return {
+        ok: true,
+        report: {
+          bundles: stack.bundles,
+          community: stack.community,
+          error: stack.error || null,
+          rules,
+          dependencyEdges: edges,
+          conflicts,
+          suggested,
+        },
+      };
+    } catch (err) {
+      log('diagnostics', 'bundle 顺序检测失败: ' + ((err && err.message) || err));
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  });
+
+  // bundle 顺序应用：把建议顺序写回 profile package.json（官方内置保持原位，原子写）。
+  ipcMain.handle('dsh:diag-order-apply', async (event, { order } = {}) => {
+    if (!pluginManagerIpcAllowed(event)) return { ok: false, error: 'unauthorized' };
+    try {
+      const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
+      const profileDir = path.join(home, 'profiles', 'web');
+      if (!Array.isArray(order) || order.some((n) => typeof n !== 'string')) {
+        return { ok: false, error: '顺序清单格式错误' };
+      }
+      if (diagMutationBusy) return { ok: false, error: '另有恢复/重排任务进行中，请稍候' };
+      diagMutationBusy = true;
+      try {
+        const result = desktopOrdering.applyBundleOrder(profileDir, order, fs);
+        if (result.ok && result.changed) {
+          log('diagnostics', '已应用 bundle 顺序（' + order.length + ' 个社区 bundle），重启后生效');
+        }
+        return result;
+      } finally {
+        diagMutationBusy = false;
+      }
+    } catch (err) {
+      log('diagnostics', '应用 bundle 顺序失败: ' + ((err && err.message) || err));
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  });
+
+  // 一键移除启动清单中的失效 bundle 条目（防砖：declares no dsh.bundle fail-loud 自愈）。
+  // 只改 dsh.profile.bundles 与其 dependencies 条目，备份后原子写，重启生效。
+  ipcMain.handle('dsh:diag-remove-bundle', async (event, { names } = {}) => {
+    if (!pluginManagerIpcAllowed(event)) return { ok: false, error: 'unauthorized' };
+    try {
+      const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
+      const profileDir = path.join(home, 'profiles', 'web');
+      if (!Array.isArray(names) || names.length === 0 || names.some((n) => typeof n !== 'string' || !n)) {
+        return { ok: false, error: '移除名单格式错误' };
+      }
+      // 防御：官方内置包绝不允许被移除（体检本身已过滤，这里再兜一层）
+      const filtered = names.filter((n) => !n.startsWith('@deepseek-ai/'));
+      if (filtered.length === 0) return { ok: false, error: '官方基础组件不可移除' };
+      if (diagMutationBusy) return { ok: false, error: '另有恢复/重排任务进行中，请稍候' };
+      diagMutationBusy = true;
+      try {
+        const removed = removeBundlesFromProfile(profileDir, filtered, fs);
+        if (removed.length > 0) {
+          log('diagnostics', '已从启动清单移除失效 bundle（备份于 package.json.bak-*）: ' + removed.join(', '));
+        }
+        return { ok: true, removed };
+      } finally {
+        diagMutationBusy = false;
+      }
+    } catch (err) {
+      log('diagnostics', '移除失效 bundle 失败: ' + ((err && err.message) || err));
       return { ok: false, error: String((err && err.message) || err) };
     }
   });
