@@ -1604,8 +1604,26 @@ async function handleBootFailure(err, overlays = []) {
         cancelId: 2,
       }).then(({ response }) => {
         if (response === 0) {
-          updater.rollback(updCtx());
-          startAndShow(overlays).catch((e2) => fatal('DeepSeek Harness 启动失败', e2));
+          // 回退本身可能失败（overlay 目录被安全软件/句柄锁定）：失败时显式
+          // 报错并给重试/退出出口，不能让异常成为 unhandledRejection 后静默卡住。
+          try {
+            updater.rollback(updCtx());
+            startAndShow(overlays).catch((e2) => fatal('DeepSeek Harness 启动失败', e2));
+          } catch (rollbackErr) {
+            log('boot', '回退 overlay 失败: ' + (rollbackErr && rollbackErr.message || String(rollbackErr)));
+            showBox({
+              type: 'error',
+              title: '回退失败',
+              message: '无法回退到内置版本，更新副本可能被安全软件占用。',
+              detail: (rollbackErr && rollbackErr.message || String(rollbackErr)) + logTailSnippet(),
+              buttons: ['重试回退', '退出'],
+              defaultId: 0,
+              cancelId: 1,
+            }).then(({ response: r2 }) => {
+              if (r2 === 0) startAndShow(overlays).catch((e2) => fatal('DeepSeek Harness 启动失败', e2));
+              else app.quit();
+            });
+          }
         } else if (response === 1) {
           startAndShow(overlays).catch((e2) => handleBootFailure(e2, overlays));
         } else {
@@ -2304,8 +2322,8 @@ async function runUpdateFlow(manual) {
         await showBox({
           type: 'warning',
           title: '检查更新失败',
-          message: '无法连接 npm registry。',
-          detail: err.message + '\n\n可通过环境变量 NPM_CONFIG_REGISTRY 配置镜像。',
+          message: '无法连接 GitHub Releases 或 npm registry。',
+          detail: err.message + '\n\n可通过环境变量 NPM_CONFIG_REGISTRY 配置 npm 镜像；GitHub Releases 会在网络可用时自动重试。',
           buttons: ['确定'],
         });
       }

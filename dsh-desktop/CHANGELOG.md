@@ -5,6 +5,7 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 
 ## [Unreleased]
 ### 修复
+- **agent 更新回退失败后静默卡住**：overlay agent 启动失败弹窗的「回退到内置版本并重试」分支直接调用 `updater.rollback()` 且无异常保护——回退本身失败（overlay 目录被安全软件/句柄锁定）时异常成为 unhandledRejection，用户点击后应用无任何反应、静默卡在失败页。现回退包 try/catch，失败显式弹「回退失败」错误框（说明文件可能被占用）并给「重试回退 / 退出」两个出口。
 - **profile bundle 装配链根治性重构（「declares no dsh.bundle」一类启动失败不再依赖锚点补丁）**：`dsh.profile.bundles` 中任何一条登记不满足 dsh 装配契约（包未安装 / 未声明 `dsh.bundle.patch` / 补丁层缺失或损坏 / 入口文件缺失），官方 `dsh-app-boot` 即 fail-loud 以退出码 1 启动失败。此前唯一防线是启动前对 dsh 构建产物做字符串锚点改写（跳过 + 诊断），锚点随 dsh 版本变化失配即静默失效——用户反馈的 `profile bundle "dsh-hub" declares no dsh.bundle`（纯客户端 bundle 被登记进 profile.bundles）正是该形状，且入口缺失形状（loader 激活期 `plugin tree failed to load`）在防护覆盖范围之外。本次重构把「启动前把 manifest 对账到可装配状态」收口为唯一实现 `scripts/lib/profile-reconcile.js`（main.js 与 `sync-companion-plugins.js` 共用），运行时防护保留为纵深防御：
   - **全量逐条校验**：每条 bundles 登记按与 dsh 装配契约一一对应的 11 种失败码校验（登记名非法 / 包未安装 / 未声明补丁层 / 补丁层越界·缺失·不可解析 / 入口越界·缺失·指向目录 / client 入口越界·缺失，补丁层用与 dsh 相同的 entry-list YAML 方言解析；client 入口校验与上游 `verifyBundleDir` 新增的 `exports["./client"]` 校验同语义、文案逐字一致，并在对账侧收口为结构化失败码）；无效且非核心的登记**从 manifest 移除**并写入隔离记录 `dsh-desktop.broken-bundles.json`（移除原因 + 时间，重装插件重新登记即恢复，恢复健康后记录自动清除）；核心 bundles（`@deepseek-ai/dsh-base` / `dsh-web-app`）校验失败绝不移除（核心缺失是安装损坏而非数据问题，保留并由启动防护兜底跳过 + 告警）；
   - **校验实现单一化**：`profile-bundle-heal.js` 提取 `inspectBundleDir` 为唯一结构化校验实现（`verifyBundleDir` 变为兼容包装，文案与契约不变），对账与同步侧防呆共用同一判定语义；
