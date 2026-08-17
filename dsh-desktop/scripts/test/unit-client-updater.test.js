@@ -99,6 +99,32 @@ test('selectAsset: Gitee 分片按 part 序号排序并拼接为完整文件名'
   });
 });
 
+test('selectAsset: 分片缺中间序号（part1+part3）→ 拒绝，不拼坏包', () => {
+  withEnv('PORTABLE_EXECUTABLE_DIR', 'C:\\tools\\dsh-desktop', () => {
+    const release = {
+      version: '0.4.1',
+      assets: [
+        { name: 'DSH-Desktop-0.4.1-win-portable-x64.exe.part1', url: 'https://example/p1', size: 1 },
+        { name: 'DSH-Desktop-0.4.1-win-portable-x64.exe.part3', url: 'https://example/p3', size: 3 },
+      ],
+    };
+    assert.throws(() => selectAsset(release), /未找到匹配的安装包资产/);
+  });
+});
+
+test('selectAsset: 分片从 part2 开始（缺 part1）→ 拒绝', () => {
+  withEnv('PORTABLE_EXECUTABLE_DIR', 'C:\\tools\\dsh-desktop', () => {
+    const release = {
+      version: '0.4.1',
+      assets: [
+        { name: 'DSH-Desktop-0.4.1-win-portable-x64.exe.part2', url: 'https://example/p2', size: 2 },
+        { name: 'DSH-Desktop-0.4.1-win-portable-x64.exe.part3', url: 'https://example/p3', size: 3 },
+      ],
+    };
+    assert.throws(() => selectAsset(release), /未找到匹配的安装包资产/);
+  });
+});
+
 test('selectAsset: Gitee v0.3.9 旧命名分片（安装版）仍可排序拼接', () => {
   withEnv('PORTABLE_EXECUTABLE_DIR', undefined, () => {
     const release = {

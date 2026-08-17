@@ -197,13 +197,18 @@ function selectAsset(release) {
           `DSH-Desktop-Setup-${release.version}-${arch}.exe`,
         ];
   for (const base of bases) {
+    const n = (s) => parseInt(s.split('part').pop(), 10) || 0;
     const parts = release.assets
       .filter((a) => a.name.startsWith(base + '.part'))
-      .sort((a, b) => {
-        const n = (s) => parseInt(s.split('part').pop(), 10) || 0;
-        return n(a.name) - n(b.name);
-      });
-    if (parts.length) return { parts, name: base, totalSize: parts.reduce((s, p) => s + p.size, 0) };
+      .sort((a, b) => n(a.name) - n(b.name));
+    // 分片序号必须连续（1..N）：缺中间分片时拼接出的安装包损坏。下载侧
+    // 每片有 content-length 完整性校验，但缺块导致的「总大小恰好超过
+    // MIN_VALID_BYTES 下限」仍可能放行坏包（如仅缺尾部小块），这里直接
+    // 拒绝不连续的分片集，宁可用下一个命名候选或报错，也不拼坏包。
+    const seqOk = parts.every((p, i) => n(p.name) === i + 1);
+    if (parts.length && seqOk) {
+      return { parts, name: base, totalSize: parts.reduce((s, p) => s + p.size, 0) };
+    }
   }
   throw new Error('未找到匹配的安装包资产（' + release.assets.map((a) => a.name).join(', ') + '）');
 }
@@ -330,7 +335,15 @@ async function downloadRelease(ctx, release, { onProgress } = {}) {
     fs.rmSync(finalPath, { force: true });
     throw new Error('下载文件异常（仅 ' + Math.round(stat.size / 1048576) + ' MB），已丢弃');
   }
-  if (sel.totalSize > 0 && Math.abs(stat.size - sel.totalSize) > 2 * 1024 * 1024) {
+  if (split && sel.totalSize > 0 && stat.size !== sel.totalSize) {
+    // 分片场景：每片都按 content-length 完整校验过，合并后大小与上游声明
+    // 不一致只可能是分片集本身不完整/声明错误——宁可丢弃重试，也不能把
+    // 残缺安装包标记为「已下载待安装」（安装器失败后用户会看到
+    // 「下载了但从不弹安装」的经典困惑）。
+    fs.rmSync(finalPath, { force: true });
+    throw new Error('分片合并后大小与声明不一致（期望 ' + sel.totalSize + ' 实际 ' + stat.size + '），已丢弃，将重试');
+  }
+  if (!split && sel.totalSize > 0 && Math.abs(stat.size - sel.totalSize) > 2 * 1024 * 1024) {
     ctx.log('client-update', `大小与上游声明不一致：期望 ${sel.totalSize} 实际 ${stat.size}（继续，安装器会自校验）`);
   }
   ctx.log('client-update', `下载完成: ${finalPath}（${Math.round(stat.size / 1048576)} MB）`);
