@@ -348,7 +348,9 @@ window.__ModuleLoader__.load({
                 return { message: "HTTP " + r.status };
               })
               .then(function (e) {
-                throw new Error(e.message || "HTTP " + r.status);
+                // 服务端业务错误放在 error 字段（如 502 上游失败原因），
+                // message 缺失时透传 error，避免只显示裸的 HTTP 状态码。
+                throw new Error(e.message || e.error || "HTTP " + r.status);
               });
           }
           return readSSE(r, appendAssistant);
