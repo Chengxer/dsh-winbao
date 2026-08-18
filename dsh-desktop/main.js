@@ -53,6 +53,7 @@ const { reconcileProfileBundles, createEntryListYamlParser, resolveBundleDirLike
 const { COMPANION_PLUGINS } = require('./scripts/lib/companion-plugins');
 const { writeFileAtomic } = require('./scripts/lib/patch-io');
 const { applyPatchToFiles } = require('./scripts/lib/patch-engine');
+const { selectReleaseAsset } = require('./scripts/lib/github-release-assets');
 const { FLASH_PKG_REL, EXPOSE_PKG_REL, PW_REL, BASH_REL, CODE_PRESET_REL, patchTargets, localCopyFiles, guardCopyFiles, localNodeModulesRoots, slotCompatCopyFiles, slotCompatPatchTargets, transformFlashFix, transformExposeFix, transformShellDescriptionOptional, transformCodeModeCompat, transformAttachmentMimeTrust, transformLegacySlotKey, transformSlotUnkeyedCompat, transformSlotErrorIsolation, SLOT_ERROR_ISOLATE_MARKER, SLOT_KEY_COMPAT_PKG_REL, ATTACH_LOCAL_REL } = require('./scripts/lib/runtime-patches');
 const { ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK, removeLegacyMarketplacePatchLines, removedPluginIdsFromPatch, ensureDisabledPatchEntry, registerCompanionPatchEntries, syncCompanionFiles } = require('./scripts/lib/companion-profile');
 // 内置 Agent 预设保护：客户端更新（覆盖安装）前快照用户改过的预设，更新后恢复。
@@ -69,6 +70,9 @@ const desktopBackup = require('./scripts/desktop-backup');
 const desktopOrdering = require('./scripts/desktop-ordering');
 const desktopValidity = require('./scripts/desktop-validity');
 const zlib = require('node:zlib');
+// 插件保护中心（借鉴 EAC）：快照 / 回滚 / 静态体检 / 自动修复 / 守护启动 /
+// 事故报告。跑在 Electron 主进程里，绝不动 harness 内核或用户会话数据。
+const { createGuard } = require('./plugin-guard');
 
 // ---------------------------------------------------------------------------
 // 启动期崩溃兜底（issue #30「便携版有进程无界面」）：模块加载 / 启动早期
@@ -1291,6 +1295,24 @@ function effectiveDshHome() {
   return dshHome || path.join(os.homedir(), '.dsh');
 }
 
+// ---------------------------------------------------------------------------
+// 插件保护中心（plugin-guard.js）：快照 / 回滚 / 静态体检 / 自动修复 /
+// 守护启动 / 事故报告。实例延迟创建（依赖 dshHome 与后端模式解析就绪，
+// 首次调用发生在 boot 或 IPC 阶段）。桌面端运行在共享 web profile。
+// ---------------------------------------------------------------------------
+let guardInstance = null;
+function ensureGuard() {
+  if (!guardInstance) {
+    guardInstance = createGuard({
+      getHome: () => effectiveDshHome() || path.join(os.homedir(), '.dsh'),
+      getProfile: () => 'web',
+      dshBin: () => dshBin(),
+      log,
+    });
+  }
+  return guardInstance;
+}
+
 // 设置页「WSL 后端」用的状态快照：当前 local 模式（未配置过）或 force 时，
 // 按已保存的 wslDistro/wslInstallDir 做一次探测；失败不抛错，错误进 status。
 // 全部探测走异步原语（configureAsync/statusAsync），绝不阻塞主进程
@@ -1542,6 +1564,24 @@ function startAndShow(overlays = []) {
       if (mainWindow && !mainWindow.isDestroyed()) return mainWindow.loadURL(url).then(() => url);
       return url;
     });
+}
+
+// 守护启动（plugin-guard.js）：快照 → 拉起 → 失败则体检/修复/回滚再试，
+// 仍失败落事故报告。调用方统一走这里，用户不再面对「装完插件起不来」。
+async function startAndShowGuarded(overlays = []) {
+  const g = ensureGuard();
+  // 回滚分支的重试也要能更新「最后良好」标记（restore 会留 pre-restore 快照，
+  // 成功拉起后它就是最新一份 = 当前良好状态）。
+  g.setRollbackLift(async () => {
+    const url = await startAndShow(overlays);
+    const snaps = g.listSnapshots();
+    if (snaps.length) g.markGood(snaps[0].id);
+    return url;
+  });
+  return g.guardedBoot(
+    () => startAndShow(overlays),
+    () => '日志文件：' + path.join(logsDir, 'dsh-web.log')
+  );
 }
 
 // 插件市场式原地重启：终结旧 dsh web 进程树并等待其真正退出，再重新启动。
@@ -2611,6 +2651,38 @@ async function showAbout() {
   else if (response === 1) clipboard.writeText(urls.gitee);
 }
 
+// 图片粘贴保存（dsh-image-paste 插件，借鉴 EAC）：只接受 image/* 的 data URL，
+// base64 解码后原子写入 %TEMP%/dsh-paste/<清洗名>-<时间戳><ext>，返回
+// { ok, path, size }。文件在临时目录，随系统清理，不污染工作区。
+const IMAGE_PASTE_MAX_BYTES = 15 * 1024 * 1024;
+const IMAGE_PASTE_EXT = {
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+  'image/bmp': '.bmp',
+  'image/avif': '.avif',
+  'image/ico': '.ico',
+  'image/x-icon': '.ico',
+  'image/tiff': '.tiff',
+};
+
+function imagePasteSave(dataUrl, name) {
+  const m = /^data:(image\/[\w.+-]+);base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+  if (!m) return { ok: false, error: '不是合法的图片 data URL' };
+  const mime = m[1].toLowerCase();
+  if (!IMAGE_PASTE_EXT[mime]) return { ok: false, error: '不支持的图片类型: ' + mime };
+  const buf = Buffer.from(m[2], 'base64');
+  if (buf.length === 0) return { ok: false, error: '图片内容为空' };
+  if (buf.length > IMAGE_PASTE_MAX_BYTES) return { ok: false, error: '图片超过 15MB 上限' };
+  const dir = path.join(os.tmpdir(), 'dsh-paste');
+  fs.mkdirSync(dir, { recursive: true });
+  const base = String(name).replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim().slice(0, 40) || '粘贴图片';
+  const file = path.join(dir, base + '-' + Date.now() + IMAGE_PASTE_EXT[mime]);
+  fs.writeFileSync(file, buf);
+  return { ok: true, path: file, size: buf.length };
+}
+
 function registerChromeIpc() {
   ipcMain.handle('chrome:init', async (event) => {
     if (!mainWindow || event.sender !== mainWindow.webContents) return null;
@@ -2734,6 +2806,63 @@ function registerChromeIpc() {
     if (payload?.intent !== 'restart-service') return { ok: false, error: 'missing-intent' };
     if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'unauthorized' };
     return restartService();
+  });
+
+  // 插件保护中心（plugin-guard.js）：快照 / 回滚 / 体检 / 修复 / 事故报告。
+  // 设置页「插件保护」分区从这里取数与触发动作（借鉴 EAC）。
+  ipcMain.handle('guard:action', async (event, { action, value } = {}) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'unauthorized' };
+    const g = ensureGuard();
+    switch (action) {
+      case 'status': {
+        return {
+          ok: true,
+          profile: 'web',
+          shareWebProfile: false,
+          snapshots: g.listSnapshots().slice(0, 20),
+          incidents: g.listIncidents().slice(0, 20),
+          lastGood: g.lastGoodSnapshot(),
+        };
+      }
+      case 'snapshot': {
+        const s = g.snapshot(String(value || 'manual'));
+        return { ok: !!s, snapshot: s };
+      }
+      case 'restore': {
+        if (serverProc && !restartingServer) {
+          // 服务运行中不能换配置文件（文件锁 + 进程内存态）：走标准重启窗口。
+          return { ok: false, error: 'service-running', hint: '请先重启 Web 服务（或让回滚在重启间隙执行）' };
+        }
+        return g.restore(value);
+      }
+      case 'check':
+        return { ok: true, report: g.healthCheck() };
+      case 'repair': {
+        const r = g.repair();
+        return { ok: true, applied: r.applied };
+      }
+      case 'incident':
+        return g.readIncident(value);
+      case 'resolve-incident':
+        return g.resolveIncident(value);
+      default:
+        return { ok: false, error: 'unknown action' };
+    }
+  });
+
+  // 图片粘贴（dsh-image-paste 插件，借鉴 EAC）：把剪贴板图片存到临时目录供
+  // agent 的 inspect_image 读取。只接受 image/* 的 data URL，限 15MB。
+  ipcMain.handle('dsh:image-paste-save', async (event, { dataUrl, name } = {}) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'unauthorized' };
+    try {
+      const res = imagePasteSave(String(dataUrl || ''), String(name || '粘贴图片'));
+      if (!res.ok) return res;
+      log('plugin-manager', '已保存粘贴图片: ' + res.path);
+      return res;
+    } catch (err) {
+      log('plugin-manager', '保存粘贴图片失败: ' + ((err && err.message) || err));
+      return { ok: false, error: String((err && err.message) || err) };
+    }
   });
 
   // 会话浮窗：主窗请求把某个会话弹出到独立窗口（校验来源与数量上限）。
@@ -4430,18 +4559,12 @@ async function pluginManagerFetchGithubLatest(repo) {
   try {
     const data = await pluginManagerHttpGetJson(githubReleaseApiUrl(repo), 15000, { Accept: 'application/vnd.github+json' });
     if (data && data.tag_name && Array.isArray(data.assets) && data.assets.length > 0) {
-      // 多资产 Release 选择策略（issue #90）：优先「平台匹配的归档」
-      // （win/windows + .tgz/.tar.gz/.zip）→ 任意归档 → 平台匹配任意文件 →
-      // 兜底第一个。此前直接取第一个资产，多资产 Release（checksum / 其它
-      // 平台分包）会下载错文件。
-      const isArchive = (n) => /\.(?:tgz|tar\.gz|zip)$/i.test(n);
-      const isWinAsset = (n) => /(?:win|windows)/i.test(n);
-      const a =
-        data.assets.find((x) => x && x.name && isArchive(x.name) && isWinAsset(x.name)) ||
-        data.assets.find((x) => x && x.name && isArchive(x.name)) ||
-        data.assets.find((x) => x && x.name && isWinAsset(x.name)) ||
-        data.assets.find((x) => x && x.name) ||
-        data.assets[0];
+      // 多资产 Release 选择策略（issue #90/#97）：优先「平台匹配的归档」
+      // → 任意归档 → 平台匹配任意文件 → 首个二进制；先剔除 .sha256 等
+      // 校验和文件，win/darwin 词边界判定，x64 > arm64 > ia32 架构偏好。
+      // 实现收敛到 scripts/lib/github-release-assets.js（纯函数单测覆盖）。
+      const a = selectReleaseAsset(data.assets);
+      if (!a) return null;
       // GitHub API digest 形如 "sha256:<hex64>"（部分老资产无此字段）
       const dm = /^(?:sha256:)?([0-9a-fA-F]{64})$/.exec(String(a.digest || ''));
       return {
@@ -6147,7 +6270,7 @@ async function boot() {
     else enablePickerBrowseOverlay();
   }
   bootFinished = true; // 窗口已建：此后异常走既有 fatal/错误弹窗，不再重复弹
-  startAndShow()
+  startAndShowGuarded()
     .then(() => {
       // Session-completion notifications: watch dsh session logs under the
       // effective DSH_HOME (same config the CLI uses).

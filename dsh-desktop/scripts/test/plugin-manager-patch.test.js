@@ -228,3 +228,20 @@ test('issue #66: 关闭 terminal 不误改前缀匹配的 terminal-tab（\b 缺�
   const out = togglePluginInPatch(src, 'terminal', false);
   assert.equal(countId(out, 'terminal-tab'), 1, 'terminal-tab 必须原样保留');
 });
+
+test('issue #100: id「foo」不误中带后缀的「- id: foo bar」条目（边界放宽到空白后）', () => {
+  const src = [
+    '# 历史遗留的非法条目（id 含空白）',
+    '- id: foo bar',
+    '  name: legacy-foo-bar',
+    '',
+  ].join('\n');
+  const out = togglePluginInPatch(src, 'foo', false, '@scope/foo');
+  // foo bar 不是 foo：原条目必须原样保留，不得被误删/误改
+  assert.ok(out.includes('- id: foo bar'), 'foo bar 条目必须原样保留');
+  assert.ok(out.includes('  name: legacy-foo-bar'), 'foo bar 的 name 行必须保留');
+  assert.ok(!out.includes('- id: foo bar\n  disabled'), '不得把 disabled 写到 foo bar 条目上');
+  // foo 的禁用条目作为新顶层条目追加
+  assert.match(out, /- id: foo\s*\n\s*name: '@scope\/foo'\s*\n\s*disabled: true/);
+  assert.equal((out.match(/(?:^|\n)[ \t]{0,2}- id: foo[ \t]*(?:\n|$)/g) || []).length, 1, 'foo 自身只登记一处');
+});

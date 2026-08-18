@@ -203,18 +203,27 @@ function checkPluginPackage(name, dir, yaml, fs = require('node:fs'), listed = f
  * @param {string|null} assetsDir
  * @param {object} yaml js-yaml 方言加载器
  * @param {object} fs
- * @returns {object} { ok, checked, conflicts, contractViolations, summary:{errors, warnings} }
+ * @returns {object} { ok, checked, conflicts, contractViolations, manifestError, summary:{errors, warnings} }
  *   contractViolations = 在启动清单内但缺 dsh.bundle.patch 声明的包名（可一键移除）
+ *   manifestError = profile package.json 损坏/不可读时的描述（正常为 null）
  */
 function validatePlugins(profileDir, coreDirDshAt, assetsDir, yaml, fs = require('node:fs')) {
+  const manifestFile = path.join(profileDir, 'package.json');
   let listedSet = new Set();
+  let manifestError = null;
   try {
-    const manifest = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
+    const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
     const bundles = manifest && manifest.dsh && manifest.dsh.profile && Array.isArray(manifest.dsh.profile.bundles)
       ? manifest.dsh.profile.bundles
       : [];
     listedSet = new Set(bundles.filter((n) => typeof n === 'string'));
-  } catch { /* 无 manifest 时 listedSet 为空 */ }
+  } catch (err) {
+    // 区分「无 manifest」（正常，listedSet 为空）与「manifest 损坏/不可读」
+    // （体检必须显式失败而不是静默假绿——issue #99）。
+    if (fs.existsSync(manifestFile)) {
+      manifestError = `profile package.json 无法解析: ${(err && err.message) || err}`;
+    }
+  }
   const checked = collectPluginCandidates(profileDir, coreDirDshAt, assetsDir, fs).map((c) => {
     const result = checkPluginPackage(c.name, c.dir, yaml, fs, listedSet.has(c.name));
     return {
@@ -256,12 +265,12 @@ function validatePlugins(profileDir, coreDirDshAt, assetsDir, yaml, fs = require
     }
   }
   conflicts.sort((a, b) => a.id.localeCompare(b.id));
-  const errors = checked.reduce((s, c) => s + c.issues.filter((i) => i.level === 'error').length, 0) + conflicts.length;
+  const errors = checked.reduce((s, c) => s + c.issues.filter((i) => i.level === 'error').length, 0) + conflicts.length + (manifestError ? 1 : 0);
   const warnings = checked.reduce((s, c) => s + c.issues.filter((i) => i.level === 'warning').length, 0);
   const contractViolations = checked
     .filter((c) => c.listed && c.issues.some((i) => i.level === 'error' && /启动清单/.test(i.text)))
     .map((c) => c.name);
-  return { ok: errors === 0, checked, conflicts, contractViolations, summary: { errors, warnings } };
+  return { ok: errors === 0, checked, conflicts, contractViolations, manifestError, summary: { errors, warnings } };
 }
 
 module.exports = {

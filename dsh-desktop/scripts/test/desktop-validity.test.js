@@ -222,3 +222,22 @@ test('validatePlugins: 覆盖条目（disabled/config）不算注册 → 不产�
   const out3 = validatePlugins(profileDir, null, path.join(dir, 'assets'), jsonYaml, fs);
   assert.strictEqual(out3.ok, true, '定向 insert 组名不算注册');
 });
+
+test('issue #99: profile package.json 存在但解析失败 → manifestError + ok:false，不再假绿', () => {
+  const dir = tmpdir();
+  const profileDir = dir;
+  // 清单文件损坏（存在但 JSON 解析失败）—— 修复前这里会静默当空清单处理
+  write(profileDir, 'package.json', '{broken json');
+  write(dir, 'assets/good-pkg/package.json', JSON.stringify({ name: 'good-pkg', dsh: { bundle: { patch: './cordis.patch.yml' } } }));
+  write(dir, 'assets/good-pkg/cordis.patch.yml', patchJson([{ id: 'good' }]));
+  const out = validatePlugins(profileDir, null, path.join(dir, 'assets'), jsonYaml, fs);
+  assert.strictEqual(out.ok, false, 'manifest 损坏必须显式失败，不得静默假绿');
+  assert.match(out.manifestError, /无法解析/, '返回结构应带 manifestError 描述');
+  assert.ok(out.summary.errors >= 1, 'manifest 损坏必须计入 errors');
+  // 对照：健康 manifest → manifestError 为 null，总结论正常
+  const healthy = tmpdir();
+  write(healthy, 'package.json', '{"name":"p"}');
+  const out2 = validatePlugins(healthy, null, null, jsonYaml, fs);
+  assert.strictEqual(out2.manifestError, null);
+  assert.strictEqual(out2.ok, true);
+});

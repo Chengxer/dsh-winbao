@@ -58,6 +58,23 @@ const COMPANION_PLUGINS = [
   // agent 会话（消息分片回写、通道适配器、去重限流）；QQ 由官方插件
   // @tencent-connect/dsh-qqbot 提供，不在本插件范围。
   { id: 'openclaw-bridge', name: '@deepseek-ai/dsh-openclaw-bridge' },
+  // —— 效率插件包（借鉴 EAC 移植，纯客户端） ——
+  // 拖入文件到对话：拖入文本/代码注入内容，图片/二进制注入路径提示。
+  { id: 'file-drop', name: 'dsh-file-drop' },
+  // 图片粘贴发送：Ctrl/Cmd+V 粘贴图片存临时目录后注入路径提示。
+  { id: 'image-paste', name: 'dsh-image-paste' },
+  // 对话回退：消息 hover 出「编辑并回退」，按上一回合分叉新会话重发。
+  { id: 'message-rewind', name: 'dsh-message-rewind' },
+  // AI 变更审核：审查模型刚做的改动（正确性/安全性/一致性）。
+  { id: 'change-review', name: 'dsh-change-review' },
+  // 自动压缩：接近上下文上限时自动发送 /compact。
+  { id: 'auto-compact', name: 'dsh-auto-compact' },
+  // 峰谷价格卫士：高峰时段发送前拦截提醒，可定时到闲时价自动执行。
+  { id: 'offpeak', name: 'dsh-offpeak' },
+  // 设置页左侧边栏自定义：显示/隐藏与排序设置导航项。
+  { id: 'settings-nav-custom', name: 'dsh-settings-nav-custom' },
+  // 设置页高级选项折叠：把低频选项行收进「高级选项」折叠组。
+  { id: 'settings-groups', name: 'dsh-settings-groups' },
 ];
 
 /** 包名 → assets/plugins 下的目录名（去 scope 前缀）。 */

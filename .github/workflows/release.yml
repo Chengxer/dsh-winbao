@@ -1,16 +1,17 @@
 name: Release Build
 
-# 双平台发布流水线（Windows x64/arm64 + macOS x64/arm64）：
-#   · 推 v* tag（如 v0.4.0）时自动在云端构建 Windows 与 macOS 全部架构
-#     安装包，一并上传到对应 GitHub Release；
-#   · 手动触发（workflow_dispatch）可指定 tag、Windows 架构与 macOS 架构，
-#     用于给已发布的版本补传某个平台/架构的安装包（例如给 v0.3.9 补 mac）。
+# 三平台发布流水线（Windows x64/arm64 + macOS x64/arm64 + Linux x64）：
+#   · 推 v* tag（如 v0.4.0）时自动在云端构建 Windows、macOS 与 Linux 全部
+#     架构安装包，一并上传到对应 GitHub Release；
+#   · 手动触发（workflow_dispatch）可指定 tag、Windows 架构、macOS 架构与
+#     Linux 开关，用于给已发布的版本补传某个平台/架构的安装包（例如给
+#     v0.3.9 补 mac）。
 # 用法：git tag v0.4.0 && git push origin v0.4.0（push gitee v0.4.0 同步 tag）
 #
 # 注意：GitHub Actions 的 job 级 if 无法引用 matrix context（解析期报
 # "Unrecognized named-value: 'matrix'"），故不用 matrix 裁剪，而是拆成
-# 四个显式 job（win-x64 / win-arm64 / mac-x64 / mac-arm64），各自用 if
-# 按 inputs.arch / inputs.mac 决定是否运行。
+# 五个显式 job（win-x64 / win-arm64 / mac-x64 / mac-arm64 / linux-x64），
+# 各自用 if 按 inputs.arch / inputs.mac / inputs.linux 决定是否运行。
 #
 # macOS 构建在 macos-14（Apple Silicon）runner 上交叉完成：
 #   · arm64 腿：npm ci 装 darwin-arm64 原生变体，vendor/node 本地复制；
@@ -19,6 +20,11 @@ name: Release Build
 #     darwin-x64（Intel runner 已退役，不再依赖 macos-13/macos-15-intel）。
 # macOS 产物未签名（无 Apple Developer 证书）：Apple Silicon 首次启动需
 # 右键→打开，或 `xattr -dr com.apple.quarantine` 后正常打开。
+#
+# Linux 构建在 ubuntu-latest runner 上原生完成（x64）：npm ci 直接装
+# linux-x64 原生变体（koffi/sharp/libvips/narb/node-pty + landlock 沙箱二
+# 进制），vendor/node 本地复制；打包为 AppImage 单文件，架构用 file -b
+# 校验 ELF "x86-64"。
 on:
   push:
     tags:
@@ -37,6 +43,10 @@ on:
         description: 'macOS 构建：none / both / x64 / arm64'
         required: false
         default: 'none'
+      linux:
+        description: 'Linux 构建：yes / no'
+        required: false
+        default: 'no'
 
 permissions:
   contents: write
@@ -250,7 +260,7 @@ jobs:
           - profile bundle 装配自愈根治（无效登记隔离记录）
           - agent 预设更新保护（保留用户自定义预设）
           - 内置插件市场 zat-dsh-engine 移除；keyed slot 兼容
-          - GitHub Actions 双平台四架构自动构建（win x64/arm64 + mac x64/arm64）
+          - GitHub Actions 三平台五架构自动构建（win x64/arm64 + mac x64/arm64 + linux x64）
 
           ## 📦 怎么选安装包（平台 / 芯片对照）
 
@@ -262,11 +272,13 @@ jobs:
           | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-Setup-$($tag -replace '^v','')-arm64.exe |
           | macOS（Intel） | x64 | DSH-Desktop-$($tag -replace '^v','')-macos-x64.dmg / .zip |
           | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$($tag -replace '^v','')-macos-arm64.dmg / .zip |
+          | Linux（AppImage） | x64 | DSH-Desktop-$($tag -replace '^v','')-linux-x64.AppImage |
 
           - Windows 用户：x64 设备选 x64 文件；ARM 设备（如 Surface Pro X）选 arm64 文件。
           - macOS 用户：Intel Mac 选 x64；Apple Silicon（M1/M2/M3/M4）选 arm64。将 App 拖入「应用程序」。
           - macOS 版未签名：首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"。
           - 客户端自动更新：Windows 与 macOS 均支持（macOS 版未签名，首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine）。
+          - Linux 用户：下载 .AppImage，chmod +x 后双击运行（或 ./DSH-Desktop-*.AppImage）。部分发行版需先安装 libfuse2（sudo apt install libfuse2）。
           "@
           gh release create $tag --title "DSH Desktop $tag" --notes $notes 2>$null
             if ($LASTEXITCODE -eq 0) { break }
@@ -496,7 +508,7 @@ jobs:
           - profile bundle 装配自愈根治（无效登记隔离记录）
           - agent 预设更新保护（保留用户自定义预设）
           - 内置插件市场 zat-dsh-engine 移除；keyed slot 兼容
-          - GitHub Actions 双平台四架构自动构建（win x64/arm64 + mac x64/arm64）
+          - GitHub Actions 三平台五架构自动构建（win x64/arm64 + mac x64/arm64 + linux x64）
 
           ## 📦 怎么选安装包（平台 / 芯片对照）
 
@@ -508,11 +520,13 @@ jobs:
           | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-Setup-$($tag -replace '^v','')-arm64.exe |
           | macOS（Intel） | x64 | DSH-Desktop-$($tag -replace '^v','')-macos-x64.dmg / .zip |
           | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$($tag -replace '^v','')-macos-arm64.dmg / .zip |
+          | Linux（AppImage） | x64 | DSH-Desktop-$($tag -replace '^v','')-linux-x64.AppImage |
 
           - Windows 用户：x64 设备选 x64 文件；ARM 设备（如 Surface Pro X）选 arm64 文件。
           - macOS 用户：Intel Mac 选 x64；Apple Silicon（M1/M2/M3/M4）选 arm64。将 App 拖入「应用程序」。
           - macOS 版未签名：首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"。
           - 客户端自动更新：Windows 与 macOS 均支持（macOS 版未签名，首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine）。
+          - Linux 用户：下载 .AppImage，chmod +x 后双击运行（或 ./DSH-Desktop-*.AppImage）。部分发行版需先安装 libfuse2（sudo apt install libfuse2）。
           "@
           gh release create $tag --title "DSH Desktop $tag" --notes $notes 2>$null
             if ($LASTEXITCODE -eq 0) { break }
@@ -524,6 +538,243 @@ jobs:
           gh release upload $tag "dist/DSH-Desktop-*-$arch.exe" "dist/DSH-Desktop-*-$arch.exe.blockmap" --clobber
           Write-Output '=== release assets ==='
           gh release view $tag --json assets --jq '.assets[].name'
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+
+  # --- Linux --------------------------------------------------------------
+  # Linux x64 构建跑在 ubuntu-latest 上（原生构建，无交叉补装脚本）：npm ci
+  # 自动装 linux-x64 原生变体（koffi / sharp / libvips / narb / node-pty）
+  # 以及 landlock 沙箱二进制。vendor/node 本地复制。ELF 架构用 file -b
+  # 校验 "x86-64"。打包为 AppImage（deb 需 author email，暂不发布）。
+
+  build-linux-x64:
+    name: build-linux-x64
+    # 手动触发时按输入裁剪；推 tag 恒构建 Linux x64。
+    if: >-
+      github.event_name == 'push' ||
+      inputs.linux == 'yes'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dsh-desktop
+    env:
+      ARCH: x64
+      UNPACKED: linux-unpacked
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dsh-desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # vendor/ 不进 git（.gitignore 排除），构建前现场生成：
+      # Linux x64 原生腿复制 runner 自带 Node 24 的 node 二进制
+      # （ABI 与 npm ci 装出的 linux-x64 原生模块匹配）。npm CLI 纯 JS。
+      - name: Fetch runtime (vendor/node + vendor/npm)
+        run: |
+          npm run fetch-node
+          npm run fetch-npm
+
+      # 打包前校验所有运行时原生二进制确实是 x86-64 ELF（file -b）。
+      # landlock 是 ELF 静态二进制（非 .node），单独用 find 扫描目录。
+      - name: Verify native binaries architecture
+        run: |
+          set -euo pipefail
+          want='x86-64'
+          checked=0
+          shopt -s globstar
+
+          check_elf() {
+            local f
+            for f in "$@"; do
+              if [ ! -f "$f" ]; then
+                echo "缺失: $f" >&2
+                exit 1
+              fi
+              local out
+              out="$(file -b "$f")"
+              printf '%-84s %s\n' "$f" "$out"
+              if [[ "$out" != *"$want"* ]]; then
+                echo "架构不符: $f = $out (期望 $want)" >&2
+                exit 1
+              fi
+              checked=$((checked + 1))
+            done
+          }
+
+          check_elf vendor/node/node
+          check_elf node_modules/@koromix/koffi-linux-x64/**/*.node
+          check_elf node_modules/@img/sharp-linux-x64/**/*.node
+          check_elf node_modules/@img/sharp-libvips-linux-x64/**/*.so*
+          check_elf node_modules/node-addon-require-builtin-linux-x64-gnu/prebuilt/*.node
+          check_elf node_modules/node-pty/prebuilds/linux-x64/pty.node
+
+          if [ ! -d node_modules/@deepseek-ai/node-addon-landlock-run-linux-x64 ]; then
+            echo '缺失: node_modules/@deepseek-ai/node-addon-landlock-run-linux-x64' >&2
+            exit 1
+          fi
+          landlock_bins=0
+          while IFS= read -r -d '' f; do
+            out="$(file -b "$f")"
+            if [[ "$out" == *ELF* ]]; then
+              printf '%-84s %s\n' "$f" "$out"
+              if [[ "$out" != *"$want"* ]]; then
+                echo "架构不符: $f = $out (期望 $want)" >&2
+                exit 1
+              fi
+              checked=$((checked + 1))
+              landlock_bins=$((landlock_bins + 1))
+            fi
+          done < <(find node_modules/@deepseek-ai/node-addon-landlock-run-linux-x64 -type f -print0)
+          if [ "$landlock_bins" -eq 0 ]; then
+            echo '未找到 landlock ELF 二进制' >&2
+            exit 1
+          fi
+
+          echo "OK: $checked 个原生二进制均为 $want"
+
+      - name: Build (Linux x64, AppImage)
+        run: npm run dist:linux -- --x64
+        timeout-minutes: 45
+        env:
+          # 无代码签名证书：禁止自动发现证书，避免误签或构建失败
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      # 校验「打进 AppImage」的原生二进制（构建机上的 node_modules 不等于打包
+      # 产物，防止原生模块静默漏出）。Linux 解包目录 linux-unpacked（x64 默认
+      # 架构无后缀），结构：resources/app + resources/node + resources/npm。
+      - name: Verify packaged app natives
+        run: |
+          set -euo pipefail
+          want='x86-64'
+          checked=0
+          shopt -s globstar
+          unpacked="dist/$UNPACKED"
+
+          check_elf() {
+            local f
+            for f in "$@"; do
+              if [ ! -f "$f" ]; then
+                echo "缺失: $f" >&2
+                exit 1
+              fi
+              local out
+              out="$(file -b "$f")"
+              printf '%-84s %s\n' "$f" "$out"
+              if [[ "$out" != *"$want"* ]]; then
+                echo "架构不符: $f = $out (期望 $want)" >&2
+                exit 1
+              fi
+              checked=$((checked + 1))
+            done
+          }
+
+          check_elf "$unpacked/resources/node/node"
+          check_elf "$unpacked/resources/app/node_modules/@koromix/koffi-linux-x64"/**/*.node
+          check_elf "$unpacked/resources/app/node_modules/@img/sharp-linux-x64"/**/*.node
+          check_elf "$unpacked/resources/app/node_modules/@img/sharp-libvips-linux-x64"/**/*.so*
+          check_elf "$unpacked/resources/app/node_modules/node-addon-require-builtin-linux-x64-gnu"/prebuilt/*.node
+          check_elf "$unpacked/resources/app/node_modules/node-pty"/prebuilds/linux-x64/pty.node
+
+          landlock_root="$unpacked/resources/app/node_modules/@deepseek-ai/node-addon-landlock-run-linux-x64"
+          if [ ! -d "$landlock_root" ]; then
+            echo "缺失: $landlock_root" >&2
+            exit 1
+          fi
+          landlock_bins=0
+          while IFS= read -r -d '' f; do
+            out="$(file -b "$f")"
+            if [[ "$out" == *ELF* ]]; then
+              printf '%-84s %s\n' "$f" "$out"
+              if [[ "$out" != *"$want"* ]]; then
+                echo "架构不符: $f = $out (期望 $want)" >&2
+                exit 1
+              fi
+              checked=$((checked + 1))
+              landlock_bins=$((landlock_bins + 1))
+            fi
+          done < <(find "$landlock_root" -type f -print0)
+          if [ "$landlock_bins" -eq 0 ]; then
+            echo '未找到 landlock ELF 二进制' >&2
+            exit 1
+          fi
+
+          echo "OK: $checked 个打包内原生二进制均为 $want"
+          # 顺手确认 extraResources 的 npm 目录也进了包
+          if [ ! -d "$unpacked/resources/npm" ]; then
+            echo "打包产物缺少: $unpacked/resources/npm" >&2
+            exit 1
+          fi
+
+      - name: Publish to GitHub Release
+        run: |
+          set -euo pipefail
+          tag="$TAG"
+          notes=$(cat <<EOF
+          # 更新要点：每次发版更新本段（面向当前版本），新版本发布时改为新版本要点
+          ## ✨ v0.3.10 更新要点
+
+          **新增**
+          - 🧩 内置插件中枢 dsh-hub：插件更新引擎（一键更新/启停/卸载/自修复）+ 全局记忆（5 个 memory_* 工具，跨会话共享）+ graph-memory 一键挂载
+          - 🍎 macOS 客户端自动更新（dmg/zip 下载安装，失败自动回滚）
+          - 🔔 点击系统通知一键回到应用前台
+          - 💰 余额增强：OpenCode Go 订阅额度、峰谷定价、未知模型回退修正
+          - 🐳 桌面宠物默认关闭（设置 → 插件 → 管理 可一键开启）
+          - 📌 侧边会话浮窗升级 v0.2.5（图标对齐/动画档位/输入框同款）
+
+          **修复**
+          - 更新后桌面图标消失（安装版缺失即补建）
+          - 客户端更新下载完成不弹安装（待安装包优先弹窗）
+          - WSL 托管后端探测失败自动回落本地（issue #54）
+          - 更新回退失败静默卡住（弹错误框双出口）
+          - 余额栏消失、左侧 Object 字样、计费回退不一致
+          - 路径围栏本地 DoS、更新竞态、服务启动句柄泄漏
+
+          **工程**
+          - 插件管理：卸载/恢复 + 双源镜像更新（npm 官方 ↔ npmmirror、GitHub ↔ gh-proxy 自动切换）
+          - profile bundle 装配自愈根治（无效登记隔离记录）
+          - agent 预设更新保护（保留用户自定义预设）
+          - 内置插件市场 zat-dsh-engine 移除；keyed slot 兼容
+          - GitHub Actions 三平台五架构自动构建（win x64/arm64 + mac x64/arm64 + linux x64）
+
+          ## 📦 怎么选安装包（平台 / 芯片对照）
+
+          | 平台 | 芯片 | 文件 |
+          | --- | --- | --- |
+          | Windows 便携版（免安装） | x64 | DSH-Desktop-${tag#v}-portable-x64.exe |
+          | Windows 便携版（免安装） | ARM64 | DSH-Desktop-${tag#v}-portable-arm64.exe |
+          | Windows 安装版（含快捷方式） | x64 | DSH-Desktop-Setup-${tag#v}-x64.exe |
+          | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-Setup-${tag#v}-arm64.exe |
+          | macOS（Intel） | x64 | DSH-Desktop-${tag#v}-macos-x64.dmg / .zip |
+          | macOS（Apple Silicon） | ARM64 | DSH-Desktop-${tag#v}-macos-arm64.dmg / .zip |
+          | Linux（AppImage） | x64 | DSH-Desktop-${tag#v}-linux-x64.AppImage |
+
+          - Windows 用户：x64 设备选 x64 文件；ARM 设备（如 Surface Pro X）选 arm64 文件。
+          - macOS 用户：Intel Mac 选 x64；Apple Silicon（M1/M2/M3/M4）选 arm64。将 App 拖入「应用程序」。
+          - macOS 版未签名：首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"。
+          - 客户端自动更新：Windows 与 macOS 均支持（macOS 版未签名，首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine）。
+          - Linux 用户：下载 .AppImage，chmod +x 后双击运行（或 ./DSH-Desktop-*.AppImage）。部分发行版需先安装 libfuse2（sudo apt install libfuse2）。
+          EOF
+          )
+          for i in 1 2 3 4 5 6; do
+            if gh release view "$tag" --json id >/dev/null 2>&1; then
+              break
+            fi
+            if gh release create "$tag" --title "DSH Desktop $tag" --notes "$notes" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 5
+          done
+          gh release view "$tag" --json id --jq .id >/dev/null
+          gh release upload "$tag" "dist/DSH-Desktop-*-$ARCH.AppImage" --clobber
+          echo '=== release assets ==='
+          gh release view "$tag" --json assets --jq '.assets[].name'
         env:
           TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
           GH_TOKEN: ${{ github.token }}
@@ -696,7 +947,7 @@ jobs:
           - profile bundle 装配自愈根治（无效登记隔离记录）
           - agent 预设更新保护（保留用户自定义预设）
           - 内置插件市场 zat-dsh-engine 移除；keyed slot 兼容
-          - GitHub Actions 双平台四架构自动构建（win x64/arm64 + mac x64/arm64）
+          - GitHub Actions 三平台五架构自动构建（win x64/arm64 + mac x64/arm64 + linux x64）
 
           ## 📦 怎么选安装包（平台 / 芯片对照）
 
@@ -708,11 +959,13 @@ jobs:
           | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-Setup-$($tag -replace '^v','')-arm64.exe |
           | macOS（Intel） | x64 | DSH-Desktop-$($tag -replace '^v','')-macos-x64.dmg / .zip |
           | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$($tag -replace '^v','')-macos-arm64.dmg / .zip |
+          | Linux（AppImage） | x64 | DSH-Desktop-$($tag -replace '^v','')-linux-x64.AppImage |
 
           - Windows 用户：x64 设备选 x64 文件；ARM 设备（如 Surface Pro X）选 arm64 文件。
           - macOS 用户：Intel Mac 选 x64；Apple Silicon（M1/M2/M3/M4）选 arm64。将 App 拖入「应用程序」。
           - macOS 版未签名：首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"。
           - 客户端自动更新：Windows 与 macOS 均支持（macOS 版未签名，首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine）。
+          - Linux 用户：下载 .AppImage，chmod +x 后双击运行（或 ./DSH-Desktop-*.AppImage）。部分发行版需先安装 libfuse2（sudo apt install libfuse2）。
           "@
           gh release create $tag --title "DSH Desktop $tag" --notes $notes 2>$null
             if ($LASTEXITCODE -eq 0) { break }
@@ -873,7 +1126,7 @@ jobs:
           - profile bundle 装配自愈根治（无效登记隔离记录）
           - agent 预设更新保护（保留用户自定义预设）
           - 内置插件市场 zat-dsh-engine 移除；keyed slot 兼容
-          - GitHub Actions 双平台四架构自动构建（win x64/arm64 + mac x64/arm64）
+          - GitHub Actions 三平台五架构自动构建（win x64/arm64 + mac x64/arm64 + linux x64）
 
           ## 📦 怎么选安装包（平台 / 芯片对照）
 
@@ -885,11 +1138,13 @@ jobs:
           | Windows 安装版（含快捷方式） | ARM64 | DSH-Desktop-Setup-$($tag -replace '^v','')-arm64.exe |
           | macOS（Intel） | x64 | DSH-Desktop-$($tag -replace '^v','')-macos-x64.dmg / .zip |
           | macOS（Apple Silicon） | ARM64 | DSH-Desktop-$($tag -replace '^v','')-macos-arm64.dmg / .zip |
+          | Linux（AppImage） | x64 | DSH-Desktop-$($tag -replace '^v','')-linux-x64.AppImage |
 
           - Windows 用户：x64 设备选 x64 文件；ARM 设备（如 Surface Pro X）选 arm64 文件。
           - macOS 用户：Intel Mac 选 x64；Apple Silicon（M1/M2/M3/M4）选 arm64。将 App 拖入「应用程序」。
           - macOS 版未签名：首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"。
           - 客户端自动更新：Windows 与 macOS 均支持（macOS 版未签名，首次打开请右键 → 打开，或执行 xattr -dr com.apple.quarantine）。
+          - Linux 用户：下载 .AppImage，chmod +x 后双击运行（或 ./DSH-Desktop-*.AppImage）。部分发行版需先安装 libfuse2（sudo apt install libfuse2）。
           "@
           gh release create $tag --title "DSH Desktop $tag" --notes $notes 2>$null
             if ($LASTEXITCODE -eq 0) { break }
