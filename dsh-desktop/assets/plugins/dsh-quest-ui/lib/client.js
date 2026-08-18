@@ -83,8 +83,8 @@
 			// 通用设置开关行样式（qdu- 前缀）。开关行不依赖 body 属性 ——
 			// 模式关闭时也必须可见；风格与 Quest 设置页行语言保持一致。
 			const ROW_CSS = [
-				".qdu-row{border-bottom:1px solid var(--qdu-line,#e8eaed);align-items:center;gap:8px;padding:14px 4px;margin:0 -4px;display:flex;border-radius:8px;transition:background-color .15s ease}",
-				".qdu-row:hover{background:var(--qdu-hover,rgba(38,49,72,.045))}",
+				// 设置行：纯文本行风格（无圆角块无 hover 底色，仅保留柔和分隔线）
+				".qdu-row{border-bottom:1px solid var(--qdu-line,#e8eaed);align-items:center;gap:8px;padding:14px 0;display:flex}",
 				".qdu-rowText{flex-direction:column;flex:1;gap:3px;min-width:0;padding-right:48px;display:flex}",
 				".qdu-title{color:var(--dsw-alias-label-primary);font-size:14px;font-weight:500;line-height:22px}",
 				".qdu-desc{color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:400;line-height:18px}",
@@ -93,6 +93,21 @@
 				".qdu-switch:disabled{opacity:.45;cursor:default}",
 				".qdu-knob{position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(16,24,40,.25);transition:transform .18s cubic-bezier(.4,0,.2,1)}",
 				".qdu-switch[aria-checked=true] .qdu-knob{transform:translateX(18px)}"
+			].join("");
+
+			// dsh-synapse 会话地图适配（双 UI 通用，不锁 body[data-dsh-quest-ui]
+			// 作用域——默认 UI 与 Quest UI 都生效）：切换按钮与顶部 Session log
+			// （wSkVaW_headerUtilities，y≈48）同一水平面；地图 overlay 下移避开
+			// Electron 自绘标题栏（0-36px），否则 iframe 内 topbar 被挡上半截。
+			// 颜色用字面量（默认 UI 下 --qdu-* 令牌不存在），与 ROW_CSS 同为
+			// 无作用域常量，随 ensureCss 一并注入。
+			const SYNAPSE_CSS = [
+				".dsh-synapse-switch{top:48px!important;border:1px solid rgba(15,17,21,.10)!important;background:#ffffff!important;box-shadow:0 1px 3px rgba(16,24,40,.06)!important;border-radius:999px!important}",
+				".dsh-synapse-switch button{font-weight:500!important;color:#61666b!important;border-radius:999px!important;transition:background-color .15s cubic-bezier(.4,0,.2,1),color .15s cubic-bezier(.4,0,.2,1)!important}",
+				".dsh-synapse-switch button:hover{background:rgba(38,49,72,.06)!important;color:#0f1115!important}",
+				".dsh-synapse-switch button.active{background:#4176e6!important;color:#fff!important}",
+				".dsh-synapse-overlay{animation:qdu-synapse-fade-in .18s cubic-bezier(.4,0,.2,1);top:36px!important}",
+				"@keyframes qdu-synapse-fade-in{from{opacity:0}to{opacity:1}}"
 			].join("");
 
 			// 主题 CSS（Quest 风格 reskin）：每条规则都必须以 body[data-dsh-quest-ui]
@@ -132,41 +147,52 @@
 				// 侧栏分隔线柔化（宽度不变；!important 压宿主 hashed 类边框色）
 				'body[data-dsh-quest-ui] [class$="_sidebar"],body[data-dsh-quest-ui] [class$="_Sidebar"]{border-right:1px solid var(--qdu-line-soft)!important}',
 			
-				// —— Q3 中央英雄输入卡片（Quest 核心视觉）：浮起白卡、大圆角、
-				//    双层柔影，聚焦时阴影加深 + 主色光环 ——
-				// 卡片外壳（hero 空态与 normal 会话态共用 .uV2eYG_root）；描边用
-				// label 色 8% 透明混合；position 给 hero 顶部高光线做定位铺垫
-				'body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_root"]:has(textarea){position:relative;background:var(--qdu-bg-card);border:1px solid color-mix(in srgb,var(--qdu-label-1) 8%,transparent);border-radius:var(--qdu-radius-card);box-shadow:var(--qdu-shadow-float);transition:box-shadow .2s var(--qdu-ease),border-color .2s var(--qdu-ease)}',
-				'body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_root"]:has(textarea):focus-within{border-color:color-mix(in srgb,var(--qdu-accent) 45%,transparent);box-shadow:var(--qdu-shadow-float-lg),0 0 0 3px color-mix(in srgb,var(--qdu-accent) 12%,transparent)}',
-				// 空态 hero 形态：更大圆角 + 居中限宽 + 更强浮起 + 顶部主色渐变高光线
-				'body[data-dsh-quest-ui] [class*="_composerHero"] [class*="_root"]:has(textarea){border-radius:24px;box-shadow:var(--qdu-shadow-float-lg)}',
-				'body[data-dsh-quest-ui] [class*="_composerHero"] [class*="_root"]:has(textarea)::before{content:"";position:absolute;left:24px;right:24px;top:0;height:2px;border-radius:0 0 999px 999px;background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--qdu-accent) 55%,transparent) 35%,color-mix(in srgb,var(--qdu-accent) 55%,transparent) 65%,transparent);pointer-events:none}',
-				'body[data-dsh-quest-ui] [class*="_composerHero"]{max-width:780px;margin:0 auto;width:100%}',
-				// 输入区内层完全透明化（宿主 card/backdrop 自带底色是“生搬感”根源）
-				'body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_card"]{border-radius:var(--qdu-radius-card);background:transparent!important}',
+				// —— Q3 中央输入区（Qoder Quest 打开式）：去边框去嵌套，白底大圆角
+				//    开阔区域靠浅灰画布衬托轮廓，按钮与提示贴大区域下缘两端分布 ——
+				// 外壳（hero 空态与 normal 会话态共用）：无框无影，豁达打开
+				// !important：压宿主自带边框，彻底解除“框中框”束缚
+				'body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_root"]:has(textarea){position:relative;display:flex;flex-direction:column;background:transparent!important;border:none!important;box-shadow:none!important;border-radius:0;min-height:140px;padding:0 10px 2px!important;transition:box-shadow .18s var(--qdu-ease)}',
+				// 聚焦反馈：仅顶部 2px 主色直线（平角）——下方不再出现任何弧形蓝边
+				'body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_root"]:has(textarea):focus-within{box-shadow:none!important}',
+				'body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_root"]:has(textarea):focus-within::after{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:color-mix(in srgb,var(--qdu-accent) 95%,transparent);border-radius:0;pointer-events:none}',
+				// 空态 hero：大区域（240px）、内容顶到左上，与画布完全融合（无边角）
+				'body[data-dsh-quest-ui] [class*="_composerHero"] [class*="_root"]:has(textarea){border-radius:0;box-shadow:none!important;min-height:240px;display:flex;flex-direction:column;justify-content:flex-start}',
+				'body[data-dsh-quest-ui] [class*="_composerHero"]{max-width:820px;margin:0 auto;width:100%}',
+				// 输入区内层完全透明化（宿主 card/backdrop 自带底色是“生搬感”根源）；
+				// card/scroll 纵向撑满使工具行贴底；打破宿主 780px 居中限宽 ——
+				// 输入卡占满整个下栏，从左上角开始（v0.4.1：豁达全开）
+				'body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_card"]{position:static!important;border-radius:inherit;background:transparent!important;flex:1;display:flex;flex-direction:column;width:100%!important;max-width:none!important;margin-left:0!important;margin-right:0!important}',
+				'body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_card"] > [class*="_scroll"]{flex:1;width:100%!important;max-width:none!important;margin:0!important;padding-bottom:44px!important;box-sizing:border-box}',
 				'body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_grow"] [class*="_backdrop"]{background:transparent!important;border:none!important;box-shadow:none!important}',
-				// textarea：大呼吸内边距 + placeholder 降噪；hero 态更高
-				'body[data-dsh-quest-ui] [class*="_composerStack"] textarea{background:transparent;border-radius:calc(var(--qdu-radius-card) - 6px);padding:14px 18px 6px}',
+				// textarea：大幅打开 —— normal 态 72px、hero 态 96px，大呼吸内边距
+				'body[data-dsh-quest-ui] [class*="_composerStack"] textarea{background:transparent;border-radius:14px;padding:16px 18px 8px;min-height:72px}',
 				'body[data-dsh-quest-ui] [class*="_composerStack"] textarea::placeholder{color:var(--qdu-label-3);opacity:.75}',
-				'body[data-dsh-quest-ui] [class*="_composerHero"] textarea{min-height:64px}',
-				// 发送键（.uV2eYG_primary）：36px 圆形主色 + hover 抬升投影
+				'body[data-dsh-quest-ui] [class*="_composerHero"] textarea{min-height:96px}',
+				// 发送键：36px 圆形主色，无投影无浮动（下方干净利落）
 				// !important：宿主 normal 态自带 8px 方圆角与尺寸
-				'body[data-dsh-quest-ui] [class*="_composerStack"] button[class*="_primary"]{width:36px;height:36px;border-radius:999px!important;box-shadow:0 2px 8px color-mix(in srgb,var(--qdu-accent) 35%,transparent);transition:transform .15s var(--qdu-ease),box-shadow .15s var(--qdu-ease),opacity .15s ease}',
-				'body[data-dsh-quest-ui] [class*="_composerStack"] button[class*="_primary"]:hover{transform:translateY(-1px);box-shadow:0 4px 14px color-mix(in srgb,var(--qdu-accent) 45%,transparent)}',
-				'body[data-dsh-quest-ui] [class*="_composerStack"] button[class*="_primary"]:active{transform:translateY(0)}',
+				'body[data-dsh-quest-ui] [class*="_composerStack"] button[class*="_primary"]{width:36px;height:36px;border-radius:999px!important;box-shadow:none!important;transition:opacity .15s ease}',
+				'body[data-dsh-quest-ui] [class*="_composerStack"] button[class*="_primary"]:hover{opacity:.88}',
+				'body[data-dsh-quest-ui] [class*="_composerStack"] button[class*="_primary"]:active{opacity:.75}',
 				// 工具行图标钮（命令/附件）：幽灵圆形，去宿主灰底
 				// !important + 双属性选择器提升特异性：宿主对 _add 也用了 ！important
 				'body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_row"] [class*="_tools"] button[class*="_add"],body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_row"] [class*="_tools"] .dsh-vision-attach-btn{width:32px;height:32px;border-radius:999px!important;background:transparent!important;background-color:transparent!important;color:var(--qdu-label-2)}',
 				'body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_row"] [class*="_tools"] button[class*="_add"]:hover,body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_row"] [class*="_tools"] .dsh-vision-attach-btn:hover{background:var(--qdu-hover)!important;color:var(--qdu-label-1)}',
-				// 文字选择器（访问模式/选择模型/上下文环）：描边药丸；图标环圆形
-				'body[data-dsh-quest-ui] [class*="_composerStack"] button[aria-label*="访问模式"],body[data-dsh-quest-ui] [class*="_composerStack"] button[aria-label*="选择模型"]{height:28px;border-radius:999px;border:1px solid var(--qdu-line);background:transparent!important;color:var(--qdu-label-2)!important;font-size:12px;transition:background-color .15s ease,border-color .15s ease,color .15s ease}',
-				'body[data-dsh-quest-ui] [class*="_composerStack"] button[aria-label*="访问模式"]:hover,body[data-dsh-quest-ui] [class*="_composerStack"] button[aria-label*="选择模型"]:hover{background:var(--qdu-hover)!important;border-color:var(--qdu-line);color:var(--qdu-label-1)!important}',
+				// 文字选择器（访问模式/选择模型）：彻底隐形 —— 无背景块无圆角框，
+				// 纯文字幽灵，hover 仅颜色加深（不再出现任何方形块）
+				'body[data-dsh-quest-ui] [class*="_composerStack"] button[aria-label*="访问模式"],body[data-dsh-quest-ui] [class*="_composerStack"] button[aria-label*="选择模型"]{height:28px;border:none!important;border-radius:0!important;background:transparent!important;background-color:transparent!important;box-shadow:none!important;color:var(--qdu-label-2)!important;font-size:12px;transition:color .15s ease}',
+				'body[data-dsh-quest-ui] [class*="_composerStack"] button[aria-label*="访问模式"]:hover,body[data-dsh-quest-ui] [class*="_composerStack"] button[aria-label*="选择模型"]:hover{background:transparent!important;color:var(--qdu-label-1)!important}',
 				'body[data-dsh-quest-ui] [class*="_composerStack"] button[aria-label*="上下文"]{border-radius:999px!important;transition:background-color .15s ease}',
 				'body[data-dsh-quest-ui] [class*="_composerStack"] button[aria-label*="上下文"]:hover{background:var(--qdu-hover)!important}',
-				// 卡内工具行底部呼吸（row 在 textarea 下）
-				'body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_row"]{padding:0 10px 10px}',
-				// 会话统计条（root 兄弟，竖线分隔）：整体降噪，竖线淡化为细线
-				'body[data-dsh-quest-ui] div:has(> span[class*="_sep"]){color:var(--qdu-label-3);font-size:11px}',
+				// 工具行：绝对定位钉在 root 最底缘（摆脱宿主 card 固定高度限制），
+				// 两端分布（左工具组贴左缘 / 右发送组贴右缘）
+				'body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_row"]{position:absolute;left:10px;right:10px;bottom:4px;display:flex;justify-content:space-between;align-items:center;gap:8px;padding:0 8px;z-index:1}',
+				// 余额信息（dsh-balance dock，root 下独占一行）：绝对定位到
+				// 工具行同一最底层的中部，与发送键同层，下方不再多出一行
+				'body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_root"]:has(textarea) > div:has(.dsh-balance-wrap){display:block;position:absolute;left:50%;transform:translateX(-50%);bottom:10px;margin:0!important;max-width:60%;overflow:hidden;white-space:nowrap;pointer-events:none;z-index:0}',
+				'body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_root"]:has(textarea) > div:has(.dsh-balance-wrap) .dsh-balance-wrap{white-space:nowrap}',
+				// 会话统计条：突破宿主 748px 居中限宽的外层 wrapper，左对齐贴缘，降噪小字
+				'body[data-dsh-quest-ui] [class*="_composerStack"] [class*="_root"]:has(textarea) > div:has([class*="_sep"]){width:100%!important;max-width:none!important;margin:0!important;padding:8px 14px 0;box-sizing:border-box}',
+				'body[data-dsh-quest-ui] div:has(> span[class*="_sep"]){color:var(--qdu-label-3);font-size:11px;width:100%;max-width:none!important;justify-content:flex-start!important;flex-wrap:wrap}',
 				'body[data-dsh-quest-ui] span[class*="_sep"]{color:var(--qdu-line)}',
 			
 				// —— Q4 消息流降噪：助手消息圆角、去硬边框；用户消息仅圆角化
@@ -210,12 +236,19 @@
 				// —— 自有节点：侧栏分组头（Qoder Quest 小号大写字距标签）——
 				'body[data-dsh-quest-ui] .qdu-nav-head{box-sizing:border-box;padding:12px 12px 6px;font-size:11px;line-height:16px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--qdu-label-3);user-select:none}',
 			
-				// —— 自有节点：元数据药丸条（贴输入卡片上方、居中、描边药丸；
-				//    纯展示不拦截点击）——
-				'body[data-dsh-quest-ui] .qdu-pillbar{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;max-width:780px;margin:0 auto 8px;padding:0 16px;pointer-events:none}',
-				'body[data-dsh-quest-ui] .qdu-pill{border:1px solid color-mix(in srgb,var(--qdu-label-1) 8%,transparent);border-radius:var(--qdu-radius-pill);padding:3px 12px;font-size:12px;line-height:18px;color:var(--qdu-label-2);background:var(--qdu-bg-card);display:inline-flex;align-items:center;gap:4px;box-shadow:0 1px 2px rgba(16,24,40,.04)}',
-				// 药丸前缀圆点（主色点缀）
-				'body[data-dsh-quest-ui] .qdu-pill::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--qdu-accent);opacity:.75}',
+			// （v0.4.4：胶囊样式已彻底移除，节点与 CSS 均不再存在）
+
+				// —— 第三方插件元素 Quest 化处理 ——
+				// 消息区“编辑”悬浮钮（dshrw-editbtn，白底方形带阴影）：Quest 下隐藏
+				'body[data-dsh-quest-ui] .dshrw-editbtn{display:none!important}',
+				// 临时会话按钮（dss-footer-icon，原在侧栏底部带文字）：只留图标，
+				// fixed 到窗口右上角，与对话/文件/终端标签栏（y≈84）同一水平面
+				'body[data-dsh-quest-ui] .dss-footer-icon{position:fixed!important;top:80px;right:14px;width:32px;height:32px;padding:0;display:flex;align-items:center;justify-content:center;z-index:5;background:transparent;border:none}',
+				'body[data-dsh-quest-ui] .dss-footer-icon .dss-footer-label{display:none}',
+				// 上下文用量面板（JObwrW_panel）：轻度美化降噪（内容为宿主用量数据）
+				'body[data-dsh-quest-ui] .JObwrW_panel{line-height:1.6}',
+				'body[data-dsh-quest-ui] .JObwrW_figures{color:var(--qdu-label-2)}',
+				// —— dsh-synapse 适配已上移为双 UI 通用的 SYNAPSE_CSS（v0.6.0）——
 			
 				// —— 空态建议卡：圆点前缀（::before 14px 描边圆）+ 40px 行高 +
 				//    hover 浅底；官方欢迎页有建议条目时才命中，无条目安静无效 ——
@@ -231,7 +264,7 @@
 				const tag = document.createElement("style");
 				tag.dataset.plugin = "@deepseek-ai/dsh-quest-ui";
 				tag.dataset.pluginCss = tagId;
-				tag.textContent = ROW_CSS + CSS;
+				tag.textContent = ROW_CSS + SYNAPSE_CSS + CSS;
 				document.head.appendChild(tag);
 			}
 
@@ -303,34 +336,11 @@
 				if (first.parentNode) first.parentNode.insertBefore(head, first);
 			}
 
-			// 阶段五：元数据药丸条。Quest 风格下贴在输入卡片正上方（输入栈容器
-			// [class*="_composerStack"] 的前一兄弟位），随 hero/normal 形态移动；
-			// 找不到输入栈时退化到对话主列首位。
+			// 阶段五（v0.4.1 调整）：按用户反馈移除元数据药丸条 —— 中间不再插入
+			// 任何胶囊节点，输入域直接顶到下栏左上，其余部件压至最底缘。
+			// 核心接口（PILL_TEXTS/readWorkspaceMeta）与指纹字段保留供二期恢复。
 			function applyMetaPills() {
-				removeOwnedNodes(PILLBAR_CLASS);
-				var stack = document.querySelector('[class*="_composerStack"]');
-				var host = (stack && stack.parentElement) || null;
-				var anchor = stack || null;
-				if (!host) {
-					var conv = document.querySelector('[data-slot="conversation"]');
-					host = (conv && conv.parentElement) || document.querySelector('[data-slot="conversation.session"]');
-					anchor = null;
-				}
-				if (!host) return;
-				var texts = window.__dshQuestUiCore.PILL_TEXTS.slice();
-				var meta = null;
-				try { meta = window.__dshQuestUiCore.readWorkspaceMeta(); } catch (e) { /* P8 */ }
-				if (meta && meta.branch) texts.push(String(meta.branch)); // 二期：分支名药丸
-				var bar = document.createElement("div");
-				bar.className = PILLBAR_CLASS;
-				for (var i = 0; i < texts.length; i++) {
-					var pill = document.createElement("span");
-					pill.className = "qdu-pill";
-					pill.textContent = texts[i];
-					bar.appendChild(pill);
-				}
-				// 插在输入栈前一兄弟位（紧贴卡片上方）；退化路径插主列首位。
-				host.insertBefore(bar, anchor || host.firstChild);
+				return;
 			}
 
 			// 目标区域结构摘要（指纹输入）：会话行数 + 自有节点存在位 + 主区就绪位。
@@ -341,6 +351,76 @@
 					pillsPresent: !!document.querySelector("." + PILLBAR_CLASS),
 					conversationReady: !!document.querySelector('[data-slot="conversation"]')
 				};
+			}
+
+			// —— dsh-synapse 画布主题适配：synapse 以同源 iframe（/synapse/）
+			//    呈现，Quest 宿主 CSS 够不到帧内文档；这里在同源安全前提下向
+			//    contentDocument 注入一份轻量 Quest 主题（字体/底色/按钮/滚动条
+			//    对齐宿主），并随 iframe 重新加载重注入。只插 style 节点，不动
+			//    上游 DOM（P7）；iframe 缺失或跨源时安静返回（P8）。
+			var SYNAPSE_THEME_ID = "qdu-synapse-theme";
+			var SYNAPSE_THEME_CSS = [
+				"body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:#f7f8fa}",
+			"button{border-radius:8px;transition:background-color .15s ease,color .15s ease,border-color .15s ease}",
+			"::-webkit-scrollbar{width:8px;height:8px}",
+			"::-webkit-scrollbar-thumb{border-radius:999px;background:rgba(127,127,127,.28)}",
+			"::-webkit-scrollbar-track{background:transparent}"
+			].join("");
+			var synapseFrameHooked = null;
+			function injectSynapseStyle(doc) {
+				if (!doc || !doc.head || doc.getElementById(SYNAPSE_THEME_ID)) return;
+				var st = doc.createElement("style");
+				st.id = SYNAPSE_THEME_ID;
+				st.textContent = SYNAPSE_THEME_CSS;
+				doc.head.appendChild(st);
+			}
+			function ensureSynapseTheme() {
+				var frame = document.querySelector(".dsh-synapse-overlay iframe");
+				if (!frame) return;
+				try { injectSynapseStyle(frame.contentDocument); } catch (e) { /* 跨源/未就绪 */ }
+				if (synapseFrameHooked !== frame) {
+					if (synapseFrameHooked && synapseFrameHooked.removeEventListener) {
+						synapseFrameHooked.removeEventListener("load", synapseFrameReload);
+					}
+					synapseFrameHooked = frame;
+					frame.addEventListener("load", synapseFrameReload);
+				}
+			}
+			// 双 UI 通用（v0.6.0）：synapse 宿主元素由其 client.js 在模块加载时创建，
+			// 与本插件加载顺序不确定——启动期有界探测（最多 12 次×800ms）找到
+			// iframe 后接管（注入 + load 重挂），找不到即安静放弃，不常驻轮询
+			// （P1：模式关闭态除一次性探测外零开销）。
+			var synapseBootTimer = null;
+			function bootstrapSynapseTheme() {
+				if (typeof document === "undefined") return;
+				var tries = 0;
+				var probe = function () {
+					synapseBootTimer = null;
+					try {
+						if (document.querySelector(".dsh-synapse-overlay iframe")) {
+							ensureSynapseTheme();
+							return;
+						}
+					} catch (e) { /* P8 */ }
+					if (++tries < 12) synapseBootTimer = setTimeout(probe, 800);
+				};
+				probe();
+			}
+			function synapseFrameReload() {
+				try { injectSynapseStyle(synapseFrameHooked && synapseFrameHooked.contentDocument); } catch (e) { /* P8 */ }
+			}
+			function teardownSynapseTheme() {
+				if (synapseBootTimer !== null) { clearTimeout(synapseBootTimer); synapseBootTimer = null; }
+				if (synapseFrameHooked && synapseFrameHooked.removeEventListener) {
+					synapseFrameHooked.removeEventListener("load", synapseFrameReload);
+				}
+				synapseFrameHooked = null;
+				try {
+					var frame = document.querySelector(".dsh-synapse-overlay iframe");
+					var doc = frame && frame.contentDocument;
+					var st = doc && doc.getElementById(SYNAPSE_THEME_ID);
+					if (st && st.parentNode) st.parentNode.removeChild(st);
+				} catch (e) { /* P8 */ }
 			}
 
 			// 统一增强器入口（P1/P2/P3）：开启才挂单一观察器，关闭彻底拆除。
@@ -374,6 +454,8 @@
 					if (this._timer) { clearTimeout(this._timer); this._timer = null; }
 					if (this._observer) { this._observer.disconnect(); this._observer = null; }
 					this._removeAllOwnedNodes(); // 摘掉全部 qdu-* 自有节点
+					// 注：synapse 主题注入为双 UI 通用能力（v0.6.0），模式关闭不拆；
+					// 仅在插件卸载时由 teardown effect 清理。
 					this._fp = "";
 				},
 				_removeAllOwnedNodes: function () {
@@ -389,6 +471,7 @@
 						this._fp = fp;
 						applySidebarHead(); // 阶段四
 						applyMetaPills();   // 阶段五
+						ensureSynapseTheme(); // synapse 画布主题适配（幂等）
 					} catch (e) { /* P8：静默 */ }
 				}
 			};
@@ -428,7 +511,11 @@
 				}, QuestModeRow), "dsh-quest-ui: quest mode row");
 
 				// 插件卸载时彻底拆除增强器（清理回调语义）。
-				ctx.effect(() => () => questEnhancers.setOn(false), "dsh-quest-ui: teardown enhancers");
+				// 插件卸载时彻底清理增强器与 synapse 注入（模式开关不由此路径负责）。
+				ctx.effect(() => () => { questEnhancers.setOn(false); teardownSynapseTheme(); }, "dsh-quest-ui: teardown enhancers");
+
+				// synapse 适配双 UI 通用：无论模式开关状态，启动即接管画布。
+				try { bootstrapSynapseTheme(); } catch (e) { console.warn("[dsh-quest-ui] synapse bootstrap failed: " + ((e && e.message) || e)); }
 			}
 
 			function apply(ctx) {
