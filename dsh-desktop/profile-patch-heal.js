@@ -112,11 +112,16 @@ function dedupePatchEntries(text) {
         removed.push(id);
         blockDupCount += 1;
         i += 1;
+        // 删除该注册行及其完整子树：缩进大于 id 行的所有后续行都属于本条目
+        // （name/config 及 config 内的嵌套 YAML 列表项——历史实现把 `- a` 这种
+        // 嵌套列表项误判为「下一条目兄弟行」而保留，导致其父键 config: 被删后
+        // 留下孤儿列表行、产出损坏的 cordis.patch.yml）。到缩进 ≤ id 行处停下，
+        // 那是下一条目的开始。
         const indent = m[1].length;
         while (i < block.lines.length) {
           const l = block.lines[i];
           const li = /^\s*/.exec(l)[0].length;
-          if (l.trim() === '' || (li > indent && !/^\s*-\s+/.test(l))) {
+          if (l.trim() === '' || li > indent) {
             i += 1;
             continue;
           }
@@ -195,8 +200,9 @@ function dropBlocksByIds(text, ids) {
       removed.push(...hitIds);
       continue;
     }
-    // 部分命中：行级删除命中的「- id: X」注册行及其同缩进兄弟行（name 等），
-    // 保留块内其余注册。兄弟行判定：缩进大于 id 行、且不以「- 」开头。
+    // 部分命中：行级删除命中的「- id: X」注册行及其完整子树，保留块内其余注册。
+    // 子树判定：缩进大于 id 行的所有后续行都属于本条目（含 config 内的嵌套
+    // YAML 列表项）；到缩进 ≤ id 行处停下（那是下一条目）。
     const keep = block.lines.map((line) => ({ line, drop: false }));
     for (const r of idRows) {
       if (!removal.has(r.id)) continue;
@@ -207,7 +213,7 @@ function dropBlocksByIds(text, ids) {
       while (j < block.lines.length) {
         const l = block.lines[j];
         const li = /^\s*/.exec(l)[0].length;
-        if (l.trim() === '' || (li > indent && !/^\s*-\s+/.test(l))) {
+        if (l.trim() === '' || li > indent) {
           keep[j].drop = true;
           j += 1;
           continue;

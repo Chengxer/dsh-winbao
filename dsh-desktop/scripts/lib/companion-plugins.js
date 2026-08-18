@@ -50,6 +50,14 @@ const COMPANION_PLUGINS = [
   // 启停/卸载/启动自检修复）+ 全局记忆 + graph-memory / dsh-market 挂载 +
   // 自身更新检查；原生适配 Gitee 版客户端版本双源对比。
   { id: 'dsh-hub', name: 'dsh-hub' },
+  // 手机桥（hzhz314159/dsh-mini，MIT）：从手机浏览器/App 驱动 DSH agent 会话
+  // （收发文字/图片/文件、切换模型、平衡度环、局域网网关二维码配对）。
+  // 随包附带手机 App 安装包 DSH-Mobile-v1.4.0.zip（assets/plugins/dsh-mini/）。
+  { id: 'dsh-mini', name: '@deepseek-ai/dsh-mini' },
+  // IM 桥（hzhz314159/openclaw-dsh-bridge，MIT）：微信/飞书官方频道桥接入 DSH
+  // agent 会话（消息分片回写、通道适配器、去重限流）；QQ 由官方插件
+  // @tencent-connect/dsh-qqbot 提供，不在本插件范围。
+  { id: 'openclaw-bridge', name: '@deepseek-ai/dsh-openclaw-bridge' },
 ];
 
 /** 包名 → assets/plugins 下的目录名（去 scope 前缀）。 */

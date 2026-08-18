@@ -34,6 +34,10 @@ const STAT_SWEEP_MS = 10000; // 兜底 stat 清扫（捕获 fs.watch 漏报/文�
 const WALK_SWEEP_MS = 30000; // 目录对账（发现新会话、清理消失的监视器）
 
 // Structural zstd frame scanner (ported from dsh-session-persistence-jsonl).
+// Robust to mid-stream corruption: when a non-magic byte (garbage) or a torn
+// frame is encountered, it searches forward for the next valid frame magic and
+// continues scanning, so frames appended after a corrupt region are still
+// recovered instead of being silently dropped.
 function scanZstdFrames(buffer) {
   const frames = [];
   let offset = 0;
@@ -41,15 +45,23 @@ function scanZstdFrames(buffer) {
     const start = offset;
     if (buffer.length - offset < 4) return { frames, tornStart: start };
     if (buffer.readUInt32LE(offset) !== ZSTD_MAGIC) {
-      // Bytes before the next frame magic should not exist in a healthy log;
-      // stop scanning and keep what we have.
-      return { frames, tornStart: start };
+      // Bytes before the next frame magic: skip the garbage and resume at the
+      // next valid frame boundary, if any.
+      const next = buffer.indexOf(ZSTD_MAGIC, offset + 1);
+      if (next === -1) return { frames, tornStart: start };
+      offset = next;
+      continue;
     }
     offset += 4;
     if (offset === buffer.length) return { frames, tornStart: start };
     const descriptor = buffer.readUInt8(offset);
     offset += 1;
-    if ((descriptor & 24) !== 0) return { frames, tornStart: start };
+    if ((descriptor & 24) !== 0) {
+      const next = buffer.indexOf(ZSTD_MAGIC, offset + 1);
+      if (next === -1) return { frames, tornStart: start };
+      offset = next;
+      continue;
+    }
     const contentSizeFlag = descriptor >>> 6;
     const singleSegment = (descriptor & 32) !== 0;
     const checksum = (descriptor & 4) !== 0;
@@ -59,6 +71,7 @@ function scanZstdFrames(buffer) {
     const remainingHeaderBytes = (singleSegment ? 0 : 1) + dictionaryBytes + contentSizeBytes;
     if (buffer.length - offset < remainingHeaderBytes) return { frames, tornStart: start };
     offset += remainingHeaderBytes;
+    let torn = false;
     for (;;) {
       if (buffer.length - offset < 3) return { frames, tornStart: start };
       const blockHeader = buffer.readUIntLE(offset, 3);
@@ -66,11 +79,17 @@ function scanZstdFrames(buffer) {
       const lastBlock = (blockHeader & 1) !== 0;
       const blockType = (blockHeader >>> 1) & 3;
       const blockSize = blockHeader >>> 3;
-      if (blockType === 3) return { frames, tornStart: start };
+      if (blockType === 3) { torn = true; break; }
       const payloadBytes = blockType === 1 ? 1 : blockSize;
       if (buffer.length - offset < payloadBytes) return { frames, tornStart: start };
       offset += payloadBytes;
       if (lastBlock) break;
+    }
+    if (torn) {
+      const next = buffer.indexOf(ZSTD_MAGIC, offset + 1);
+      if (next === -1) return { frames, tornStart: start };
+      offset = next;
+      continue;
     }
     if (checksum) {
       if (buffer.length - offset < 4) return { frames, tornStart: start };
@@ -281,9 +300,15 @@ class SessionWatcher {
 
     const { frames } = scanZstdFrames(tail);
 
-    // 首次见到该会话（基线）：只解析头部与最后一帧边界，不逐帧解码历史——
-    // 历史事件本就不触发通知，跳过全量解压可避免启动卡顿。
+    // 首次见到该会话（基线）：只解析头部。若检测到中段损坏（帧间存在空隙，
+    // scanZstdFrames 越过垃圾区找回的后续帧），则把这些「未送达」的 turn 事件
+    // 一并计数通知；纯连续的会话历史不触发通知，避免启动时对存量会话刷屏。
     if (first) {
+      // 帧间是否有空隙（损坏/垃圾区）？连续日志里 frames[i].start 应等于上一帧 end。
+      let hasGap = false;
+      for (let i = 1; i < frames.length; i++) {
+        if (frames[i].start !== frames[i - 1].end) { hasGap = true; break; }
+      }
       if (frames.length > 0) {
         try {
           const text = decodeFrame(tail.subarray(frames[0].start, frames[0].end));
@@ -292,10 +317,31 @@ class SessionWatcher {
         } catch { /* 头部损坏则下次重试 */ }
         rec.consumed = readFrom + frames[frames.length - 1].end;
       }
+      // 有损坏空隙时，把垃圾区之后恢复的帧纳入计数，避免 turn/end 被吞。
+      if (hasGap) {
+        let turnEnds = 0;
+        let assistantMessages = 0;
+        for (const f of frames) {
+          let text;
+          try { text = decodeFrame(tail.subarray(f.start, f.end)); } catch { break; }
+          for (const line of text.split('\n')) {
+            if (!line) continue;
+            for (const ev of expandRow(line)) {
+              if (!ev || typeof ev !== 'object') continue;
+              if (ev.type === 'session/title' && ev.data && typeof ev.data.title === 'string') rec.title = ev.data.title;
+              if (ev.type === 'turn/start' || ev.type === 'turn/end') rec.hasTurnEvents = true;
+              if (ev.type === 'turn/end') turnEnds += 1;
+              if (ev.type === 'assistant/message') assistantMessages += 1;
+            }
+          }
+        }
+        const count = rec.hasTurnEvents ? turnEnds : assistantMessages;
+        if (count > 0) this.emit(rec, count);
+      }
       // 没有完整帧则不推进（tornStart 提示未写满）。
       rec.baseline = true;
       rec.lastSize = st.size;
-      return true; // 计为"做了重活"（供分批限流）
+      return frames.length > 0; // 计为"做了重活"（供分批限流）
     }
 
     // 增量：只解码 consumed 之后的新完整帧。
@@ -335,7 +381,7 @@ class SessionWatcher {
       title = rec.title;
     }
     const cwdBase = h.cwd ? path.basename(h.cwd) : null;
-    const shortId = h.id ? h.id.slice(-8) : null;
+    const shortId = typeof h.id === 'string' ? h.id.slice(-8) : null;
     body = [cwdBase, shortId ? '会话 ' + shortId : null].filter(Boolean).join(' · ');
     body += (count > 1 ? '（' + count + ' 轮任务完成）' : '');
     try { this.onTurnEnd({ title, body, sessionId: h.id, cwd: h.cwd }); }

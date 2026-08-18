@@ -172,3 +172,69 @@ test('v2: newly created session is discovered and notified (reconcile + sweep)',
   assert.strictEqual(notes[0].sessionId, 'testsess6');
   fs.rmSync(tmp, { recursive: true, force: true });
 });
+
+test('v2: mid-stream garbage does not permanently lose later turn/end (incremental)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'swv2-'));
+  const file = path.join(tmp, 'p1', 'sessg', 'session.jsonl.zstd');
+  makeSessionFile(file, 'testsessg');
+  const notes = [];
+  const w = new SessionWatcher({
+    sessionsDir: tmp,
+    onTurnEnd: (info) => notes.push(info),
+    log: () => {},
+    statSweepMs: 60000,
+    walkSweepMs: 60000,
+  });
+  w.process(file); // baseline: header frame only
+  // append F1(header+turn/start), then 6 garbage bytes, then F2(turn/end)
+  const f1 = zlib.zstdCompressSync(
+    Buffer.from(JSON.stringify({ type: 'session', id: 'testsessg', cwd: 'C:/fake' }) + '\n' +
+      JSON.stringify({ type: 'turn/start' }) + '\n', 'utf8'));
+  const f2 = zlib.zstdCompressSync(
+    Buffer.from(JSON.stringify({ type: 'turn/end' }) + '\n', 'utf8'));
+  const buf = Buffer.concat([f1, Buffer.from([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]), f2]);
+  fs.appendFileSync(file, buf);
+  w.process(file); // should recover F2 past the garbage and notify
+  w.stop();
+  assert.strictEqual(notes.length, 1, 'turn/end after garbage must not be lost');
+  assert.strictEqual(notes[0].sessionId, 'testsessg');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('v2: single corrupted file (header+garbage+turn/end) notifies on first scan', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'swv2-'));
+  const file = path.join(tmp, 'p1', 'sessh', 'session.jsonl.zstd');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const f1 = zlib.zstdCompressSync(
+    Buffer.from(JSON.stringify({ type: 'session', id: 'sessh', cwd: 'C:/fake', title: 't' }) + '\n' +
+      JSON.stringify({ type: 'turn/start' }) + '\n', 'utf8'));
+  const f2 = zlib.zstdCompressSync(
+    Buffer.from(JSON.stringify({ type: 'turn/end' }) + '\n', 'utf8'));
+  fs.writeFileSync(file, Buffer.concat([f1, Buffer.from([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]), f2]));
+  const notes = [];
+  const w = new SessionWatcher({ sessionsDir: tmp, onTurnEnd: (i) => notes.push(i), log: () => {} });
+  w.process(file);
+  w.process(file);
+  w.stop();
+  assert.strictEqual(notes.length, 1, 'recovered turn/end after corruption should notify on first scan');
+  assert.strictEqual(notes[0].sessionId, 'sessh');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('v2: non-string session id does not throw away turn-end notification', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'swv2-'));
+  const file = path.join(tmp, 'p1', 'sessn', 'session.jsonl.zstd');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, zlib.zstdCompressSync(
+    Buffer.from(JSON.stringify({ type: 'session', id: 12345, cwd: 'C:/fake', title: 't' }) + '\n', 'utf8')));
+  const notes = [];
+  const w = new SessionWatcher({ sessionsDir: tmp, onTurnEnd: (i) => notes.push(i), log: () => {} });
+  w.process(file); // baseline
+  fs.appendFileSync(file, zlib.zstdCompressSync(
+    Buffer.from(JSON.stringify({ type: 'turn/end' }) + '\n', 'utf8')));
+  w.process(file); // incremental
+  w.stop();
+  assert.strictEqual(notes.length, 1, 'numeric session id must not drop the notification');
+  assert.strictEqual(notes[0].sessionId, 12345);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});

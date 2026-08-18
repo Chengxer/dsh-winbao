@@ -202,3 +202,29 @@ test('卸载→恢复→卸载 往返不堆积注释', () => {
   assert.equal(countId(t, 'balance'), 1);
   assert.equal(removedCount(t), 1);
 });
+
+test('issue #66: 关闭一个插件不吞掉同 insert 块内的兄弟条目', () => {
+  const src = [
+    '- insert:',
+    '    - id: terminal',
+    '      name: terminal',
+    '    - id: file-changes',
+    '      name: file-changes',
+    '',
+  ].join('\n');
+  const out = togglePluginInPatch(src, 'terminal', false);
+  assert.equal(countId(out, 'file-changes'), 1, '兄弟条目 file-changes 必须保留');
+  assert.equal(countId(out, 'terminal'), 1, 'terminal 顶层 disabled 条目保留');
+  assert.ok(out.includes('disabled: true'), 'terminal 被禁用');
+});
+
+test('issue #66: 关闭 terminal 不误改前缀匹配的 terminal-tab（\b 缺陷）', () => {
+  const src = [
+    '- insert:',
+    '    - id: terminal-tab',
+    '      name: terminal-tab',
+    '',
+  ].join('\n');
+  const out = togglePluginInPatch(src, 'terminal', false);
+  assert.equal(countId(out, 'terminal-tab'), 1, 'terminal-tab 必须原样保留');
+});

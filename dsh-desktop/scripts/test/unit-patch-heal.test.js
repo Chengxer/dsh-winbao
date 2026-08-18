@@ -76,6 +76,33 @@ test('dedupePatchEntries: 三个同名块 → 只保留第一个', () => {
   assert.strictEqual((r.text.match(/- id: balance/g) || []).length, 1);
 });
 
+test('dedupePatchEntries: 重复条目携带嵌套列表 config 时整棵删除（issue #73 不产孤儿列表行）', () => {
+  // 被删的是第二个重复 balance（带 config 嵌套列表）；其整棵子树（config/- a/- b）
+  // 必须随行删除，兄弟条目 other 原样保留，不产生悬空的 - a / - b 孤儿列表行。
+  const input = [
+    '- insert:',
+    '    - id: balance',
+    "      name: 'balance'",
+    '    - id: balance',
+    "      name: 'balance'",
+    '      config:',
+    '        - a',
+    '        - b',
+    '    - id: other',
+    "      name: 'other'",
+    '',
+  ].join('\n');
+  const r = dedupePatchEntries(input);
+  assert.deepStrictEqual(r.removed, ['balance']);
+  assert.ok(!r.text.includes('config:'), '被删条目的 config 键不得残留');
+  assert.ok(!r.text.includes('- a'), '嵌套列表项 - a 不得成为孤儿行残留');
+  assert.ok(!r.text.includes('- b'), '嵌套列表项 - b 不得成为孤儿行残留');
+  assert.strictEqual((r.text.match(/- id: other/g) || []).length, 1, '兄弟条目 other 保留');
+  assert.ok(r.text.includes("name: 'other'"));
+  const remaining = r.text.split('\n').filter((l) => /^\s+-\s/.test(l) && !/^\s+- id:/.test(l));
+  assert.deepStrictEqual(remaining, [], '不应残留任何悬空列表行');
+});
+
 test('dedupePatchEntries: insert 块部分重复 → 只删重复注册行，保留块内新注册', () => {
   const input = [
     '- insert:',

@@ -185,9 +185,13 @@ function checkPluginPackage(name, dir, yaml, fs = require('node:fs'), listed = f
       }
     }
   }
-  // 声明了 main 但入口文件缺失（仅警告：bundle 不一定走 main）
+  // 声明了 main 但入口文件缺失。对「在启动清单中」的 bundle 这是致命问题：
+  // 装配时入口文件缺失会直接导致服务重启失败/Web UI 不可用（issue #65/#76），
+  // 必须判为 error 并纳入总结论；未列入清单的包才降级为 warning。
   if (typeof pkg.main === 'string' && pkg.main && !fs.existsSync(path.join(dir, pkg.main))) {
-    issues.push({ level: 'warning', text: `main 入口不存在: ${pkg.main}` });
+    issues.push(listed
+      ? { level: 'error', text: `在启动清单中但 main 入口不存在: ${pkg.main}——装配必然失败，请构建产物或从清单移除该 bundle` }
+      : { level: 'warning', text: `main 入口不存在: ${pkg.main}` });
   }
   return { name, issues, ids, patchOk };
 }

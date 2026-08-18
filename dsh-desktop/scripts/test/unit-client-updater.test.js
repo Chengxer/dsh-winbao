@@ -22,6 +22,8 @@ const {
   platformKind,
   currentArch,
   cleanupPendingPackage,
+  concatFiles,
+  resolveHttpProxy,
 } = require('../../client-updater');
 
 function withEnv(name, value, fn) {
@@ -410,4 +412,60 @@ test('cleanupPendingPackage: 文件已不存在时静默成功（幂等）', () 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('concatFiles: 正常合并多个分片并清理源', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-concat-'));
+  try {
+    const a = path.join(dir, 'a.part1');
+    const b = path.join(dir, 'b.part2');
+    const dest = path.join(dir, 'out.bin');
+    fs.writeFileSync(a, 'AAA');
+    fs.writeFileSync(b, 'BBB');
+    await concatFiles([a, b], dest);
+    assert.strictEqual(fs.readFileSync(dest, 'utf8'), 'AAABBB', '分片应按序拼接');
+    assert.ok(!fs.existsSync(a) && !fs.existsSync(b), '源分片应被清理');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('concatFiles: 目标不可写时以 rejection 收敛，不产生未捕获异常且清理半截目标（issue #70）', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-concat2-'));
+  try {
+    const a = path.join(dir, 'a.part1');
+    const dest = path.join(dir, 'out.bin');
+    fs.writeFileSync(a, 'AAAA');
+    // 目标为目录 → 写入失败（EISDIR）。历史上写流无 error 监听器会以未捕获
+    // 异常崩掉主进程；修复后应作为 rejection 抛给调用方。
+    fs.mkdirSync(dest);
+    let uncaught = 0;
+    const onUncaught = () => { uncaught += 1; };
+    process.on('uncaughtException', onUncaught);
+    try {
+      await assert.rejects(
+        concatFiles([a], dest),
+        undefined,
+        '目标不可写时应以 rejection 失败而不是未捕获异常'
+      );
+    } finally {
+      process.removeListener('uncaughtException', onUncaught);
+    }
+    assert.strictEqual(uncaught, 0, '不得触发 uncaughtException');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resolveHttpProxy: 解析 HTTPS_PROXY / 分号分隔多代理 / 无代理（issue #84 国内网络）', () => {
+  withEnv('HTTPS_PROXY', 'http://127.0.0.1:10090', () => {
+    assert.deepStrictEqual(resolveHttpProxy(), { href: 'http://127.0.0.1:10090/' });
+  });
+  withEnv('HTTPS_PROXY', 'http://a:8080, http://b:8081', () => {
+    assert.deepStrictEqual(resolveHttpProxy(), { href: 'http://a:8080/' }, '取第一个可用代理');
+  });
+  // 无代理 → null（Windows 上环境变量大小写不敏感，勿与 HTTPS_PROXY 叠测）
+  withEnv('HTTPS_PROXY', undefined, () => {
+    assert.strictEqual(resolveHttpProxy(), null);
+  });
 });

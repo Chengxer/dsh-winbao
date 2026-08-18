@@ -280,7 +280,7 @@ function bundledVersion() {
 }
 
 // 版本号白名单：版本字符串被拼进 `sh -lc 'npm install <pkg>@<version>'`，
-// 只允许字母/数字/点/下划线/连字符（覆盖 0.1.0-rc.6 与 latest 形态）。
+// 只允许字母/数字/点/下划线/连字符（覆盖 0.1.0-rc.7 与 latest 形态）。
 const VERSION_RE = /^[A-Za-z0-9._-]+$/;
 
 /**

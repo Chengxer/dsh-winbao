@@ -2,7 +2,11 @@
 //   1. 设置页「归档对话管理」栏：列出全部已归档会话（标题/项目/更新时间），
 //      每条提供「恢复」与「删除」；
 //   2. 暴露 window.__dshSessionManager 桥，供官方会话行 ⋯ 菜单补丁
-//      （patch-session-manage.js 注入的「删除对话」项）调用。
+//      （patch-session-manage.js 注入的「删除对话」项）调用；
+//   3. 暴露 window.__dshDesktopOpenDir 桥（issue #85），供侧栏项目/会话行
+//      ⋯ 菜单「打开项目目录」项调用（patch-open-project-dir.js 注入），
+//      复用 preload 的 window.dshDesktop.openPath → dsh:file-open →
+//      shell.openPath。
 // 底层 RPC：workspace.unarchiveSession / workspace.deleteSession（由
 // patch-session-manage.js 补进 dsh-host-apiproxy 与 dsh-client-connection）；
 // 状态更新走官方 host 帧（archived-sessions-changed / session-removed），
@@ -219,6 +223,10 @@ window.__ModuleLoader__.load({
 				deleteSession: (sessionId) => deleteSession(ctx, String(sessionId)),
 				unarchiveSession: (sessionId) => unarchiveSession(ctx, String(sessionId))
 			};
+
+			// 「打开项目目录」桥（issue #85）：侧栏项目/会话行菜单 → 宿主
+			// shell.openPath。复用 preload 暴露的 dshDesktop.openPath。
+			window.__dshDesktopOpenDir = (dir) => window.dshDesktop?.openPath?.(dir);
 
 			ctx.slots.inject("settings.section", () => ctx.slots.register({
 				name: "settings.section",

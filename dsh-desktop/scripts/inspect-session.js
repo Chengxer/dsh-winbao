@@ -1,16 +1,27 @@
 'use strict';
 // Inspect a dsh session file using node:zlib (the same codec dsh itself uses).
+// The log is a concatenation of multiple zstd frames; each frame is decompressed
+// separately so multi-frame logs are fully inspected (not just the first frame).
 const fs = require('node:fs');
 const zlib = require('node:zlib');
+const { scanZstdFrames } = require('../session-watcher'); // 帧扫描器唯一实现
 
 const f = process.argv[2];
 const tailN = parseInt(process.argv[3] || '8', 10);
-const txt = zlib.zstdDecompressSync(fs.readFileSync(f)).toString('utf8');
-const lines = txt.split('\n').filter(Boolean);
+const buf = fs.readFileSync(f);
+const { frames, tornStart } = scanZstdFrames(buf);
+const lines = [];
+for (const { start, end } of frames) {
+  let text;
+  try { text = zlib.zstdDecompressSync(buf.subarray(start, end)).toString('utf8'); }
+  catch (err) { console.error('frame ' + start + '..' + end + ' 解压失败: ' + err.message); continue; }
+  for (const line of text.split('\n')) if (line) lines.push(line);
+}
+console.log('FRAMES=' + frames.length + ' tornStart=' + (tornStart === undefined ? 'none' : tornStart));
 console.log('LINES=' + lines.length);
 
 // First line must be the session header.
-console.log('HEADER=' + lines[0].slice(0, 200));
+console.log('HEADER=' + (lines[0] || '(empty)').slice(0, 200));
 
 // Event type vocabulary.
 const typeCounts = {};

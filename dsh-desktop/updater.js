@@ -3,8 +3,9 @@
 // Self-update engine for the bundled @deepseek-ai/dsh agent.
 //
 // Flow:
-//   1. checkLatest():  bundled npm runs "npm view @deepseek-ai/dsh version"
-//      (respects the user's .npmrc registry / proxy settings).
+//   1. checkLatest():  checks the official GitHub Releases list (including
+//      prereleases) and npm dist-tags. npm remains the install source and
+//      fallback, so the user's .npmrc registry / proxy settings are respected.
 //   2. User consents in a dialog ("立即更新 / 跳过此版本 / 稍后").
 //   3. applyUpdate(): installs the official new version into a STAGING dir
 //      (<userData>/agent-staging) with the bundled node + npm runtime, then
@@ -22,11 +23,15 @@
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
+const https = require('node:https');
+const tls = require('node:tls');
 
 const PKG = '@deepseek-ai/dsh';
+const GITHUB_RELEASES_URL = 'https://api.github.com/repos/deepseek-ai/deepseek-harness/releases?per_page=20';
 const IS_WIN = process.platform === 'win32';
 
 let activeProc = null;
+let trustedCAs = null;
 
 // --- settings -------------------------------------------------------------
 
@@ -42,11 +47,12 @@ function saveSettings(ctx, s) {
   try { fs.mkdirSync(path.dirname(file), { recursive: true }); } catch {}
   // 设置文件可能被安全软件短暂锁定（更新重启窗口正是扫描高发期）。
   // 先写临时文件再替换，失败重试 3 次，避免「标记清理失败→重启后仍提示待安装更新」。
+  // 原子写：用 rename 覆盖目标，绝不先删原文件——rename 失败时原 settings.json
+  // 仍完好（历史实现先 rmSync 再 rename，rename 失败会导致用户设置永久丢失）。
   const tmp = file + '.tmp-' + process.pid;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       fs.writeFileSync(tmp, JSON.stringify(s, null, 2) + '\n');
-      try { fs.rmSync(file, { force: true }); } catch {}
       fs.renameSync(tmp, file);
       return true;
     } catch (err) {
@@ -146,13 +152,134 @@ function runNpm(ctx, args, { timeoutMs = 30 * 60 * 1000, logStream = null } = {}
 
 // --- public API -----------------------------------------------------------
 
+// --- release/version discovery -------------------------------------------
+
+/**
+ * Releases use `dsh-v0.1.0-rc.7`, while npm install needs `0.1.0-rc.7`.
+ * Keep this parser strict: the result is later inserted into an npm command
+ * and into a shell command in the WSL backend.
+ */
+function parseReleaseVersion(tag) {
+  let v = String(tag || '').trim();
+  v = v.replace(/^dsh-/i, '').replace(/^v/i, '');
+  return /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(v) ? v : null;
+}
+
+/** Pick the highest non-draft DSH release. Pre-releases are intentional. */
+function selectLatestRelease(releases) {
+  let best = null;
+  for (const release of Array.isArray(releases) ? releases : []) {
+    if (!release || release.draft) continue;
+    const version = parseReleaseVersion(release.tag_name || release.name);
+    if (!version) continue;
+    if (!best || compareVersions(version, best.version) > 0 ||
+      (compareVersions(version, best.version) === 0 && String(release.published_at || '') > String(best.release.published_at || ''))) {
+      best = { version, release };
+    }
+  }
+  return best;
+}
+
+function fetchJson(url, { timeoutMs = 12000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const requestOptions = {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'dsh-desktop-updater',
+      },
+    };
+    // Node does not use the Windows certificate store unless explicitly
+    // requested. Combine system and bundled roots so enterprise proxies work
+    // without weakening TLS validation (`rejectUnauthorized` stays enabled).
+    if (typeof tls.getCACertificates === 'function') {
+      if (trustedCAs === null) trustedCAs = [...new Set([...tls.rootCertificates, ...tls.getCACertificates('system')])];
+      requestOptions.ca = trustedCAs;
+    }
+    const req = https.get(url, requestOptions, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        body += chunk;
+        if (body.length > 4 * 1024 * 1024) req.destroy(new Error('响应过大'));
+      });
+      res.on('end', () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          reject(new Error(`GitHub Releases HTTP ${res.statusCode}`));
+          return;
+        }
+        try { resolve(JSON.parse(body)); }
+        catch (err) { reject(new Error('GitHub Releases 返回了无效 JSON: ' + err.message)); }
+      });
+    });
+    const timer = setTimeout(() => req.destroy(new Error('GitHub Releases 请求超时')), timeoutMs);
+    req.on('error', (err) => { clearTimeout(timer); reject(err); });
+    req.on('close', () => clearTimeout(timer));
+  });
+}
+
+async function checkGitHubLatest(ctx) {
+  const releases = ctx.fetchGitHubReleases
+    ? await ctx.fetchGitHubReleases(GITHUB_RELEASES_URL)
+    : await fetchJson(GITHUB_RELEASES_URL);
+  const selected = selectLatestRelease(releases);
+  if (!selected) throw new Error('GitHub Releases 中没有可识别的 dsh 版本');
+  return selected.version;
+}
+
+function parseNpmVersions(output) {
+  const raw = String(output || '').trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed === 'string') return [parsed];
+    if (parsed && typeof parsed === 'object') return Object.values(parsed);
+  } catch {}
+  return raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+async function checkNpmLatest(ctx) {
+  // `version` only follows the `latest` tag and therefore misses rc/beta
+  // releases. Dist-tags includes both latest and next on the official npm
+  // package (rc.6/latest, rc.7/next at the time of this fix).
+  const npmRunner = ctx.runNpm || runNpm;
+  const out = await npmRunner(ctx, ['view', PKG, 'dist-tags', '--json'], { timeoutMs: 90000 });
+  const versions = parseNpmVersions(out).map(parseReleaseVersion).filter(Boolean);
+  if (versions.length === 0) throw new Error('npm dist-tags 无可识别版本号');
+  return versions.reduce((best, v) => compareVersions(v, best) > 0 ? v : best, versions[0]);
+}
+
+async function checkNpmVersion(ctx, version) {
+  const npmRunner = ctx.runNpm || runNpm;
+  const out = await npmRunner(ctx, ['view', PKG + '@' + version, 'version'], { timeoutMs: 90000 });
+  return parseNpmVersions(out).map(parseReleaseVersion).includes(version);
+}
+
 async function checkLatest(ctx) {
-  const out = await runNpm(ctx, ['view', PKG, 'version'], { timeoutMs: 90000 });
-  const lines = out.trim().split(/\r?\n/).filter(Boolean);
-  if (lines.length === 0) throw new Error('npm view 无输出，无法解析官方版本号');
-  const v = lines[lines.length - 1].trim();
-  if (!/^\d+\.\d+\.\d+/.test(v)) throw new Error('无法解析官方版本号: ' + JSON.stringify(v));
-  return v;
+  const [github, npm] = await Promise.allSettled([
+    checkGitHubLatest(ctx),
+    checkNpmLatest(ctx),
+  ]);
+  const candidates = [];
+  if (github.status === 'fulfilled' && npm.status === 'fulfilled' && compareVersions(github.value, npm.value) > 0) {
+    // A GitHub release can briefly lead a registry mirror. Do not advertise a
+    // version that the exact npm install command cannot resolve.
+    try {
+      if (await checkNpmVersion(ctx, github.value)) candidates.push(github.value);
+      else candidates.push(npm.value);
+    } catch {
+      candidates.push(npm.value);
+    }
+  } else {
+    if (github.status === 'fulfilled') candidates.push(github.value);
+    if (npm.status === 'fulfilled') candidates.push(npm.value);
+  }
+  if (candidates.length === 0) {
+    const errors = [github, npm].filter((r) => r.status === 'rejected').map((r) => r.reason && r.reason.message || String(r.reason));
+    throw new Error('无法检查 dsh 更新（GitHub 与 npm 均不可用）：' + errors.join('；'));
+  }
+  const latest = candidates.reduce((best, v) => compareVersions(v, best) > 0 ? v : best, candidates[0]);
+  if (ctx.log) ctx.log('update', `版本探测结果: ${latest}（GitHub=${github.status === 'fulfilled' ? github.value : '失败'}，npm=${npm.status === 'fulfilled' ? npm.value : '失败'}）`);
+  return latest;
 }
 
 async function applyUpdate(ctx, version) {
@@ -231,6 +358,12 @@ module.exports = {
   bundledVersion,
   activeVersion,
   compareVersions,
+  parseReleaseVersion,
+  selectLatestRelease,
+  parseNpmVersions,
+  checkGitHubLatest,
+  checkNpmLatest,
+  checkNpmVersion,
   checkLatest,
   applyUpdate,
   rollback,

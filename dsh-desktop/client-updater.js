@@ -73,10 +73,46 @@ function apiEndpoints() {
 
 // --- HTTP ----------------------------------------------------------------
 
+// 解析 HTTPS_PROXY / https_proxy / HTTP_PROXY / http_proxy 环境变量中的第一个
+// 代理，用于国内/企业网络（国网等需代理访问 GitHub 的场景，issue #84）。返回
+// { href } 或 null。node:https 不支持 CONNECT 隧道，这里用「绝对 URL + Host 头」
+// 的代理请求形式（主流 HTTP/HTTPS 代理均接受）。
+function resolveHttpProxy() {
+  const raw = process.env.HTTPS_PROXY || process.env.https_proxy ||
+    process.env.HTTP_PROXY || process.env.http_proxy || '';
+  const parts = String(raw).split(/[,;]/).map((s) => s.trim()).filter(Boolean);
+  for (const p of parts) {
+    try {
+      const u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(p) ? p : 'http://' + p);
+      if (u.hostname) return { href: u.href };
+    } catch { /* 跳过无效代理 */ }
+  }
+  return null;
+}
+
+// 构造一次 http(s) 请求并返回 request 对象（响应走 onResponse 回调）。
+// 有可用代理时把请求发往代理（绝对 URL + Host 头），否则直连目标。
+// 调用方负责 error/timeout 监听。
+function rawRequest(url, requestHeaders, onResponse) {
+  const proxy = resolveHttpProxy();
+  if (proxy) {
+    const proxyUrl = new URL(proxy.href);
+    const mod = proxyUrl.protocol === 'https:' ? require('node:https') : require('node:http');
+    return mod.request(proxyUrl, {
+      method: 'GET',
+      path: url,
+      headers: { ...requestHeaders, Host: new URL(url).host },
+    }, onResponse);
+  }
+  const u = new URL(url);
+  const mod = u.protocol === 'https:' ? require('node:https') : require('node:http');
+  return mod.request(u, { method: 'GET', headers: requestHeaders }, onResponse);
+}
+
 function httpGetJson(url, headers = {}, timeoutMs = 20000, redirects = 0) {
   return new Promise((resolve, reject) => {
     if (redirects > 5) return reject(new Error('重定向次数过多'));
-    const req = https.get(url, { headers: { 'User-Agent': 'DSH-Desktop', ...headers } }, (res) => {
+    const req = rawRequest(url, { 'User-Agent': 'DSH-Desktop', ...headers }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
         return httpGetJson(new URL(res.headers.location, url).toString(), headers, timeoutMs, redirects + 1).then(resolve, reject);
@@ -231,7 +267,7 @@ function downloadFile(url, dest, { onProgress } = {}) {
     };
     const request = (url2, redirects) => {
       if (redirects > 5) return fail(new Error('重定向次数过多'));
-      const req = https.get(url2, { headers: { 'User-Agent': 'DSH-Desktop' } }, (res) => {
+      const req = rawRequest(url2, { 'User-Agent': 'DSH-Desktop' }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
           return request(new URL(res.headers.location, url2).toString(), redirects + 1);
@@ -278,19 +314,26 @@ function downloadFile(url, dest, { onProgress } = {}) {
 async function concatFiles(sources, dest) {
   // 写流从第一刻起挂 error 监听：合并期间磁盘满/EACCES 若无监听器会以
   // 未捕获异常直接崩掉主进程（历史缺陷），且残留半截目标文件。
+  // 分片 pipe 期间（尤其第一片）写流必须已有用户级 error 监听器，否则一旦
+  // 写入失败，'error' 事件无监听器 → 未捕获异常 → 主进程崩溃（issue #70）。
   const out = fs.createWriteStream(dest);
+  let writeError = null;
+  out.on('error', (err) => { if (!writeError) writeError = err; });
   try {
     for (const s of sources) {
       await new Promise((res, rej) => {
+        if (writeError) return rej(writeError);
         const rs = fs.createReadStream(s);
         rs.on('error', rej);
         rs.on('end', res);
+        // 写流一旦出错，必须拒绝当前 pipe（否则源流不会因 { end:false } 结束，
+        // 该 Promise 将永久挂起）。清理统一在 catch 分支。
+        out.on('error', rej);
         rs.pipe(out, { end: false });
       });
       fs.rmSync(s, { force: true });
     }
     await new Promise((res, rej) => {
-      out.on('error', rej);
       out.end(res);
     });
   } catch (err) {
@@ -765,6 +808,7 @@ module.exports = {
   checkLatest,
   selectAsset,
   downloadRelease,
+  concatFiles,
   applyUpdate,
   cleanupPendingPackage,
   buildPortableCmd,
@@ -774,5 +818,6 @@ module.exports = {
   platformKind,
   currentArch,
   resolveRepos,
+  resolveHttpProxy,
   DEFAULT_REPOS,
 };

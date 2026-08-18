@@ -60,6 +60,30 @@ test('checkPluginPackage 正常包无 issue，ids 收集', () => {
   assert.strictEqual(out.patchOk, true);
 });
 
+test('issue #76: 启动清单内 bundle 缺 main 入口 → error（总结论不再误报“无问题”）', () => {
+  const dir = tmpdir();
+  // 声明 main 但入口文件不存在，且该包在启动清单中 → 必须是 error 级别
+  write(dir, 'assets/graph-memory/package.json', JSON.stringify({
+    name: 'graph-memory',
+    main: 'dist/index.js',
+    dsh: { bundle: { patch: './cordis.patch.yml' } },
+  }));
+  write(dir, 'assets/graph-memory/cordis.patch.yml', patchJson([{ id: 'gm', name: 'graph-memory' }]));
+  const listed = checkPluginPackage('graph-memory', path.join(dir, 'assets/graph-memory'), jsonYaml, fs, true);
+  const err = listed.issues.find((i) => /main 入口不存在/.test(i.text));
+  assert.ok(err, '应有 main 入口缺失 issue');
+  assert.strictEqual(err.level, 'error', '清单内缺 main 入口必须是 error');
+  // 未列入清单 → 降级为 warning
+  const unlisted = checkPluginPackage('graph-memory', path.join(dir, 'assets/graph-memory'), jsonYaml, fs, false);
+  const warn = unlisted.issues.find((i) => /main 入口不存在/.test(i.text));
+  assert.strictEqual(warn.level, 'warning', '未列入清单的缺 main 入口降级为 warning');
+  // validatePlugins 汇总：清单内坏包 → ok:false（总结论不再与明细矛盾）
+  write(dir, 'package.json', JSON.stringify({ name: 'p', dsh: { profile: { bundles: ['graph-memory'] } } }));
+  const out = validatePlugins(dir, null, path.join(dir, 'assets'), jsonYaml, fs);
+  assert.strictEqual(out.ok, false, '存在清单内缺 main 入口的 bundle 时总结论必须为“会失败”');
+  assert.ok(out.summary.errors >= 1, 'summary.errors 应包含该致命问题');
+});
+
 test('checkPluginPackage 缺 package.json / 无 dsh / 补丁缺失 / 解析失败', () => {
   const dir = tmpdir();
   // 缺 package.json

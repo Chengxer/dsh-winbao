@@ -119,7 +119,7 @@ test('installAgent: 版本号白名单拒绝 shell 注入（经 applyUpdate 公�
   await assert.rejects(() => wsl.applyUpdate(''), /非法的版本号/);
   await assert.rejects(() => wsl.applyUpdate('$(id)'), /非法的版本号/);
   // 合法形态（含 npm dist-tag 与 rc 预发布）必须放行
-  await assert.doesNotReject(() => wsl.applyUpdate('0.1.0-rc.6'));
+  await assert.doesNotReject(() => wsl.applyUpdate('0.1.0-rc.7'));
   await assert.doesNotReject(() => wsl.applyUpdate('latest'));
 });
 

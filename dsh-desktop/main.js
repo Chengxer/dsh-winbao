@@ -60,6 +60,7 @@ const presetGuard = require('./scripts/lib/preset-guard');
 const { patchWebSearchBaseUrl } = require('./scripts/patch-web-search-baseurl');
 const { patchMenuViewport } = require('./scripts/patch-menu-viewport');
 const { patchSessionManage } = require('./scripts/patch-session-manage');
+const { patchOpenProjectDir } = require('./scripts/patch-open-project-dir');
 const { patchSessionPersistence } = require('./scripts/patch-session-persistence');
 // 「设置 → 插件 → 诊断与管理」：诊断 / 备份与恢复 / 日志包导出 / 防砖体检 /
 // bundle 顺序检测与重排（纯函数模块，node --test 单测覆盖）。
@@ -118,7 +119,26 @@ process.on('unhandledRejection', (reason) => {
 // 任意绝对路径（如写入 Startup\*.bat）一律拒绝；缓存 5 分钟。
 // ---------------------------------------------------------------------------
 const DANGEROUS_EXT = /\.(bat|cmd|com|exe|ps1|vbs|lnk|js|jse|msi|scr|pif|reg)$/i;
-const fileRootsCache = { at: 0, roots: [] };
+const fileRootsCache = { at: 0, roots: [], sig: '' };
+// 轻量会话清单签名：只收集 session.jsonl.zstd 文件路径（不做 zstd 解码，开销远小于
+// fileRoots 的全量遍历+解压）。isUnderFileRoots 在 miss 时用它比对——若目录清单变化
+// （新增会话目录），说明缓存滞后于新会话，应主动失效缓存而非干等冷却窗口，从而
+// 避免「新建会话后约 5 秒内文件被围栏误拒」（issue #68）。
+function sessionFilesSignature() {
+  const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+  const out = [];
+  const walk = (dir) => {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) { walk(p); continue; }
+      if (e.name === 'session.jsonl.zstd') out.push(p);
+    }
+  };
+  walk(path.join(dshHome, 'sessions'));
+  return out.join('\n');
+}
 // 强制刷新冷却：isUnderFileRoots 在 miss 时会强制失效缓存以兜住「TTL 内新建会话」，
 // 但每次 miss 都强制刷新会被高频/恶意探测放大为「全目录遍历 + 逐文件 zstd 解压」
 // 的本地 DoS（预览/还原服务监听 127.0.0.1，浏览器恶意页面即可触发）。用冷却窗口
@@ -151,21 +171,29 @@ function fileRoots() {
   walk(path.join(dshHome, 'sessions'));
   fileRootsCache.roots = [...new Set(roots)];
   fileRootsCache.at = Date.now();
+  fileRootsCache.sig = sessionFilesSignature();
   return fileRootsCache.roots;
 }
 
 function isUnderFileRoots(p) {
   const resolved = path.resolve(p);
+  // Windows 上路径比较大小写不敏感：同一真实文件的路径大小写变体（如
+  // D:\QODER 与 D:\Qoder）应归一化后比较，避免合法文件被误拒（fail-closed
+  // 不越权，但会破坏合法的打开/预览/还原）。
+  const normalize = IS_WIN ? (s) => s.toLowerCase() : (s) => s;
+  const nResolved = normalize(resolved);
   const check = () => fileRoots().some((r) => {
-    const rp = path.resolve(r);
-    return resolved === rp || resolved.startsWith(rp + path.sep);
+    const rp = normalize(path.resolve(r));
+    return nResolved === rp || nResolved.startsWith(rp + path.sep);
   });
   if (check()) return true;
-  // 缓存可能滞后于新会话：5 分钟 TTL 内新建的会话，其 cwd 尚未进入缓存。
-  // 首次判定不通过时强制刷新一次再判，避免误拒新会话的项目文件（预览/还原/打开）。
-  // 但「每次 miss 都强制刷新」会被高频/恶意探测放大为本地 DoS（全目录遍历 + 逐文件
-  // zstd 解压）：用冷却窗口把强制刷新限制为至多每 5s 一次。冷却期内的 miss 直接
-  // 返回 false（新会话由下一次冷却到期后的刷新或 5 分钟 TTL 收敛，最坏延迟 5s）。
+  // 缓存可能滞后于新会话：若会话目录清单已变化（新增/删除会话文件），主动失效
+  // 缓存重新判定，不受强制刷新冷却窗口限制——这样新建会话后其 cwd 能立即进入
+  // 围栏根集合，项目文件预览/打开/还原不被短暂误拒（issue #68）。
+  if (fileRootsCache.sig && sessionFilesSignature() !== fileRootsCache.sig) {
+    fileRootsCache.at = 0;
+    return check();
+  }
   if (Date.now() - fileRootsForceAt < FILE_ROOTS_FORCE_COOLDOWN_MS) return false;
   fileRootsForceAt = Date.now();
   fileRootsCache.at = 0;
@@ -1163,7 +1191,10 @@ let testForceUnsafeOnce = process.env.DSH_DESKTOP_TEST_FORCE_UNSAFE === '1';
 function chooseStableWebPort() {
   return new Promise((resolve) => {
     const settings = updater.loadSettings(updCtx());
-    const preferred = Number(settings.webPort) || 0;
+    const rawPreferred = Number(settings.webPort);
+    // 越界/非法端口（<=0 或 >65535）不直接尝试——net.listen 对越界端口会
+    // 同步抛 ERR_SOCKET_BAD_PORT，导致启动失败；统一按「无偏好」走空闲端口。
+    const preferred = Number.isInteger(rawPreferred) && rawPreferred > 0 && rawPreferred <= 65535 ? rawPreferred : 0;
     const save = (port) => {
       // 启动提速：端口与已保存值一致时不写盘，避免每次启动都改写
       // settings.json（无意义的写入 + mtime 抖动）。
@@ -2393,6 +2424,7 @@ async function runUpdateFlow(manual) {
         applyWebSearchBaseUrlFix();
         applyMenuViewportFix();
         applySessionManageFix();
+        applyOpenProjectDirFix();
         applySessionPersistenceFix();
       } else {
         await updater.applyUpdate(ctx, latest);
@@ -2416,6 +2448,7 @@ async function runUpdateFlow(manual) {
         applyWebSearchBaseUrlFix();
         applyMenuViewportFix();
         applySessionManageFix();
+        applyOpenProjectDirFix();
         applySessionPersistenceFix();
       }
       // 进度窗已非模态，但完成对话框弹出前仍先关闭它，避免叠窗/对话框被遮挡。
@@ -2841,7 +2874,9 @@ function registerChromeIpc() {
           else results.push({ path: p, status: 'conflict' });
         } else {
           if (content !== null && content.includes(newText)) {
-            fs.writeFileSync(p, content.replace(newText, oldText), 'utf8');
+            // oldText 需按字面量写回（split/join 不做 $ 替换模式展开，且全量替换），
+            // 避免 $& / $' / $` 等被 String.replace 当替换模式吞掉、以及只还原首处。
+            fs.writeFileSync(p, content.split(newText).join(oldText), 'utf8');
             results.push({ path: p, status: 'reverted' });
           } else if (content !== null && content === oldText) {
             results.push({ path: p, status: 'skipped' });
@@ -4280,10 +4315,19 @@ const PLUGIN_UPDATE_SOURCES = {
 function pluginManagerHttpGetJson(url, timeoutMs = 15000, headers = {}, redirects = 0) {
   return new Promise((resolve, reject) => {
     if (redirects > 5) return reject(new Error('重定向次数过多'));
-    const req = https.get(url, { headers: { 'User-Agent': 'DSH-Desktop', ...headers }, timeout: timeoutMs }, (res) => {
+    let nextUrl;
+    try {
+      const u = new URL(url);
+      nextUrl = u.protocol === 'https:' ? https : (u.protocol === 'http:' ? require('node:http') : null);
+      if (!nextUrl) return reject(new Error('不支持的协议: ' + u.protocol));
+    } catch (err) { return reject(err); }
+    const req = nextUrl.get(url, { headers: { 'User-Agent': 'DSH-Desktop', ...headers }, timeout: timeoutMs }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
-        return resolve(pluginManagerHttpGetJson(res.headers.location, timeoutMs, headers, redirects + 1));
+        // 相对/绝对 Location 一律用 new URL 解析后递归（历史实现直接透传原始
+        // location：相对路径或 http:// 会在 https.get 里同步抛 ERR_INVALID_PROTOCOL，
+        // 冒到 uncaughtException 且原 Promise 永不落定 → IPC 永久挂起，issue #80）。
+        return resolve(pluginManagerHttpGetJson(new URL(res.headers.location, url).toString(), timeoutMs, headers, redirects + 1));
       }
       let data = '';
       res.on('data', (c) => { data += c; });
@@ -4301,10 +4345,16 @@ function pluginManagerHttpGetJson(url, timeoutMs = 15000, headers = {}, redirect
 function pluginManagerHttpGetBuffer(url, timeoutMs = 60000, redirects = 0) {
   return new Promise((resolve, reject) => {
     if (redirects > 5) return reject(new Error('重定向次数过多'));
-    const req = https.get(url, { headers: { 'User-Agent': 'DSH-Desktop' }, timeout: timeoutMs }, (res) => {
+    let client;
+    try {
+      const u = new URL(url);
+      client = u.protocol === 'https:' ? https : (u.protocol === 'http:' ? require('node:http') : null);
+      if (!client) return reject(new Error('不支持的协议: ' + u.protocol));
+    } catch (err) { return reject(err); }
+    const req = client.get(url, { headers: { 'User-Agent': 'DSH-Desktop' }, timeout: timeoutMs }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
-        return resolve(pluginManagerHttpGetBuffer(res.headers.location, timeoutMs, redirects + 1));
+        return resolve(pluginManagerHttpGetBuffer(new URL(res.headers.location, url).toString(), timeoutMs, redirects + 1));
       }
       if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
       const chunks = [];
@@ -5198,6 +5248,25 @@ function applySessionManageFix() {
   }
 }
 // ---------------------------------------------------------------------------
+// issue #85 运行时补丁：侧栏项目/会话行 ⋯ 菜单「打开项目目录」+ 右键菜单
+// （dsh-client-ui-workspace）。补丁本体在 scripts/patch-open-project-dir.js
+// （幂等、锚点不匹配自动跳过）；覆盖三处运行副本：profile fallback、内置
+// app 副本、用户更新过的 agent overlay。桥 window.__dshDesktopOpenDir 由
+// dsh-session-manager 插件提供（window.dshDesktop.openPath → shell.openPath）。
+// ---------------------------------------------------------------------------
+function applyOpenProjectDirFix() {
+  const targets = runtimeNodeModulesRoots();
+  for (const root of targets) {
+    if (!root || !fs.existsSync(root)) continue;
+    try {
+      const n = patchOpenProjectDir(root, (m) => log('boot', m));
+      if (n > 0) log('boot', '打开项目目录补丁: 已应用到 ' + root);
+    } catch (err) {
+      log('boot', '打开项目目录补丁失败(' + root + '): ' + err.message);
+    }
+  }
+}
+// ---------------------------------------------------------------------------
 // 会话历史尾部恢复补丁：进程中断可能留下一个结构完整的 zstd frame，但其
 // 解压文本以半条 JSONL 结束。只允许最终 frame 进入官方已有的 torn-tail
 // 截断/重放流程；中段损坏继续拒绝。
@@ -5276,7 +5345,7 @@ function maintainShortcuts() {
       try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return 0; }
       for (const e of entries) {
         if (!e.isFile() || !/^DSH Desktop.*\.lnk$/i.test(e.name)) continue;
-        if (e.name.toLowerCase() === 'DSH Desktop.lnk') continue;
+        if (e.name.toLowerCase() === 'dsh desktop.lnk') continue;
         try { fs.rmSync(path.join(dir, e.name), { force: true }); removed++; } catch {}
       }
       return removed;
@@ -5942,6 +6011,7 @@ async function boot() {
     applyWebSearchBaseUrlFix();
     applyMenuViewportFix();
     applySessionManageFix();
+    applyOpenProjectDirFix();
     applySessionPersistenceFix();
   } else {
     // 先修复 profile fallback 联接再同步/补丁依赖文件：EPERM 环境下补丁写不进去。
@@ -5964,6 +6034,7 @@ async function boot() {
     applyWebSearchBaseUrlFix();
     applyMenuViewportFix();
     applySessionManageFix();
+    applyOpenProjectDirFix();
     applySessionPersistenceFix();
     setupTestChannel();
     if (runKoffiPreflight()) clearAutoPickerBrowseOverlay();

@@ -21,6 +21,10 @@ const FLASH_NEW = '(value) => baselineByKey.get(keyOf(value)) ?? value).filter((
 
 /** 设置暴露白名单（dsh-prompt / 第三方思考 / 识图 / 会话调整）。 */
 const SETTINGS_NAMESPACES = ['dsh-prompt', 'dsh-third-party-thinking', 'dsh-vision', 'dsh-conversation-tweaks'];
+// dsh rc.7 replaced the static allow-list with plugin-owned dynamic settings
+// descriptors. Such a source already exposes every registered namespace, so
+// the legacy list injection is unnecessary and must be treated as idempotent.
+const DYNAMIC_SETTINGS_ANCHOR = 'namespaces: settings.describe({ redactSecrets: true }).map(namespaceView)';
 
 /** 各补丁目标包内的相对路径（@deepseek-ai/<rel>）。 */
 const FLASH_PKG_REL = path.join('dsh-client-runtime', 'lib', 'client.js');
@@ -204,6 +208,7 @@ function transformFlashFix(src, file) {
 function transformExposeFix(src, file) {
   const declIdx = src.indexOf('const WEB_SETTINGS_NAMESPACES = [');
   if (declIdx === -1) {
+    if (src.includes(DYNAMIC_SETTINGS_ANCHOR)) return { status: 'already' };
     return { status: 'anchor-missing', detail: '未找到 WEB_SETTINGS_NAMESPACES（版本可能已变更），跳过 ' + file };
   }
   const closeIdx = src.indexOf('];', declIdx);

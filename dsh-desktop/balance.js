@@ -176,12 +176,23 @@ function balanceEndpoint() {
   return base + '/user/balance';
 }
 
-function fetchJson(url, apiKey, timeoutMs = 15000) {
+function fetchJson(url, apiKey, timeoutMs = 15000, redirects = 0) {
   return new Promise((resolve, reject) => {
-    const req = https.get(
+    if (redirects > 5) return reject(new Error('重定向次数过多'));
+    // 按 URL 协议选择客户端：DEEPSEEK_BALANCE_URL / DEEPSEEK_API_BASE 可指向
+    // 本地 http 代理/镜像（README 承诺的代理场景），硬编码 node:https 会让
+    // http:// 端点必失败（issue #78）。
+    const http = url.startsWith('https:') ? https : require('node:http');
+    const req = http.get(
       url,
       { headers: { Authorization: 'Bearer ' + apiKey, 'User-Agent': 'DSH-Desktop' } },
       (res) => {
+        // 跟随 3xx 重定向（CDN 常见），相对/跨协议 Location 用 new URL 解析。
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          return fetchJson(new URL(res.headers.location, url).toString(), apiKey, timeoutMs, redirects + 1)
+            .then(resolve, reject);
+        }
         let body = '';
         res.setEncoding('utf8');
         res.on('data', (c) => {

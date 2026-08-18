@@ -52,7 +52,7 @@ const dshDesktop = {
     },
   },
   menu: {
-    action: (action, payload) => ipcRenderer.invoke('chrome:menu', { action, ...payload }),
+    action: (action, payload) => ipcRenderer.invoke('chrome:menu', { ...(payload || {}), action }),
   },
   getInfo: () => ipcRenderer.invoke('chrome:init'),
   refreshBalance: () => ipcRenderer.invoke('dsh:balance-refresh'),
