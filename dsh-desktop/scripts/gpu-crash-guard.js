@@ -38,6 +38,7 @@ function createGpuCrashGuard(options = {}) {
     },
     reset() {
       times = [];
+      last = -Infinity; // 重置去重锚点：否则 reset 后紧接的 record 会被旧的 last 去重吞掉（issue #88）
     },
   };
 }

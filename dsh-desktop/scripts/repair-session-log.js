@@ -29,7 +29,8 @@ function expandRow(row) {
     case 'text-chunks':
     case 'reasoning-chunks':
     case 'tool-call-chunks': {
-      const members = row.type === 'tool-call-chunks' ? row.data.args : row.data.texts;
+      const d = row.data || {};
+      const members = row.type === 'tool-call-chunks' ? d.args : d.texts;
       if (!Array.isArray(members)) return [row];
       const events = [];
       for (let k = 0; k < members.length; k++) {

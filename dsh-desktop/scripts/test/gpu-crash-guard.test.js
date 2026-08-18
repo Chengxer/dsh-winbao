@@ -50,6 +50,16 @@ test('滑动窗口：超过窗口期的旧崩溃过期不计', () => {
   assert.strictEqual(guard.count(), 3);
 });
 
+test('reset 重置去重锚点：reset 后去重窗口内立即 record 不被吞（issue #88）', () => {
+  const clock = { now: 1000 };
+  const guard = createGpuCrashGuard({ limit: 1, now: fakeNow(clock) });
+  clock.now = 2000;
+  guard.record(); // 触发一次（last=2000，count=1 → 达 limit）
+  guard.reset(); // times=[] 且 last 必须回到 -Infinity
+  clock.now += 1000; // 仍在 3000ms 去重窗口内
+  assert.strictEqual(guard.record(), true, 'reset 后首次记录必须立即生效，不被旧的去重锚点吞掉');
+});
+
 test('自定义阈值与 reset', () => {
   const clock = { now: 1000 };
   const guard = createGpuCrashGuard({ limit: 2, now: fakeNow(clock) });

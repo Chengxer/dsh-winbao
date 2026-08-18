@@ -329,6 +329,12 @@ async function rollback() {
   const dir = state.installDir;
   const res = await internals.runWsl(`sh -lc 'cd ${dir} && rm -rf agent-failed && mv agent agent-failed 2>/dev/null || true; if [ -d agent-prev ]; then mv agent-prev agent; echo WSL_ROLLBACK_OK; else echo WSL_NO_PREV; fi'`);
   state.versionCache = null;
+  // 命令执行失败（res.ok=false）时 stdout 为空，绝不能被当成「已回退」的
+  // 虚假成功（issue #87）。
+  if (!res.ok) {
+    log('WSL 回退命令执行失败: ' + (res.stderr || res.stdout || 'unknown'));
+    return false;
+  }
   if (res.stdout.includes('WSL_NO_PREV')) return false;
   log('已回退到上一版本（agent-prev）');
   return true;

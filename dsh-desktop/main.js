@@ -1159,7 +1159,14 @@ function showBox(opts) {
   };
   const p = boxChain.then(run, run);
   boxChain = p.then(() => {}, () => {});
-  return p;
+  // reject 兜底（issue #89）：dialog 异常（如窗口销毁瞬间）时降级为 cancel
+  // 响应而不是让 promise 悬挂 reject —— await 调用方拿到可用的 {response}，
+  // fire-and-forget 调用方（.then 无 .catch）也不产生 unhandledRejection。
+  return p.catch((err) => {
+    log('boot', '对话框调用失败（按取消处理）: ' + ((err && err.message) || err));
+    const cancel = opts.cancelId != null ? opts.cancelId : (Array.isArray(opts.buttons) ? opts.buttons.length - 1 : 0);
+    return { response: cancel, checkboxChecked: false };
+  });
 }
 
 // 选择一个尽量稳定的 127.0.0.1 端口并保存到 settings.json。
@@ -1332,6 +1339,8 @@ async function startServer(unsafePortRetries = 4, overlays = []) {
       return Promise.reject(new Error('WSL 托管后端未就绪: ' + wslBackend.lastError()));
     }
     const out = fs.createWriteStream(path.join(logsDir, 'dsh-web.log'), { flags: 'a' });
+    // 写流 error 静默监听：磁盘满/权限变更等写失败时避免 uncaughtException 崩主进程（issue #86）。
+    out.on('error', (e) => log('dsh', 'dsh-web.log 写入失败: ' + ((e && e.message) || e)));
     log('dsh', `WSL 托管模式：在 ${wslBackend.installDirLinux()}/agent 内启动 dsh web`);
     const proc = wslBackend.spawnServer();
     serverProc = proc;
@@ -1348,6 +1357,8 @@ async function startServer(unsafePortRetries = 4, overlays = []) {
       ));
     }
     const out = fs.createWriteStream(path.join(logsDir, 'dsh-web.log'), { flags: 'a' });
+    // 同上：写流 error 静默监听，防 uncaughtException（issue #86）。
+    out.on('error', (e) => log('dsh', 'dsh-web.log 写入失败: ' + ((e && e.message) || e)));
     log('dsh', `启动: "${nodeBin}" "${bin}" web --host 127.0.0.1 --port ${webPort}`);
     // --use-system-ca: 让 dsh web 进程信任系统证书库（代理/MITM 场景下内置 node 的
     // 默认 CA 无法验证，导致插件市场等对外 fetch 失败）。
@@ -1468,13 +1479,17 @@ function waitUntilUp(url, timeoutMs = 120000) {
   const started = Date.now();
   return new Promise((resolve, reject) => {
     const tick = () => {
+      // retry 单路触发守卫：timeout → destroy → error 会产生「双重重试」（双 setTimeout
+      // 排队 → 双倍探测请求）；统一收敛为每个 tick 至多重试一次（issue #86）。
+      let retried = false;
+      const once = () => { if (!retried) { retried = true; retry(); } };
       const req = http.get(url + '/', { timeout: 3000 }, (res) => {
         res.resume();
         if (res.statusCode && res.statusCode < 500) resolve(url);
-        else retry();
+        else { req.destroy(); once(); }
       });
-      req.on('error', retry);
-      req.on('timeout', () => { req.destroy(); retry(); });
+      req.on('error', once);
+      req.on('timeout', () => { req.destroy(); once(); });
     };
     const retry = () => {
       if (Date.now() - started > timeoutMs) reject(new Error('Web UI 未在预期时间内就绪'));
@@ -1591,8 +1606,10 @@ function scanWebLogForSettingsFailure() {
     const mapIdx = filePath.indexOf(' must be a map');
     if (mapIdx >= 0) filePath = filePath.slice(0, mapIdx);
     else {
-      const idx = filePath.lastIndexOf(':');
-      if (idx > 1) filePath = filePath.slice(0, idx);
+      // 剥离尾部「:行:列」报错定位：lastIndexOf(':') 只剥最后一段，Windows
+      // 路径 "C:\...\file.json:9:3" 会残留 ":9"；一次正则剥掉整段（盘符冒号
+      // 不在行尾，不受影响）（issue #87）。
+      filePath = filePath.replace(/:\d+(?::\d+)?\s*$/, '');
     }
     return { filePath, line: hit.trim() };
   } catch {
@@ -2873,6 +2890,12 @@ function registerChromeIpc() {
           if (content === null) { fs.writeFileSync(p, oldText, 'utf8'); results.push({ path: p, status: 'reverted' }); }
           else results.push({ path: p, status: 'conflict' });
         } else {
+          // oldText 与 newText 双空：无任何变更意图，直接跳过（split/join 空串
+          // 会恒满足 includes('') 并误报 reverted 虚假成功）（issue #87）。
+          if (oldText === '' && newText === '') {
+            results.push({ path: p, status: 'skipped' });
+            continue;
+          }
           if (content !== null && content.includes(newText)) {
             // oldText 需按字面量写回（split/join 不做 $ 替换模式展开，且全量替换），
             // 避免 $& / $' / $` 等被 String.replace 当替换模式吞掉、以及只还原首处。
@@ -4402,7 +4425,18 @@ async function pluginManagerFetchGithubLatest(repo) {
   try {
     const data = await pluginManagerHttpGetJson(githubReleaseApiUrl(repo), 15000, { Accept: 'application/vnd.github+json' });
     if (data && data.tag_name && Array.isArray(data.assets) && data.assets.length > 0) {
-      const a = data.assets.find((x) => x && x.name) || data.assets[0];
+      // 多资产 Release 选择策略（issue #90）：优先「平台匹配的归档」
+      // （win/windows + .tgz/.tar.gz/.zip）→ 任意归档 → 平台匹配任意文件 →
+      // 兜底第一个。此前直接取第一个资产，多资产 Release（checksum / 其它
+      // 平台分包）会下载错文件。
+      const isArchive = (n) => /\.(?:tgz|tar\.gz|zip)$/i.test(n);
+      const isWinAsset = (n) => /(?:win|windows)/i.test(n);
+      const a =
+        data.assets.find((x) => x && x.name && isArchive(x.name) && isWinAsset(x.name)) ||
+        data.assets.find((x) => x && x.name && isArchive(x.name)) ||
+        data.assets.find((x) => x && x.name && isWinAsset(x.name)) ||
+        data.assets.find((x) => x && x.name) ||
+        data.assets[0];
       // GitHub API digest 形如 "sha256:<hex64>"（部分老资产无此字段）
       const dm = /^(?:sha256:)?([0-9a-fA-F]{64})$/.exec(String(a.digest || ''));
       return {
@@ -5781,7 +5815,11 @@ function startPreviewStaticServer() {
         "cache-control": "no-store"
       });
       if (req.method === "HEAD") { res.end(); return; }
-      fs.createReadStream(p).pipe(res);
+      // 读流 error 监听：文件读取中途失败（权限/移除）时销毁响应而非
+      // uncaughtException 崩主进程（issue #86）。
+      const rs = fs.createReadStream(p);
+      rs.on("error", () => { res.destroy(); });
+      rs.pipe(res);
     } catch {
       res.writeHead(404);
       res.end();
@@ -5933,6 +5971,7 @@ async function boot() {
   capLogFile(path.join(logsDir, 'dsh-web.log'));
   capLogFile(path.join(logsDir, 'watchdog.log'));
   desktopLog = fs.createWriteStream(path.join(logsDir, 'desktop.log'), { flags: 'a' });
+  desktopLog.on('error', (e) => { try { console.error('desktop.log 写入失败', e); } catch {} });
   // 崩溃取证（Issue #9）：把 Crashpad minidump 固定到数据目录并保留，
   // 用于后续定位 0xC0000005 的底层来源（不联网上传）。
   crashDumpsDir = path.join(userDataDir, 'crash-dumps');
@@ -5979,6 +6018,7 @@ async function boot() {
   createTray();
   // 托盘图标被 explorer 重启等外部因素清掉后，周期性自愈。
   trayRecoveryTimer = setInterval(ensureTray, 30 * 1000);
+  if (trayRecoveryTimer.unref) trayRecoveryTimer.unref(); // 不阻止退出（issue #89）
   if (uncleanPrev) notifyUncleanRestart(uncleanPrev);
   // 内置 Agent 预设保护：更新后首启恢复用户改过的预设（与后端模式无关，
   // assets/agent-presets 始终在 Windows 侧安装目录）。放在预设同步之前，
@@ -6159,12 +6199,13 @@ if (!gotLock) {
     if (recovery) recovery.dispose();
     if (sessionWatcher) sessionWatcher.stop();
     if (balanceTimer) clearInterval(balanceTimer);
+    if (balanceRetryTimer) { clearTimeout(balanceRetryTimer); balanceRetryTimer = null; }
     if (trayRecoveryTimer) { clearInterval(trayRecoveryTimer); trayRecoveryTimer = null; }
     if (tray) { try { tray.destroy(); } catch {} tray = null; }
   });
-  // 关闭窗口后常驻托盘；托盘不存在时才随窗口退出。
+  // 关闭窗口后常驻托盘；托盘不存在或已销毁时才随窗口退出。
   app.on('window-all-closed', () => {
-    if (!IS_WIN || !tray) app.quit();
+    if (!IS_WIN || !tray || tray.isDestroyed()) app.quit();
   });
   app.whenReady().then(boot).catch((err) => fatal('应用初始化失败', err));
 }

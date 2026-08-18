@@ -225,7 +225,7 @@ function syncPlugins(home, dryRun, dshPkgDir) {
   // 安装说明）。幂等写入禁用条目：patch 中已存在 compaction-basic 条目
   // （含用户手写的 disabled 块）则不动，尊重用户配置。
   if (bundleNames.has('billion-context-dsh')) {
-    const acp = ensureDisabledPatchEntry(patch, new RegExp('(?:^|\\n)\\s*-?\\s*id\\s*:\\s*compaction-basic\\b'), ACP_DISABLE_BLOCK);
+    const acp = ensureDisabledPatchEntry(patch, new RegExp('(?:^|\\n)\\s*-?\\s*id\\s*:\\s*compaction-basic(?![A-Za-z0-9_.-])'), ACP_DISABLE_BLOCK);
     if (acp.changed) {
       patch = acp.patch;
       changed = true;
@@ -241,7 +241,7 @@ function syncPlugins(home, dryRun, dshPkgDir) {
   // 客户端默认。插件级 disabled 条目一票否决任何已保存状态；需要时可在
   // 设置 → 插件 → 管理 一键开启。幂等：已存在 harness-pet 条目则不动。
   if (bundleNames.has('harness-pet')) {
-    const pet = ensureDisabledPatchEntry(patch, new RegExp('(?:^|\\n)\\s*-?\\s*id\\s*:\\s*harness-pet\\b'), PET_DISABLE_BLOCK);
+    const pet = ensureDisabledPatchEntry(patch, new RegExp('(?:^|\\n)\\s*-?\\s*id\\s*:\\s*harness-pet(?![A-Za-z0-9_.-])'), PET_DISABLE_BLOCK);
     if (pet.changed) {
       patch = pet.patch;
       changed = true;

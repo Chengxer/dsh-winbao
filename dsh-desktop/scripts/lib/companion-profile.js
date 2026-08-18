@@ -67,7 +67,7 @@ function removedPluginIdsFromPatch(patch) {
   const entryRe = /(?:^|\n)([ \t]{0,2})- id:[ \t]*([A-Za-z0-9_.-]+)([\s\S]*?)(?=(?:\n[ \t]{0,2}- id:)|(?:\n[ \t]{0,2}- insert:)|\s*$)/g;
   let m;
   while ((m = entryRe.exec(text)) !== null) {
-    if (/(?:^|\n)[ \t]{0,2}removed[ \t]*:[ \t]*true\b/.test(m[3])) ids.add(m[2]);
+    if (/(?:^|\n)[ \t]{0,2}removed[ \t]*:[ \t]*true\b/i.test(m[3])) ids.add(m[2]);
   }
   return ids;
 }
@@ -267,8 +267,10 @@ function registerCompanionPatchEntries(patch, opts) {
     const reId = escRegExp(p.id);
     // 该 id 在 patch 里已存在：若它现在的 name 与当前版本不一致（例如终端
     // 包改名 @deepseek-ai/dsh-terminal → dsh-terminal-tab），就地改名为当前
-    // 值。只改 name 行，不动用户自己加的其它行。
-    const idNameRe = new RegExp('(id:\\s*' + reId + '\\b[^\\n]*\\n\\s*name:\\s*\\x27)([^\\x27]*)(\\x27)');
+    // 值。只改 name 行，不动用户自己加的其它行。id 边界用负向断言
+    // (?![A-Za-z0-9_.-]) 替代 \b：\b 会把 "dsh-terminal" 误命中
+    // "dsh-terminal-tab"（- 是非词字符构成边界）（issue #87）。
+    const idNameRe = new RegExp('(id:\\s*' + reId + '(?![A-Za-z0-9_.-])[^\\n]*\\n\\s*name:\\s*\\x27)([^\\x27]*)(\\x27)');
     const m = text.match(idNameRe);
     if (m) {
       if (m[2] !== p.name) {
@@ -281,7 +283,7 @@ function registerCompanionPatchEntries(patch, opts) {
     }
     // 尊重用户已有配置：id 只要出现过（例如用户手写的 disabled 条目）就不再
     // 自动插入，避免「禁用后下次启动又被加回来」或同 id 重复条目导致 loader 报错。
-    if (new RegExp('(?:^|\\n)\\s*-?\\s*id\\s*:\\s*' + reId + '\\b').test('\n' + text)) {
+    if (new RegExp('(?:^|\\n)\\s*-?\\s*id\\s*:\\s*' + reId + '(?![A-Za-z0-9_.-])').test('\n' + text)) {
       continue;
     }
     const block = `- insert:\n    - id: ${p.id}\n      name: '${p.name}'\n`;

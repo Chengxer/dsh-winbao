@@ -136,3 +136,10 @@ test('rollback/hasPrevious/stop: 桩替换后行为契约', async () => {
   assert.equal(await wsl.rollback(), true);
   await wsl.stop(); // 不应抛错
 });
+
+test('rollback: 命令执行失败时返回 false，不虚假成功（issue #87）', async () => {
+  stubPrimitives();
+  await wsl.configureAsync({ distro: 'Ubuntu' });
+  wsl._internals.runWsl = async () => ({ ok: false, code: 1, stdout: '', stderr: 'wsl.exe 网络错误' });
+  assert.equal(await wsl.rollback(), false, 'runWsl 失败（res.ok=false）时必须返回 false');
+});

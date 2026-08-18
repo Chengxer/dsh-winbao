@@ -88,7 +88,9 @@ if (fs.existsSync(patchFile)) {
 const settingsFile = path.join(dshHome, 'settings.yaml');
 if (fs.existsSync(settingsFile)) {
   const yaml = fs.readFileSync(settingsFile, 'utf8');
-  const m = yaml.match(/^dsh-vision:\r?\n((?:[ \t].*\r?\n?)*)/m);
+  // 空行（或纯空白行）也应延续 section 捕获：YAML 块内常见分隔空行，
+    // 原正则 [ \t].* 不匹配空行会把后续键截断（issue #88）。
+    const m = yaml.match(/^dsh-vision:\r?\n((?:[ \t].*\r?\n?|[ \t]*\r?\n)*)/m);
   if (m) {
     const section = m[1];
     const model = (section.match(/^\s*model:\s*(.+)$/m) || [])[1]?.trim();

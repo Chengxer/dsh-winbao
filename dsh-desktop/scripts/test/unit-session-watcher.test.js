@@ -238,3 +238,22 @@ test('v2: non-string session id does not throw away turn-end notification', () =
   assert.strictEqual(notes[0].sessionId, 12345);
   fs.rmSync(tmp, { recursive: true, force: true });
 });
+
+test('v2: non-string cwd does not throw and still notifies (issue #88)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'swv2-'));
+  const file = path.join(tmp, 'p1', 'sessc', 'session.jsonl.zstd');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, zlib.zstdCompressSync(
+    Buffer.from(JSON.stringify({ type: 'session', id: 'sessc', cwd: 12345, title: 't' }) + '\n', 'utf8')));
+  const notes = [];
+  const w = new SessionWatcher({ sessionsDir: tmp, onTurnEnd: (i) => notes.push(i), log: () => {} });
+  assert.doesNotThrow(() => w.process(file)); // baseline（emit 里 path.basename(non-string) 不应抛）
+  fs.appendFileSync(file, zlib.zstdCompressSync(
+    Buffer.from(JSON.stringify({ type: 'turn/end' }) + '\n', 'utf8')));
+  w.process(file); // incremental
+  w.stop();
+  assert.strictEqual(notes.length, 1, 'numeric cwd must not drop or crash the notification');
+  assert.strictEqual(notes[0].sessionId, 'sessc');
+  assert.strictEqual(notes[0].cwd, 12345);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});

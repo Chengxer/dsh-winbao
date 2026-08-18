@@ -380,7 +380,8 @@ class SessionWatcher {
     if (rec.title) {
       title = rec.title;
     }
-    const cwdBase = h.cwd ? path.basename(h.cwd) : null;
+    // h.cwd 可能是非字符串（脏数据/旧格式记录），typeof 守卫避免 path.basename 抛错（issue #88）
+    const cwdBase = typeof h.cwd === 'string' && h.cwd ? path.basename(h.cwd) : null;
     const shortId = typeof h.id === 'string' ? h.id.slice(-8) : null;
     body = [cwdBase, shortId ? '会话 ' + shortId : null].filter(Boolean).join(' · ');
     body += (count > 1 ? '（' + count + ' 轮任务完成）' : '');
