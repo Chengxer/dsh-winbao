@@ -88,7 +88,24 @@ function bundledVersion() {
   catch { return null; }
 }
 
-function activeVersion(ctx) { return overlayVersion(ctx) || bundledVersion(); }
+// 启动期 @deepseek-ai/dsh 包可能尚未安装（fetch-runtime / 打包注入），此时
+// overlay + bundled 均为 null。compareVersions(latest, null) 中 null 被转为
+// 空串 → 任何有效版本都 > null → "已是最新" 分支永远不触发，用户每次启动都被
+// 反复弹窗。兜底为 '0.0.0' 保证语义正确（任何真实版本都 > 0.0.0）。
+const FALLBACK_VERSION = '0.0.0';
+
+function activeVersion(ctx) {
+  return overlayVersion(ctx) || bundledVersion() || FALLBACK_VERSION;
+}
+
+/** 返回 { version, source } 用于日志/诊断，source = 'overlay' | 'bundled' | 'fallback'。 */
+function activeVersionInfo(ctx) {
+  const ov = overlayVersion(ctx);
+  if (ov) return { version: ov, source: 'overlay' };
+  const bv = bundledVersion();
+  if (bv) return { version: bv, source: 'bundled' };
+  return { version: FALLBACK_VERSION, source: 'fallback' };
+}
 
 // --- semver-ish compare ---
 // 全仓唯一实现见 scripts/lib/versions.js（与 scripts/plugin-manager-update.js
@@ -357,6 +374,7 @@ module.exports = {
   overlayVersion,
   bundledVersion,
   activeVersion,
+  activeVersionInfo,
   compareVersions,
   parseReleaseVersion,
   selectLatestRelease,

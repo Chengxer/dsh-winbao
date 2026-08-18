@@ -60,6 +60,34 @@ test('checkLatest: does not advertise a GitHub version missing from npm', async 
   assert.equal(await updater.checkLatest(ctx), '0.1.0-rc.7');
 });
 
+test('activeVersion: returns "0.0.0" when both overlay and bundled are null', () => {
+  // Bug fix: compareVersions(latest, null) treats null as empty string, always
+  // returning -1, causing "already latest" branch to never trigger.
+  const ctx = { userDataDir: '/nonexistent/path/that/does/not/exist' };
+  const version = updater.activeVersion(ctx);
+  assert.equal(typeof version, 'string');
+  assert.equal(version, '0.0.0');
+});
+
+test('activeVersionInfo: returns fallback source when no overlay or bundled', () => {
+  const ctx = { userDataDir: '/nonexistent/path/that/does/not/exist' };
+  const info = updater.activeVersionInfo(ctx);
+  assert.equal(info.version, '0.0.0');
+  assert.equal(info.source, 'fallback');
+});
+
+test('compareVersions: null/undefined are treated as less than any real version', () => {
+  // This is the root cause of the "repeated update prompt" bug:
+  // compareVersions("0.1.0-rc.7", null) used to return -1 because
+  // String(null) = "" which parsed as [''], a non-numeric segment that
+  // compared as less than any numeric segment.
+  // After the fix, activeVersion returns '0.0.0' instead of null.
+  assert.ok(updater.compareVersions('0.1.0-rc.7', '0.0.0') > 0);
+  assert.ok(updater.compareVersions('0.3.10', '0.0.0') > 0);
+  // But compareVersions with actual null still returns > 0 (null → '' → less than everything).
+  assert.ok(updater.compareVersions('0.1.0-rc.7', null) > 0);
+});
+
 test('saveSettings: atomic write never deletes the original on rename failure', () => {
   const os = require('node:os');
   const fs = require('node:fs');

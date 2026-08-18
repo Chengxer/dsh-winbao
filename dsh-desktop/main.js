@@ -53,7 +53,7 @@ const { reconcileProfileBundles, createEntryListYamlParser, resolveBundleDirLike
 const { COMPANION_PLUGINS } = require('./scripts/lib/companion-plugins');
 const { writeFileAtomic } = require('./scripts/lib/patch-io');
 const { applyPatchToFiles } = require('./scripts/lib/patch-engine');
-const { FLASH_PKG_REL, EXPOSE_PKG_REL, PW_REL, BASH_REL, CODE_PRESET_REL, patchTargets, localCopyFiles, guardCopyFiles, localNodeModulesRoots, slotCompatCopyFiles, slotCompatPatchTargets, transformFlashFix, transformExposeFix, transformShellDescriptionOptional, transformCodeModeCompat, transformAttachmentMimeTrust, transformLegacySlotKey, transformSlotUnkeyedCompat, ATTACH_LOCAL_REL } = require('./scripts/lib/runtime-patches');
+const { FLASH_PKG_REL, EXPOSE_PKG_REL, PW_REL, BASH_REL, CODE_PRESET_REL, patchTargets, localCopyFiles, guardCopyFiles, localNodeModulesRoots, slotCompatCopyFiles, slotCompatPatchTargets, transformFlashFix, transformExposeFix, transformShellDescriptionOptional, transformCodeModeCompat, transformAttachmentMimeTrust, transformLegacySlotKey, transformSlotUnkeyedCompat, transformSlotErrorIsolation, SLOT_ERROR_ISOLATE_MARKER, SLOT_KEY_COMPAT_PKG_REL, ATTACH_LOCAL_REL } = require('./scripts/lib/runtime-patches');
 const { ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK, removeLegacyMarketplacePatchLines, removedPluginIdsFromPatch, ensureDisabledPatchEntry, registerCompanionPatchEntries, syncCompanionFiles } = require('./scripts/lib/companion-profile');
 // 内置 Agent 预设保护：客户端更新（覆盖安装）前快照用户改过的预设，更新后恢复。
 const presetGuard = require('./scripts/lib/preset-guard');
@@ -2379,7 +2379,10 @@ async function runUpdateFlow(manual) {
       }
       return;
     }
-    const current = isWslMode() ? (wslBackend.activeVersion() || '0.0.0') : updater.activeVersion(ctx);
+    // 双保险：activeVersion 已兜底 '0.0.0'，此处再加 || '0.0.0' 防未来回归。
+    const current = isWslMode()
+      ? (wslBackend.activeVersion() || '0.0.0')
+      : (updater.activeVersion(ctx) || '0.0.0');
     const settings = updater.loadSettings(ctx);
     if (updater.compareVersions(latest, current) <= 0) {
       if (manual) {
@@ -2424,6 +2427,7 @@ async function runUpdateFlow(manual) {
         syncCompanionPlugins();
         syncBuiltinAgentPresets();
         applySlotCompatFix();
+        preScanPluginHealth();
         applyRuntimeFlashFix();
         applyPromptExposeFix();
         applyShellDescriptionCompatFix();
@@ -2450,6 +2454,7 @@ async function runUpdateFlow(manual) {
         // 同时把壳内置 Agent 预设补进新 overlay（干净 npm 包不含 8 个壳预设）。
         syncLocalAgentPresets();
         applySlotCompatFix();
+        preScanPluginHealth();
         applyRuntimeFlashFix();
         applyPromptExposeFix();
         applyShellDescriptionCompatFix();
@@ -4698,6 +4703,65 @@ function applySlotCompatFix() {
     doneLog: (file) => '已兼容 keyed slot 无 key 注册 ' + file,
     failLog: (file, err) => 'keyed slot 无 key 兼容补丁失败(' + file + '): ' + err.message,
   });
+  // 第三轮：keyed slot 注册错误隔离（安全网）。
+  // 当前两轮补丁因版本差异均未命中时，在 ui-slots register 函数的 throw
+  // 语句前注入 guard，让缺少 key 的注册自动派生 key 而不是 throw，避免
+  // 单个第三方插件拖垮整个 loader（dsh web 60s 超时 → 桌面版 + 网页版均不可用）。
+  // 目标文件与第一轮相同（SLOT_KEY_COMPAT_PKG_REL = dsh-client-ui-slots）。
+  applyPatchToFiles({
+    prefix: 'keyed slot 错误隔离补丁',
+    files,
+    log: (m) => log('boot', m),
+    transform: transformSlotErrorIsolation,
+    alreadyLog: (file) => '已应用，跳过 ' + file,
+    doneLog: (file, note) => '已隔离 keyed slot 注册错误 ' + file + (note ? ' (' + note + ')' : ''),
+    failLog: (file, err) => 'keyed slot 错误隔离补丁失败(' + file + '): ' + err.message,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 启动前 bundle 健康预检：扫描 profile 中的 bundle 包，检查是否存在已知的
+// "未提供 key 的 keyed slot 注册" 模式（dsh-vision-router 等第三方插件）。
+// 对已知会崩溃且补丁未命中的 bundle，在日志中警告并通知用户。
+// 纯读操作，不修改任何文件；实际修复由上述三层补丁负责。
+// ---------------------------------------------------------------------------
+function preScanPluginHealth() {
+  try {
+    const home = effectiveDshHome() || dshHome || path.join(os.homedir(), '.dsh');
+    const profileDir = path.join(home, 'profiles', 'web');
+    const pkgJsonPath = path.join(profileDir, 'package.json');
+    if (!fs.existsSync(pkgJsonPath)) return;
+    let pkgJson;
+    try { pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8')); } catch { return; }
+    const bundles = (pkgJson['dsh'] && pkgJson['dsh'].profile && pkgJson['dsh'].profile.bundles) || [];
+    if (!Array.isArray(bundles) || bundles.length === 0) return;
+    // 检查每个 bundle 的 dsh-cordis-client-runner / dsh-client-ui-slots 副本是否已被补丁。
+    const nmRoots = [
+      path.join(home, 'profiles', 'node_modules'),
+      path.join(__dirname, 'node_modules'),
+      path.join(userDataDir, 'agent', 'node_modules'),
+    ];
+    const unpatched = [];
+    for (const root of nmRoots) {
+      const uiSlotsFile = path.join(root, '@deepseek-ai', SLOT_KEY_COMPAT_PKG_REL);
+      if (!fs.existsSync(uiSlotsFile)) continue;
+      try {
+        const content = fs.readFileSync(uiSlotsFile, 'utf8');
+        // 若三层补丁均未命中，说明 ui-slots 文件存在但锚点不匹配
+        const hasAnyPatch = content.includes(SLOT_ERROR_ISOLATE_MARKER)
+          || content.includes('dsh-desktop compat: accept legacy keyed-slot id as key');
+        if (!hasAnyPatch) {
+          unpatched.push(uiSlotsFile);
+        }
+      } catch {}
+    }
+    if (unpatched.length > 0) {
+      log('boot', '插件健康预检: ui-slots 文件未被补丁覆盖（版本差异），slot 错误隔离可能未生效: ' + unpatched.join(', '));
+      log('boot', '建议: 若启动后出现 "keyed slot requires options.key" 错误，请升级 DSH Desktop 或联系插件开发者添加 options.key');
+    }
+  } catch (err) {
+    log('boot', '插件健康预检失败（不影响启动）: ' + ((err && err.message) || err));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -6036,6 +6100,7 @@ async function boot() {
     syncCompanionPlugins();
     syncBuiltinAgentPresets();
     applySlotCompatFix();
+    preScanPluginHealth();
     applyRuntimeFlashFix();
     applyPromptExposeFix();
     applyShellDescriptionCompatFix();
@@ -6059,6 +6124,7 @@ async function boot() {
     syncCompanionPlugins();
     syncLocalAgentPresets();
     applySlotCompatFix();
+    preScanPluginHealth();
     applyRuntimeFlashFix();
     applyPromptExposeFix();
     applyShellDescriptionCompatFix();

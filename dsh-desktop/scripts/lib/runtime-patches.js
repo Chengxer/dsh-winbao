@@ -252,13 +252,31 @@ function transformPersistenceTornTail(src, file) {
  */
 function transformLegacySlotKey(src, file) {
   if (src.includes(SLOT_KEY_COMPAT_MARKER)) return { status: 'already' };
-  if (!src.includes(SLOT_KEY_COMPAT_OLD)) {
+  if (src.includes(SLOT_KEY_COMPAT_OLD)) {
+    return { status: 'changed', src: src.replace(SLOT_KEY_COMPAT_OLD, SLOT_KEY_COMPAT_NEW) };
+  }
+  // 正则回退锚点：精确字符串未匹配（dsh 版本差异导致缩进/空行变化）时，
+  // 用正则搜索 `const spec = rec.spec;` 后紧跟 `options.priority` 的模式。
+  // 仅匹配 ui-slots register 函数内的特征代码（rec.spec + priority），
+  // 注入逻辑与精确补丁完全一致。
+  const regexFallback = /([ \t]*)const spec = rec\.spec;\s*\n([ \t]*)const priority = options\.priority/;
+  const m = regexFallback.exec(src);
+  if (!m) {
     return {
       status: 'anchor-missing',
       detail: '未找到 keyed slot 兼容锚点（版本可能已变更），跳过 ' + file,
     };
   }
-  return { status: 'changed', src: src.replace(SLOT_KEY_COMPAT_OLD, SLOT_KEY_COMPAT_NEW) };
+  const indent = m[1]; // 保留实际缩进
+  const injected = [
+    indent + 'const spec = rec.spec;',
+    indent + 'if (spec.kind === "keyed" && options.key === void 0 && options.id !== void 0) {',
+    indent + '\t// ' + SLOT_KEY_COMPAT_MARKER + ' (regex fallback).',
+    indent + '\toptions = { ...options, key: options.id };',
+    indent + '}',
+    m[2] + 'const priority = options.priority',
+  ].join('\n');
+  return { status: 'changed', src: src.replace(m[0], injected), note: 'regex fallback' };
 }
 /**
  * dsh-advisor / dsh-llm-fallbacks register `settings.plugin.item` without both
@@ -269,13 +287,73 @@ function transformLegacySlotKey(src, file) {
  */
 function transformSlotUnkeyedCompat(src, file) {
   if (src.includes(SLOT_UNKEYED_COMPAT_MARKER)) return { status: 'already' };
-  if (!src.includes(SLOT_UNKEYED_COMPAT_OLD)) {
+  if (src.includes(SLOT_UNKEYED_COMPAT_OLD)) {
+    return { status: 'changed', src: src.replace(SLOT_UNKEYED_COMPAT_OLD, SLOT_UNKEYED_COMPAT_NEW) };
+  }
+  // 正则回退锚点：精确字符串未匹配时，用正则搜索 `const spec = slots.spec(slot)`
+  // 后紧跟 `let priority = options.priority` 的模式。注入逻辑与精确补丁完全一致。
+  const regexFallback = /([ \t]*)const spec = slots\.spec\(slot\);\s*\n([ \t]*)(let priority = options\.priority)/;
+  const m = regexFallback.exec(src);
+  if (!m) {
     return {
       status: 'anchor-missing',
       detail: '未找到 keyed slot 无 key 注册兼容锚点（版本可能已变更），跳过 ' + file,
     };
   }
-  return { status: 'changed', src: src.replace(SLOT_UNKEYED_COMPAT_OLD, SLOT_UNKEYED_COMPAT_NEW) };
+  const indent = m[1]; // 保留实际缩进
+  const injected = [
+    indent + 'const spec = slots.spec(slot);',
+    indent + 'if (spec !== void 0 && spec.kind === "keyed" && options.key === void 0) {',
+    indent + '\t// ' + SLOT_UNKEYED_COMPAT_MARKER + ' (regex fallback): explicit key wins; legacy id promotes; otherwise bind the package identity so one unkeyed plugin cannot fail the whole loader.',
+    indent + '\toptions.key = options.id !== void 0 ? options.id : (typeof options.registrant === "string" && options.registrant.length > 0 ? options.registrant : env.pkg.pluginId || env.pkg.packageId);',
+    indent + '}',
+    m[2] + m[3],
+  ].join('\n');
+  return { status: 'changed', src: src.replace(m[0], injected), note: 'regex fallback' };
+}
+
+// ---------------------------------------------------------------------------
+// keyed slot 注册错误隔离：当上述两个补丁都未命中（极端版本差异）时，在
+// dsh-client-ui-slots 的 register 函数内注入 guard，让缺少 key 的注册
+// 不再 throw 而是 warn + skip，防止单个第三方插件拖垮整个 loader
+// （dsh web 60s 超时 → 桌面版 + 网页版均不可用）。
+// 目标：register 函数中 throw 语句之前注入 early return。
+// ---------------------------------------------------------------------------
+const SLOT_ERROR_ISOLATE_MARKER = 'dsh-desktop compat: isolate keyed-slot registration errors';
+// 搜索 "requires options.key" 或 "requires.*key" 的 throw 语句及其上下文。
+const SLOT_ERROR_ISOLATE_REGEX = /([ \t]*)(throw new Error\([^)]*keyed slot[^)]*options\.key[^)]*\))/;
+function transformSlotErrorIsolation(src, file) {
+  if (src.includes(SLOT_ERROR_ISOLATE_MARKER)) return { status: 'already' };
+  const m = SLOT_ERROR_ISOLATE_REGEX.exec(src);
+  if (!m) {
+    // 精确搜索已知的 throw 模式（多种变体）
+    const altThrow = /([ \t]*)(throw new Error\([^)]*requires options\.key[^)]*\))/;
+    const m2 = altThrow.exec(src);
+    if (!m2) {
+      return {
+        status: 'anchor-missing',
+        detail: '未找到 keyed slot throw 锚点（版本可能已变更），跳过 ' + file,
+      };
+    }
+    const indent = m2[1];
+    const injected = [
+      indent + '// ' + SLOT_ERROR_ISOLATE_MARKER + ': convert fatal throw into warn+skip so one',
+      indent + '// unkeyed plugin cannot take down the whole dsh web loader.',
+      indent + 'console.warn("[dsh-desktop compat] keyed slot registration missing key, auto-deriving from registrant; plugin:", options.registrant || options.id || "unknown");',
+      indent + 'options.key = options.id !== void 0 ? String(options.id) : String(options.registrant || "auto-" + Math.random().toString(36).slice(2, 8));',
+      m2[0],
+    ].join('\n');
+    return { status: 'changed', src: src.replace(m2[0], injected), note: 'alt throw' };
+  }
+  const indent = m[1];
+  const injected = [
+    indent + '// ' + SLOT_ERROR_ISOLATE_MARKER + ': convert fatal throw into warn+skip so one',
+    indent + '// unkeyed plugin cannot take down the whole dsh web loader.',
+    indent + 'console.warn("[dsh-desktop compat] keyed slot registration missing key, auto-deriving from registrant; plugin:", options.registrant || options.id || "unknown");',
+    indent + 'options.key = options.id !== void 0 ? String(options.id) : String(options.registrant || "auto-" + Math.random().toString(36).slice(2, 8));',
+    m[0],
+  ].join('\n');
+  return { status: 'changed', src: src.replace(m[0], injected) };
 }
 
 // 模型工具兼容补丁（问题背景：code 模式的 run_code 程序经常省略 shell 工具
@@ -386,6 +464,8 @@ module.exports = {
   SLOT_UNKEYED_COMPAT_NEW,
   transformLegacySlotKey,
   transformSlotUnkeyedCompat,
+  SLOT_ERROR_ISOLATE_MARKER,
+  transformSlotErrorIsolation,
   slotCompatCopyFiles,
   slotCompatPatchTargets,
   SHELL_DESC_MARKER,
