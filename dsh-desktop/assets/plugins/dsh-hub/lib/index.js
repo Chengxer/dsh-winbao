@@ -1849,7 +1849,7 @@ function gmSourceStatus() {
   const pkgPath = path.join(gmSourceDir(), 'package.json')
   if (existsSync(pkgPath)) {
     const meta = readJson(pkgPath)
-    return { present: true, version: meta?.version ?? null, dir: gmSourceDir(), source: 'plugin-src' }
+    return { present: true, version: meta?.version ?? null, dir: gmSourceDir(), source: 'plugin-src', entryOk: existsSync(path.join(gmSourceDir(), 'dist', 'index.js')) }
   }
   // 随 DSH Desktop 内置分发：companion 同步器把 assets/plugins/graph-memory 复制进
   // profile node_modules 并登记 bundles，无需 plugin-src 源码目录。
@@ -1860,7 +1860,7 @@ function gmSourceStatus() {
     try { isJunction = lstatSync(bundledDir).isSymbolicLink() } catch { /* 目录不可读按非 junction 处理 */ }
     if (!isJunction) {
       const meta = readJson(bundledPkg)
-      return { present: true, version: meta?.version ?? null, dir: bundledDir, source: 'bundled' }
+      return { present: true, version: meta?.version ?? null, dir: bundledDir, source: 'bundled', entryOk: existsSync(path.join(bundledDir, 'dist', 'index.js')) }
     }
   }
   return { present: false }
@@ -1916,6 +1916,11 @@ export function mountGraphMemoryLocked() {
   const src = gmSourceStatus()
   if (!src.present) {
     return { ok: false, reason: 'missing-source', message: '未找到 graph-memory 源码（plugin-src/graph-memory 不存在）' }
+  }
+  if (src.present && !src.entryOk) {
+    // 入口缺失（dist/index.js）：装配后启动 dsh web 会 ERR_MODULE_NOT_FOUND 直接失败，
+    // 比不装配更糟（issue #65）；明确报错让用户更新应用而不是静默挂载。
+    return { ok: false, reason: 'missing-entry', message: 'graph-memory 入口缺失（dist/index.js 不存在），请更新 DSH Desktop 后重试' }
   }
   const current = gmInstalledStatus()
   if (current.installed) {
