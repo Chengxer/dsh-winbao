@@ -2545,7 +2545,7 @@ var qrcode = function() {
         h(
           "div",
           { className: "dsm-dialog", onClick: function (e) { e.stopPropagation(); } },
-          h("div", { className: "dsm-dialog-title" }, "手机连接 DSH-Mobile"),
+          h("div", { className: "dsm-dialog-title" }, "远程控制 DSH-Mobile"),
           gw.lanEnabled
             ? h(
                 "div",
@@ -2668,7 +2668,7 @@ var qrcode = function() {
           type: "button",
           className: "dsm-footer-icon",
           "data-rail": wide ? "0" : "1",
-          title: "手机连接",
+          title: "远程控制",
           "aria-haspopup": "dialog",
           onClick: function () {
             // 未配置（网关关闭）→ 跳设置页；已配置 → 弹二维码
@@ -2700,7 +2700,7 @@ var qrcode = function() {
           h("rect", { x: "5", y: "2", width: "14", height: "20", rx: "2", ry: "2" }),
           h("path", { d: "M12 18h.01" })
         ),
-        wide ? h("span", { className: "dsm-footer-label" }, "手机连接") : null
+        wide ? h("span", { className: "dsm-footer-label" }, "远程控制") : null
       );
     }
 
@@ -3157,7 +3157,7 @@ var qrcode = function() {
       ctx.effect(function () {
         try {
           const ret = ctx.slots.inject("sidebar.footer.action", function () {
-            const dispose = ctx.slots.register({ name: "sidebar.footer.action", id: "dsh-mini", order: 210, label: "手机连接" }, FooterIcon);
+            const dispose = ctx.slots.register({ name: "sidebar.footer.action", id: "dsh-mini", order: 210, label: "远程控制" }, FooterIcon);
             beacon("slot-footer", "registered");
             return dispose;
           }, "dsh-mini");
