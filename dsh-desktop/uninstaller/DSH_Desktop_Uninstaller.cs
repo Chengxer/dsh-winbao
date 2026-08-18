@@ -381,6 +381,17 @@ class DSHDesktopUninstaller
             keepPresetNames = form.KeepPresetNames;
             keepPluginNames = form.KeepPluginNames;
             useDetectedRunningDsh = form.UseDetectedRunningDsh;
+
+            // Second confirmation: show exactly what will be retained before starting.
+            string summary = RetentionSummary();
+            string message = summary == "(none)"
+                ? "确定卸载 DSH Desktop 并删除所有用户数据吗？"
+                : "确定卸载 DSH Desktop 并保留以下内容吗？\r\n\r\n" + summary;
+            if (MessageBox.Show(message, "确认卸载", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK)
+            {
+                return false;
+            }
+
             return true;
         }
     }
