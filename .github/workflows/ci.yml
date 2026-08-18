@@ -1,0 +1,30 @@
+# PR 自动检查：语法预检 + 全量单测
+# CI 红时请勿请求 review —— 先在本机复现并修复（命令见 CONTRIBUTING.md）。
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    name: check-syntax + unit tests
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: dsh-desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dsh-desktop/package-lock.json
+      - name: 安装依赖
+        run: npm ci
+      - name: 语法预检（构建门禁同款，prepack/predist 自动执行）
+        run: node scripts/check-syntax.js
+      - name: 全量单测（unit-* / desktop-*，node --test 自动发现）
+        run: npm test
