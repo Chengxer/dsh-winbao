@@ -328,7 +328,7 @@ function renderMenu() {
   if (!menuEl) return;
   menuEl.innerHTML = `
     <div class="dch-mh">
-      <div class="dch-mh-title">DSH Desktop <span style="font-weight:400;color:var(--dsw-alias-label-tertiary)">v${esc(state.appVersion)}</span></div>
+      <div class="dch-mh-title">DSH Desktop JXZ <span style="font-weight:400;color:var(--dsw-alias-label-tertiary)">v${esc(state.appVersion)}</span></div>
       <div class="dch-mh-sub"><span>agent v${esc(state.agentVersion)}</span><span>${esc(state.agentSource)}</span></div>
     </div>
     <button class="dch-item" data-act="check-agent-update">检查 dsh 更新…</button>
@@ -357,7 +357,7 @@ function renderMenu() {
     <div class="dch-sep"></div>
     <button class="dch-item" data-act="sponsor">☕ 请作者喝咖啡</button>
     <div class="dch-sep"></div>
-    <button class="dch-item" data-act="about">关于 DSH Desktop</button>
+    <button class="dch-item" data-act="about">关于 DSH Desktop JXZ</button>
     <button class="dch-item" data-danger="1" data-act="quit">退出</button>`;
   menuEl.querySelectorAll('.dch-item').forEach((item) => {
     item.addEventListener('click', async () => {
@@ -466,7 +466,7 @@ function injectChrome() {
   bar.innerHTML = `
     <div class="dch-left">
       <img class="dch-icon" alt="" draggable="false" />
-      <span class="dch-title">DSH Desktop</span>
+      <span class="dch-title">DSH Desktop JXZ</span>
       <span class="dch-badge" hidden></span>
     </div>
     <div class="dch-right">

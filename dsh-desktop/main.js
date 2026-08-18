@@ -108,9 +108,9 @@ process.on('uncaughtException', (err) => {
   log('crash', 'uncaughtException: ' + stack);
   try {
     if (!bootFinished) {
-      dialog.showErrorBox('DSH Desktop 启动异常', String((err && err.message) || err) + '\n\n详细日志：' + startupCrashLogFile());
+      dialog.showErrorBox('DSH Desktop JXZ 启动异常', String((err && err.message) || err) + '\n\n详细日志：' + startupCrashLogFile());
     } else {
-      dialog.showErrorBox('DSH Desktop 遇到异常', '应用已记录该错误并继续运行。\n\n' + stack.slice(0, 500));
+      dialog.showErrorBox('DSH Desktop JXZ 遇到异常', '应用已记录该错误并继续运行。\n\n' + stack.slice(0, 500));
     }
   } catch {}
 });
@@ -367,7 +367,7 @@ function notifyUncleanRestart(prev) {
       ? started.toLocaleString('zh-CN', { hour12: false })
       : '上次';
     showNotification({
-      title: 'DSH Desktop 已自动恢复',
+      title: 'DSH Desktop JXZ 已自动恢复',
       body: `检测到应用在 ${when} 前后未正常退出，看门狗已重新启动应用。`,
       onClick: () => showMainWindow(),
     });
@@ -1031,7 +1031,7 @@ function ensureSafeBootOverlay(ids) {
 function notifySafeBoot(ids) {
   try {
     showNotification({
-      title: 'DSH Desktop 安全模式',
+      title: 'DSH Desktop JXZ 安全模式',
       body: '检测到启动配置错误，已自动禁用问题插件：' + ids.join(', ') + '。修复后可删除 ' + safeBootOverlayPath(),
     });
   } catch (err) {
@@ -1042,7 +1042,7 @@ function notifySafeBoot(ids) {
 function notifyBundleRepair(removed) {
   try {
     const n = new Notification({
-      title: 'DSH Desktop 启动自愈',
+      title: 'DSH Desktop JXZ 启动自愈',
       body: '检测到启动层（dsh.profile.bundles）中存在未声明 dsh.bundle 的插件，已移出启动清单并备份配置：' + removed.join(', ') + '。正在重试启动。',
       icon: path.join(__dirname, 'assets', 'icon.png'),
     });
@@ -1090,7 +1090,7 @@ function showSelfHealNotice(kind, names) {
   } catch { /* 窗口操作失败不阻塞提示 */ }
   showBox({
     type: 'info',
-    title: 'DSH Desktop 已自动修复启动问题',
+    title: 'DSH Desktop JXZ 已自动修复启动问题',
     message: isBundle
       ? '检测到启动清单中有插件缺少启动声明（会导致应用启动失败），已移出启动清单并恢复启动。'
       : '检测到上次启动失败的插件，已自动禁用并恢复启动。',
@@ -1111,7 +1111,7 @@ function notifyManifestResetRecovered(recovered) {
   if (process.env.DSH_DESKTOP_TEST === '1') return;
   try {
     showNotification({
-      title: 'DSH Desktop 配置自愈',
+      title: 'DSH Desktop JXZ 配置自愈',
       body: Array.isArray(recovered) && recovered.length > 0
         ? 'profile 配置损坏，已备份并重建；检测到您安装的插件并已自动恢复：' + recovered.join(', ')
         : 'profile 配置损坏，已备份并重建（原文件保留在 profile 目录的 .broken- 备份中，可对比找回原配置）',
@@ -1875,7 +1875,7 @@ function createWindow(opts = {}) {
     minWidth: 960,
     minHeight: 640,
     show: false,
-    title: 'DSH Desktop',
+    title: 'DSH Desktop JXZ',
     backgroundColor: '#0b1220',
     icon: path.join(__dirname, 'assets', 'icon.png'),
     // 风格化无边框窗口：去掉原生标题栏/菜单栏，自绘玻璃栏 + Win11 原生圆角。
@@ -1910,7 +1910,7 @@ function createWindow(opts = {}) {
   // Keep the app brand in the OS title bar (the web UI sets its own <title>).
   win.on('page-title-updated', (event) => {
     event.preventDefault();
-    win.setTitle('DSH Desktop');
+    win.setTitle('DSH Desktop JXZ');
   });
 
   // Open target=_blank / window.open in the system browser.
@@ -2714,8 +2714,8 @@ async function showAbout() {
   const urls = repoUrls();
   const { response } = await showBox({
     type: 'info',
-    title: '关于 DSH Desktop',
-    message: 'DSH Desktop ' + APP_VERSION,
+    title: '关于 DSH Desktop JXZ',
+    message: 'DSH Desktop JXZ ' + APP_VERSION,
     detail: 'DeepSeek Harness 桌面客户端\n\nagent 版本：' + dshVersion() + '（' + dshVersionSource() + '）\n数据目录：' + userDataDir + '\nDSH_HOME：' + (isWslMode() ? 'WSL：' + wslBackend.installDirLinux() : (dshHome || '（dsh 默认）')) +
       '\n\n项目仓库：\n  GitHub: ' + urls.github + '\n  Gitee:  ' + urls.gitee,
     buttons: ['复制 GitHub 地址', '复制 Gitee 地址', '确定'],
@@ -3655,7 +3655,7 @@ function trayHintOnce() {
   trayHintShown = true;
   try {
     tray.displayBalloon({
-      title: 'DSH Desktop 仍在运行',
+      title: 'DSH Desktop JXZ 仍在运行',
       content: '窗口已隐藏到系统托盘，点击托盘图标可重新打开。',
       iconType: 'info',
     });
@@ -3699,9 +3699,9 @@ function createTray() {
     const iconPath = path.join(__dirname, 'assets', 'tray-icon.png');
     if (!fs.existsSync(iconPath)) return;
     tray = new Tray(iconPath);
-    tray.setToolTip('DSH Desktop' + (APP_VERSION ? ' v' + APP_VERSION : ''));
+    tray.setToolTip('DSH Desktop JXZ' + (APP_VERSION ? ' v' + APP_VERSION : ''));
     const menu = Menu.buildFromTemplate([
-      { label: '显示 DSH Desktop', click: () => showMainWindow() },
+      { label: '显示 DSH Desktop JXZ', click: () => showMainWindow() },
       { type: 'separator' },
       { label: '检查 dsh 更新…', click: () => { showMainWindow(); runUpdateFlow(true); } },
       { label: '检查客户端更新…', click: () => { showMainWindow(); runClientUpdateFlow(true); } },
@@ -5774,7 +5774,7 @@ async function runClientUpdateFlow(manual) {
         const { response: rp } = await showBox({
           type: 'info',
           title: '有待安装的客户端更新',
-          message: `已下载 DSH Desktop v${pend.version}，是否立即安装并重启？`,
+          message: `已下载 DSH Desktop JXZ v${pend.version}，是否立即安装并重启？`,
           detail: '安装包保存在数据目录的 updates 文件夹中。',
           buttons: ['立即重启', '取消'],
           defaultId: 0,
@@ -5815,7 +5815,7 @@ async function runClientUpdateFlow(manual) {
           type: 'info',
           title: '检查客户端更新',
           message: '当前已是最新版本。',
-          detail: `DSH Desktop v${APP_VERSION}\n上游最新：${release.version}（${release.source}）`,
+          detail: `DSH Desktop JXZ v${APP_VERSION}\n上游最新：${release.version}（${release.source}）`,
           buttons: ['确定'],
         });
       }
@@ -5828,7 +5828,7 @@ async function runClientUpdateFlow(manual) {
     const { response } = await showBox({
       type: 'info',
       title: '发现新版本客户端',
-      message: `DSH Desktop 发布了新版本：v${release.version}`,
+      message: `DSH Desktop JXZ 发布了新版本：v${release.version}`,
       detail: `当前版本：v${APP_VERSION}\n发布来源：${release.source}${notes}\n\n是否立即更新？下载后自动替换并重启应用。`,
       buttons: ['立即更新', '跳过此版本', '稍后'],
       defaultId: 0,
@@ -5871,7 +5871,7 @@ async function runClientUpdateFlow(manual) {
       const { response: r2 } = await showBox({
         type: 'info',
         title: '下载完成',
-        message: `已准备好 DSH Desktop v${release.version}（${Math.round(size / 1048576)} MB）。`,
+        message: `已准备好 DSH Desktop JXZ v${release.version}（${Math.round(size / 1048576)} MB）。`,
         detail: '立即重启应用完成更新？\n· 重启后自动安装新版本并启动\n· 选择稍后重启：下次启动时再提示安装',
         buttons: ['立即重启', '稍后重启'],
         defaultId: 0,
@@ -5938,7 +5938,7 @@ function offerPendingClientUpdate() {
     showBox({
       type: 'warning',
       title: '客户端更新未完成',
-      message: `DSH Desktop v${pending.version} 尚未安装成功（当前仍为 v${APP_VERSION}）。`,
+      message: `DSH Desktop JXZ v${pending.version} 尚未安装成功（当前仍为 v${APP_VERSION}）。`,
       detail: '已下载的安装包仍保留在数据目录的 updates 文件夹中，可以重试安装。\n\n安装脚本日志：' + applyLog,
       buttons: ['重试安装', '打开日志', '稍后'],
       defaultId: 0,
@@ -5965,7 +5965,7 @@ function offerPendingClientUpdate() {
   showBox({
     type: 'info',
     title: '有待安装的客户端更新',
-    message: `已下载 DSH Desktop v${pending.version}，是否现在安装并重启？`,
+    message: `已下载 DSH Desktop JXZ v${pending.version}，是否现在安装并重启？`,
     detail: '安装包保存在数据目录的 updates 文件夹中。',
     buttons: ['立即重启', '稍后'],
     defaultId: 0,
