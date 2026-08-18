@@ -13,3 +13,8 @@ build/*
 # bundle，例外于通用的 dist/ 忽略规则。
 !assets/plugins/graph-memory/dist/
 !assets/plugins/billion-context-dsh/dist/
+# billion-context-dsh 离线依赖 acp-kernel 必须随包携带：profile 装配只拷贝
+# 目录不跑 npm install，依赖不入库会导致启动崩溃（ERR_MODULE_NOT_FOUND，
+# issue #93）。
+!assets/plugins/billion-context-dsh/node_modules/
+!assets/plugins/billion-context-dsh/node_modules/**
