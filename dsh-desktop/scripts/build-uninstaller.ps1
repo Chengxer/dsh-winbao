@@ -14,12 +14,14 @@ $ErrorActionPreference = 'Stop'
 $root    = Split-Path -Parent $PSScriptRoot
 $unDir   = Join-Path $root 'uninstaller'
 $outDir  = Join-Path $root 'build'
-$src     = Join-Path $unDir 'DSH_Desktop_Uninstaller.cs'
 $icon    = Join-Path $unDir 'Uninstall_DSH_Desktop_icon.ico'
 $tmpOut  = Join-Path $outDir 'Uninstall_DSH_Desktop.new.exe'
 $finalOut = Join-Path $outDir 'Uninstall_DSH_Desktop.exe'
 
-if (-not (Test-Path -LiteralPath $src)) { throw "Missing source: $src" }
+# Compile every .cs under uninstaller/ so future modules can be added without
+# editing this script again.
+$srcFiles = @(Get-ChildItem -LiteralPath $unDir -Filter '*.cs' | Sort-Object Name | ForEach-Object { $_.FullName })
+if ($srcFiles.Count -eq 0) { throw "No C# source files found under $unDir" }
 if (-not (Test-Path -LiteralPath $icon)) { throw "Missing icon: $icon" }
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
@@ -38,9 +40,8 @@ $args = @(
     '/target:winexe',
     "/out:$tmpOut",
     "/r:$fwDir\System.Windows.Forms.dll",
-    "/r:$fwDir\System.Drawing.dll",
-    $src
-)
+    "/r:$fwDir\System.Drawing.dll"
+) + $srcFiles
 
 Write-Host "Compiling: $csc" -ForegroundColor Cyan
 & $csc @args

@@ -14,6 +14,7 @@ using Microsoft.Win32;
 
 class DSHDesktopUninstaller
 {
+#region Fields, Constants & Paths
     static bool silent = false;
     static List<string> messages = new List<string>();
     static bool keepAgentPresets = false;
@@ -71,7 +72,9 @@ class DSHDesktopUninstaller
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     static extern int MessageBoxW(IntPtr hWnd, string lpText, string lpCaption, uint uType);
+#endregion
 
+#region Install Detection
     static string ResolveDshInstallDir()
     {
         // Prefer a DSH Desktop uninstall entry: this works across versions,
@@ -355,8 +358,10 @@ class DSHDesktopUninstaller
         }
 
         return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dsh");
+#endregion
     }
 
+#region Entry Point & CLI Parsing
     static bool ConfirmAndSelectRetention()
     {
         if (silent) return true;
@@ -565,7 +570,9 @@ class DSHDesktopUninstaller
         }
         return result;
     }
+#endregion
 
+#region Preset/Plugin Detection
     static List<PresetInfo> DetectAgentPresets()
     {
         List<PresetInfo> result = new List<PresetInfo>();
@@ -712,7 +719,9 @@ class DSHDesktopUninstaller
         string candidate = Path.Combine(webModules, relative);
         return Directory.Exists(candidate) ? candidate : string.Empty;
     }
+#endregion
 
+#region Uninstall Pipeline
     static bool IsAdministrator()
     {
         WindowsIdentity identity = WindowsIdentity.GetCurrent();
@@ -819,6 +828,8 @@ class DSHDesktopUninstaller
         return kept.Count == 0 ? "(none)" : string.Join(", ", kept.ToArray());
     }
 
+#endregion
+#region Process & File Cleanup
     static void KillDSHProcesses()
     {
         Log("[1/9] Stopping DSH Desktop processes...");
@@ -952,7 +963,9 @@ class DSHDesktopUninstaller
             Log("  Failed to delete file: " + file + " -> " + ex.Message);
         }
     }
+#endregion
 
+#region Registry & PATH Cleanup
     static void DeleteRegistryKeys()
     {
         Log("[2/9] Cleaning registry...");
@@ -1100,7 +1113,9 @@ class DSHDesktopUninstaller
             Log("  Failed to clean PATH: " + ex.Message);
         }
     }
+#endregion
 
+#region User Data Retention & Cleanup
     static void PreserveSelectedPlugins()
     {
         if (!keepPlugins || !keepRuntime) return;
@@ -1151,7 +1166,7 @@ class DSHDesktopUninstaller
             Log("  No plugin needed copying.");
         }
     }
-static bool IsSettingsFile(string path)
+    static bool IsSettingsFile(string path)
     {
         string name = Path.GetFileName(path);
         return !string.IsNullOrEmpty(name) && name.StartsWith("settings.yaml", StringComparison.OrdinalIgnoreCase);
@@ -1314,7 +1329,9 @@ static bool IsSettingsFile(string path)
         {
         }
     }
+#endregion
 
+#region Logging & Helpers
     static void InitializeLog()
     {
         try
@@ -1358,7 +1375,9 @@ static bool IsSettingsFile(string path)
             {
             }
         }
+#endregion
     }
+#region GUI (RetentionForm)
     class RetentionForm : Form
     {
         private class PresetListItem
@@ -1396,7 +1415,7 @@ static bool IsSettingsFile(string path)
                 return Label;
             }
         }
-private class GrayableCheckBox : CheckBox
+        private class GrayableCheckBox : CheckBox
           {
               protected override void OnPaint(PaintEventArgs e)
               {
@@ -2023,3 +2042,4 @@ private class GrayableCheckBox : CheckBox
         }
     }
 }
+#endregion
