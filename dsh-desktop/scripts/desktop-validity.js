@@ -213,10 +213,16 @@ function validatePlugins(profileDir, coreDirDshAt, assetsDir, yaml, fs = require
   let manifestError = null;
   try {
     const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
-    const bundles = manifest && manifest.dsh && manifest.dsh.profile && Array.isArray(manifest.dsh.profile.bundles)
-      ? manifest.dsh.profile.bundles
-      : [];
-    listedSet = new Set(bundles.filter((n) => typeof n === 'string'));
+    const profileMeta = manifest && manifest.dsh && manifest.dsh.profile ? manifest.dsh.profile : null;
+    // issue #99 补强（PR #102 增量）：bundles 字段存在但非数组 = 结构损坏，
+    // 与 manifest 读取失败同级的假绿变体（静默置空会让清单内缺陷全部降级为
+    // warning）；字段缺失则视为合法空清单，避免新装 profile 误报。
+    if (profileMeta && !Array.isArray(profileMeta.bundles)) {
+      manifestError = 'dsh.profile.bundles 不是数组（实际类型: ' + typeof profileMeta.bundles + '）';
+    } else {
+      const bundles = profileMeta ? profileMeta.bundles : [];
+      listedSet = new Set(bundles.filter((n) => typeof n === 'string'));
+    }
   } catch (err) {
     // 区分「无 manifest」（正常，listedSet 为空）与「manifest 损坏/不可读」
     // （体检必须显式失败而不是静默假绿——issue #99）。

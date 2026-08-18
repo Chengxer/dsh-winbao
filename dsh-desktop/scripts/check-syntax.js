@@ -10,7 +10,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { detachedHits } = require('./lib/js-syntax-scan');
+const { detachedHits, stripStringsAndBlockComments } = require('./lib/js-syntax-scan');
 
 const root = path.resolve(__dirname, '..');
 const entryFiles = [
@@ -82,6 +82,28 @@ for (const file of entryFiles) {
     continue;
   }
   const text = fs.readFileSync(filePath, 'utf8');
+  const scanned = stripStringsAndBlockComments(text);
+  // issue #98 失明防护：preload.js 含正则字面量（如 /[&<>"']/g）。若剥离器
+  // 失明复发（正则内引号当字符串起始，吞掉后续代码），非空格字符保留率会
+  // 断崖下跌、真实 function 声明被成批吞掉（曾实测 77.2% 涂白 / 19 个被吞）。
+  // 硬性断言防回归——失明 = 放行走私。正常基线：保留率 ~29%（字符串/注释/
+  // 正则天然占 70%），function 仅字符串字面量内的文本被涂（0 个真实声明）。
+  // 阈值 23% 相对基线留 6pp 余量（失明基线 22.8%，fn 吞没断言是主哨兵）。
+  if (file === 'preload.js') {
+    const ns0 = (text.match(/[^\s]/g) || []).length;
+    const ns1 = (scanned.match(/[^\s]/g) || []).length;
+    const ratio = ns0 > 0 ? ns1 / ns0 : 1;
+    const fn0 = (text.match(/function\b/g) || []).length;
+    const fn1 = (scanned.match(/function\b/g) || []).length;
+    if (ratio < 0.23 || fn0 - fn1 > 5) {
+      failed++;
+      const why = ratio < 0.23
+        ? `剥离保留率 ${(ratio * 100).toFixed(1)}%（阈值 23%）`
+        : `function 被吞 ${fn0 - fn1} 个（阈值 5）`;
+      console.error(`[check-syntax] FAIL preload.js（${why}，疑似剥离器失明）`);
+      continue;
+    }
+  }
   const hits = detachedHits(text);
   if (hits.length > 0) {
     failed++;

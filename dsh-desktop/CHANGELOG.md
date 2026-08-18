@@ -27,6 +27,12 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
   - **健康检查口径统一**：`logProfileBundleHealth` 改用与对账相同的 `resolveBundleDirLike` 双锚点解析，消除「对账判定可解析、健康检查误报缺失」的口径撕裂（诊断只读）；
   - **重复登记去重**：同一 bundle 名在 `dsh.profile.bundles` 中登记两次时，其补丁层条目会重复出现在组合 entry list 中，loader 装配期抛 `duplicate loader entry id`（fail-loud → 退出码 1），且启动防护覆盖不到（两层都能正常加载）——现对账保留首次出现、移除重复项（冗余而非无效登记，不进隔离记录），该形状此前从不清理；
   - **测试环境封闭**：`unit-sync-cli` 的 CLI 调用 PATH 收口到 System32——CLI 的 `findDshPackageDir` 会经 PATH 探测 `dsh` 命令，环境 PATH 上的真实 dsh（如 harness 安装）会被当作预设同步目标，把 `assets/agent-presets` 写进真实安装（内容相同、mtime 被改写）；测试必须封闭，绝不触碰真实环境。
+- **防护层修复（issue #97/#98/#99/#100，另含 #75 补强）**：社区批量上报的「防护罩有洞」问题逐一修复——
+  - **插件 GitHub Release 多资产选择（#97）**：原实现 `isWinAsset` 用子串匹配（`darwin` 含 `win` 会误判为 Windows 资产，选中 macOS 二进制）、无架构优先级（`win-ia32` 与 `win-x64` 乱序时选错）、无归档时可能选中 `.sha256` 校验和文本。现收口为纯函数 `selectReleaseAsset(assets)`：词边界平台判定（`win32-x64.tgz` ✓ / `darwin-x64.tgz` ✗）、架构优先级（x64/amd64 → arm64/aarch64 → ia32/x86 → arm → 无架构兜底，稳定排序）、任何阶段排除校验和/签名/说明等非二进制文件（含无扩展名 `SHA256SUMS`/`SHA512SUMS` 与 `.sha1`；全部被排除 → 明确拒绝更新并提示），10 项单测；
+  - **语法门禁剥离器支持正则字面量（#98）**：`check-syntax.js` 的字符串/注释剥离器不识别 JS 正则字面量——含引号的正则（如 `/[&<>"']/g`）会把引号当字符串起始，与后方引号配对将中间真实代码整段涂白，门禁对「孤立 async」失明（实测 preload.js 77.2% 被涂白、19 个 function 被吞）。现新增 `scanRegexLiteral`（跳过转义与字符类、拒绝跨行伪正则、闭 `/` 后按 flags/除法链判定）整体涂白正则字面量；补除法链识别（`a / /re/g` 第一个 `/` 按除法跳过，`return /re/` 等关键字后接正则按白名单放行）、flags 白名单含 ES2022 `d`/ES2024 `v`；并给门禁加 preload.js 失明硬断言（保留率 <23% 或 function 被吞 >5 即 FAIL 且报错注明触发项，正常基线 ~29%/吞 1 字符串内文本），26 项单测（含 mid 注入回归，防 EOF 特判假绿）；
+  - **防砖体检 manifest 读取失败假绿（#99）**：`desktop-validity.js` 的 `validatePlugins` 用 `catch {}` 静默吞掉 profile `package.json` 读取/解析失败——启动清单读不到时清单内缺陷全部降级为 warning，体检返回「未发现问题」（假绿）。现显式记录 `manifestError`、总结论判定失败（含 `dsh.profile.bundles` 字段存在但非数组的结构损坏变体；字段缺失仍视为合法空清单），设置页体检区红字提示「无法读取启动清单，体检结果不可信」，4 种情形回归测试（缺失/损坏 JSON/bundles 非数组/正常）；
+  - **补丁条目 id 负向断言漏掉行内空白（#100）**：`togglePluginInPatch` 的条目定位负向断言 `(?![A-Za-z0-9_.-])` 对行内空格放行——非标 id `- id: foo bar` 会被 `toggle('foo')` 命中误加 disabled（insert 内层更会被整条误删）。负向断言加入空格/tab（只排除行内空白，不排除 `\n`——排除换行会让所有既有条目匹配不上退化为重复新建），3 项回归测试；
+  - **行注释内引号吞代码（#75 补强）**：剥离器此前不处理 `//` 行注释，注释内的引号会被当字符串起始吞掉后续代码（漏报比误报更危险）。现行注释整体涂白到行尾（保留换行），8 场景探测全过。
 
 ## [0.3.10] — 2026-08-17
 ### 新增

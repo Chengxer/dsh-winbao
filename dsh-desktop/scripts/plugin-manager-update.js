@@ -40,6 +40,15 @@ function ghProxyUrl(url) {
   return GH_PROXY_PREFIXES[0] + url;
 }
 
+// ---------------------------------------------------------------------------
+// GitHub Release 多资产选择（issue #97 根治）：
+// 资产选择实现已收敛到 scripts/lib/github-release-assets.js（selectReleaseAsset，
+// unit-github-release-assets.test.js 全覆盖）。此处保留 NON_BINARY_RE 仅作外部
+// 兼容引用（main.js / companion-profile / 既有脚本沿用本路径）。
+// ---------------------------------------------------------------------------
+
+/** 任何阶段都不得选中的「非二进制」文件（校验和/签名/说明等，下载了无法安装）。 */
+const NON_BINARY_RE = /\.(?:sha256|sha512|sha1|sig|asc|txt|md|json|yaml|yml|toml|ini|nfo|log)$|(?:^|[.\-_])sha(?:256|512|1)?sums?$/i;
 /** 校验 sha512 base64 integrity（npm dist.integrity 格式: sha512-<base64>）。 */
 function verifyIntegrity(buffer, integrity) {
   if (!integrity || typeof integrity !== 'string') return false;
@@ -91,4 +100,5 @@ module.exports = {
   GH_PROXY_PREFIXES,
   verifyIntegrity,
   findPackageRoot,
+  NON_BINARY_RE,
 };

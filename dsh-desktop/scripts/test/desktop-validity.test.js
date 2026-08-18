@@ -241,3 +241,37 @@ test('issue #99: profile package.json 存在但解析失败 → manifestError + 
   assert.strictEqual(out2.manifestError, null);
   assert.strictEqual(out2.ok, true);
 });
+
+test('issue #99: profile package.json 缺失 = 合法空清单，不误报（与损坏对照）', () => {
+  // PR #102 曾主张缺失也判失败；main 取舍为「存在但读不了」才是硬错误
+  // （新装 profile 首次启动无清单属正常），此处固化 main 语义。
+  const dir = tmpdir();
+  const profileDir = dir;
+  const assetsDir = path.join(dir, 'assets');
+  write(assetsDir, 'good-pkg/package.json', JSON.stringify({ name: 'good-pkg', dsh: { bundle: { patch: './cordis.patch.yml' } } }));
+  write(assetsDir, 'good-pkg/cordis.patch.yml', patchJson([{ id: 'good' }]));
+  const out = validatePlugins(profileDir, null, assetsDir, jsonYaml, fs);
+  assert.strictEqual(out.manifestError, null, '缺失不产生 manifestError（ENOENT 静默）');
+  assert.strictEqual(out.ok, true, '缺失 = 合法空清单，不判失败');
+  assert.ok(out.checked.some((c) => c.name === 'good-pkg'), 'checked 照常执行（清单之外的内置配套照查）');
+  assert.ok(out.checked.every((c) => c.listed === false), '无清单时所有 listed 为 false');
+});
+
+test('issue #99 补强 B4: dsh.profile.bundles 存在但非数组 → manifestError + ok:false（假绿变体）', () => {
+  const dir = tmpdir();
+  const profileDir = dir;
+  const assetsDir = path.join(dir, 'assets');
+  write(assetsDir, 'good-pkg/package.json', JSON.stringify({ name: 'good-pkg', dsh: { bundle: { patch: './cordis.patch.yml' } } }));
+  write(assetsDir, 'good-pkg/cordis.patch.yml', patchJson([{ id: 'good' }]));
+  // 情况一：bundles 字段非数组（结构损坏的合法 JSON）——静默置空会假绿，必须显式报错
+  write(profileDir, 'package.json', JSON.stringify({ name: 'p', dsh: { profile: { bundles: 'oops' } } }));
+  let out = validatePlugins(profileDir, null, assetsDir, jsonYaml, fs);
+  assert.strictEqual(out.ok, false, 'bundles 非数组必须判失败（#99 假绿变体）');
+  assert.ok(out.manifestError, 'manifestError 应有信息');
+  assert.match(out.manifestError, /bundles 不是数组/);
+  // 情况二：字段缺失 → 合法空清单，不误报
+  write(profileDir, 'package.json', JSON.stringify({ name: 'p' }));
+  out = validatePlugins(profileDir, null, assetsDir, jsonYaml, fs);
+  assert.strictEqual(out.manifestError, null, 'bundles 字段缺失 = 合法空清单，不误报');
+  assert.strictEqual(out.ok, true);
+});

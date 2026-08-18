@@ -31,7 +31,10 @@ function isRegexStart(text, i) {
   while (j >= 0 && (text[j] === ' ' || text.charCodeAt(j) === 9)) j -= 1;
   if (j < 0) return true;
   const ch = text[j];
-  if ('{([=:;,+-*%&|!?<>^~'.indexOf(ch) !== -1) return true;
+  // 含 `/`：除法运算符后紧跟的 `/` 必是正则字面量起始（`a / /["' ]/g`），
+  // 否则正则内引号会落到字符串分支造成失明（issue #98 补强 A1）。常规
+  // 除法链 `a / b / c` 的第二个 `/` 前驱是标识符，不受影响。
+  if ('{([=:;,+-*%&|!?<>^~/'.indexOf(ch) !== -1) return true;
   const word = /[A-Za-z_$][A-Za-z0-9_$]*$/.exec(text.slice(0, j + 1));
   if (word) {
     return /^(return|throw|case|delete|void|typeof|instanceof|in|of|new|do|else|yield|await)$/.test(word[0]);
@@ -72,6 +75,16 @@ function stripStringsAndBlockComments(text) {
       if (end === -1) { out.push(repl(text.slice(i))); break; }
       out.push(repl(text.slice(i, end + 2)));
       i = end + 2;
+      continue;
+    }
+    // 行注释：跳到行尾（保留换行）。行注释内的引号/反引号若被当作字符串
+    // 起始，会把后续真实代码整段剔除，导致「孤立 async」漏报并放行走私
+    // （issue #75 / #98 补强：漏报比误报更危险）。
+    if (c === '/' && text[i + 1] === '/') {
+      const nl = text.indexOf('\n', i + 2);
+      if (nl === -1) { out.push(repl(text.slice(i))); break; }
+      out.push(repl(text.slice(i, nl)));
+      i = nl;
       continue;
     }
     // 正则字面量 /.../flags（issue #98）：须在字符串判断之前处理，
