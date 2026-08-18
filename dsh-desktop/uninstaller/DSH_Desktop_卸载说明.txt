@@ -75,7 +75,8 @@ DSH Desktop 完全卸载程序 - 使用说明
     - 其他 .dsh 数据：保留预设、聊天、插件、应用设置、模型配置之外的其余 .dsh 数据
       （graph-memory/storages/super-injector/profiles 等）
     - .dsh-runtime：保留 DSH CLI 运行时
-  勾选完成后点击“卸载”继续，点击“取消”退出。
+  勾选完成后点击“卸载”，会再次弹出确认窗口，列出本次要保留的内容；
+  点击“确定”才开始卸载，点击“取消”则退出。
 
 静默参数:
   Uninstall_DSH_Desktop.exe /S
