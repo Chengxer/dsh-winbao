@@ -424,9 +424,11 @@ function syncCompanionFiles(opts) {
     // 完整同步插件自带的 lib/assets/src/dist/node_modules 目录：第三方插件
     // 的懒加载 chunk、动画素材、dist 构建产物与随包分发的私有依赖
     // （如 billion-context-dsh 的 acp-kernel）不都落在固定文件清单里。
-    // public 为 webServer 静态资源目录（dsh-mini 手机桥页面等），同样必须
-    // 随包同步，否则插件 webServer 挂载时找不到静态页。
-    for (const sub of ['lib', 'client', 'data', 'assets', 'src', 'dist', 'public', 'node_modules']) {
+    // public 是 webServer 静态资源目录（dsh-mini 手机桥页面等），同样必须
+    // 随包同步，否则插件 webServer 挂载时找不到静态页面。gui 是 dsh-mini
+    // v1.4+ 的手机 GUI 静态产物（manifest.json + bundles + dist），缺失时
+    // 手机端只能看到上游内置的「未携带 gui/ 资产」报错页。
+    for (const sub of ['lib', 'client', 'data', 'assets', 'src', 'dist', 'public', 'gui', 'node_modules']) {
       syncDir(path.join(src, sub), path.join(dest, sub), log);
     }
     // 落盘后校验 bundle 完整性：dsh 装配时会读取补丁层与入口文件，任一缺失
