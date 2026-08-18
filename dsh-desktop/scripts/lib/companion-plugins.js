@@ -29,7 +29,10 @@ const COMPANION_PLUGINS = [
   // 面板（恢复/删除）。依赖 patch-session-manage.js 的官方包运行时补丁。
   { id: 'dsh-session-manager', name: 'dsh-session-manager' },
   { id: 'conversation-tweaks', name: '@deepseek-ai/dsh-conversation-tweaks' },
-  { id: 'super-injector', name: '@dsh-external/dsh-super-injector' },
+  // id 必须与该插件 bundle 层 cordis.patch.yml 声明的 loader id 一致
+  // （dsh-super-injector）。曾声明为 super-injector 导致 bundle 迁移自愈的
+  // dropBlocksByIds 永不命中残留 insert 块 → 双登记启动崩溃（issue #104）。
+  { id: 'dsh-super-injector', name: '@dsh-external/dsh-super-injector' },
   { id: 'prompt-custom', name: '@deepseek-ai/dsh-prompt-custom' },
   { id: 'workspace-anchor', name: '@deepseek-ai/dsh-workspace-anchor' },
   { id: 'third-party-thinking', name: '@deepseek-ai/dsh-third-party-thinking' },
