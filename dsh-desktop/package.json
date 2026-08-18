@@ -11,7 +11,7 @@
                     "start":  "node scripts/install-minimal-win-preset.js \u0026\u0026 node scripts/patch-event-vocabulary.js node_modules/@deepseek-ai/dsh-session \u0026\u0026 node scripts/patch-deps.js \u0026\u0026 electron .",
                     "fetch-node":  "node scripts/fetch-node.js",
                     "pack":  "node scripts/patch-portable-template.js \u0026\u0026 node scripts/patch-deps.js \u0026\u0026 electron-builder --dir",
-                    "predist":  "node scripts/check-syntax.js",
+                    "predist":  "node scripts/check-syntax.js && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-uninstaller.ps1",
                     "prepack":  "node scripts/check-syntax.js",
                     "dist":  "node scripts/patch-portable-template.js \u0026\u0026 node scripts/patch-deps.js \u0026\u0026 electron-builder --win",
                     "dist:arm64":  "node scripts/patch-portable-template.js \u0026\u0026 node scripts/patch-deps.js \u0026\u0026 electron-builder --win --config electron-builder.arm64.yml",

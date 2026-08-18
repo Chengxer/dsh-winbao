@@ -1485,7 +1485,7 @@ function waitUntilUp(url, timeoutMs = 120000) {
       const once = () => { if (!retried) { retried = true; retry(); } };
       const req = http.get(url + '/', { timeout: 3000 }, (res) => {
         res.resume();
-        if (res.statusCode && res.statusCode < 500) resolve(url);
+        if (res.statusCode && res.statusCode < 500) { retried = true; resolve(url); }
         else { req.destroy(); once(); }
       });
       req.on('error', once);
