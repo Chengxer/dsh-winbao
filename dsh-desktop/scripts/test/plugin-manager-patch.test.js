@@ -228,3 +228,33 @@ test('issue #66: 关闭 terminal 不误改前缀匹配的 terminal-tab（\b 缺�
   const out = togglePluginInPatch(src, 'terminal', false);
   assert.equal(countId(out, 'terminal-tab'), 1, 'terminal-tab 必须原样保留');
 });
+
+test('issue #100: 顶层含空格的非标 id（foo bar）不被 foo 命中误改', () => {
+  const src = [
+    '- id: foo bar',
+    '  name: Foo Bar',
+    '  config: {}',
+    '',
+  ].join('\n');
+  const out = togglePluginInPatch(src, 'foo', false);
+  // foo bar 条目块必须原样保留（文件开头即该条目，未被插入 disabled）
+  assert.ok(out.startsWith('- id: foo bar\n  name: Foo Bar\n  config: {}\n'), 'foo bar 条目原样保留');
+  // foo 自己的新顶层 disabled 条目正常追加
+  assert.ok(out.includes('- id: foo'), 'foo 条目正常登记');
+});
+
+test('issue #100: insert 内层含空格的非标 id（foo bar）不被 foo 命中误删', () => {
+  const src = [
+    '- insert:',
+    '    - id: foo',
+    '      name: foo',
+    '    - id: foo bar',
+    '      name: fb',
+    '',
+  ].join('\n');
+  const out = togglePluginInPatch(src, 'foo', false);
+  assert.ok(!out.includes('    - id: foo\n'), 'foo 内层条目被移出（正常）');
+  assert.ok(out.includes('    - id: foo bar\n'), 'foo bar 内层条目必须保留');
+  // 顶层登记点恰一个（注意 countId 的 \b 会把 foo bar 误计，这里用行级精确断言）
+  assert.equal((out.match(/^- id: foo\s*$/m) || []).length, 1, 'foo 顶层 disabled 条目保留');
+});

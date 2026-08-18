@@ -203,18 +203,30 @@ function checkPluginPackage(name, dir, yaml, fs = require('node:fs'), listed = f
  * @param {string|null} assetsDir
  * @param {object} yaml js-yaml 方言加载器
  * @param {object} fs
- * @returns {object} { ok, checked, conflicts, contractViolations, summary:{errors, warnings} }
+ * @returns {object} { ok, manifestError, checked, conflicts, contractViolations, summary:{errors, warnings} }
+ *   manifestError = profile package.json 读取/解析失败信息（此时 ok 必为 false，体检不可信）
  *   contractViolations = 在启动清单内但缺 dsh.bundle.patch 声明的包名（可一键移除）
  */
 function validatePlugins(profileDir, coreDirDshAt, assetsDir, yaml, fs = require('node:fs')) {
   let listedSet = new Set();
+  let manifestError = null;
   try {
     const manifest = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
-    const bundles = manifest && manifest.dsh && manifest.dsh.profile && Array.isArray(manifest.dsh.profile.bundles)
-      ? manifest.dsh.profile.bundles
-      : [];
-    listedSet = new Set(bundles.filter((n) => typeof n === 'string'));
-  } catch { /* 无 manifest 时 listedSet 为空 */ }
+    const profileMeta = manifest && manifest.dsh && manifest.dsh.profile ? manifest.dsh.profile : null;
+    // issue #99 补强：bundles 字段存在但非数组 = 结构损坏，与 manifest 读取失败
+    // 同级的假绿变体（静默置空会让清单内缺陷全部降级 warning）；字段缺失则
+    // 视为合法空清单，避免新装 profile 误报。
+    if (profileMeta && !Array.isArray(profileMeta.bundles)) {
+      manifestError = 'dsh.profile.bundles 不是数组（实际类型: ' + (typeof profileMeta.bundles) + '）';
+    } else {
+      const bundles = profileMeta ? profileMeta.bundles : [];
+      listedSet = new Set(bundles.filter((n) => typeof n === 'string'));
+    }
+  } catch (err) {
+    // issue #99：manifest 缺失/损坏时不能静默 —— listedSet 为空会让清单内缺陷
+    // 全部降级为 warning，体检假绿。显式记录并让总结论判定为失败。
+    manifestError = String((err && err.message) || err);
+  }
   const checked = collectPluginCandidates(profileDir, coreDirDshAt, assetsDir, fs).map((c) => {
     const result = checkPluginPackage(c.name, c.dir, yaml, fs, listedSet.has(c.name));
     return {
@@ -261,7 +273,14 @@ function validatePlugins(profileDir, coreDirDshAt, assetsDir, yaml, fs = require
   const contractViolations = checked
     .filter((c) => c.listed && c.issues.some((i) => i.level === 'error' && /启动清单/.test(i.text)))
     .map((c) => c.name);
-  return { ok: errors === 0, checked, conflicts, contractViolations, summary: { errors, warnings } };
+  return {
+    ok: errors === 0 && !manifestError,
+    manifestError,
+    checked,
+    conflicts,
+    contractViolations,
+    summary: { errors, warnings },
+  };
 }
 
 module.exports = {

@@ -99,6 +99,7 @@ window.__ModuleLoader__.load({
 			diagValidOk: "未发现会导致启动失败的问题 ✓",
 			diagValidSummary: "已检查 {0} 个插件包：{1} 个错误，{2} 个警告",
 			diagValidConflict: "跨包重复的 loader 条目 id「{0}」（{1}）：下次启动可能失败（duplicate loader entry id）",
+			diagValidManifestFail: "无法读取启动清单（profile/package.json），体检结果不可信：",
 			diagRemoveBtn: "一键移除失效条目",
 			diagRemoveConfirm: "确认移除 {0} 个失效条目？（备份后从启动清单移除，重启生效）",
 			diagRemoveDone: "已从启动清单移除：{0}",
@@ -959,6 +960,7 @@ window.__ModuleLoader__.load({
 				if (!validReport) return null;
 				const r = validReport;
 				if (r.loadError) return jsx("div", { style: { fontSize: 12, color: "var(--dsw-alias-state-error-primary, #ff7a85)" }, children: L.diagValidFail + r.loadError });
+				if (r.manifestError) return jsx("div", { style: { fontSize: 12, color: "var(--dsw-alias-state-error-primary, #ff7a85)", wordBreak: "break-all" }, children: "⛔ " + L.diagValidManifestFail + r.manifestError });
 				const s = r.summary || { errors: 0, warnings: 0 };
 				return jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 6, fontSize: 12 }, children: [
 					r.ok

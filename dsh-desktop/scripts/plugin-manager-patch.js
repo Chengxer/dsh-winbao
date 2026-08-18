@@ -26,16 +26,19 @@ function yamlQuote(s) {
 // 顶层用户层条目（缩进 0-2 空格）+ 完整子树（含行尾换行）。
 // 子树用非贪婪 [\s\S]*? 匹配，并用「下一同级 - id: / - insert: / 注释 / 文件尾」
 // 前瞻收口，避免贪婪续行组把同一 insert 块内后续兄弟条目一并吞掉（issue #66）。
-// id 边界用负向断言 (?![A-Za-z0-9_.-])，因为 \b 在连字符/点后不是合法 YAML 词边界
-// （terminal\b 会误中 terminal-tab）。
+// id 边界用负向断言 (?![A-Za-z0-9_.\t -])，因为 \b 在连字符/点后不是合法 YAML 词边界
+// （terminal\b 会误中 terminal-tab）；行内空白（空格/tab）一并计入不允许的下一个
+// 字符，避免含空格的非标 id（`- id: foo bar`）被 foo 命中误改（issue #100）。
+// 注意只排除行内空白、不能排除 \n：条目行尾换行必须放行，否则既有条目全部
+// 匹配不上（退化为重复新建条目）。
 function topLevelEntryRe(id) {
-  return new RegExp('(?:^|\\n)([ \\t]{0,2})- id:\\s*' + escRegExp(id) + '(?![A-Za-z0-9_.-])[^\\n]*\\n([\\s\\S]*?)(?=(?:\\n[ \\t]{0,2}- id:)|(?:\\n[ \\t]{0,2}- insert:)|(?:\\n#)|\\s*$)', 'g');
+  return new RegExp('(?:^|\\n)([ \\t]{0,2})- id:\\s*' + escRegExp(id) + '(?![A-Za-z0-9_.\\t -])[^\\n]*\\n([\\s\\S]*?)(?=(?:\\n[ \\t]{0,2}- id:)|(?:\\n[ \\t]{0,2}- insert:)|(?:\\n#)|\\s*$)', 'g');
 }
 
 // insert 块内的内层条目（缩进 >= 4）+ 完整子树（含行尾换行）。
 // 同 topLevelEntryRe：非贪婪子树 + 下一同级/上级条目或文件尾前瞻收口。
 function insertInnerEntryRe(id) {
-  return new RegExp('(?:^|\\n)[ \\t]+- id:\\s*' + escRegExp(id) + '(?![A-Za-z0-9_.-])[^\\n]*\\n([\\s\\S]*?)(?=(?:\\n[ \\t]+- id:)|(?:\\n[ \\t]{0,2}- id:)|(?:\\n[ \\t]{0,2}- insert:)|\\s*$)', 'g');
+  return new RegExp('(?:^|\\n)[ \\t]+- id:\\s*' + escRegExp(id) + '(?![A-Za-z0-9_.\\t -])[^\\n]*\\n([\\s\\S]*?)(?=(?:\\n[ \\t]+- id:)|(?:\\n[ \\t]{0,2}- id:)|(?:\\n[ \\t]{0,2}- insert:)|\\s*$)', 'g');
 }
 
 // 本模块写入的标记注释行（整行，含行尾换行）。

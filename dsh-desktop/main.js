@@ -37,6 +37,7 @@ const {
   githubAssetDownloadUrl,
   verifyIntegrity,
   findPackageRoot,
+  selectGithubAsset,
 } = require('./scripts/plugin-manager-update');
 const { installBuiltinPresets } = require('./scripts/install-minimal-win-preset');
 const { SessionWatcher, scanZstdFrames } = require('./session-watcher');
@@ -4425,18 +4426,14 @@ async function pluginManagerFetchGithubLatest(repo) {
   try {
     const data = await pluginManagerHttpGetJson(githubReleaseApiUrl(repo), 15000, { Accept: 'application/vnd.github+json' });
     if (data && data.tag_name && Array.isArray(data.assets) && data.assets.length > 0) {
-      // 多资产 Release 选择策略（issue #90）：优先「平台匹配的归档」
-      // （win/windows + .tgz/.tar.gz/.zip）→ 任意归档 → 平台匹配任意文件 →
-      // 兜底第一个。此前直接取第一个资产，多资产 Release（checksum / 其它
-      // 平台分包）会下载错文件。
-      const isArchive = (n) => /\.(?:tgz|tar\.gz|zip)$/i.test(n);
-      const isWinAsset = (n) => /(?:win|windows)/i.test(n);
-      const a =
-        data.assets.find((x) => x && x.name && isArchive(x.name) && isWinAsset(x.name)) ||
-        data.assets.find((x) => x && x.name && isArchive(x.name)) ||
-        data.assets.find((x) => x && x.name && isWinAsset(x.name)) ||
-        data.assets.find((x) => x && x.name) ||
-        data.assets[0];
+      // 多资产 Release 选择策略（issue #90/#97）：纯函数 selectGithubAsset——
+      // 词边界平台判定（darwin 不再含 "win" 误判）、架构优先级（x64 优先）、
+      // 任何阶段排除 .sha256/.sig/.asc 等非二进制文件。无可用资产返回 null。
+      const a = selectGithubAsset(data.assets, process.platform);
+      if (!a) {
+        log('plugin-manager', 'Release ' + data.tag_name + ' 无可下载资产（仅校验和/签名等非二进制文件）');
+        return null;
+      }
       // GitHub API digest 形如 "sha256:<hex64>"（部分老资产无此字段）
       const dm = /^(?:sha256:)?([0-9a-fA-F]{64})$/.exec(String(a.digest || ''));
       return {

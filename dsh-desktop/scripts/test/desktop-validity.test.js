@@ -222,3 +222,50 @@ test('validatePlugins: 覆盖条目（disabled/config）不算注册 → 不产�
   const out3 = validatePlugins(profileDir, null, path.join(dir, 'assets'), jsonYaml, fs);
   assert.strictEqual(out3.ok, true, '定向 insert 组名不算注册');
 });
+
+test('issue #99: profile package.json 缺失/损坏 → manifestError 显式 + ok:false（不再假绿）', () => {
+  const dir = tmpdir();
+  const profileDir = dir;
+  const assetsDir = path.join(dir, 'assets');
+  write(assetsDir, 'good-pkg/package.json', JSON.stringify({ name: 'good-pkg', dsh: { bundle: { patch: './cordis.patch.yml' } } }));
+  write(assetsDir, 'good-pkg/cordis.patch.yml', patchJson([{ id: 'good' }]));
+  // 情况一：package.json 不存在（ENOENT）
+  let out = validatePlugins(profileDir, null, assetsDir, jsonYaml, fs);
+  assert.strictEqual(out.ok, false, 'manifest 缺失必须判失败');
+  assert.ok(out.manifestError, 'manifestError 应有信息（ENOENT）');
+  assert.match(out.manifestError, /ENOENT/);
+  // 情况二：package.json 是损坏 JSON（JSON.parse 抛错）
+  write(profileDir, 'package.json', '{oops not json');
+  out = validatePlugins(profileDir, null, assetsDir, jsonYaml, fs);
+  assert.strictEqual(out.ok, false, 'manifest 损坏必须判失败');
+  assert.ok(out.manifestError, 'manifestError 应有信息（解析错误）');
+  assert.match(out.manifestError, /(JSON|Unexpected|oops)/i);
+  // checked 仍照常执行（清单之外的内置配套照查），但 listed 标志全部为 false
+  assert.ok(Array.isArray(out.checked) && out.checked.some((c) => c.name === 'good-pkg'), 'checked 不被 manifest 失败阻断');
+  assert.ok(out.checked.every((c) => c.listed === false), 'manifest 失败时所有 listed 为 false');
+  // 情况三：manifest 正常可读 → 无 manifestError 且 listed 生效
+  write(profileDir, 'package.json', JSON.stringify({ name: 'p', dsh: { profile: { bundles: ['good-pkg'] } } }));
+  out = validatePlugins(profileDir, null, assetsDir, jsonYaml, fs);
+  assert.strictEqual(out.manifestError, null, 'manifest 正常时无 manifestError');
+  assert.strictEqual(out.ok, true, 'manifest 正常且无缺陷 → ok:true');
+  assert.ok(out.checked.find((c) => c.name === 'good-pkg').listed, '清单可读后 listed 生效');
+});
+
+test('issue #99 补强 B4: dsh.profile.bundles 存在但非数组 → manifestError + ok:false（假绿变体）', () => {
+  const dir = tmpdir();
+  const profileDir = dir;
+  const assetsDir = path.join(dir, 'assets');
+  write(assetsDir, 'good-pkg/package.json', JSON.stringify({ name: 'good-pkg', dsh: { bundle: { patch: './cordis.patch.yml' } } }));
+  write(assetsDir, 'good-pkg/cordis.patch.yml', patchJson([{ id: 'good' }]));
+  // 情况一：bundles 字段非数组（结构损坏的合法 JSON）——静默置空会假绿，必须显式报错
+  write(profileDir, 'package.json', JSON.stringify({ name: 'p', dsh: { profile: { bundles: 'oops' } } }));
+  let out = validatePlugins(profileDir, null, assetsDir, jsonYaml, fs);
+  assert.strictEqual(out.ok, false, 'bundles 非数组必须判失败（#99 假绿变体）');
+  assert.ok(out.manifestError, 'manifestError 应有信息');
+  assert.match(out.manifestError, /bundles 不是数组/);
+  // 情况二：字段缺失 → 合法空清单，不误报
+  write(profileDir, 'package.json', JSON.stringify({ name: 'p' }));
+  out = validatePlugins(profileDir, null, assetsDir, jsonYaml, fs);
+  assert.strictEqual(out.manifestError, null, 'bundles 字段缺失 = 合法空清单，不误报');
+  assert.strictEqual(out.ok, true);
+});

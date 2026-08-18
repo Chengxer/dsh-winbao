@@ -40,6 +40,71 @@ function ghProxyUrl(url) {
   return GH_PROXY_PREFIXES[0] + url;
 }
 
+// ---------------------------------------------------------------------------
+// GitHub Release 多资产选择（issue #90 遗留边界，issue #97 根治）：
+// 原实现 isWinAsset 用子串匹配（darwin 含 "win" 误判为 Windows）、无架构
+// 优先级、无归档时可能选中 .sha256 校验和文本。这里改为纯函数 + 词边界
+// 平台判定 + 架构优先级 + 任何阶段排除非二进制文件。
+// ---------------------------------------------------------------------------
+
+/** 任何阶段都不得选中的「非二进制」文件（校验和/签名/说明等，下载了无法安装）。 */
+const NON_BINARY_RE = /\.(?:sha256|sha512|sha1|sig|asc|txt|md|json|yaml|yml|toml|ini|nfo|log)$|(?:^|[.\-_])sha(?:256|512|1)?sums?$/i;
+
+/** process.platform 值 → 资产命名中的平台关键词（词边界匹配）。 */
+const PLATFORM_HINTS = {
+  win32: ['win', 'windows'],
+  darwin: ['darwin', 'macos', 'osx'],
+  linux: ['linux'],
+};
+
+/** 架构优先级（越小越优先）：x64/amd64 > arm64/aarch64 > ia32/x86 > arm。 */
+const ARCH_ORDER = ['x64', 'amd64', 'arm64', 'aarch64', 'ia32', 'x86', 'arm'];
+
+/**
+ * 从 GitHub Release 资产中挑选「当前平台可用的安装包」：
+ *   1) 剔除 .sha256/.sig/.asc/说明文档等非二进制文件（任何阶段不选中）；
+ *   2) 平台词边界匹配（win/windows | darwin/macos/osx | linux）优先；
+ *   3) 平台池内归档（.tgz/.tar.gz/.zip）优先，无归档时回退平台池任意文件；
+ *   4) 架构优先级排序（x64 优先，ia32/arm64 次之）。
+ * 纯函数，便于单测。返回资产对象；无可下载资产返回 null。
+ * @param {Array} assets GitHub API 资产数组（含 name 字段的对象）
+ * @param {string} platform process.platform 值（win32/darwin/linux）
+ */
+function selectGithubAsset(assets, platform) {
+  const list = (assets || []).filter((x) => x && typeof x.name === 'string');
+  const candidates = list.filter((x) => !NON_BINARY_RE.test(x.name));
+  if (!candidates.length) return null;
+
+  const hints = PLATFORM_HINTS[platform] || [];
+  // 词边界平台匹配：win/windows（win 后可带数字：win32/win64/win-arm64），
+  // 前后必须是分隔符/行首行尾——darwin 含 "win" 子串但前无边界，不误配。
+  const platRe = hints.length
+    ? new RegExp('(?:^|[.\\-_])(' + hints.map((h) => (h === 'win' ? 'win\\d*' : h)).join('|') + ')(?:[.\\-_]|$)', 'i')
+    : null;
+  const platPool = platRe ? candidates.filter((x) => platRe.test(x.name)) : [];
+  const pool = platPool.length ? platPool : candidates;
+
+  const archives = pool.filter((x) => /\.(?:tgz|tar\.gz|zip)$/i.test(x.name));
+  const finalPool = archives.length ? archives : pool;
+
+  const archPatterns = ARCH_ORDER.map((a) => new RegExp('(?:^|[.\\-_])' + a + '(?:[.\\-_]|$)', 'i'));
+  const archScore = (name) => {
+    for (let i = 0; i < archPatterns.length; i += 1) {
+      if (archPatterns[i].test(name)) return i;
+    }
+    return archPatterns.length; // 无架构信息 → 排最后但可用
+  };
+  // 排序：平台命中优先（darwin-x64 与 win32-x64 同架构时仍必须选 win32），
+  // 再按架构优先级。稳定排序保证同分保持资产原始顺序。
+  const platHit = (name) => (platRe ? (platRe.test(name) ? 0 : 1) : 0);
+  return finalPool.slice().sort((a, b) => {
+    const pa = platHit(a.name);
+    const pb = platHit(b.name);
+    if (pa !== pb) return pa - pb;
+    return archScore(a.name) - archScore(b.name);
+  })[0] || null;
+}
+
 /** 校验 sha512 base64 integrity（npm dist.integrity 格式: sha512-<base64>）。 */
 function verifyIntegrity(buffer, integrity) {
   if (!integrity || typeof integrity !== 'string') return false;
@@ -91,4 +156,6 @@ module.exports = {
   GH_PROXY_PREFIXES,
   verifyIntegrity,
   findPackageRoot,
+  selectGithubAsset,
+  NON_BINARY_RE,
 };
