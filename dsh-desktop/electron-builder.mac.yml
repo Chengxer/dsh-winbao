@@ -32,7 +32,10 @@ files:
   - profile-manifest.js
   - profile-patch-heal.js
   - profile-bundle-heal.js
+  - profile-module-heal.js
+  - patch-row-heal.js
   - wsl-backend.js
+  - plugin-guard.js
   - watchdog.js
   - assets/**/*
   # 运行时依赖：koffi 预检、依赖自愈补丁等脚本必须在成品里存在。

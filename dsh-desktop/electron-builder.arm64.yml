@@ -42,7 +42,11 @@ files:
   - renderer-recovery.js
   - profile-manifest.js
   - profile-patch-heal.js
+  - profile-bundle-heal.js
+  - profile-module-heal.js
+  - patch-row-heal.js
   - wsl-backend.js
+  - plugin-guard.js
   - watchdog.js
   - assets/**/*
   - scripts/**/*
