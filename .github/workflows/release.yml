@@ -742,7 +742,9 @@ jobs:
             sleep 5
           done
           gh release view "$tag" --json id --jq .id >/dev/null
-          gh release upload "$tag" "dist/DSH-Desktop-*-$ARCH.AppImage" --clobber
+          # AppImage 的 ${arch} 被 electron-builder 渲染为 x86_64（非 x64），
+          # 故不用 $ARCH 拼 glob，直接通配所有 AppImage 产物。
+          gh release upload "$tag" dist/*.AppImage --clobber
           echo '=== release assets ==='
           gh release view "$tag" --json assets --jq '.assets[].name'
         env:
