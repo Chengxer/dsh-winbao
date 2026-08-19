@@ -70,11 +70,18 @@ test('supervision: httpGet reject → 不健康', async () => {
   assert.equal(await s.sup.probeOnce(), false);
 });
 
-test('supervision: httpGet 永不 resolve → probeTimeout 竞速判不健康', async () => {
+test('supervision: httpGet 永不 resolve → probeTimeout 竞速判不健康（兜底计时器 ref 保证必然结算）', async () => {
   const s = makeSup({ httpGet: () => new Promise(() => {}), probeTimeoutMs: 20 });
   const started = Date.now();
   assert.equal(await s.sup.probeOnce(), false);
   assert.ok(Date.now() - started < 1000, '超时竞速应在短超时内返回');
+});
+
+test('supervision: httpGet 同步抛错 → 立即判不健康（不残留兜底计时器）', async () => {
+  const s = makeSup({ httpGet: () => { throw new Error('sync boom'); }, probeTimeoutMs: 5000 });
+  const started = Date.now();
+  assert.equal(await s.sup.probeOnce(), false);
+  assert.ok(Date.now() - started < 1000, '同步抛错应立即返回（兜底计时器已清除）');
 });
 
 test('supervision: getBaseUrl null → probe 解析为 falsy（false）', async () => {

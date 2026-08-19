@@ -41,16 +41,29 @@ function createSupervision(opts) {
     let baseUrl;
     try { baseUrl = getBaseUrl(); } catch { return Promise.resolve(false); }
     if (!baseUrl) return Promise.resolve(false);
-    return Promise.race([
-      httpGet(baseUrl + '/', { timeout: probeTimeoutMs }),
-      new Promise((resolve) => {
-        const t = setTimeout(() => resolve({ statusCode: 0, timedOut: true }), probeTimeoutMs);
-        if (t.unref) t.unref();
-      }),
-    ]).then((res) => {
+    // 竞速兜底计时器不能 unref：它承担「Promise 必然结算」的语义——unref 后，
+    // 当事件循环里只剩该计时器时会提前排空（CI 最小环境下 node:test 报
+    // "Promise resolution is still pending but the event loop has already
+    // resolved"，并连带取消本文件其余用例）。结算后必须 clearTimeout，
+    // 避免 httpGet 先返回时计时器拖慢进程退出。
+    let settleTimer = null;
+    const fallback = new Promise((resolve) => {
+      settleTimer = setTimeout(() => resolve({ statusCode: 0, timedOut: true }), probeTimeoutMs);
+    });
+    let req;
+    try {
+      req = Promise.resolve(httpGet(baseUrl + '/', { timeout: probeTimeoutMs }));
+    } catch (err) {
+      // 注入的 httpGet 同步抛错：立即判不健康并清掉兜底计时器（不残留 ref 计时器）。
+      if (settleTimer) clearTimeout(settleTimer);
+      return Promise.resolve(false);
+    }
+    return Promise.race([req, fallback]).then((res) => {
       const healthy = !!(res && typeof res.statusCode === 'number' && res.statusCode > 0 && res.statusCode < 500);
       return healthy;
-    }).catch(() => false);
+    }).catch(() => false).finally(() => {
+      if (settleTimer) clearTimeout(settleTimer);
+    });
   }
 
   async function tick() {
