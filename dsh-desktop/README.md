@@ -34,6 +34,10 @@
 > 便携版的数据目录是 exe 旁的 `data\`；安装版在 `%APPDATA%\DSH Desktop\`。
 > 若想强制指定 DSH 配置目录，启动前设置环境变量 `DSH_HOME` 即可（与 dsh CLI 行为一致）。
 
+> **macOS 用户**：当前构建未做 Apple 公证，首次打开若提示“已损坏，无法打开”，
+> 执行 `sudo xattr -cr "/Applications/DSH Desktop.app"` 即可；
+> 详见 [docs/troubleshooting.md](docs/troubleshooting.md) 的 macOS 专章。
+
 ## 跟随官方更新（用户同意后自动更新）
 
 - 启动 15 秒后及此后每 6 小时，自动查询 npm 官方 registry 上 @deepseek-ai/dsh 的最新版本；菜单「帮助 → 检查更新…」可随时手动检查。
