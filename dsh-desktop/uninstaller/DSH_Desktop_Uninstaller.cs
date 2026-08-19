@@ -24,6 +24,13 @@ class DSHDesktopUninstaller
     static bool keepOtherUserData = false;
     static bool keepChatData = false;
     static bool keepPlugins = false;
+    // 升级调用标记：electron-builder 的 NSIS 升级流程会调旧卸载器并传
+    // /S /KEEP_APP_DATA --updated，语义是“只换程序本体，保留全部用户数据”。
+    // 旧版本不认这两个参数，静默模式下所有 keep 开关为 false，导致升级即
+    // 清空 sessions/settings/credentials 等全部用户数据（2026-08 事故）。
+    static bool updatedByInstaller = false;
+    // 显式全删标志：只有用户/脚本明确传入时才允许静默删除全部用户数据。
+    static bool explicitFullWipe = false;
     static List<string> keepPresetNames = new List<string>();
     static List<string> keepPluginNames = new List<string>();
 
@@ -379,7 +386,35 @@ class DSHDesktopUninstaller
 #region Entry Point & CLI Parsing
     static bool ConfirmAndSelectRetention()
     {
-        if (silent) return true;
+        if (silent)
+        {
+            // 静默模式安全契约（2026-08 事故修复）：
+            // 1) 升级调用（/KEEP_APP_DATA 或 --updated）→ 等价 /KeepAll，保留全部用户数据；
+            // 2) 显式传了任何 /Keep* 开关 → 按开关执行；
+            // 3) 显式 /FullWipe → 才允许删除全部用户数据；
+            // 4) 其余情况（参数不明）拒绝静默删除用户数据，直接退出，
+            //    绝不再默认全删。
+            if (updatedByInstaller)
+            {
+                ApplyKeepAll();
+                Log("Silent upgrade invoked by installer (/KEEP_APP_DATA or --updated): keeping ALL user data.");
+                return true;
+            }
+            if (explicitFullWipe)
+            {
+                Log("Silent full wipe explicitly requested (/FullWipe): removing all user data.");
+                return true;
+            }
+            if (keepAgentPresets || keepRuntime || keepAppSettings || keepModelConfig ||
+                keepOtherUserData || keepChatData || keepPlugins)
+            {
+                return true;
+            }
+            Log("Silent mode without recognized retention flags: refusing to delete user data.");
+            Log("  Upgrade intent flags: /KEEP_APP_DATA / --updated (keep all data).");
+            Log("  Explicit wipe flag: /FullWipe.");
+            return false;
+        }
 
         Application.EnableVisualStyles();
         using (RetentionForm form = new RetentionForm())
@@ -430,7 +465,14 @@ class DSHDesktopUninstaller
                 psi.Verb = "runas";
                 psi.UseShellExecute = true;
                 psi.Arguments = string.Join(" ", args);
-                Process.Start(psi);
+                Process elevated = Process.Start(psi);
+                // 静默升级场景（NSIS 调旧卸载器）必须等提权子进程结束，
+                // 否则安装器会误判卸载已完成，与正在删文件的子进程并发。
+                if (silent && elevated != null)
+                {
+                    try { elevated.WaitForExit(); return elevated.ExitCode; }
+                    catch { return 0; }
+                }
                 return 0;
             }
             catch (Exception ex)
@@ -547,13 +589,25 @@ class DSHDesktopUninstaller
             else if (arg.Equals("/KeepAll", StringComparison.OrdinalIgnoreCase) ||
                      arg.Equals("-KeepAll", StringComparison.OrdinalIgnoreCase))
             {
-                keepAgentPresets = true;
-                keepRuntime = true;
-                keepPlugins = true;
-                keepChatData = true;
-                keepAppSettings = true;
-                keepModelConfig = true;
-                keepOtherUserData = true;
+                ApplyKeepAll();
+            }
+            else if (arg.Equals("/KEEP_APP_DATA", StringComparison.OrdinalIgnoreCase) ||
+                     arg.Equals("-KEEP_APP_DATA", StringComparison.OrdinalIgnoreCase) ||
+                     arg.Equals("/KeepAppData", StringComparison.OrdinalIgnoreCase) ||
+                     arg.Equals("--updated", StringComparison.OrdinalIgnoreCase) ||
+                     arg.Equals("/updated", StringComparison.OrdinalIgnoreCase) ||
+                     arg.Equals("--upgrade", StringComparison.OrdinalIgnoreCase))
+            {
+                // electron-builder NSIS 升级契约：静默调用旧卸载器时传这些参数，
+                // 语义为“升级安装，保留全部用户数据”。
+                updatedByInstaller = true;
+            }
+            else if (arg.Equals("/FullWipe", StringComparison.OrdinalIgnoreCase) ||
+                     arg.Equals("-FullWipe", StringComparison.OrdinalIgnoreCase) ||
+                     arg.Equals("/DeleteAllData", StringComparison.OrdinalIgnoreCase) ||
+                     arg.Equals("-DeleteAllData", StringComparison.OrdinalIgnoreCase))
+            {
+                explicitFullWipe = true;
             }
             else if (arg.Equals("/DetectRunning", StringComparison.OrdinalIgnoreCase) ||
                      arg.Equals("-DetectRunning", StringComparison.OrdinalIgnoreCase) ||
@@ -568,6 +622,17 @@ class DSHDesktopUninstaller
                 useDetectedRunningDsh = false;
             }
         }
+    }
+
+    static void ApplyKeepAll()
+    {
+        keepAgentPresets = true;
+        keepRuntime = true;
+        keepPlugins = true;
+        keepChatData = true;
+        keepAppSettings = true;
+        keepModelConfig = true;
+        keepOtherUserData = true;
     }
 
     static List<string> ParsePresetNames(string value)
@@ -773,8 +838,17 @@ class DSHDesktopUninstaller
         DeleteDirectoryWithRetry(DshInstallDir);
         DeleteDirectoryWithRetry(DshDesktopUpdaterDir);
         DeleteDirectoryWithRetry(DshLauncherUpdaterDir);
-        DeleteDirectoryWithRetry(DshRoamingDir);
-        DeleteDirectoryWithRetry(DshRoamingDir2);
+        // Roaming\DSH Desktop 内含 logs/settings.json/window-state 等应用数据：
+        // 保留应用设置或其他用户数据时不得删除（升级安装必须原样保留）。
+        if (!keepAppSettings && !keepOtherUserData)
+        {
+            DeleteDirectoryWithRetry(DshRoamingDir);
+            DeleteDirectoryWithRetry(DshRoamingDir2);
+        }
+        else
+        {
+            Log("  Keeping app data dirs (retention active): " + DshRoamingDir);
+        }
         DeleteFileIfExists(DesktopShortcut);
         DeleteFileIfExists(StartMenuShortcut);
         DeleteFileIfExists(CommonDesktopShortcut);
