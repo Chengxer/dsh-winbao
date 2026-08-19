@@ -7,6 +7,10 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 
 > 内核升级：内置 DeepSeek Harness 从 0.1.0-rc.7 升至 **0.1.0-rc.8**（npm `next` tag，2026-08-19 发布）。含行为适配与补丁体系全量重锚定审查。**同时修复存量 rc.8 overlay 用户的补丁失配**（更新器按 dist-tags 最大值推荐版本，rc.8 发布当天起线上用户已可装到 rc.8 overlay，而既有补丁锚定 rc.7 形态）。
 
+### 修复（0.4.1 用户反馈）
+- **设置页左侧导航无法滚动**：装的插件多或展开「高级」分组后，导航行数超出设置面板高度，官方 navList 无 overflow，下方条目被裁掉看不清也点不到。dsh-settings-groups 就地把 navList 容器化（overflow-y:auto + min-height:0/max-height:100% 允许在 flex 布局正确收缩 + overscroll-behavior:contain 防滚动穿透），未超出时零影响。
+- **「操作失败： signal timed out」弹窗友好化**：该错误是连接层 AbortSignal.timeout 的裸 DOMException（后端正忙/假死时所有带超时的请求都报它），直接 alert 用户无法理解。dsh-session-manager 的会话操作超时改为：人话说明（后端响应超时，输入不显示/内容刷不出通常同因）+ 「是否立即重启 DSH 服务」一键走壳层受监管重启（window.dshDesktop.restartService，不产生游离进程）。后端假死的根治（存活探针 + 受控自动重启）由 #121 插件中心重构的 supervision 层承载。
+
 ### 升级与适配
 - **依赖平移**：`@deepseek-ai/dsh` 与 19 个 `@deepseek-ai/dsh-*` 兄弟包从 `0.1.0-rc.7` 精确锁版整体升至 `0.1.0-rc.8`（54 包全家桶齐发；cordis 系 1.x/4.x 版本线冻结不变；新增传递依赖 `dsh-tool-pwsh-persistent` 随 minimal preset 的 win32 pwsh 栈引入）。
 - **禁止内核自动开浏览器（关键行为适配）**：rc.8 `dsh web` 新增 `openBrowser` 默认 `true`（非 SSH 环境经 `open` 模块拉起系统浏览器；WSL 内经 `wslview` 弹 Windows 浏览器）。桌面内嵌场景由壳层 spawn 时显式传 `--no-open`（main.js `startServer()` 与 wsl-backend.js `spawnServer()`），**按内核版本门控**（≥ 0.1.0-rc.8 才传；rc.7 的 web 命令无此选项，commander 遇未知选项直接报错）。

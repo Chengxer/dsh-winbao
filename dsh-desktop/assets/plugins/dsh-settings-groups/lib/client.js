@@ -140,11 +140,27 @@
     return head;
   }
 
+  // 导航列表滚动容器化：装了较多插件或展开「高级」分组后，行数会超过
+  // 设置面板高度；官方 navList 无 overflow，超出部分被裁掉——看不清也
+  // 点不到（用户反馈「高级设置滑动不了」）。就地把它变成滚动容器：
+  //   · overflow-y:auto —— 超出才出现滚动条，未超出零影响；
+  //   · min-height:0 / max-height:100% —— 允许在 flex 父布局里正确收缩，
+  //     避免 flex 子项默认 min-height:auto 撑破容器继续溢出；
+  //   · overscroll-behavior:contain —— 滚到头不穿透带动整页。
+  // 只写本插件拥有的样式位，React 重渲染抹掉后由指纹重放恢复。
+  function ensureNavScrollable(list) {
+    list.style.overflowY = 'auto';
+    list.style.overscrollBehavior = 'contain';
+    list.style.minHeight = '0';
+    list.style.maxHeight = '100%';
+  }
+
   // 应用侧边栏分组：只写 advanced 行 display 与插入组头，绝不移动 React
   // 节点。navList 是 flex column 时用 order 把展开态排成
   // 「普通头 → 普通行 → 高级头 → 高级行」；非 flex 时靠 DOM 插入位置，
   // 折叠态下两组交界仍正确。
   function applyNav(list, cfg, keywords) {
+    ensureNavScrollable(list);
     var cells = navCellsOf(list);
     var titles = cells.map(firstText);
     var parts = window.__dshSettingsGroupsCore.partitionItems(titles, keywords);
