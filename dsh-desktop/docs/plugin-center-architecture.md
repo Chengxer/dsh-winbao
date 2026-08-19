@@ -55,28 +55,28 @@ Electron 能力（dialog、ipcMain、app）一律经 `createPluginCenter(ctx)` �
 const center = createPluginCenter({
   getHome,            // () => string           有效 DSH_HOME
   getProfile,         // () => string           桌面端恒为 'web'
-  getProfileDir,      // () => string           <home>/profiles/<profile>
-  getUserDataDir,     // () => string           壳层 userData（日志/缓存）
-  getDshBin,          // () => string           当前 dsh bin（内置或 overlay）
   log,                // (topic, msg) => void
-  yaml,               // 与 dsh 同构的 entry-list 解析器（loadDshYamlDialect 结果）
-  dialogs,            // { confirm(opts) => Promise<boolean> }（Electron 注入；测试注入桩）
-  openExternal,       // (url) => void
+  companionPlugins,   // 配套插件清单（可选，默认 COMPANION_PLUGINS）
+  dialogs,            // { confirm(message) => Promise<boolean> }（Electron 注入；测试注入桩）
 });
 
-center.inventory.collect()                       // 与历史 pluginManagerCollect 同构
-center.inventory.describe(id)                    // 单插件详情（分组/包名/版本/来源）
-center.lifecycle.setEnabled(id, enabled)         // → { ok } | PluginError
-center.lifecycle.uninstall(id)                   // → { ok, restartRequired } | PluginError
-center.lifecycle.restore(id)                     // → { ok, restartRequired } | PluginError（仅配套可恢复）
-center.updates.checkUpdates()                    // → items[]（npm 双源 / GitHub 官方）
-center.updates.update(id)                        // 加固更新链
-center.guard.*                                   // 包 plugin-guard.js（快照/回滚/体检/守护启动/事故）
-center.scan.profile({ onFinding })               // 全 profile 静态扫描门禁
-center.supervision.start() / stop()              // dsh web 存活探针
-center.ipc.register(ipcMain, { mainWindow, getWebUrl })  // 注册全部插件管理 IPC
-center.ipc.authorize(event, action)              // 统一鉴权（见 §7）
-center.state.getUninstalled()                    // 卸载决策（供同步器消费）
+center.inventory.rows() / center.inventory.collect()   // 与历史 pluginManagerCollect 同构
+center.inventory.describe(id)                          // 单插件 inventory 行（未知返回 null）
+center.lifecycle.setEnabled(id, enabled)               // → { ok, restartRequired } | PluginError
+center.lifecycle.uninstall(id)                         // → { ok, restartRequired } | PluginError
+center.lifecycle.restore(id)                           // → { ok, restartRequired } | PluginError（仅配套可恢复）
+center.updates.sources                                 // 更新源表（与历史 PLUGIN_UPDATE_SOURCES 一致）
+center.updates.checkUpdates()                          // → items[]（npm 双源 / GitHub 官方）
+center.updates.update(id)                              // 加固更新链（fail-closed）
+center.quarantine.apply(id, info) / applyBySource(source, info) / clear(id)  // 自动隔离落盘/解除
+center.scan.profile()                                  // → findings[]（全 profile node_modules 静态扫描）
+center.markers.parseMarkers / createMarkerAccumulator  // stderr 机器可读标记解析
+center.isMutating()                                    // 是否有插件变更进行中（存活探针 isBusy 用）
+center.bootCleanup()                                   // 启动残留清理（.trash / .bak）
+center.removedIds()                                    // patch removed 行 ∪ state.uninstalled 并集
+center.supervision({ getBaseUrl, httpGet, isBusy, onZombie })  // → { start, stop, state }（工厂）
+center.state / center.manifestStore / center.patchGate // 底层句柄（同步器/自愈共用）
+center.ipc.actions / center.ipc.confirmMessages / center.ipc.authorize(event, deps, action)
 ```
 
 ## 4. 数据流（规范）
@@ -84,11 +84,12 @@ center.state.getUninstalled()                    // 卸载决策（供同步器�
 ### 4.1 开关插件
 ```
 IPC dsh:plugin-set-enabled
- → authorize(ACTION_PLUGIN_SET_ENABLED)
+ → pluginManagerIpcAllowed（capability.authorize，action='*' 通用口径）
  → inventory.collect() 定位分组（core 拒绝）
  → lifecycle.setEnabled
    → WriteGate.acquire
-   → patch-surgery.togglePluginInPatch（EOL 保持、原子写）
+   → patch-surgery.togglePluginInPatch（EOL 保持、原子写；disabled:false 翻转 true）
+   → 启用时一并解除自动隔离决策（state.clearQuarantined，失败仅日志）
    → 返回 restartRequired: true（生效语义不变：重启后由 dsh loader 组合）
 ```
 
@@ -100,16 +101,16 @@ IPC dsh:plugin-uninstall
    → inventory 定位；core / 带用户 config 拒绝
    → PluginStateStore.markUninstalled(id, name)          # 决策先落盘，抗 patch 重置复活
    → patch-surgery.setPluginRemoved(text, id, true, name) # disabled+removed 顶层条目
-   → ManifestStore.removeBundle(name)                     # bundles 登记移除（第三方一并覆盖）
-   → ManifestStore.removeDependency(name)                 # 消灭"pnpm install 复活"根源
-   → ModulesLayer.removePackageDir(name)                  # rename→.trash 后再删（运行中安全）
+   → ManifestStore.removeBundles / removeDependencies（写锁 + 原子写 + 备份）
+   → ModulesLayer.removePackageDir（rename→.trash 后再删；与更新链共用 profile-modules 锁）
    → ModulesLayer.prunePackageStore(name)                 # .pnpm store 同名精确清理（尽力）
    → 返回 restartRequired: true
 ```
 
 ### 4.3 恢复卸载（仅内置配套）
 ```
- → PluginStateStore.clearUninstalled(id)
+ → PluginStateStore.clearUninstalled(id)（失败即中止，绝不返回「已恢复」假成功）
+ → PluginStateStore.clearQuarantined(id)（解除自动隔离决策；失败仅日志，补丁层仍会移除 disabled 行）
  → patch-surgery.setPluginRemoved(text, id, false, name)
  → 下次启动 sync 重新装配（sync 消费 state + patch 双源）
 第三方（无源可装）→ { ok:false, code:'PLUGIN_RESTORE_NO_SOURCE' }（不再假成功）
@@ -135,10 +136,10 @@ IPC dsh:plugin-update
 boot:
   healBeforeServer（profile/home patch 预检，写经 patch-surgery）
   syncPlugins（removedIds = patch removed 行 ∪ PluginStateStore.uninstalled）
-  applyPatches（注册表驱动，不变）
+  applyPatches（注册表驱动，不变；loader-isolation 三守卫在此注入）
   preflight（只读）
   startAndShowGuarded（plugin-guard 守护启动）
-  稳定 30s → confirmPendingGood → supervision.start()
+    → 服务就绪 → supervision.start()（grace 120s 覆盖稳定窗口，稳定 30s 落定「最后良好」）
 ```
 
 ### 4.6 插件错误自动隔离（四级，核心需求：单插件错误完全不影响其他功能）
@@ -162,15 +163,17 @@ fail-loud 语义注入自动隔离（详见该文件头注释）：
 
 **L3 自动隔离落盘（quarantine，壳层）**：main.js 观测两类 stderr 标记 →
 `quarantine.apply(id)`：
-1. `PluginStateStore.markQuarantined`（决策持久化）；
-2. patch-surgery 写官方 `disabled: true` 顶层覆盖行（dsh loader 语义：重启后
-   该条目被跳过，其余插件完全不受影响）；
+1. patch-surgery 写官方 `disabled: true` 顶层覆盖行（运行期防线先落盘：即使
+   状态持久化失败，重启后该条目仍被跳过，其余插件完全不受影响）；
+2. `PluginStateStore.markQuarantined`（决策持久化，失败仅日志不阻塞隔离）；
 3. 系统通知「插件 X 已自动隔离，可在插件管理页恢复」+ 守护重启一次（限频）。
 用户 `setEnabled(true)` / 恢复即 `quarantine.clear`（移除 disabled 行 + 决策）；
 插件若仍坏，下一轮自动隔离再次触发（闭环，风暴/崩溃环上限兜底无死循环）。
 
 **L4 挂死恢复（假活探针）**：`supervision.js` 见 §4.6 原探活语义（连续 3 次
-失败且非忙态 → 守护重启）。
+失败且非忙态 → 守护重启）。**重启有上限**：同一 10 分钟窗口内最多自动重启
+2 次（插件占死事件循环的场合无限重启只会无限失败），耗尽后停止自动重启并
+弹窗提示排查；服务稳定落地（30s）后配额复位。
 
 **诚实边界**：同进程插件造成的共享状态破坏无法逐插件回滚——L2/L3 通过
 「隔离 + 重启」恢复干净状态；插件代码永不进入 Electron 主进程执行路径
@@ -193,8 +196,12 @@ fail-loud 语义注入自动隔离（详见该文件头注释）：
   patch 被自愈重置时，sync 依据 state 不复活插件；state 损坏时，patch 行仍
   保证插件处于禁用态。
 - 兼容：v1 文件（无 quarantine 字段）原位迁移 v2；损坏 → `.broken-<ts>` 备份
-  + 重建空状态，绝不阻塞启动；非法条目（id/包名不合法）净化丢弃。
-- 写入：writeJsonAtomic + WriteGate；构造期迁移为同步原子写。
+  + 重建空状态，绝不阻塞启动；非法条目净化：id 非法/危险键（`__proto__` 等）
+  丢弃，包名非法置空保留（决策以 id 为准）。
+- 写入：writeJsonAtomic + WriteGate；**写穿语义**——锁内重读磁盘，只叠加本
+  实例自上次成功落盘以来修改过的键（dirty 集）并应用本实例的删除（tombstone），
+  其余键原样保留：既不丢「他进程的新增」也不复活「他进程的删除」。构造期
+  迁移为同步原子写；`readOnly`（CLI --dry-run）构造期与 save 一律不写盘。
 - 消费方：`plugin-sync.js`（sync）、`sync-companion-plugins.js`（CLI）、
   `lifecycle.js`、`quarantine.js`、`inventory.js`。CLI 与壳层共用同一文件，
   双入口不再漂移。
@@ -219,9 +226,11 @@ community 组并开放开关/卸载（bundles 登记由 ManifestStore 一并清�
   `pluginManagerIpcAllowed` 以 action='*' 通用口径委托同一实现，单一数据源）：
   `sender === mainWindow.webContents && senderFrame.url.origin === webUrl.origin`，
   消除历史上 list/set-enabled 只查 sender 的不一致。
-- **破坏性确认**：uninstall / update / restore / backup-restore / diag-order-apply /
-  diag-remove-bundle 在主进程经 `dialogs.confirm` 二次确认（测试可注入桩）；
-  确认文案集中声明于 `capability.js` 的 `CONFIRM_MESSAGES`。
+- **破坏性确认**：uninstall / update / restore / backup-restore / diag-order-apply
+  / diag-remove-bundle 在主进程经 `dialogs.confirm` 二次确认（测试可注入桩）；
+  确认文案集中声明于 `capability.js` 的 `CONFIRM_MESSAGES`（键：uninstall /
+  update / restore / order-apply / remove-bundle / backup-restore），
+  main.js 只按键引用，禁止散落文案。
 - **参数白名单**：id/包名一律过 `ids.js`；payload 体积与形状在 handler 内校验。
 - 能力表（action → {originCheck, confirm, mutating}）集中声明于 `capability.js`，
   新增 IPC 必须在此登记，禁止散落判断。
@@ -247,8 +256,10 @@ community 组并开放开关/卸载（bundles 登记由 ManifestStore 一并清�
 | PLUGIN_HAS_CONFIG | 带用户配置，禁止卸载 |
 | PLUGIN_NOT_TOGGLEABLE | 该插件不可开关 |
 | PLUGIN_RESTORE_NO_SOURCE | 第三方插件无源可恢复 |
-| PLUGIN_BUSY | 同 id 操作进行中 |
-| PLUGIN_SERVICE_RUNNING | 服务运行中，操作需先重启/已安全降级 |
+| PLUGIN_BUSY | 同 id 更新进行中 / 写入锁超时（生命周期操作靠 WriteGate 串行 + 幂等） |
+| PLUGIN_SERVICE_RUNNING | 服务运行中，操作需先重启/已安全降级（保留码） |
+| PLUGIN_BAD_ID | 插件 id 含非法字符 |
+| PLUGIN_BAD_PACKAGE | 包名含非法字符 |
 | UPDATE_NO_INTEGRITY | 元数据缺少完整性锚点，拒绝更新 |
 | UPDATE_INTEGRITY_MISMATCH | 下载内容校验失败 |
 | UPDATE_BAD_URL | tarball 非 https / 协议非法 |
@@ -256,7 +267,8 @@ community 组并开放开关/卸载（bundles 登记由 ManifestStore 一并清�
 | UPDATE_PACKAGE_MISMATCH | 包名/版本不匹配 |
 | UPDATE_SCAN_BLOCKED | 静态扫描高危且用户拒绝 |
 | UPDATE_ROLLBACK_FAILED | 回滚失败（备份保留于 .bak） |
-| STATE_CORRUPT | 状态文件损坏（已备份重建） |
+| UPDATE_DOWNLOAD_FAILED | 下载/解压/网络失败 |
+| STATE_CORRUPT | 状态文件损坏（保留码：损坏走备份重建 + 日志自愈，不对外抛出） |
 | UNAUTHORIZED | IPC 鉴权失败 |
 
 ## 10. 测试策略

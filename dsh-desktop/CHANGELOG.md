@@ -23,30 +23,41 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
     installFailLoud 就绪后不再 exit(1)；
   - L3 自动隔离落盘：壳层观察标记 → quarantine（官方 disabled 覆盖行 + 状态存储
     `desktop-plugin-state.json` v2）→ 系统通知 + 守护重启；插件管理页可一键恢复
-    （闭环、无死循环）；
+    （闭环、无死循环；启用/恢复清除本会话去重，会话内可重复触发）；
   - L4 挂死恢复：dsh web 存活探针（连续 3 次探活失败且非忙态 → 守护重启），
-    补「进程存活但假死」盲区。
+    补「进程存活但假死」盲区；同一 10 分钟窗口最多自动重启 2 次，耗尽后停止
+    自动重启并提示排查（稳定落地后配额复位）。
 - **安装/卸载自由面修复**：第三方 bundle 归入 community 组（可开关/可卸载）；
   卸载完整清理（bundles 登记 + dependencies 键 + 目录 + .pnpm store 无引用副本），
   决策落家级状态存储——patch 被自愈重置也不复活；第三方恢复返回
   `PLUGIN_RESTORE_NO_SOURCE`（不再假成功）；运行中目录操作 rename 语义。
 - **更新链加固（fail-closed）**：npm integrity（sha512）/ GitHub digest 缺失一律
-  拒绝；下载仅 https（重定向禁降级/环）；tar 归档条目预检（拒绝 `../`、绝对路径、
-  symlink/hardlink/设备）与解压后链接复检；包名/版本契约校验；更新内容静态扫描
-  门禁（高危需确认）；原子替换 + rename 回滚。
+  拒绝；下载仅 https（重定向禁降级/环）；传输层字节上限（JSON 4MB 在传输层生效）；
+  tar 归档条目预检（拒绝 `../`、绝对路径、ADS、保留设备名含 `CON .txt` 形态、
+  symlink/hardlink/设备）与解压后链接复检；包名必须存在且与目标一致、版本严格
+  高于当前安装版本（拒绝降级）；更新内容静态扫描门禁（高危需确认）；原子替换 +
+  rename 回滚（与卸载共用 `profile-modules` 锁）。
 - **IPC 与权限收紧**：插件管理 IPC 全量 frame-origin 精确校验（修复 list/set-enabled
-  只查 sender 的不一致）；卸载/更新/备份恢复/重排等破坏性动作主进程二次确认；
-  `setPermissionRequestHandler` 拒绝摄像头/麦克风/定位等媒体权限（白名单放行
-  fullscreen/pointerLock/notifications/clipboard）。
+  只查 sender 的不一致）；卸载/更新/备份恢复/重排等破坏性动作主进程二次确认（文案
+  按 capability.CONFIRM_MESSAGES 单一数据源）；`setPermissionRequestHandler` 拒绝
+  摄像头/麦克风/定位等媒体权限（白名单放行 fullscreen/pointerLock/notifications/
+  clipboard 且请求 origin 与当前 webUrl 精确相等）。
 - **对账/同步修复**：reconcile 隔离记录同 code+reason 去重、removedByPolicy 只报
   实际移除名、reset 仅表示「存在但损坏」、manifest 写失败仅告警、包名形状校验；
   companion 过期清理加白名单并覆盖非 scope 落点；loader id 字符集全仓统一（点号
   id 可写可愈）；removeBundledRowDuplicates 的 id 级去重接线；plugin-guard 扫描
   收口 scan.js。
-- **测试**：新增 `unit-plugin-core-*`（basic / patch-surgery / lifecycle / updates）
-  与 `unit-loader-isolation` 共 60 项断言；新增集成场景 `plugin-auto-isolation`
-  （坏插件启动自动隔离全链路，真实 Electron 隔离环境）；全量单测 693 项 +
-  集成回归。
+- **测试**：新增 20 个测试文件、354 项单测（`unit-plugin-core-*` 14 个模块深测 +
+  `unit-loader-isolation(-deep)` + `unit-web-crash-shield(-deep)` +
+  `unit-compat-*` 回归钉死 + `unit-plugin-center` 组装根端到端），覆盖：状态存储写穿
+  合并/回滚/readOnly、WriteGate TOCTOU/心跳/重入、卸载 I1 失败注入中止、更新链全
+  拒绝路径 + 回滚、归档名 fuzz、扫描 5 模式、quarantine 闭环、标记跨 chunk 逐字节
+  切割、capability 全矩阵、supervision 假时钟全窗口、隔离变换语法变体 + 子进程执行
+  级行为、compat 修复逐项钉死；全量单测 1056 项全绿（2 项既有环境跳过）；
+- **集成场景**（真实 Electron 隔离环境）：新增 `plugin-uninstall-restore-e2e`
+  （卸载四层清理 → 完整重启不复活 → 恢复 → 完整重启重新装配）与
+  `plugin-supervision-zombie-cap`（假活判定 → 守护重启 → 配额耗尽停止自动重启）；
+  `plugin-auto-isolation` 扩展「会话内重新启用 → 热更新路径再次隔离」闭环断言。
 
 ## [0.4.1] — 2026-08-19
 

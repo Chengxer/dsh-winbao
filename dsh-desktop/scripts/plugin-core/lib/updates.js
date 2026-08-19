@@ -34,21 +34,21 @@ const REDIRECT_MAX = 5;
 const JSON_MAX_BYTES = 4 * 1024 * 1024;
 
 /** 默认 https 传输（可注入替换）。返回 { statusCode, headers, body(Buffer) }。 */
-function defaultRequest(url, { timeoutMs = 60000 } = {}) {
+function defaultRequest(url, { timeoutMs = 60000, headers = {}, maxBytes = DOWNLOAD_MAX_BYTES } = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     if (u.protocol !== 'https:') return reject(new Error('非 https 协议: ' + u.protocol));
     const https = require('node:https');
-    const req = https.get(url, { headers: { 'User-Agent': 'DSH-Desktop' }, timeout: timeoutMs }, (res) => {
+    const req = https.get(url, { headers: { 'User-Agent': 'DSH-Desktop', ...headers }, timeout: timeoutMs }, (res) => {
       const chunks = [];
       let total = 0;
       let limitHit = false;
       res.on('data', (c) => {
         if (limitHit) return;
         total += c.length;
-        if (total > DOWNLOAD_MAX_BYTES) {
+        if (total > maxBytes) {
           limitHit = true;
-          req.destroy(new Error('下载超过 64MB 上限'));
+          req.destroy(new Error('下载超过 ' + maxBytes + ' 字节上限'));
           return;
         }
         chunks.push(c);
@@ -79,23 +79,23 @@ async function downloadHttps(url, { request = defaultRequest, timeoutMs = 60000,
   return res.body;
 }
 
-/** 下载 JSON（带大小上限）。 */
+/** 下载 JSON（带大小上限，上限在传输层生效——超大响应不会先整块进内存）。 */
 async function downloadJson(url, { request = defaultRequest, timeoutMs = 15000, headers = {} } = {}) {
-  const res = await rawGet(url, { request, timeoutMs, headers });
+  const res = await rawGet(url, { request, timeoutMs, headers, maxBytes: JSON_MAX_BYTES });
   const text = res.body.toString('utf8');
   if (text.length > JSON_MAX_BYTES) throw new Error('响应超过大小上限');
   try { return JSON.parse(text); } catch (err) { throw new Error('响应不是合法 JSON'); }
 }
 
-async function rawGet(url, { request = defaultRequest, timeoutMs = 15000, headers = {}, redirects = 0 } = {}) {
+async function rawGet(url, { request = defaultRequest, timeoutMs = 15000, headers = {}, maxBytes = undefined, redirects = 0 } = {}) {
   if (redirects > REDIRECT_MAX) throw new Error('重定向次数过多');
   const u = new URL(url);
   if (u.protocol !== 'https:') throw new Error('非 https 协议');
-  const res = await request(url, { timeoutMs, headers });
+  const res = await request(url, { timeoutMs, headers, maxBytes });
   if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
     const next = new URL(res.headers.location, url).toString();
     if (new URL(next).protocol !== 'https:') throw new Error('重定向降级到非 https，已拒绝');
-    return rawGet(next, { request, timeoutMs, headers, redirects: redirects + 1 });
+    return rawGet(next, { request, timeoutMs, headers, maxBytes, redirects: redirects + 1 });
   }
   if (res.statusCode !== 200) throw new Error('HTTP ' + res.statusCode);
   return res;
@@ -167,6 +167,14 @@ async function checkUpdatesAvailable(rows, sources, installedVersion, opts = {})
     if (!info) {
       return { id: row.id, name: row.name, current, latest: '', hasUpdate: false, source: src.kind, error: '查询失败' };
     }
+    // 完整性锚点缺失（fail-closed 更新链）：不把「更新后必然被拒」的版本
+    // 展示成可更新（UI 一致性：hasUpdate 即「可更新」，不是「有新版」）。
+    const anchorMissing = src.kind === 'npm'
+      ? !/^sha512-[A-Za-z0-9+/=]+$/.test(info.integrity || '')
+      : !info.digest;
+    if (anchorMissing) {
+      return { id: row.id, name: row.name, current, latest: info.version, hasUpdate: false, source: src.kind, error: 'UPDATE_NO_INTEGRITY' };
+    }
     return {
       id: row.id,
       name: row.name,
@@ -204,7 +212,12 @@ function validateArchiveEntryName(name) {
     const seg = rawSeg.replace(/[. ]+$/, '');
     if (seg === '..' || seg === '') return false;
     if (seg.includes(':')) return false; // 盘符残留 / ADS 流
-    if (WINDOWS_RESERVED_RE.test(seg)) return false;
+    // 保留设备名判定在「stem」（首个点之前的部分）上进行：Windows 会剥掉
+    // stem 尾部空格——`CON .txt` 归一化为 `CON.txt`，同样命中保留名。
+    const dotIdx = seg.indexOf('.');
+    const stem = (dotIdx >= 0 ? seg.slice(0, dotIdx) : seg).replace(/[. ]+$/, '');
+    if (stem === '') continue; // 纯点/空格 stem（如 `..txt` 的父层）按普通名处理
+    if (WINDOWS_RESERVED_RE.test(stem)) return false;
   }
   return true;
 }
@@ -294,6 +307,7 @@ async function updatePlugin(opts) {
     id, name, profileDir, source, log = () => {},
     request = defaultRequest, spawnSync = require('node:child_process').spawnSync,
     tarBin = 'tar.exe', confirm = () => false, now = Date.now,
+    installedVersion = '', gate = null,
   } = opts;
   const pkgDir = path.join(profileDir, 'node_modules', ...name.split('/'));
   if (!fs.existsSync(path.join(pkgDir, 'package.json'))) {
@@ -362,21 +376,30 @@ async function updatePlugin(opts) {
     }
     const root = findPackageRoot(extractDir);
     if (!root) return { ok: false, error: new PluginError(PLUGIN_ERROR_CODES.UPDATE_PACKAGE_MISMATCH, '解压内容里找不到 package.json') };
-    if (!path.resolve(root).startsWith(path.resolve(extractDir) + path.sep)) {
+    // 围栏：root 必须在解压根内（root === 解压根本身 = package.json 位于归档
+    // 顶层的合法形态，findPackageRoot 对这类归档返回解压根，一并放行）。
+    const resolvedRoot = path.resolve(root);
+    const resolvedExtract = path.resolve(extractDir);
+    if (resolvedRoot !== resolvedExtract && !resolvedRoot.startsWith(resolvedExtract + path.sep)) {
       return { ok: false, error: new PluginError(PLUGIN_ERROR_CODES.UPDATE_ARCHIVE_UNSAFE, '解压内容路径越界，已中止') };
     }
     if (treeHasLinks(extractDir)) {
       return { ok: false, error: new PluginError(PLUGIN_ERROR_CODES.UPDATE_ARCHIVE_UNSAFE, '解压产物包含符号链接，已中止') };
     }
 
-    // 6) 包名/版本契约
+    // 6) 包名/版本契约（fail-closed）：包名缺失或与目标不一致一律拒绝；
+    //    版本必须合法且严格高于当前安装版本（拒绝降级/原地重装伪装成更新）。
     let newPkg;
     try { newPkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')); } catch (err) {
       return { ok: false, error: new PluginError(PLUGIN_ERROR_CODES.UPDATE_PACKAGE_MISMATCH, '新版本 package.json 无法解析: ' + err.message) };
     }
     if (!newPkg || !newPkg.version) return { ok: false, error: new PluginError(PLUGIN_ERROR_CODES.UPDATE_PACKAGE_MISMATCH, '新版本 package.json 缺少 version') };
-    if (newPkg.name && newPkg.name !== name) {
-      return { ok: false, error: new PluginError(PLUGIN_ERROR_CODES.UPDATE_PACKAGE_MISMATCH, '下载内容包名不匹配（' + newPkg.name + ' ≠ ' + name + '），已中止') };
+    if (!newPkg.name || newPkg.name !== name) {
+      return { ok: false, error: new PluginError(PLUGIN_ERROR_CODES.UPDATE_PACKAGE_MISMATCH, '下载内容包名不匹配（' + String(newPkg.name || '(缺失)') + ' ≠ ' + name + '），已中止') };
+    }
+    if (typeof installedVersion === 'string' && installedVersion !== ''
+      && compareVersions(String(newPkg.version), installedVersion) <= 0) {
+      return { ok: false, error: new PluginError(PLUGIN_ERROR_CODES.UPDATE_PACKAGE_MISMATCH, '新版本 ' + String(newPkg.version) + ' 未高于当前安装版本 ' + installedVersion + '，拒绝更新') };
     }
 
     // 7) 静态扫描门禁（命中高危 → confirm；默认拒绝）
@@ -391,26 +414,33 @@ async function updatePlugin(opts) {
       }
     }
 
-    // 8) 原子替换（rename 语义 + 回滚）
-    try {
-      fs.renameSync(pkgDir, backupDir);
-    } catch (err) {
-      return { ok: false, error: new PluginError(PLUGIN_ERROR_CODES.UPDATE_ROLLBACK_FAILED, '移出旧版本失败（文件被占用，请退出应用后重试）: ' + err.message) };
-    }
-    try {
-      fs.renameSync(root, pkgDir);
-    } catch (err) {
-      // 回滚
+    // 8) 原子替换（rename 语义 + 回滚）。与 lifecycle 的模块目录操作共用
+    //    'profile-modules' 锁，杜绝「卸载删目录与更新换目录」交错（同进程
+    //    与跨进程都经 WriteGate 串行）。
+    const swap = () => {
       try {
-        fs.rmSync(pkgDir, { recursive: true, force: true, maxRetries: 2 });
-        fs.renameSync(backupDir, pkgDir);
-      } catch (rollbackErr) {
-        rollbackFailed = true;
-        log('更新回滚失败，旧版本备份保留在 ' + backupDir + ': ' + rollbackErr.message);
-        return { ok: false, error: new PluginError(PLUGIN_ERROR_CODES.UPDATE_ROLLBACK_FAILED, '更新失败且回滚失败，备份保留在 ' + backupDir) };
+        fs.renameSync(pkgDir, backupDir);
+      } catch (err) {
+        return { ok: false, error: new PluginError(PLUGIN_ERROR_CODES.UPDATE_ROLLBACK_FAILED, '移出旧版本失败（文件被占用，请退出应用后重试）: ' + err.message) };
       }
-      return { ok: false, error: new PluginError(PLUGIN_ERROR_CODES.PLUGIN_BUSY, '替换新版本失败: ' + err.message) };
-    }
+      try {
+        fs.renameSync(root, pkgDir);
+      } catch (err) {
+        // 回滚
+        try {
+          fs.rmSync(pkgDir, { recursive: true, force: true, maxRetries: 2 });
+          fs.renameSync(backupDir, pkgDir);
+        } catch (rollbackErr) {
+          rollbackFailed = true;
+          log('更新回滚失败，旧版本备份保留在 ' + backupDir + ': ' + rollbackErr.message);
+          return { ok: false, error: new PluginError(PLUGIN_ERROR_CODES.UPDATE_ROLLBACK_FAILED, '更新失败且回滚失败，备份保留在 ' + backupDir) };
+        }
+        return { ok: false, error: new PluginError(PLUGIN_ERROR_CODES.PLUGIN_BUSY, '替换新版本失败: ' + err.message) };
+      }
+      return null;
+    };
+    const swapResult = gate ? await gate.run('profile-modules', swap) : swap();
+    if (swapResult) return swapResult;
     return { ok: true, restartRequired: true, version: String(newPkg.version) };
   } catch (err) {
     if (err instanceof PluginError) return { ok: false, error: err };
@@ -424,15 +454,23 @@ async function updatePlugin(opts) {
   }
 }
 
-/** 启动时清理 24h 前的 .bak-<ts> 更新备份（服务运行中被锁的残留）。 */
+/** 启动时清理 24h 前的 .bak-<ts> 更新备份（服务运行中被锁的残留；含 @scope 子层）。 */
 function cleanupStaleUpdateBackups(profileDir, { now = Date.now(), maxAgeMs = 24 * 3600 * 1000 } = {}) {
   const modulesDir = path.join(profileDir, 'node_modules');
+  const scanDirs = [modulesDir];
   let entries;
-  try { entries = fs.readdirSync(modulesDir); } catch { return; }
-  for (const name of entries) {
-    const m = /^(.+)\.bak-(\d+)$/.exec(name);
-    if (!m || now - Number(m[2]) < maxAgeMs) continue;
-    try { fs.rmSync(path.join(modulesDir, name), { recursive: true, force: true, maxRetries: 2 }); } catch { /* 占用则跳过 */ }
+  try { entries = fs.readdirSync(modulesDir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    if (e.isDirectory() && e.name.startsWith('@')) scanDirs.push(path.join(modulesDir, e.name));
+  }
+  for (const dir of scanDirs) {
+    let names;
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    for (const name of names) {
+      const m = /^(.+)\.bak-(\d+)$/.exec(name);
+      if (!m || now - Number(m[2]) < maxAgeMs) continue;
+      try { fs.rmSync(path.join(dir, name), { recursive: true, force: true, maxRetries: 2 }); } catch { /* 占用则跳过 */ }
+    }
   }
 }
 

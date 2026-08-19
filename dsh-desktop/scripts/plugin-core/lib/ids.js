@@ -18,10 +18,12 @@ const LOADER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 
 /**
  * npm 包名：与历史 pluginManagerPackageDir 白名单逐字同构
- * （@scope/name 或裸名；scope 仅小写字母数字连字符，name 含点/下划线/连字符），
- * 兼容性优先，不收紧存量行为。
+ * （@scope/name 或裸名；name 含点/下划线/连字符；/i 使 scope 段同样大小写
+ * 不敏感——历史兼容口径，不收紧存量行为）。
+ * 新增负向：拒绝前导点（'.'/'..'/'...'）——这类名字过不了任何真实 npm 包，
+ * 且会削弱下游路径围栏（packageDirOf 的 startsWith 防线不应是唯一防线）。
  */
-const PACKAGE_NAME_RE = /^(@[a-z0-9-]+\/)?[a-z0-9._-]+$/i;
+const PACKAGE_NAME_RE = /^(?!\.)(@[a-z0-9-]+\/)?[a-z0-9._-]+$/i;
 
 /** 包名 → assets/plugins 下的目录名（去 scope 前缀；与 companionDirName 同构）。 */
 function packageDirName(name) {

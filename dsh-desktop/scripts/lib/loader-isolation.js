@@ -97,17 +97,23 @@ const LOADER_HELPERS_CODE = [
  * @returns {{status:'already'|'anchor-missing'|'changed', src?: string, detail?: string}}
  */
 function transformLoaderTreeIsolation(src, file) {
-  if (src.includes(LOADER_TREE_ISOLATION_MARKER)) return { status: 'already' };
-  if (!src.includes(LOADER_UPDATE_OUTCOMES_OLD) || !src.includes(LOADER_AWAIT_FAILURES_OLD)) {
+  // CRLF 归一化匹配（上游重构/换行风格漂移不应击穿隔离）；写回保持原 EOL。
+  const crlf = src.includes('\r\n');
+  const text = crlf ? src.replace(/\r\n/g, '\n') : src;
+  // 幂等判定 = marker 存在 **且** 注入体存在（仅 marker 残留的损坏文件必须重注入）。
+  const injected = text.includes('function isolateEntryApplyFailures(') && text.includes('function isolateFiberFailures(');
+  if (text.includes(LOADER_TREE_ISOLATION_MARKER) && injected) return { status: 'already' };
+  if (!text.includes(LOADER_UPDATE_OUTCOMES_OLD) || !text.includes(LOADER_AWAIT_FAILURES_OLD)) {
     return { status: 'anchor-missing', detail: '未找到 loader 失败分支锚点（版本可能已变更），跳过 ' + file };
   }
-  if (!src.includes(LOADER_HELPERS_ANCHOR)) {
+  if (!text.includes(LOADER_HELPERS_ANCHOR)) {
     return { status: 'anchor-missing', detail: '未找到 loader helper 注入锚点（版本可能已变更），跳过 ' + file };
   }
-  let out = src.replace(LOADER_UPDATE_OUTCOMES_OLD, LOADER_UPDATE_OUTCOMES_NEW);
+  let out = text.replace(LOADER_UPDATE_OUTCOMES_OLD, LOADER_UPDATE_OUTCOMES_NEW);
   out = out.replace(LOADER_AWAIT_FAILURES_OLD, LOADER_AWAIT_FAILURES_NEW);
   out = out.replace(LOADER_HELPERS_ANCHOR, LOADER_HELPERS_CODE + '\n\n' + LOADER_HELPERS_ANCHOR);
-  return { status: 'changed', src: '// ' + LOADER_TREE_ISOLATION_MARKER + '\n' + out };
+  if (!out.includes(LOADER_TREE_ISOLATION_MARKER)) out = '// ' + LOADER_TREE_ISOLATION_MARKER + '\n' + out;
+  return { status: 'changed', src: crlf ? out.replace(/\n/g, '\r\n') : out };
 }
 
 // ── dsh-app-boot：boot 审计自动隔离 ─────────────────────────────────────────
@@ -170,13 +176,17 @@ const APP_BOOT_ISOLATION_CODE = [
  * @returns {{status:'already'|'anchor-missing'|'changed', src?: string, detail?: string}}
  */
 function transformLoaderActivationIsolation(src, file) {
-  if (src.includes(LOADER_ACTIVATION_ISOLATION_MARKER)) return { status: 'already' };
-  if (!src.includes(APP_BOOT_BOOT_CALL_OLD) || !src.includes(APP_BOOT_INSERT_ANCHOR)) {
+  const crlf = src.includes('\r\n');
+  const text = crlf ? src.replace(/\r\n/g, '\n') : src;
+  const injected = text.includes('async function isolateInactiveEntries(');
+  if (text.includes(LOADER_ACTIVATION_ISOLATION_MARKER) && injected) return { status: 'already' };
+  if (!text.includes(APP_BOOT_BOOT_CALL_OLD) || !text.includes(APP_BOOT_INSERT_ANCHOR)) {
     return { status: 'anchor-missing', detail: '未找到 boot 审计锚点（版本可能已变更），跳过 ' + file };
   }
-  let out = src.replace(APP_BOOT_BOOT_CALL_OLD, APP_BOOT_BOOT_CALL_NEW);
+  let out = text.replace(APP_BOOT_BOOT_CALL_OLD, APP_BOOT_BOOT_CALL_NEW);
   out = out.replace(APP_BOOT_INSERT_ANCHOR, APP_BOOT_ISOLATION_CODE + '\n\n' + APP_BOOT_INSERT_ANCHOR);
-  return { status: 'changed', src: '// ' + LOADER_ACTIVATION_ISOLATION_MARKER + '\n' + out };
+  if (!out.includes(LOADER_ACTIVATION_ISOLATION_MARKER)) out = '// ' + LOADER_ACTIVATION_ISOLATION_MARKER + '\n' + out;
+  return { status: 'changed', src: crlf ? out.replace(/\n/g, '\r\n') : out };
 }
 
 // ── dsh-app-boot：installFailLoud 就绪后不再 exit ────────────────────────────
@@ -196,17 +206,55 @@ const FAIL_LOUD_NO_RELEASE_NEW = [
   '\t\t\treturn;',
   '\t\t}',
 ].join('\n');
-const FAIL_LOUD_RELEASE_EXIT_OLD = [
+const FAIL_LOUD_RELEASE_BLOCK_OLD = [
+  '\t\t(async () => {',
+  '\t\t\tlet timer;',
+  '\t\t\ttry {',
+  '\t\t\t\tawait Promise.race([(async () => release())(), new Promise((resolve) => {',
+  '\t\t\t\t\ttimer = setTimeout(resolve, FAIL_LOUD_RELEASE_TIMEOUT_MS);',
+  '\t\t\t\t})]);',
+  '\t\t\t} catch {}',
   '\t\t\tclearTimeout(timer);',
   '\t\t\tproc.exit(1);',
+  '\t\t})();',
 ].join('\n');
-const FAIL_LOUD_RELEASE_EXIT_NEW = [
+// 就绪后（已武装）绝不能执行 release：release 是「退出前把终端/插件树交还」的
+// 拆除钩子——宿主要继续运行，执行它会把整棵树拆掉而进程存活（僵尸）。
+// 武装判定必须在 release 之前，直接记录并返回。
+const FAIL_LOUD_RELEASE_BLOCK_NEW = [
+  '\t\t(async () => {',
+  '\t\t\tif (process.env.DSH_CRASH_SHIELD_ARMED === "1") {',
+  '\t\t\t\tproc.stderr.write(`[crash-shield] isolated fatal load failure: ${err instanceof Error ? err.message : String(err)}\\n`);',
+  '\t\t\t\treturn;',
+  '\t\t\t}',
+  '\t\t\tlet timer;',
+  '\t\t\ttry {',
+  '\t\t\t\tawait Promise.race([(async () => release())(), new Promise((resolve) => {',
+  '\t\t\t\t\ttimer = setTimeout(resolve, FAIL_LOUD_RELEASE_TIMEOUT_MS);',
+  '\t\t\t\t})]);',
+  '\t\t\t} catch {}',
+  '\t\t\tclearTimeout(timer);',
+  '\t\t\tproc.exit(1);',
+  '\t\t})();',
+].join('\n');
+
+// 旧 transform 注入的「先 release 后判 armed」形态（已废弃；用于修复已打补丁的
+// dev 树：release 先执行会把插件树拆掉而进程存活 → 僵尸宿主）。
+const FAIL_LOUD_RELEASE_BLOCK_OLD_INJECTED = [
+  '\t\t(async () => {',
+  '\t\t\tlet timer;',
+  '\t\t\ttry {',
+  '\t\t\t\tawait Promise.race([(async () => release())(), new Promise((resolve) => {',
+  '\t\t\t\t\ttimer = setTimeout(resolve, FAIL_LOUD_RELEASE_TIMEOUT_MS);',
+  '\t\t\t\t})]);',
+  '\t\t\t} catch {}',
   '\t\t\tclearTimeout(timer);',
   '\t\t\tif (process.env.DSH_CRASH_SHIELD_ARMED === "1") {',
   '\t\t\t\tproc.stderr.write(`[crash-shield] isolated fatal load failure: ${err instanceof Error ? err.message : String(err)}\\n`);',
   '\t\t\t\treturn;',
   '\t\t\t}',
   '\t\t\tproc.exit(1);',
+  '\t\t})();',
 ].join('\n');
 
 /**
@@ -216,13 +264,23 @@ const FAIL_LOUD_RELEASE_EXIT_NEW = [
  * @returns {{status:'already'|'anchor-missing'|'changed', src?: string, detail?: string}}
  */
 function transformFailLoudIsolation(src, file) {
-  if (src.includes(FAIL_LOUD_ISOLATION_MARKER)) return { status: 'already' };
-  if (!src.includes(FAIL_LOUD_NO_RELEASE_OLD) || !src.includes(FAIL_LOUD_RELEASE_EXIT_OLD)) {
+  const crlf = src.includes('\r\n');
+  const text = crlf ? src.replace(/\r\n/g, '\n') : src;
+  // 幂等判定 = marker 存在 且 新形态注入体存在；仅 marker 残留（或旧形态
+  // 「先 release 后判 armed」）都进入修复路径。
+  if (text.includes(FAIL_LOUD_ISOLATION_MARKER) && text.includes(FAIL_LOUD_RELEASE_BLOCK_NEW)) return { status: 'already' };
+  // 修复路径 1：旧注入形态 → 替换为「武装判定先于 release」的新形态。
+  if (text.includes(FAIL_LOUD_RELEASE_BLOCK_OLD_INJECTED)) {
+    const out = text.replace(FAIL_LOUD_RELEASE_BLOCK_OLD_INJECTED, FAIL_LOUD_RELEASE_BLOCK_NEW);
+    return { status: 'changed', src: crlf ? out.replace(/\n/g, '\r\n') : out };
+  }
+  if (!text.includes(FAIL_LOUD_NO_RELEASE_OLD) || !text.includes(FAIL_LOUD_RELEASE_BLOCK_OLD)) {
     return { status: 'anchor-missing', detail: '未找到 installFailLoud 锚点（版本可能已变更），跳过 ' + file };
   }
-  let out = src.replace(FAIL_LOUD_NO_RELEASE_OLD, FAIL_LOUD_NO_RELEASE_NEW);
-  out = out.replace(FAIL_LOUD_RELEASE_EXIT_OLD, FAIL_LOUD_RELEASE_EXIT_NEW);
-  return { status: 'changed', src: '// ' + FAIL_LOUD_ISOLATION_MARKER + '\n' + out };
+  let out = text.replace(FAIL_LOUD_NO_RELEASE_OLD, FAIL_LOUD_NO_RELEASE_NEW);
+  out = out.replace(FAIL_LOUD_RELEASE_BLOCK_OLD, FAIL_LOUD_RELEASE_BLOCK_NEW);
+  if (!out.includes(FAIL_LOUD_ISOLATION_MARKER)) out = '// ' + FAIL_LOUD_ISOLATION_MARKER + '\n' + out;
+  return { status: 'changed', src: crlf ? out.replace(/\n/g, '\r\n') : out };
 }
 
 module.exports = {

@@ -38,8 +38,9 @@ function createSupervision(opts) {
   let probing = false;
 
   function probeOnce() {
-    const baseUrl = getBaseUrl();
-    if (!baseUrl) return Promise.resolve();
+    let baseUrl;
+    try { baseUrl = getBaseUrl(); } catch { return Promise.resolve(false); }
+    if (!baseUrl) return Promise.resolve(false);
     return Promise.race([
       httpGet(baseUrl + '/', { timeout: probeTimeoutMs }),
       new Promise((resolve) => {
@@ -55,7 +56,9 @@ function createSupervision(opts) {
   async function tick() {
     if (stopped) return;
     const now = timers.now();
-    if (now - startAt < graceMs || now - lastRecoveryAt < cooldownMs) {
+    // lastRecoveryAt=0 表示「从未触发过 zombie」：注入时钟从 0 开始时不得误入
+    // cooldown 窗口（now - 0 恒大于 cooldownMs 的假象会随假时钟翻转）。
+    if (now - startAt < graceMs || (lastRecoveryAt !== 0 && now - lastRecoveryAt < cooldownMs)) {
       schedule();
       return;
     }
@@ -64,6 +67,9 @@ function createSupervision(opts) {
     let healthy;
     try {
       healthy = await probeOnce();
+    } catch {
+      // 探活异常（注入的 httpGet 同步抛错等）与探活失败同口径，绝不打断定时循环。
+      healthy = false;
     } finally {
       probing = false;
     }

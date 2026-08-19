@@ -27,8 +27,16 @@
       （不能被「跳过」吞掉）。
 - [ ] **不落盘承诺**：确认注入代码**没有**调用 `tree.write()` / 写文件——隔离持久化
       只能由壳层 quarantine 完成，避免 loader 与壳层并发写 `cordis.patch.yml`。
-- [ ] **幂等与升级韧性**：marker 判定 `already` 路径；dsh 升级后锚点失配 →
-      `anchor-missing`（日志告警、跳过），不得抛错中断启动。
+- [ ] **幂等与升级韧性**：marker 判定 `already` 路径（marker 与**注入体**同时存在才算
+      already——仅 marker 残留的损坏文件会重注入）；dsh 升级后锚点失配 →
+      `anchor-missing`（日志告警、跳过），不得抛错中断启动；transform 对 CRLF
+      输入先归一化再匹配、写回保持原 EOL。
+- [ ] **installFailLoud 就绪后分支（僵尸防线）**：武装（DSH_CRASH_SHIELD_ARMED=1）
+      判定必须在 `release()` **之前**——release 是「退出前拆除插件树」的钩子，
+      宿主继续运行时执行它会把树拆掉而进程存活（僵尸）；两处 exit 分支都要检查。
+- [ ] **崩溃屏蔽启动期语义**：未武装时 unhandledRejection 延迟到下一 tick 重抛
+      （先让 installFailLoud 出「fatal load failure」诊断），uncaughtException
+      原样重抛；就绪后吞错 + 归因（`.pnpm` 噪声 token 已过滤）。
 
 ### 1.2 更新链加固（安全敏感）
 文件：`scripts/plugin-core/lib/updates.js`。
@@ -39,25 +47,42 @@
 - [ ] **归档预检在解压前**：`listArchive`（`tar -tf` + `tar -tvf`）先于 `extractArchive`；
       `../`、绝对路径、盘符、symlink/hardlink/设备/fifo 全部拒绝；解压后 `treeHasLinks`
       复检为纵深防线而非唯一防线。
-- [ ] **包名/版本契约**：解压产物 `package.json` 的 `name` 必须与更新目标一致，
-      `version` 必须非空；不匹配 → `UPDATE_PACKAGE_MISMATCH`。
+- [ ] **包名/版本契约**：解压产物 `package.json` 的 `name` 必须**存在**且与更新目标
+      一致（缺失同样拒绝）；`version` 必须非空且**严格高于**当前安装版本
+      （降级/原地重装拒绝）；不匹配 → `UPDATE_PACKAGE_MISMATCH`。
 - [ ] **扫描门禁**：高危命中必须经 `confirm`（主进程弹窗），拒绝 → `UPDATE_SCAN_BLOCKED`
       且**不触碰已安装目录**。
 - [ ] **原子替换与回滚**：rename 语义（pkgDir→.bak、tempRoot→pkgDir），失败回滚
-      rename 而非 rm+rename；回滚再失败 → `UPDATE_ROLLBACK_FAILED` + 备份保留。
-- [ ] **残留清理**：`cleanupStaleUpdateBackups` 只清 >24h 的 `.bak-*`，不误删新备份。
+      rename 而非 rm+rename；回滚再失败 → `UPDATE_ROLLBACK_FAILED` + 备份保留；
+      替换段与卸载的模块目录操作共用 `profile-modules` 锁（不交错）。
+- [ ] **残留清理**：`cleanupStaleUpdateBackups` 只清 >24h 的 `.bak-*`（含 @scope
+      子层），不误删新备份。
+- [ ] **传输层上限**：`defaultRequest` 支持注入 `headers` 与 `maxBytes`
+      （JSON 响应 4MB 上限在传输层生效，不整块进内存）。
 
 ### 1.3 卸载彻底性（数据正确性）
 文件：`scripts/plugin-core/lib/lifecycle.js` + `manifest-store.js` + `state-store.js`。
 
 - [ ] **写入顺序（I1）**：State → Patch → Manifest → Modules，前一步失败即中止；
-      state 落盘为 `await`（不可 fire-and-forget）。
+      state 落盘为 `await`（不可 fire-and-forget）；**save 失败时内存/簿记回滚**
+      （失败的决策不得在下一次 save 静默落盘）；restore 的 clearUninstalled
+      失败同样中止（绝不「已恢复」假成功）。
 - [ ] **防复活三件套**：`dependencies` 键移除 + `dsh.profile.bundles` 登记移除 +
       state `uninstalled` 决策。验证：卸载第三方 bundle 后跑一次
       `dsh plugin install`（或市场装其它插件触发 pnpm）不会把已卸载插件装回。
 - [ ] **rename 语义**：运行中卸载先 rename 到 `.trash-*` 再删，删除失败不视为卸载失败。
-- [ ] **store 清理**：`.pnpm/<name>@*` 仅在无其它链接引用时删除（`referencedByLinks`）。
+- [ ] **store 清理**：`.pnpm/<name>@*` 仅在无其它链接引用时删除（`referencedByLinks`
+      同时检查顶层与 `.pnpm/*/node_modules` 传递引用；visited 集 + 深度上限防
+      junction 环无限递归）。
 - [ ] **第三方恢复拒绝**：`PLUGIN_RESTORE_NO_SOURCE`，不得假成功。
+- [ ] **legacy 存量兼容**：v0.4.1 时代「仅 patch removed 行」的卸载（state 无记录）
+      恢复必须成功（clearUninstalled 的「不存在」不得被当成持久化失败）；
+      `disabled/removed` 的 false 值翻转与恢复清理均为**大小写不敏感**
+      （issue #87 手写 `True`/`False` 口径一致，不产生重复键）。
+- [ ] **state-store 写穿语义**：锁内重读磁盘、只叠加本实例 dirty 键 + tombstone，
+      跨进程「不丢新增、不复活删除」；**磁盘仍为 v1 时**（构造期迁移写盘失败兜底）
+      写穿合并保留 v1 决策；`readOnly`（CLI --dry-run）构造期与 save 均不写盘；
+      危险键（`__proto__`/`constructor`/`prototype`）拒绝入图。
 
 ### 1.4 自动隔离闭环（新核心能力）
 文件：`scripts/plugin-core/lib/quarantine.js`、`markers.js`、`main.js`（观测段）、
@@ -69,31 +94,39 @@
 - [ ] **壳层观测**：`watchServerProc` 的 stderr 分支用 `createMarkerAccumulator`
       跨 chunk 拼接；`noteLoaderIsolation` 去重（同 id 一次）；`handleAttributeMarkers`
       阈值 3/10min、每源只触发一次。
-- [ ] **quarantine 落盘**：写 `disabled: true` 顶层覆盖行 + state 决策；核心插件拒绝；
-      已卸载插件跳过。
+- [ ] **quarantine 落盘**：先写 `disabled: true` 顶层覆盖行（运行期防线先落盘），
+      再写 state 决策（失败仅日志）；核心插件拒绝；已卸载插件跳过；
+      `applyBySource` 全路径返回 Promise（未映射/空源不抛 TypeError）。
 - [ ] **解除闭环**：`setEnabled(true)` / `quarantine.clear` 同时清 state 与 patch 行；
-      插件仍坏时下一轮自动隔离再次触发（有风暴/崩溃环上限，无死循环）。
+      插件仍坏时下一轮自动隔离再次触发（启用/恢复同时清除本会话去重集，闭环
+      会话内可重复；有风暴/崩溃环上限，无死循环）。
 - [ ] **通知与重启限频**：隔离后守护重启一次；不干扰既有崩溃环计数。
 
 ### 1.5 存活探针（假活恢复）
 文件：`scripts/plugin-core/lib/supervision.js`、`main.js` 接线。
 
-- [ ] **不误伤**：grace（启动后 2min）/ cooldown（恢复后 1min）/ isBusy（插件变更与
-      重启进行中）三个窗口内绝不判定；`stop()` 后无定时器活动。
+- [ ] **不误伤**：grace（启动后 2min）/ cooldown（恢复后 1min）/ isBusy（插件变更、
+      诊断写、guard 变更与重启进行中）三个窗口内绝不判定；`stop()` 后无定时器活动。
 - [ ] **触发链**：连续 3 次探活失败 → `restartService`（守护启动）；重启失败不抛
       未捕获异常。
+- [ ] **重启配额（无死循环）**：同一 10 分钟窗口最多自动重启 2 次，耗尽后停止
+      自动重启 + 弹窗提示排查；服务稳定落地（30s）后配额复位。
 
 ### 1.6 IPC 能力策略与权限收紧
 文件：`scripts/plugin-core/lib/capability.js`、`main.js`。
 
 - [ ] **全量 origin 校验**：`dsh:plugin-list` / `set-enabled` 与高危动作同口径
-      （历史只查 sender 的不一致已消除）；origin 精确比较（前缀匹配不可用）。
+      （历史只查 sender 的不一致已消除）；origin 精确比较（前缀匹配不可用）；
+      **`chrome:restart-service` 同样收口到同一校验**（不再残留 sender-only）。
 - [ ] **破坏性确认**：uninstall / update / backup-restore(apply) / order-apply /
       remove-bundle / guard restore 均有主进程确认（测试模式自动放行）。
 - [ ] **权限白名单**：`setPermissionRequestHandler` 只放行
-      fullscreen / pointerLock / notifications / clipboard-read / clipboard-sanitized-write；
+      fullscreen / pointerLock / notifications / clipboard-read / clipboard-sanitized-write
+      **且请求 origin 与当前 webUrl.origin 精确相等**（origin 盲区已修复）；
       media（摄像头/麦克风）、geolocation、设备类一律拒绝并记日志。
 - [ ] **preload 桥未扩张**：`window.dshDesktop` 暴露面与 v0.4.1 一致，无新增 API。
+- [ ] **破坏性确认文案单一数据源**：main.js 只按 `CONFIRM_MESSAGES` 键引用，
+      不得散落重复文案。
 
 ### 1.7 对账 / 同步 / 自愈兼容层
 文件：`scripts/lib/profile-reconcile.js`、`companion-profile.js`、
@@ -102,16 +135,27 @@
 `scripts/lib/patch-io.js`、`plugin-guard.js`。
 
 - [ ] **单一数据源**：patch 手术经 `plugin-core/lib/patch-surgery.js`；原子写经
-      `fs-atomic.js`；三个旧文件是纯 re-export（禁止再出现独立实现）。
+      `fs-atomic.js`；manifest 写经 `ManifestStore`（含
+      `profile-patch-heal.removeBundlesFromProfile` 的委托路径——启动自愈与用户
+      卸载同锁同实现）；三个旧文件是纯 re-export（禁止再出现独立实现）。
 - [ ] **卸载决策双源**：shell 与 CLI 同步器都合并 state 的 uninstalled；
       `removedBundles` 覆盖第三方已卸载名（不再误报 UNRESOLVABLE）。
 - [ ] **reconcile 修复**：quarantine 记录同 code+reason 去重；`removedByPolicy`
       只报实际移除名；`reset` 只在「存在但损坏」时为真；manifest 写失败仅告警不冒泡；
       包名形状校验（拒绝 `../`）。
 - [ ] **companion-profile 修复**：过期清理加白名单（`KNOWN_COMPANION_DIR_NAMES`）
-      且覆盖非 scope 落点；mtime 取整比较（保持零写入幂等）。
+      **且以当前配套目录名（expectedDirs）为排除集**——当前插件绝不被清理
+      （删除重拷抖动 + 「保留更新版本」分支失效的回归已修复）；覆盖非 scope
+      落点；mtime 取整比较（保持零写入幂等）。
 - [ ] **guard 修复**：id 级去重已接线 `collectBundleEntryIds`；扫描经 `scan.js`；
       头注释作者名笔误已修正（chenw2759-wq）。
+- [ ] **已知边界（诚实披露）**：`profile-reconcile` 的 boot 期 manifest 重建写
+      与用户 IPC 卸载写之间存在理论上的「先读后写」窗口（窗口窄：对账发生在
+      启动同步期，早于可交互的卸载）。该窗口不会造成永久不一致——卸载决策的
+      权威来源是「state.uninstalled ∪ patch removed 行」双源，任一被 clobber
+      的 bundles 登记都会在下次启动同步被双源重新过滤；运行期残留条目则被
+      L1 loader 隔离兜底。若未来要彻底关闭该窗口，需把 reconcile 的落盘改到
+      `profile-manifest` 锁内（读改写一体化），本 PR 未引入该重构以控制面。
 
 ---
 
@@ -143,13 +187,19 @@ node --test "scripts/test/*.test.js" "scripts/test/*.test.mjs"
 node scripts/test/integration-runner.js --all
 # 重构核心场景单独跑
 node scripts/test/integration-runner.js plugin-auto-isolation
+node scripts/test/integration-runner.js plugin-uninstall-restore-e2e
+node scripts/test/integration-runner.js plugin-supervision-zombie-cap
 node scripts/test/integration-runner.js boot-healthy server-restart restart-service
 node scripts/test/integration-runner.js heal-dup-patch heal-missing-bundle heal-broken-manifest
 ```
 
 新增单测（必须逐条阅读断言，确认不是「假绿」）：
-`unit-plugin-core-basic / patch-surgery / lifecycle / updates`、
-`unit-loader-isolation`、`unit-web-crash-shield`（扩展归因断言）。
+`unit-plugin-core-basic / patch-surgery / lifecycle / updates`（第一轮）、
+`unit-plugin-core-state-deep / fs-atomic-deep / lifecycle-deep / manifest-store /
+inventory / patch-surgery-deep / updates-deep / scan / quarantine / capability /
+markers / supervision / ids-errors-text / plugin-center`（第二轮深度扩充）、
+`unit-loader-isolation(-deep)`、`unit-web-crash-shield(-deep)`（归因/阈值/窗口/
+跨 chunk/执行级行为）、`unit-compat-regression*`（compat 修复逐项钉死）。
 
 ### 3.2 人工冒烟（打包后实机，务必隔离 DSH_HOME）
 

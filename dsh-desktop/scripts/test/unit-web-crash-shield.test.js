@@ -58,12 +58,24 @@ test('就绪后 unhandledRejection 被吞并写日志；非 Error 原因安全�
   assert.match(proc.stderrLines[1], /plain string reason/);
 });
 
-test('启动期 unhandledRejection 重抛（fail-fast）', () => {
+test('启动期 unhandledRejection 延迟到下一 tick 重抛（不抢占 installFailLoud 诊断；就绪后不再重抛）', () => {
   const proc = fakeProc();
-  const shield = createCrashShield({ process: proc, emit: () => {} });
+  const queued = [];
+  const shield = createCrashShield({
+    process: proc,
+    emit: () => {},
+    timers: { now: () => 0, immediate: (fn) => { queued.push(fn); } },
+  });
   shield.install();
-  assert.throws(() => shield.onUnhandledRejection(new Error('early rej')), /early rej/);
-  assert.throws(() => shield.onUnhandledRejection('x'));
+  assert.doesNotThrow(() => shield.onUnhandledRejection(new Error('early rej')));
+  assert.doesNotThrow(() => shield.onUnhandledRejection('x'));
+  assert.strictEqual(queued.length, 2);
+  assert.throws(() => queued[0](), /early rej/);
+  assert.throws(() => queued[1](), /x/);
+  // 已武装：延迟重抛不再执行（宿主已就绪，拒绝被历史启动期重抛打死）。
+  shield.arm();
+  assert.doesNotThrow(() => queued[0]());
+  assert.doesNotThrow(() => queued[1]());
 });
 
 test('风暴断路：窗口内超上限后恢复抛出（交壳层崩溃环自愈）', () => {

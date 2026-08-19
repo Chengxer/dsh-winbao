@@ -467,18 +467,7 @@ function reconcileProfileBundles(profileDir, opts) {
       const check = validateBundleEntry(name, { installAnchorDir, profileDir, parsePatch });
       if (!check.ok) {
         result.removed.push({ name, code: check.code, reason: check.reason });
-        // 记录去重：同 code + reason 的既有条目不重写（保留首次 removedAt，
-        // 避免每次启动对同一持续损坏状态做无意义重写）。
-        const existing = recordNext.entries[name];
-        if (!existing || existing.code !== check.code || existing.reason !== check.reason) {
-          recordNext.entries[name] = {
-            code: check.code,
-            reason: check.reason,
-            removedAt: new Date().toISOString(),
-          };
-          recordDirty = true;
-          result.quarantined.push(name);
-        }
+        if (quarantineEntry(name, check.code, check.reason)) result.quarantined.push(name);
         // manifest 未被改动（该名从未被登记）：不置 changed，避免对健康
         // manifest 做内容相同的无意义重写。
         log('配套 bundle 校验失败，不登记进 web profile bundles: ' + name + ' —— ' + check.reason + '（重装该插件后重新登记即可恢复）');
@@ -528,16 +517,7 @@ function reconcileProfileBundles(profileDir, opts) {
           if (check.ok) { kept.push(name); continue; }
           dropped.push(name);
           result.removed.push({ name, code: check.code, reason: check.reason });
-          const existing = recordNext.entries[name];
-          if (!existing || existing.code !== check.code || existing.reason !== check.reason) {
-            recordNext.entries[name] = {
-              code: check.code,
-              reason: check.reason,
-              removedAt: new Date().toISOString(),
-            };
-            recordDirty = true;
-            result.quarantined.push(name);
-          }
+          if (quarantineEntry(name, check.code, check.reason)) result.quarantined.push(name);
           result.changed = true;
           log('恢复的 bundle 复检失败，从 web profile bundles 移除: ' + name + ' —— ' + check.reason + '（重装该插件后重新登记即可恢复）');
         }

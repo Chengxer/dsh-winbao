@@ -127,6 +127,8 @@ function createPluginCenter(ctx) {
       if (row.removed) throw new PluginError(PLUGIN_ERROR_CODES.PLUGIN_RESTORE_NO_SOURCE, '插件已卸载，请先恢复再更新');
       return withUpdateLock(id, () => updatePlugin({
         id, name: row.name, profileDir: profileDir(), source: src,
+        installedVersion: installedVersion(row.name),
+        gate: patchGate,
         log: logTopic('plugin-manager'),
         confirm: confirm || (async (findings) => {
           const detail = findings.slice(0, 5).map((f) => f.message).join('\n');
@@ -160,9 +162,9 @@ function createPluginCenter(ctx) {
     },
     updates,
     quarantine: {
-      apply: (id, info) => quarantine.apply(id, info),
-      applyBySource: (source, info) => quarantine.applyBySource(source, info),
-      clear: (id) => quarantine.clear(id),
+      apply: (id, info) => wrapMutation(() => quarantine.apply(id, info)),
+      applyBySource: (source, info) => wrapMutation(() => quarantine.applyBySource(source, info)),
+      clear: (id) => wrapMutation(() => quarantine.clear(id)),
     },
     scan: {
       profile: () => scanDir({
@@ -183,8 +185,12 @@ function createPluginCenter(ctx) {
     },
   };
 
-  api.supervision = ({ getBaseUrl, httpGet, isBusy, onZombie }) => createSupervision({
-    getBaseUrl, httpGet,
+  // 其余监督参数（intervalMs / graceMs / cooldownMs / failThreshold / probeTimeoutMs /
+  // timers）原样透传——调用方（含集成测试的时间压缩注入）不得被门面吞掉。
+  api.supervision = ({ getBaseUrl, httpGet, isBusy, onZombie, ...rest }) => createSupervision({
+    ...rest,
+    getBaseUrl,
+    httpGet,
     isBusy: () => (isBusy ? isBusy() : false) || api.isMutating(),
     onZombie,
     log: (m) => log('supervision', m),

@@ -34,11 +34,13 @@ function parseMarkers(text) {
 
 /**
  * 累积式解析器：stderr 是分块到达的流，标记可能跨 chunk 断裂。
- * 每块只保留尾部最长可能前缀（取两种标记中较长者 ≈ 96 字符）拼接下一块。
+ * 每块只保留尾部 KEEP 字符拼接下一块。KEEP 必须大于最长标记前缀
+ * （`[loader-isolation] entry <id> (<name>)`，id 最长 128、name 最长 214），
+ * 否则前缀在 chunk 边界前被截断会导致标记漏检。
  */
 function createMarkerAccumulator() {
   let tail = '';
-  const KEEP = 128;
+  const KEEP = 1024;
   return (chunk) => {
     const text = tail + String(chunk);
     tail = text.slice(-KEEP);

@@ -70,8 +70,8 @@ function parsePatchRows(text) {
     if (isSiblingBlock && indent < 4) { flush(); continue; }
     const nm = /^\s*name:\s*['"]?([^'"\s]+)['"]?\s*$/.exec(line);
     if (nm) current.row.name = nm[1];
-    else if (/^\s*disabled:\s*(true|false)\s*$/.test(line)) current.row.disabled = /true/.test(line);
-    else if (/^\s*removed:\s*(true|false)\s*$/.test(line)) current.row.removed = /true/.test(line);
+    else if (/^\s*disabled:\s*(true|false)\s*$/i.test(line)) current.row.disabled = /true/i.test(line);
+    else if (/^\s*removed:\s*(true|false)\s*$/i.test(line)) current.row.removed = /true/i.test(line);
     else if (/^\s*config\s*:/.test(line)) current.row.hasConfig = true;
   }
   flush();
@@ -151,15 +151,21 @@ function setPluginRemoved(text, id, removed, name) {
     // 1) 与禁用同款：移出 insert 块 + 孤儿块清理
     out = out.replace(insertInnerEntryRe(id), (m) => (m[0] === '\n' ? '\n' : ''));
     out = dropEmptyInsertBlocks(out);
-    // 2) 顶层条目：确保 disabled: true + removed: true
+    // 2) 顶层条目：确保 disabled: true + removed: true（false 值一律翻转为 true，
+    //    否则手写 `disabled: false`/`removed: false` 会让卸载后条目仍参与组合/
+    //    被同步器复活）
     const topRe = topLevelEntryRe(id);
     if (topRe.test(out)) {
       topRe.lastIndex = 0;
       out = out.replace(topRe, (block) => {
-        if (!/(?:^|\n)[ \t]{0,2}removed\s*:/.test(block)) {
+        if (/(?:^|\n)[ \t]{0,2}removed\s*:\s*false\b/i.test(block)) {
+          block = block.replace(/(\n[ \t]{0,2}removed\s*:\s*)false\b/i, '$1true');
+        } else if (!/(?:^|\n)[ \t]{0,2}removed\s*:/i.test(block)) {
           block = block.replace(/\n$/, '') + '\n  removed: true\n';
         }
-        if (!/(?:^|\n)[ \t]{0,2}disabled\s*:/.test(block)) {
+        if (/(?:^|\n)[ \t]{0,2}disabled\s*:\s*false\b/i.test(block)) {
+          block = block.replace(/(\n[ \t]{0,2}disabled\s*:\s*)false\b/i, '$1true');
+        } else if (!/(?:^|\n)[ \t]{0,2}disabled\s*:/i.test(block)) {
           if (/(?:^|\n)[ \t]{0,2}name\s*:/.test(block)) {
             block = block.replace(/(?:\n[ \t]{0,2}name\s*:[^\n]*)/, (m) => m + '\n  disabled: true');
           } else {
@@ -181,8 +187,8 @@ function setPluginRemoved(text, id, removed, name) {
   // 恢复：移除 removed/disabled 行；无 config 则整个条目移除（含卸载注释）
   out = out.replace(topLevelEntryRe(id), (m) => {
     const withoutFlags = m
-      .replace(/\n[ \t]{0,2}removed\s*:\s*true[^\n]*/g, '')
-      .replace(/\n[ \t]{0,2}disabled\s*:\s*(?:true|false)[^\n]*/g, '');
+      .replace(/\n[ \t]{0,2}removed\s*:\s*true[^\n]*/gi, '')
+      .replace(/\n[ \t]{0,2}disabled\s*:\s*(?:true|false)[^\n]*/gi, '');
     if (/(?:^|\n)[ \t]{0,2}config\s*:/.test(withoutFlags)) return withoutFlags;
     return m[0] === '\n' ? '\n' : '';
   });
@@ -223,7 +229,12 @@ function togglePluginInPatch(text, id, enabled, name) {
       out = out.replace(topRe, (block) => {
         // 只认 0-2 空格缩进的 disabled/name 行（本模块写入的格式），
         // 不碰 config 块内更深缩进的同名键。
-        if (/(?:^|\n)[ \t]{0,2}disabled\s*:/.test(block)) return block;
+        // `disabled: false` 与「无 disabled 行」同义：必须翻转为 true，
+        // 否则手写 false 会让「关闭」静默失效（插件保持启用）。
+        if (/(?:^|\n)[ \t]{0,2}disabled\s*:\s*true\b/i.test(block)) return block;
+        if (/(?:^|\n)[ \t]{0,2}disabled\s*:\s*false\b/i.test(block)) {
+          return block.replace(/(\n[ \t]{0,2}disabled\s*:\s*)false\b/i, '$1true');
+        }
         if (/(?:^|\n)[ \t]{0,2}name\s*:/.test(block)) {
           return block.replace(/(?:\n[ \t]{0,2}name\s*:[^\n]*)/, (m) => m + '\n  disabled: true');
         }
@@ -242,7 +253,7 @@ function togglePluginInPatch(text, id, enabled, name) {
   // 启用：顶层条目移除 disabled 行（0-2 空格缩进）；无 config 则整个条目移除；
   // 连带移除本模块的标记注释（避免反复开关时注释堆积）。
   out = out.replace(topLevelEntryRe(id), (m) => {
-    const withoutDisabled = m.replace(/\n[ \t]{0,2}disabled\s*:\s*(?:true|false)[^\n]*/g, '');
+    const withoutDisabled = m.replace(/\n[ \t]{0,2}disabled\s*:\s*(?:true|false)[^\n]*/gi, '');
     if (/(?:^|\n)[ \t]{0,2}config\s*:/.test(withoutDisabled)) return withoutDisabled;
     return m[0] === '\n' ? '\n' : '';
   });
@@ -589,7 +600,9 @@ function healPatchListSyntax(text) {
   return { text, healed: false };
 }
 
-/** 从 patch 文本提取「卸载标记」id（纯文本扫描，YAML 损坏时仍可用）。 */
+/** 从 patch 文本提取「卸载标记」id（纯文本扫描，YAML 损坏时仍可用）。
+ *  `removed: true` 值大小写不敏感（issue #87 手写 `True` 历史契约），
+ *  与 parsePatchRows 的解析口径一致。 */
 function removedPluginIdsFromPatch(patch) {
   const ids = new Set();
   const text = String(patch || '');

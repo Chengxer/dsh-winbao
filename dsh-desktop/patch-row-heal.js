@@ -14,7 +14,7 @@ const {
   removeBundledRowDuplicates,
   bundlePatchEntryIds,
   collectBundleEntryIds,
-} = require('./plugin-core/lib/patch-surgery');
+} = require('./scripts/plugin-core/lib/patch-surgery');
 
 module.exports = {
   configLinesFor,

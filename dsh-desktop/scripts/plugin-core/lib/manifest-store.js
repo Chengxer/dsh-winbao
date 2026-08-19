@@ -66,7 +66,10 @@ class ManifestStore {
       const next = fn(manifest);
       if (next === null || next === undefined) return { changed: false, manifest, backup: null };
       const raw = this.readRaw();
-      const serialized = JSON.stringify(next, null, 2) + '\n';
+      // EOL 保持（I2）：原文件 CRLF 则写回 CRLF；否则 LF。
+      const rawCrlf = typeof raw === 'string' && raw.includes('\r\n');
+      let serialized = JSON.stringify(next, null, 2) + '\n';
+      if (rawCrlf) serialized = serialized.replace(/\n/g, '\r\n');
       if (raw === serialized) return { changed: false, manifest: next, backup: null };
       const backup = backupFile(this.file, { keep: this.backupKeep, log: this.log });
       writeFileAtomic(this.file, serialized);

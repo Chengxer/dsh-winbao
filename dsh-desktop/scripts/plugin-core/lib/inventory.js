@@ -84,15 +84,17 @@ function collectInventory(opts) {
   };
 
   // companion：配套插件（带卸载标记归入 removed 分组）。
+  // 分组判定同时看 patch removed 行与 state 卸载决策：patch 被自愈重置后，
+  // 仅剩 state 决策的卸载项也必须归入 removed（与 §6 表一致）。
   for (const p of companionPlugins) {
     const u = userById.get(p.id);
-    addRow(p.id, p.name, u && u.removed === true ? 'removed' : 'companion');
+    addRow(p.id, p.name, (u && u.removed === true) || state.isUninstalled(p.id) ? 'removed' : 'companion');
   }
   // insert 块出现但不在配套表 → other。
   for (const [id, name] of insertById) if (!companionById.has(id)) addRow(id, name, 'other');
   // 用户层条目（llm-deepseek / web / 手动条目）。
   for (const [id, u] of userById) {
-    if (!companionById.has(id)) addRow(id, u.name, u.removed === true ? 'removed' : 'other');
+    if (!companionById.has(id)) addRow(id, u.name, u.removed === true || state.isUninstalled(id) ? 'removed' : 'other');
   }
   // bundles：核心 / 配套名之外的第三方 bundle → community。
   for (const name of bundles) {

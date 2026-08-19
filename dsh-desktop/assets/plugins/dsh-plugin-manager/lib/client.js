@@ -508,7 +508,7 @@ window.__ModuleLoader__.load({
 										style: linkBtnStyle(uninstallArmed === row.id, false),
 										children: uninstallArmed === row.id ? L.uninstallConfirm : L.uninstallBtn
 									}) : null,
-									removed ? jsx("button", {
+									removed && row.restorable !== false ? jsx("button", {
 										type: "button",
 										onClick: (e) => { e.stopPropagation(); doRestore(row); },
 										style: linkBtnStyle(false, true),
@@ -581,7 +581,7 @@ window.__ModuleLoader__.load({
 									style: linkBtnStyle(uninstallArmed === row.id, false),
 									children: uninstallArmed === row.id ? L.uninstallConfirm : L.uninstallBtn
 								}) : null,
-								removed ? jsx("button", {
+								removed && row.restorable !== false ? jsx("button", {
 									type: "button",
 									onClick: () => doRestore(row),
 									style: linkBtnStyle(false, true),

@@ -57,17 +57,22 @@ const KNOWN_COMPANION_DIR_NAMES = new Set([
 
 /**
  * 清理历史版本遗留的旧包目录（白名单 + 私有 + 描述三重判定，避免误删）。
+ * 修复：白名单里包含**当前配套目录名**，若不做「当前名单」排除，命中
+ * private+描述判定的当前插件会在每次同步时被「删除 → 重新复制」——
+ * 破坏零写入幂等，并让「保留更新版本」分支读不到已装版本。
  * @param {string} scanDir 扫描目录（node_modules 或 node_modules/@scope）
- * @param {Object} hooks { log, fail, plan, dryRun }
+ * @param {Object} hooks { log, fail, plan, dryRun, expectedDirs }
+ *   expectedDirs —— 当前配套目录名集合（bare 名），命中即跳过（绝不清当前插件）
  * @returns {number} 清理数量
  */
 function removeStaleCompanionPlugins(scanDir, hooks = {}) {
-  const { log, fail, plan, dryRun = false } = hooks;
+  const { log, fail, plan, dryRun = false, expectedDirs } = hooks;
   let cleaned = 0;
   let entries;
   try { entries = fs.readdirSync(scanDir, { withFileTypes: true }); } catch { return cleaned; }
   for (const entry of entries) {
     if (!entry.isDirectory() || !KNOWN_COMPANION_DIR_NAMES.has(entry.name)) continue;
+    if (expectedDirs && expectedDirs.has(entry.name)) continue; // 当前插件目录，绝不清理
     const pkgPath = path.join(scanDir, entry.name, 'package.json');
     let pkg;
     try { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')); } catch { continue; }
@@ -177,11 +182,14 @@ function syncCompanionFiles(opts) {
   } = opts;
   const profileModules = path.join(profileDir, 'node_modules', '@deepseek-ai');
   if (!dryRun) fs.mkdirSync(profileModules, { recursive: true });
-  removeStaleCompanionPlugins(profileModules, { log, fail, plan, dryRun });
+  // 当前配套目录名（bare）集合：过期清理必须以它为排除集（修复「每次同步
+  // 误删当前插件 → 删除重拷抖动 + 保留更新版本分支失效」回归）。
+  const currentDirs = new Set((plugins || []).map((p) => companionDirName(p)));
+  removeStaleCompanionPlugins(profileModules, { log, fail, plan, dryRun, expectedDirs: currentDirs });
   // 非 scope 落点（dsh-better-sidebar / harness-pet / graph-memory / dshmarket /
   // dsh-hub / billion-context-dsh 等）同样过清理（修复历史「非 scope 旧目录
   // 永不清理」）。
-  removeStaleCompanionPlugins(path.join(profileDir, 'node_modules'), { log, fail, plan, dryRun });
+  removeStaleCompanionPlugins(path.join(profileDir, 'node_modules'), { log, fail, plan, dryRun, expectedDirs: currentDirs });
   removeLegacyMarketplaceDir(path.join(profileDir, 'node_modules'), { log, fail, plan, dryRun });
 
   const bundleNames = new Set();

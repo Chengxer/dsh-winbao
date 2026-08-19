@@ -205,6 +205,14 @@ const SCENARIO_ENV = {
   // WSL 探测失败回落本地模式（issue #54）：强制一个必然不存在的发行版名，
   // 任何机器（含未安装 WSL 的机器）上 configureAsync 都必然失败。
   'wsl-broken-fallback': { DSH_DESKTOP_BACKEND: 'wsl', DSH_DESKTOP_WSL_DISTRO: '__dsh_test_missing_distro__' },
+  // 假活探针压缩周期（生产默认 interval 30s / grace 120s / cooldown 60s / 阈值 3，
+  // 场景内压缩到 ~15s 一个判定周期，配额窗口语义不变）。
+  'plugin-supervision-zombie-cap': {
+    DSH_DESKTOP_TEST_SUPERVISION_INTERVAL: '3000',
+    DSH_DESKTOP_TEST_SUPERVISION_GRACE: '9000',
+    DSH_DESKTOP_TEST_SUPERVISION_COOLDOWN: '3000',
+    DSH_DESKTOP_TEST_SUPERVISION_THRESHOLD: '2',
+  },
 };
 
 const SCENARIOS = {};
@@ -1055,10 +1063,22 @@ SCENARIOS['plugin-auto-isolation'] = async (t) => {
   // loader 侧隔离标记出现在 dsh-web.log（经壳层管道落盘）。
   t.assert(t.grepLog('loader 自动隔离条目: broken-plugin'), '应观察到 loader 隔离标记');
   t.assert(t.grepLog('已自动隔离插件 broken-plugin'), '应落盘 quarantine（disabled 覆盖）');
-  // 隔离持久化：profile patch 出现 disabled 覆盖行；家级状态存储有决策。
+  // 隔离持久化：profile patch 出现 broken-plugin 的 disabled 覆盖行；家级状态存储有决策。
+  // 注意：patch 全文件恒含 harness-pet 的默认禁用块，断言必须按条目块限定范围。
+  const entryBlock = (patchText, id) => {
+    const lines = String(patchText).split(/\r?\n/);
+    const re = new RegExp('^[ \\t]{0,2}- id:\\s*' + id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*$');
+    const start = lines.findIndex((l) => re.test(l));
+    if (start < 0) return '';
+    let end = lines.length;
+    for (let i = start + 1; i < lines.length; i += 1) {
+      if (/^[ \t]{0,2}- (?:id|insert):/.test(lines[i])) { end = i; break; }
+    }
+    return lines.slice(start + 1, end).join('\n');
+  };
   const patch = fs.readFileSync(path.join(profileDir, 'cordis.patch.yml'), 'utf8');
   t.assert(/^\s*- id: broken-plugin\s*$/m.test(patch), 'patch 应含 broken-plugin 条目');
-  t.assert(/\bdisabled:\s*true\b/.test(patch), 'patch 应含 disabled: true 覆盖行');
+  t.assert(/\bdisabled:\s*true\b/.test(entryBlock(patch, 'broken-plugin')), 'broken-plugin 条目块应含 disabled: true 覆盖行');
   const state = JSON.parse(fs.readFileSync(path.join(t.dshHome, 'desktop-plugin-state.json'), 'utf8'));
   t.assert(state.quarantine && state.quarantine['broken-plugin'], '状态存储应记录隔离决策');
   // 正常配套插件仍被装配（其他功能不受影响）。
@@ -1070,6 +1090,124 @@ SCENARIOS['plugin-auto-isolation'] = async (t) => {
   const st = await t.send('restart-service', undefined, 120000);
   t.assert(st.ok, '重启命令应成功: ' + JSON.stringify(st));
   await t.waitFor('界面已稳定', 120000, '隔离后重启稳定');
+
+  // 会话内闭环：用户重新启用 → 隔离解除；插件仍坏 → **热更新路径在补丁变化后
+  // 立即重试该条目** → 失败 → 再次自动隔离（无需重启，闭环会话内可重复）。
+  // 中间态（已解除）是瞬态的：断言以「再次隔离发生 + 决策/覆盖行回归」为准。
+  const countOccur = (needle) => {
+    let n = 0;
+    for (const f of [t.desktopLog, t.stdoutFile]) {
+      try {
+        const txt = fs.readFileSync(f, 'utf8');
+        let i = 0;
+        while ((i = txt.indexOf(needle, i)) !== -1) { n += 1; i += needle.length; }
+      } catch {}
+    }
+    return n;
+  };
+  const beforeLoop = countOccur('已自动隔离插件 broken-plugin');
+  const en = await t.send('plugin-set-enabled', { id: 'broken-plugin', enabled: true }, 30000);
+  t.assert(en.ok, '重新启用应成功: ' + JSON.stringify(en));
+  const loopStart = Date.now();
+  while (countOccur('已自动隔离插件 broken-plugin') <= beforeLoop && Date.now() - loopStart < 60000) {
+    await sleep(500);
+  }
+  t.assert(countOccur('已自动隔离插件 broken-plugin') > beforeLoop, '插件仍坏应再次触发自动隔离（会话内闭环，热更新路径）');
+  const stateAgain = JSON.parse(fs.readFileSync(path.join(t.dshHome, 'desktop-plugin-state.json'), 'utf8'));
+  t.assert(stateAgain.quarantine && stateAgain.quarantine['broken-plugin'], '状态存储应再次记录隔离决策');
+  const patchAgain = fs.readFileSync(path.join(profileDir, 'cordis.patch.yml'), 'utf8');
+  t.assert(/\bdisabled:\s*true\b/.test(entryBlock(patchAgain, 'broken-plugin')), 'broken-plugin 条目块应再次含 disabled: true 覆盖行');
+  // 再次重启：隔离持久化（重启后坏条目被跳过，不再拖垮任何环节）。
+  const st2 = await t.send('restart-service', undefined, 120000);
+  t.assert(st2.ok, '再次重启命令应成功: ' + JSON.stringify(st2));
+  await t.waitFor('界面已稳定', 120000, '再次隔离后重启稳定');
+
+  const q = await t.quitAndCheck();
+  t.assert(q.exit.code === 0 && q.cleanExit === true, '干净退出');
+};
+
+SCENARIOS['plugin-uninstall-restore-e2e'] = async (t) => {
+  // 卸载/恢复全链路（真实 Electron + 真实同步器）：卸载内置配套 **bundle**
+  // dsh-synapse（loader id 'synapse'，注册在 manifest bundles）→ 四层清理
+  // （state/patch/manifest/modules）→ **完整重启应用**（boot 同步是复活/抗复活
+  // 的真实执行点）→ 不复活 → 恢复 → 完整重启 → 重新装配。
+  const profileDir = path.join(t.dshHome, 'profiles', 'web');
+  const stateFile = path.join(t.dshHome, 'desktop-plugin-state.json');
+  const pkgDir = path.join(profileDir, 'node_modules', 'dsh-synapse');
+  await t.waitFor('boot-ready', 240000, 'Web UI 就绪');
+  await t.waitFor('界面已稳定', 60000, '稳定期完成');
+  t.assert(fs.existsSync(path.join(pkgDir, 'package.json')), '配套 bundle dsh-synapse 应已同步');
+  const manifest0 = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
+  t.assert(manifest0.dsh.profile.bundles.includes('dsh-synapse'), '初始 bundles 应包含 dsh-synapse');
+  // 1) 卸载：四层清理
+  const u = await t.send('plugin-uninstall', { id: 'synapse' }, 30000);
+  t.assert(u.ok, '卸载应成功: ' + JSON.stringify(u));
+  const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  t.assert(state.uninstalled && state.uninstalled.synapse, '卸载决策应落 state');
+  const patch = fs.readFileSync(path.join(profileDir, 'cordis.patch.yml'), 'utf8');
+  t.assert(/^\s*- id: synapse\s*$/m.test(patch) && /removed\s*:\s*true/i.test(patch), 'patch 应含 removed 顶层行');
+  const manifest = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
+  t.assert(!manifest.dsh.profile.bundles.includes('dsh-synapse'), 'bundles 应移除 dsh-synapse');
+  t.assert(!fs.existsSync(pkgDir), 'node_modules 包目录应移除');
+  // 2) 完整重启应用：boot 同步不得复活
+  await t.quitAndCheck();
+  try { fs.rmSync(t.controlFile, { force: true }); } catch {} // 清残留 quit 命令，避免新进程一启动就退出
+  t.exited = null; // 复用同一场景上下文重启应用（boot 同步才会再次执行）
+  t.spawn();
+  await t.waitFor('boot-ready', 240000, '卸载后完整重启 Web UI 就绪');
+  await t.waitFor('界面已稳定', 60000, '卸载后重启稳定');
+  t.assert(!fs.existsSync(pkgDir), '完整重启后不应复活（state+patch 双源抗复活）');
+  const manifest2 = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
+  t.assert(!manifest2.dsh.profile.bundles.includes('dsh-synapse'), '重启后 bundles 仍不应包含');
+  // 3) 恢复：决策清除 + patch 行移除
+  const r = await t.send('plugin-restore', { id: 'synapse' }, 30000);
+  t.assert(r.ok, '恢复应成功: ' + JSON.stringify(r));
+  const state2 = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  t.assert(!(state2.uninstalled && state2.uninstalled.synapse), '恢复后卸载决策应清除');
+  const patch2 = fs.readFileSync(path.join(profileDir, 'cordis.patch.yml'), 'utf8');
+  t.assert(!(/^\s*- id: synapse\s*$/m.test(patch2) && /removed\s*:\s*true/i.test(patch2)), '恢复后 patch removed 行应移除');
+  // 4) 完整重启：boot 同步重新装配
+  await t.quitAndCheck();
+  try { fs.rmSync(t.controlFile, { force: true }); } catch {}
+  t.exited = null;
+  t.spawn();
+  await t.waitFor('boot-ready', 240000, '恢复后完整重启 Web UI 就绪');
+  await t.waitFor('界面已稳定', 60000, '恢复后重启稳定');
+  t.assert(fs.existsSync(path.join(pkgDir, 'package.json')), '恢复后应重新装配');
+  const manifest3 = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
+  t.assert(manifest3.dsh.profile.bundles.includes('dsh-synapse'), '恢复后 bundles 应重新包含');
+  const q = await t.quitAndCheck();
+  t.assert(q.exit.code === 0 && q.cleanExit === true, '干净退出');
+};
+
+SCENARIOS['plugin-supervision-zombie-cap'] = async (t) => {
+  // 假活探针与重启配额（L4，真实 Electron）：进程存活但 HTTP 无响应 →
+  // 连续失败触发守护重启；同一窗口内最多自动重启 2 次，耗尽后停止自动
+  // 重启并提示用户（插件占死事件循环时不会无限重启——闭环有上限）。
+  await t.waitFor('boot-ready', 240000, 'Web UI 就绪');
+  await t.waitFor('界面已稳定', 60000, '稳定期完成');
+  await t.send('probe-fail-on');
+  await t.waitFor('判定服务假活，触发守护重启（第 1/2 次）', 60000, '第一次假活判定');
+  await t.waitFor('界面已稳定', 120000, '假活重启后恢复稳定');
+  await t.waitFor('判定服务假活，触发守护重启（第 2/2 次）', 60000, '第二次假活判定');
+  await t.waitFor('界面已稳定', 120000, '第二次重启后恢复稳定');
+  await t.waitFor('假活自动重启达到上限', 90000, '配额耗尽停止自动重启');
+  // 配额耗尽后不再自动重启：日志不再新增「触发守护重启」判定（无死循环）。
+  const countOccur = (needle) => {
+    let n = 0;
+    for (const f of [t.desktopLog, t.stdoutFile]) {
+      try {
+        const txt = fs.readFileSync(f, 'utf8');
+        let i = 0;
+        while ((i = txt.indexOf(needle, i)) !== -1) { n += 1; i += needle.length; }
+      } catch {}
+    }
+    return n;
+  };
+  const restartsBefore = countOccur('触发守护重启（第');
+  await sleep(20000); // 覆盖至少两个完整探活周期
+  t.assert(countOccur('触发守护重启（第') === restartsBefore, '配额耗尽后不得继续自动重启');
+  await t.send('probe-fail-off');
   const q = await t.quitAndCheck();
   t.assert(q.exit.code === 0 && q.cleanExit === true, '干净退出');
 };

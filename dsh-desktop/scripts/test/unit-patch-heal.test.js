@@ -467,54 +467,68 @@ test('scanBundleContracts: manifest 缺失/读失败 → 空名单（不抛错�
 });
 
 // ---------- removeBundlesFromProfile：manifest 原子移除 ----------
+// 兼容函数已收口到 ManifestStore（写锁 + 原子写 + 备份保留）：
+// 返回 Promise<string[]>；测试改用真实临时目录（真实 fs 语义）。
 
-test('removeBundlesFromProfile: 只移出 bundle 启动栈，保留依赖包并备份原文件', () => {
-  const profileDir = 'X:/profiles/web';
-  const pkgFile = profileDir + '/package.json';
-  const fs = memFs({
-    [pkgFile]: mkManifest(['dsh-bad', 'dsh-ok'], { 'dsh-bad': '1.0.0', 'dsh-ok': '1.0.0' }),
-  });
-  const before = fs.readFileSync(pkgFile);
-  const r = removeBundlesFromProfile(profileDir, ['dsh-bad'], fs);
+const os = require('node:os');
+const nodePath = require('node:path');
+const nodeFs = require('node:fs');
+
+test('removeBundlesFromProfile: 只移出 bundle 启动栈，保留依赖包并备份原文件', async () => {
+  const profileDir = nodeFs.mkdtempSync(nodePath.join(os.tmpdir(), 'dsh-heal-rmb-'));
+  const pkgFile = nodePath.join(profileDir, 'package.json');
+  nodeFs.writeFileSync(pkgFile, mkManifest(['dsh-bad', 'dsh-ok'], { 'dsh-bad': '1.0.0', 'dsh-ok': '1.0.0' }));
+  const before = nodeFs.readFileSync(pkgFile, 'utf8');
+  const r = await removeBundlesFromProfile(profileDir, ['dsh-bad']);
   assert.deepStrictEqual(r, ['dsh-bad'], '返回实际移除名单');
-  const after = JSON.parse(fs.readFileSync(pkgFile));
+  const after = JSON.parse(nodeFs.readFileSync(pkgFile, 'utf8'));
   assert.deepStrictEqual(after.dsh.profile.bundles, ['dsh-ok'], 'bundles 剔除坏包');
   assert.deepStrictEqual(Object.keys(after.dependencies), ['dsh-bad', 'dsh-ok'], '依赖保留，兼容纯客户端插件挂载');
-  const baks = [...fs.keys()].filter((p) => p.startsWith(pkgFile + '.bak-'));
+  const baks = nodeFs.readdirSync(profileDir).filter((p) => p.startsWith('package.json.bak-'));
   assert.strictEqual(baks.length, 1, '备份文件存在');
-  assert.strictEqual(fs.readFileSync(baks[0]), before, '备份内容是原 manifest');
+  assert.strictEqual(nodeFs.readFileSync(nodePath.join(profileDir, baks[0]), 'utf8'), before, '备份内容是原 manifest');
+  nodeFs.rmSync(profileDir, { recursive: true, force: true });
 });
 
-test('removeBundlesFromProfile: 官方 bundle 即使被点名也拒绝移除', () => {
-  const profileDir = 'X:/profiles/web';
-  const pkgFile = profileDir + '/package.json';
-  const fs = memFs({ [pkgFile]: mkManifest(['@deepseek-ai/dsh-base', 'dsh-ok']) });
-  assert.deepStrictEqual(removeBundlesFromProfile(profileDir, ['@deepseek-ai/dsh-base'], fs), []);
-  assert.deepStrictEqual(JSON.parse(fs.readFileSync(pkgFile)).dsh.profile.bundles, ['@deepseek-ai/dsh-base', 'dsh-ok']);
+test('removeBundlesFromProfile: 官方 bundle 即使被点名也拒绝移除', async () => {
+  const profileDir = nodeFs.mkdtempSync(nodePath.join(os.tmpdir(), 'dsh-heal-rmb-'));
+  const pkgFile = nodePath.join(profileDir, 'package.json');
+  nodeFs.writeFileSync(pkgFile, mkManifest(['@deepseek-ai/dsh-base', 'dsh-ok']));
+  assert.deepStrictEqual(await removeBundlesFromProfile(profileDir, ['@deepseek-ai/dsh-base']), []);
+  assert.deepStrictEqual(JSON.parse(nodeFs.readFileSync(pkgFile, 'utf8')).dsh.profile.bundles, ['@deepseek-ai/dsh-base', 'dsh-ok']);
+  nodeFs.rmSync(profileDir, { recursive: true, force: true });
 });
 
-test('removeBundlesFromProfile: 原子替换失败时原 manifest 保持不变', () => {
-  const profileDir = 'X:/profiles/web';
-  const pkgFile = profileDir + '/package.json';
-  const fs = memFs({ [pkgFile]: mkManifest(['dsh-bad', 'dsh-ok']) });
-  const before = fs.readFileSync(pkgFile);
-  fs.renameSync = () => { throw new Error('simulated rename failure'); };
-  assert.throws(() => removeBundlesFromProfile(profileDir, ['dsh-bad'], fs), /rename failure/);
-  assert.strictEqual(fs.readFileSync(pkgFile), before);
-  assert.strictEqual([...fs.keys()].filter((p) => p.includes('.dsh-heal-')).length, 0, '临时文件已清理');
+test('removeBundlesFromProfile: 原子替换失败时原 manifest 保持不变', { skip: process.platform !== 'win32' }, async () => {
+  // Windows：目标文件只读（readonly 属性）→ tmp+rename 替换失败 → 抛错且原文件完好。
+  const profileDir = nodeFs.mkdtempSync(nodePath.join(os.tmpdir(), 'dsh-heal-rmb-'));
+  const pkgFile = nodePath.join(profileDir, 'package.json');
+  nodeFs.writeFileSync(pkgFile, mkManifest(['dsh-bad', 'dsh-ok']));
+  const before = nodeFs.readFileSync(pkgFile, 'utf8');
+  try {
+    nodeFs.chmodSync(pkgFile, 0o444);
+    await assert.rejects(() => removeBundlesFromProfile(profileDir, ['dsh-bad']));
+    assert.strictEqual(nodeFs.readFileSync(pkgFile, 'utf8'), before);
+    assert.strictEqual(nodeFs.readdirSync(profileDir).filter((p) => p.includes('.tmp-')).length, 0, '临时文件已清理');
+  } finally {
+    nodeFs.chmodSync(pkgFile, 0o666);
+    nodeFs.rmSync(profileDir, { recursive: true, force: true });
+  }
 });
 
-test('removeBundlesFromProfile: 空名单/无命中 → 零写入', () => {
-  const profileDir = 'X:/profiles/web';
-  const pkgFile = profileDir + '/package.json';
-  const fs = memFs({ [pkgFile]: mkManifest(['dsh-ok']) });
-  assert.deepStrictEqual(removeBundlesFromProfile(profileDir, [], fs), []);
-  assert.deepStrictEqual(removeBundlesFromProfile(profileDir, ['dsh-other'], fs), []);
-  assert.strictEqual([...fs.keys()].filter((p) => p.startsWith(pkgFile + '.bak-')).length, 0, '无变化不产生备份');
-  assert.ok(fs.readFileSync(pkgFile).includes('dsh-ok'));
+test('removeBundlesFromProfile: 空名单/无命中 → 零写入', async () => {
+  const profileDir = nodeFs.mkdtempSync(nodePath.join(os.tmpdir(), 'dsh-heal-rmb-'));
+  const pkgFile = nodePath.join(profileDir, 'package.json');
+  nodeFs.writeFileSync(pkgFile, mkManifest(['dsh-ok']));
+  assert.deepStrictEqual(await removeBundlesFromProfile(profileDir, []), []);
+  assert.deepStrictEqual(await removeBundlesFromProfile(profileDir, ['dsh-other']), []);
+  assert.strictEqual(nodeFs.readdirSync(profileDir).filter((p) => p.startsWith('package.json.bak-')).length, 0, '无变化不产生备份');
+  assert.ok(nodeFs.readFileSync(pkgFile, 'utf8').includes('dsh-ok'));
+  nodeFs.rmSync(profileDir, { recursive: true, force: true });
 });
 
-test('removeBundlesFromProfile: manifest 读失败 → 空名单', () => {
-  const fs = memFs({}); // 无 package.json
-  assert.deepStrictEqual(removeBundlesFromProfile('X:/profiles/web', ['dsh-bad'], fs), []);
+test('removeBundlesFromProfile: manifest 缺失 → 空名单（不抛错）', async () => {
+  const profileDir = nodeFs.mkdtempSync(nodePath.join(os.tmpdir(), 'dsh-heal-rmb-'));
+  assert.deepStrictEqual(await removeBundlesFromProfile(profileDir, ['dsh-bad']), []);
+  nodeFs.rmSync(profileDir, { recursive: true, force: true });
 });

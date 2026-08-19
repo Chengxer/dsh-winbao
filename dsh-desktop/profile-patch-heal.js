@@ -12,45 +12,19 @@
 // ---------------------------------------------------------------------------
 
 const { dedupePatchEntries, dropBlocksByIds } = require('./scripts/plugin-core/lib/patch-surgery');
+const { removeBundlesFromProfile: manifestRemoveBundles } = require('./scripts/plugin-core/lib/manifest-store');
 
 /**
- * 备份 + 原子写回：把坏 bundle 从 dsh.profile.bundles 移除，但保留
- * dependencies（纯客户端插件仍可能由市场挂载，移出启动层不等于卸载）。
- * 兼容路径（保留注入 fs 的历史契约；新代码请用
- * scripts/plugin-core/lib/manifest-store.js 的 ManifestStore）。
+ * 把坏 bundle 从 dsh.profile.bundles 移除，但保留 dependencies（纯客户端插件
+ * 仍可能由市场挂载，移出启动层不等于卸载）。
+ * 单一写入方收口：委托 ManifestStore（写锁 + 原子写 + 备份保留），杜绝
+ * 「启动自愈与用户卸载并发写同一 manifest 互相覆盖」的丢更新（I3）。
  * @param {string} profileDir profile 目录
  * @param {string[]} names 待移除包名（应已过 @deepseek-ai/* 过滤）
- * @param {object} [fs] 文件系统实现（默认 node:fs）
- * @returns {string[]} 实际移除的包名
+ * @returns {Promise<string[]>} 实际移除的包名
  */
-function removeBundlesFromProfile(profileDir, names, fs = require('node:fs')) {
-  const path = require('node:path');
-  const wanted = new Set((names || []).filter((n) => typeof n === 'string' && n && !n.startsWith('@deepseek-ai/')));
-  if (wanted.size === 0) return [];
-  const pkgFile = path.join(profileDir, 'package.json');
-  let manifest;
-  try {
-    manifest = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
-  } catch {
-    return [];
-  }
-  const before = manifest.dsh?.profile?.bundles || [];
-  const bundles = before.filter((n) => !wanted.has(n));
-  if (bundles.length === before.length) return [];
-  const backupFile = pkgFile + '.bak-' + Date.now() + '-' + process.pid;
-  const tmpFile = pkgFile + '.dsh-heal-' + process.pid + '-' + Math.random().toString(36).slice(2, 8);
-  fs.copyFileSync(pkgFile, backupFile);
-  manifest.dsh = manifest.dsh || {};
-  manifest.dsh.profile = manifest.dsh.profile || {};
-  manifest.dsh.profile.bundles = bundles;
-  try {
-    fs.writeFileSync(tmpFile, JSON.stringify(manifest, null, 2) + '\n');
-    fs.renameSync(tmpFile, pkgFile);
-  } catch (err) {
-    try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch { /* ignore cleanup failure */ }
-    throw err;
-  }
-  return before.filter((n) => wanted.has(n));
+function removeBundlesFromProfile(profileDir, names) {
+  return manifestRemoveBundles(profileDir, names);
 }
 
 /**

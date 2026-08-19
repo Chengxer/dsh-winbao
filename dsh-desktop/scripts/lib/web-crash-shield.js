@@ -36,6 +36,9 @@ function attributeSources(err) {
   const pkgRe = /node_modules[\\/](?:@([^\\/]+)[\\/])?([A-Za-z0-9._-]+)/gi;
   let m;
   while ((m = pkgRe.exec(text)) !== null) {
+    // pnpm 隔离布局的 `node_modules/.pnpm/…` 段会被误提取成来源 '.pnpm'，
+    // 丢弃该噪声 token（真实包名会在内层 node_modules 段继续命中）。
+    if (!m[1] && m[2] === '.pnpm') continue;
     out.add(m[1] ? '@' + m[1] + '/' + m[2] : m[2]);
   }
   const entryRe = /(?:loader entry|entry)\s+([A-Za-z0-9][A-Za-z0-9_.-]*)\s*\(/gi;
@@ -46,6 +49,7 @@ function attributeSources(err) {
 function createCrashShield(options = {}) {
   const proc = options.process || process;
   const timers = options.timers || { now: () => Date.now() };
+  const queueImmediate = timers.immediate || ((fn) => setImmediate(fn));
   const emit = options.emit || ((line) => { try { proc.stderr.write(line); } catch { /* ignore */ } });
 
   let armed = false;
@@ -100,18 +104,32 @@ function createCrashShield(options = {}) {
   }
 
   function onUnhandledRejection(reason) {
-    if (!armed) throw reason instanceof Error ? reason : new Error(String(reason));
+    if (!armed) {
+      // 启动期：不在 handler 内直接重抛——那会抢在 dsh-app-boot 的
+      // installFailLoud 之前崩溃并吞掉其「fatal load failure」诊断。
+      // 延迟到下一 tick 重抛：installFailLoud 已注册则先走它的诊断 +
+      // exit(1)（进程在重抛前退出）；未注册则由本重抛兜底恢复 fail-fast。
+      queueImmediate(() => {
+        if (!armed) throw reason instanceof Error ? reason : new Error(String(reason));
+      });
+      return;
+    }
     if (stormExceeded()) throw reason instanceof Error ? reason : new Error(String(reason));
     noteAttributes(reason);
     emit(describe('unhandledRejection', reason));
   }
 
   // 就绪横幅探测：包住 stdout.write，命中「dsh web: http(s)://」即 arm。
+  // 横幅可能被拆成多次 write（分块输出），跨调用累积尾部 64 字符再判定。
   function wrapStdout() {
     const orig = proc.stdout.write;
+    let buf = '';
     proc.stdout.write = function patchedWrite(chunk, ...rest) {
       if (!armed) {
-        try { if (READY_RE.test(String(chunk))) arm(); } catch { /* 探测失败不影响输出 */ }
+        try {
+          buf = (buf + String(chunk)).slice(-64);
+          if (READY_RE.test(buf)) arm();
+        } catch { /* 探测失败不影响输出 */ }
       }
       return orig.apply(this, [chunk, ...rest]);
     };

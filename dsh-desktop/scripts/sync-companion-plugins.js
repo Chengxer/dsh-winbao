@@ -176,7 +176,7 @@ function syncPlugins(home, dryRun, dshPkgDir) {
   // 卸载决策双源：patch removed 行 ∪ 家级状态存储（与壳层共用，抗 patch 重置）。
   let stateStore = null;
   try {
-    stateStore = new PluginStateStore({ file: path.join(home, 'desktop-plugin-state.json'), log: (m) => log(m) });
+    stateStore = new PluginStateStore({ file: path.join(home, 'desktop-plugin-state.json'), log: (m) => log(m), readOnly: dryRun });
   } catch (err) {
     log('插件状态存储不可用，卸载决策仅按 patch 行: ' + err.message);
   }

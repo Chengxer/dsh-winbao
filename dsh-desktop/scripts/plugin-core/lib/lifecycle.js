@@ -63,15 +63,23 @@ function removePackageDir(profileDir, name, { log = () => {} } = {}) {
   return true;
 }
 
-/** 清理 24h 前的 .trash-* 残留（启动时调用，尽力而为）。 */
+/** 清理 24h 前的 .trash-* 残留（启动时调用，尽力而为；含 @scope 子层）。 */
 function cleanupStaleTrash(profileDir, { now = Date.now(), maxAgeMs = 24 * 3600 * 1000, log = () => {} } = {}) {
   const modulesDir = path.join(profileDir, 'node_modules');
+  const scanDirs = [modulesDir];
   let entries;
-  try { entries = fs.readdirSync(modulesDir); } catch { return; }
-  for (const name of entries) {
-    const m = /^(.+)\.trash-(\d+)-\d+$/.exec(name);
-    if (!m || now - Number(m[2]) < maxAgeMs) continue;
-    try { fs.rmSync(path.join(modulesDir, name), { recursive: true, force: true, maxRetries: 2 }); } catch { /* 占用则跳过 */ }
+  try { entries = fs.readdirSync(modulesDir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    if (e.isDirectory() && e.name.startsWith('@')) scanDirs.push(path.join(modulesDir, e.name));
+  }
+  for (const dir of scanDirs) {
+    let names;
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    for (const name of names) {
+      const m = /^(.+)\.trash-(\d+)-\d+$/.exec(name);
+      if (!m || now - Number(m[2]) < maxAgeMs) continue;
+      try { fs.rmSync(path.join(dir, name), { recursive: true, force: true, maxRetries: 2 }); } catch { /* 占用则跳过 */ }
+    }
   }
 }
 
@@ -98,32 +106,60 @@ function prunePackageStore(profileDir, name, { log = () => {} } = {}) {
   }
 }
 
-/** 探测 profile node_modules 顶层（含 @scope 子层）是否有链接指向目标目录。 */
+/**
+ * 探测是否有任何链接/目录指向目标目录：
+ *   1) node_modules 顶层（含 @scope 子层）——直接依赖的链接；
+ *   2) .pnpm/<pkg>@<ver>/node_modules 一层——其它包的**传递依赖**同样可能
+ *      以链接形式指向 store 副本（只跳过 .pnpm 会漏判而被误删）。
+ */
 function referencedByLinks(profileDir, targetDir) {
   const modulesDir = path.join(profileDir, 'node_modules');
   const norm = (p) => path.resolve(p).replace(/\//g, '\\').toLowerCase();
   const target = norm(targetDir);
-  const checkDir = (dir) => {
-    let entries;
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return false; }
-    for (const e of entries) {
-      if (e.name === '.pnpm') continue;
-      const p = path.join(dir, e.name);
-      if (e.isSymbolicLink() || e.isDirectory()) {
+  const visited = new Set(); // 防 junction 环（node_modules/x → 祖先）无限递归
+  const MAX_DEPTH = 32;
+  const checkEntry = (p, dirent, depth) => {
+    if (dirent.isSymbolicLink() || dirent.isDirectory()) {
+      try {
+        const real = fs.realpathSync(p);
+        if (norm(real) === target || norm(real).startsWith(target + '\\')) return true;
+      } catch { /* 悬空链接跳过 */ }
+      if (dirent.isDirectory()) {
         try {
-          const real = fs.realpathSync(p);
-          if (norm(real) === target || norm(real).startsWith(target + '\\')) return true;
-        } catch { /* 悬空链接跳过 */ }
-        if (e.isDirectory()) {
-          try {
-            if (!fs.lstatSync(p).isSymbolicLink() && checkDir(p)) return true;
-          } catch { /* 忽略 */ }
-        }
+          if (!fs.lstatSync(p).isSymbolicLink() && checkDir(p, depth + 1)) return true;
+        } catch { /* 忽略 */ }
       }
     }
     return false;
   };
-  return checkDir(modulesDir);
+  const checkDir = (dir, depth) => {
+    if (depth > MAX_DEPTH) return false;
+    const key = norm(dir);
+    if (visited.has(key)) return false;
+    visited.add(key);
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return false; }
+    for (const e of entries) {
+      if (e.name === '.pnpm') continue;
+      if (checkEntry(path.join(dir, e.name), e, depth)) return true;
+    }
+    return false;
+  };
+  if (checkDir(modulesDir, 0)) return true;
+  // 传递依赖引用面：.pnpm/<pkg>@<ver>/node_modules/<dep>（单层，环防护同上）。
+  let pnpmEntries;
+  try { pnpmEntries = fs.readdirSync(path.join(modulesDir, '.pnpm'), { withFileTypes: true }); } catch { return false; }
+  for (const pe of pnpmEntries) {
+    if (!pe.isDirectory()) continue;
+    let depEntries;
+    try {
+      depEntries = fs.readdirSync(path.join(modulesDir, '.pnpm', pe.name, 'node_modules'), { withFileTypes: true });
+    } catch { continue; }
+    for (const de of depEntries) {
+      if (checkEntry(path.join(modulesDir, '.pnpm', pe.name, 'node_modules', de.name), de, 0)) return true;
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -166,7 +202,10 @@ function createLifecycle(opts) {
     // I1：补丁写失败即抛错（不返回虚假成功）；写锁内完成落盘后才返回。
     await withPatchWrite((text) => togglePluginInPatch(text, id, !!enabled, row.name));
     // 用户重新启用 = 解除自动隔离决策。
-    if (enabled && state.isQuarantined(id)) await state.clearQuarantined(id);
+    if (enabled && state.isQuarantined(id)) {
+      const cleared = await state.clearQuarantined(id);
+      if (!cleared) log('解除隔离决策持久化失败（补丁层已启用，决策残留待下次写入覆盖）: ' + id);
+    }
     return { ok: true, restartRequired: true };
   }
 
@@ -196,8 +235,12 @@ function createLifecycle(opts) {
     await manifestStore.removeBundles([row.name]);
     await manifestStore.removeDependencies([row.name]);
     // 4) Modules：rename→删除包目录 + .pnpm store 无引用清理。
-    removePackageDir(profileDir, row.name, { log });
-    prunePackageStore(profileDir, row.name, { log });
+    //    与更新链的原子替换共用 'profile-modules' 锁：卸载删目录与更新换目录
+    //    绝不交错（同进程/跨进程均经同一 WriteGate 串行）。
+    await patchGate.run('profile-modules', () => {
+      removePackageDir(profileDir, row.name, { log });
+      prunePackageStore(profileDir, row.name, { log });
+    });
     return { ok: true, restartRequired: true };
   }
 
@@ -215,8 +258,15 @@ function createLifecycle(opts) {
     if (!row.restorable) {
       throw new PluginError(PLUGIN_ERROR_CODES.PLUGIN_RESTORE_NO_SOURCE, '第三方插件无安装源，无法恢复，请从插件市场重新安装: ' + id);
     }
-    await state.clearUninstalled(id);
-    await state.clearQuarantined(id);
+    // 卸载决策是「抗复活」的权威来源：清除失败即中止（绝不返回「已恢复」但
+    // 下次同步仍不装配的假成功）。仅当 state 确有决策时才要求清除成功——
+    // 兼容 v0.4.1 时代「仅 patch removed 行」的存量卸载（state 无记录）。
+    const uninstalledCleared = state.isUninstalled(id) ? await state.clearUninstalled(id) : true;
+    if (!uninstalledCleared) {
+      throw new PluginError(PLUGIN_ERROR_CODES.PLUGIN_BUSY, '恢复决策持久化失败，已中止恢复（磁盘保持原样）: ' + id);
+    }
+    const quarantineCleared = state.isQuarantined(id) ? await state.clearQuarantined(id) : true;
+    if (!quarantineCleared) log('解除隔离决策持久化失败（补丁层将移除 disabled 行，决策残留待下次写入覆盖）: ' + id);
     await withPatchWrite((text) => setPluginRemoved(text, id, false, row.name));
     return { ok: true, restartRequired: true };
   }

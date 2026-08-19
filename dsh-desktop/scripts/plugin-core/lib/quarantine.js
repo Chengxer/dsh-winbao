@@ -7,9 +7,11 @@
 //   loader 补丁 / crash-shield 输出 stderr 标记（markers.js 解析）
 //     → 壳层判定阈值 / 直接命中
 //     → quarantine.apply(id)：
-//         1) PluginStateStore.markQuarantined（决策持久化，UI 展示 + 抗重置）
-//         2) patch-surgery 写入官方 disabled: true 顶层覆盖行（dsh loader
-//            语义：重启后该条目被跳过，其余插件完全不受影响）
+//         1) patch-surgery 写入官方 disabled: true 顶层覆盖行（dsh loader
+//            语义：重启后该条目被跳过，其余插件完全不受影响）——运行期防线
+//            先落盘（若状态持久化随后失败，禁用仍生效）；
+//         2) PluginStateStore.markQuarantined（决策持久化，UI 展示 + 抗重置；
+//            失败仅日志，不阻塞隔离——patch 覆盖行仍是运行期防线）。
 //     → 守护重启（一次）→ 通知用户「插件 X 已自动隔离，可在插件管理页恢复」
 //   quarantine.clear(id)（用户恢复/启用）：
 //         state.clearQuarantined + 移除 disabled 行 → 插件重新参与组合；
@@ -87,7 +89,7 @@ function createQuarantine(opts) {
    */
   function applyBySource(source, info = {}) {
     const token = String(source || '').trim();
-    if (!token) return { ok: false, applied: false };
+    if (!token) return Promise.resolve({ ok: false, applied: false });
     const rows = inventoryRows();
     let row = rows.find((r) => r.name === token);
     if (!row) {
@@ -96,7 +98,7 @@ function createQuarantine(opts) {
     }
     if (!row) {
       log('quarantine: 来源 ' + token + ' 无法映射到已装配插件，跳过');
-      return { ok: true, applied: false };
+      return Promise.resolve({ ok: true, applied: false });
     }
     return apply(row.id, info);
   }

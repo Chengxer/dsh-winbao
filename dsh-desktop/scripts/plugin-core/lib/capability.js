@@ -77,13 +77,4 @@ function authorize(event, deps, action) {
   return { ok: true, spec };
 }
 
-/**
- * 需要确认时返回文案键；不需要确认返回 null。
- * guard:action 的 restore 子动作由调用方在 handler 内单独确认（动作值已知）。
- */
-function confirmKeyFor(action) {
-  const spec = PLUGIN_IPC_ACTIONS[action];
-  return spec ? spec.confirm : null;
-}
-
-module.exports = { PLUGIN_IPC_ACTIONS, CONFIRM_MESSAGES, authorize, confirmKeyFor };
+module.exports = { PLUGIN_IPC_ACTIONS, CONFIRM_MESSAGES, authorize };

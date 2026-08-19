@@ -13,13 +13,18 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const { PluginError, PLUGIN_ERROR_CODES } = require('./errors');
+
+// 同 key 重入识别（见 WriteGate.run）。
+const runAls = new AsyncLocalStorage();
 
 /** tmp+rename 原子写：EPERM（杀软短暂锁定）重试 3 次，失败抛错（调用方兜底）。
  *  目标目录必须已存在（与历史契约一致：不隐式创建目录，缺失即抛错）。
  *  绝不先删目标再写——「失败时原文件完好」是原子写契约的一部分
  *  （只读目标等场景 rename 失败即失败，不降级为破坏性覆盖）。 */
 function writeFileAtomic(file, content) {
+  sweepStaleTmp(file);
   const tmp = file + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8);
   let lastErr = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -33,6 +38,22 @@ function writeFileAtomic(file, content) {
     }
   }
   throw lastErr || new Error('writeFileAtomic failed: ' + file);
+}
+
+/** 清理同一目标文件 1 小时前的孤儿 .tmp-*（崩溃残留；尽力而为，绝不动其它文件）。 */
+function sweepStaleTmp(file) {
+  const dir = path.dirname(file);
+  const base = path.basename(file);
+  const prefix = base + '.tmp-';
+  let entries;
+  try { entries = fs.readdirSync(dir); } catch { return; }
+  for (const name of entries) {
+    if (!name.startsWith(prefix)) continue;
+    try {
+      const st = fs.statSync(path.join(dir, name));
+      if (Date.now() - st.mtimeMs > 3600 * 1000) fs.rmSync(path.join(dir, name), { force: true });
+    } catch { /* 占用/消失则跳过 */ }
+  }
 }
 
 /** JSON 序列化 + 尾换行 + 原子写（自动创建父目录）。 */
@@ -124,15 +145,53 @@ class WriteGate {
     const file = this.lockFileOf(key);
     try { fs.mkdirSync(this.lockDir, { recursive: true }); } catch { /* 已存在 */ }
     const deadline = Date.now() + this.timeoutMs;
+    // 持有期间心跳：每 staleMs/3 刷新锁文件 mtime，防止长临界区被「锁龄抢占」
+    // 误判为死锁（staleMs 只应命中真正的僵尸持有者）。
+    let heartbeat = null;
+    const startHeartbeat = () => {
+      heartbeat = setInterval(() => {
+        try { fs.utimesSync(file, new Date(), new Date()); } catch { /* 锁已失则停 */ }
+      }, Math.max(50, Math.floor(this.staleMs / 3)));
+      if (heartbeat.unref) heartbeat.unref();
+    };
     for (;;) {
       try {
         // 锁内容含随机 token：release 前必须比对，杜绝「被抢占后误删新持有者的锁」。
         const token = crypto.randomBytes(12).toString('hex');
-        const fd = fs.openSync(file, 'wx');
-        try { fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, at: Date.now(), token })); } finally { fs.closeSync(fd); }
-        return { file, token };
+        // TOCTOU 防线：先写「候选文件」，再硬链接进锁名——link 对已存在的目标
+        // 原子失败（EEXIST），竞争者永远读不到空锁/半写锁（历史上 openSync('wx')
+        // 先建空文件再写内容，竞争者在该窗口把空锁误判为「可抢占」→ 双持锁）。
+        const candidate = file + '.cand-' + process.pid + '-' + crypto.randomBytes(6).toString('hex');
+        let linked = false;
+        try {
+          fs.writeFileSync(candidate, JSON.stringify({ pid: process.pid, at: Date.now(), token }));
+          try {
+            fs.linkSync(candidate, file);
+            linked = true;
+          } catch (err) {
+            if (!err || err.code !== 'EEXIST') {
+              // 不支持硬链接的文件系统（如 FAT/exFAT）：退化到 wx 独占创建
+              //（残留的空锁窗口极窄且仅限该文件系统，可接受）。
+              try {
+                const fd = fs.openSync(file, 'wx');
+                try { fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, at: Date.now(), token })); } finally { fs.closeSync(fd); }
+                linked = true;
+              } catch (err2) {
+                if (!err2 || err2.code !== 'EEXIST') throw err2;
+              }
+            }
+          }
+        } finally {
+          try { fs.rmSync(candidate, { force: true }); } catch { /* 忽略 */ }
+        }
+        if (linked) {
+          startHeartbeat();
+          return { file, token, heartbeat };
+        }
       } catch (err) {
         if (!err || err.code !== 'EEXIST') throw err;
+      }
+      {
         let holder = null;
         try {
           holder = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -160,6 +219,7 @@ class WriteGate {
     const file = typeof held === 'string' ? held : held && held.file;
     const token = typeof held === 'string' ? null : held && held.token;
     if (!file) return;
+    if (held && held.heartbeat) { try { clearInterval(held.heartbeat); } catch { /* 忽略 */ } }
     try {
       // 所有权校验：仍持有（token 匹配）才删除；被抢占后绝不删新持有者的锁。
       if (token !== null) {
@@ -172,11 +232,19 @@ class WriteGate {
 
   /** 在写锁内执行 fn（进程内同 key 串行，跨进程互斥）。 */
   run(key, fn) {
+    // 同 key 重入死锁防线：fn 在执行中（同一异步链上）再次 run 同 key 会永远
+    // 等自己。用 AsyncLocalStorage 携带「gate 实例 + key」识别同链重入（同一
+    // gate 同 key）直接以 PLUGIN_BUSY 拒绝；不同异步链的并发调用、或其它 gate
+    // 的同名 key 不受影响（排队语义不变）。
+    const cur = runAls.getStore();
+    if (cur && cur.gate === this && cur.key === key) {
+      return Promise.reject(new PluginError(PLUGIN_ERROR_CODES.PLUGIN_BUSY, '写入锁同键重入（同一操作链上重复修改同一文件）: ' + key));
+    }
     const prev = this.inflight.get(key) || Promise.resolve();
     const next = prev.then(async () => {
       const held = await this.acquire(key);
       try {
-        return await fn();
+        return await runAls.run({ gate: this, key }, fn);
       } finally {
         this.release(held);
       }

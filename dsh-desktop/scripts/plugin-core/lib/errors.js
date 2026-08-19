@@ -79,7 +79,10 @@ class PluginError extends Error {
 
 /** 判定任意值是否为 PluginError（跨模块边界判定用，避免 instanceof 跨副本失真）。 */
 function isPluginError(err) {
-  return !!(err && typeof err === 'object' && typeof err.code === 'string' && PLUGIN_ERROR_CODES[err.code]);
+  // hasOwnProperty：`PLUGIN_ERROR_CODES['toString']` 会命中原型链上的函数，
+  // 导致 { code:'toString' } 之类被误判为 PluginError。
+  return !!(err && typeof err === 'object' && typeof err.code === 'string'
+    && Object.prototype.hasOwnProperty.call(PLUGIN_ERROR_CODES, err.code));
 }
 
 /** 把任意异常规整为 PluginError：已合规原样返回，其余包成对应 code（默认 UPDATE/内部）。 */
@@ -88,16 +91,10 @@ function asPluginError(err, code) {
   return new PluginError(code || 'PLUGIN_BUSY', (err && err.message) || String(err), err);
 }
 
-/** IPC handler 统一出口：把结果 / PluginError 收敛成 { ok, error?, code? } 形态。 */
-function wrapIpcResult(result) {
-  return result;
-}
-
 module.exports = {
   PLUGIN_ERROR_CODES,
   PLUGIN_ERROR_MESSAGES,
   PluginError,
   isPluginError,
   asPluginError,
-  wrapIpcResult,
 };

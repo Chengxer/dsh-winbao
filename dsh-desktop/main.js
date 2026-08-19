@@ -230,6 +230,9 @@ let epermRepairAttempted = false; // EPERM/symlink 自愈每次运行只尝试�
 // 诊断与管理的互斥写（恢复 / bundle 顺序写回 / 移除失效条目）：都是写 profile
 // 文件的操作，并发执行会互相覆盖，串行化。
 let diagMutationBusy = false;
+// plugin-guard 的变更操作（快照/修复/回滚）互斥：与诊断写同源，串行化并
+// 纳入存活探针 isBusy（探活失败期间正有配置变更时不误判假活）。
+let guardMutationBusy = false;
 // 恢复文件只能来自系统文件选择框。预览后签发一次性令牌并绑定内容哈希，
 // 确认恢复时不接受渲染层提供的任意本地路径。
 let pendingBackupRestore = null;
@@ -1390,6 +1393,16 @@ function ensurePluginIntegration() {
 // ---------------------------------------------------------------------------
 const SERVICE_STABLE_MS = 30000;
 const CRASH_LOOP_MAX = 2;
+// 假活（zombie）重启配额：同一 10 分钟窗口内连续「进程存活但 HTTP 不响应」
+// 判定最多自动重启 ZOMBIE_RESTART_MAX 次，耗尽后停止自动重启并提示用户
+// （插件占死事件循环的场合，无限重启只会无限失败——闭环必须有上限）。
+const ZOMBIE_RESTART_MAX = 2;
+const ZOMBIE_WINDOW_MS = 10 * 60 * 1000;
+let zombieRestartCount = 0;
+let zombieWindowStart = 0;
+let zombieGiveUpNotified = false;
+// 测试钩子：探活强制失败（仅 DSH_DESKTOP_TEST=1 的集成场景使用）。
+let testForceProbeFail = false;
 let crashLoopCount = 0;
 let crashLoopRecovering = false;
 let serviceStableTimer = null;
@@ -1461,6 +1474,7 @@ function armStabilityWatch(proc) {
     serviceStableTimer = null;
     if (serverProc !== proc) return; // 已换进程/已退出，不作数
     crashLoopCount = 0;
+    zombieRestartCount = 0; // 稳定落地 → 假活重启配额复位
     try { ensureGuard().confirmPendingGood(); } catch (err) { log('guard', '稳定落定失败: ' + ((err && err.message) || err)); }
   }, SERVICE_STABLE_MS);
   if (serviceStableTimer.unref) serviceStableTimer.unref();
@@ -1729,13 +1743,13 @@ function waitUntilUp(url, timeoutMs = 120000) {
 function runBundleContractMaintenance() {
   if (bundleContractRepairAttempted) return;
   bundleContractRepairAttempted = true;
-  setImmediate(() => {
+  setImmediate(async () => {
     try {
       const home = effectiveDshHome() || dshHome || process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
       const profileDir = path.join(home, 'profiles', 'web');
       const missing = scanBundleContracts(profileDir);
       if (missing.length > 0) {
-        const removed = removeBundlesFromProfile(profileDir, missing);
+        const removed = await removeBundlesFromProfile(profileDir, missing);
         if (removed.length > 0) {
           log('boot', '已从 profile 启动层移除无声明插件（备份于 package.json.bak-*）: ' + removed.join(', '));
           notifyBundleRepair(removed);
@@ -1973,7 +1987,7 @@ async function handleBootFailure(err, overlays = []) {
       if (!missing.includes(n)) missing.push(n);
     }
     if (missing.length > 0) {
-      const removed = removeBundlesFromProfile(profileDir, missing);
+      const removed = await removeBundlesFromProfile(profileDir, missing);
       if (removed.length > 0) {
         log('boot', '已从 profile 启动层移除无声明插件（备份于 package.json.bak-*）: ' + removed.join(', '));
         notifyBundleRepair(removed);
@@ -3051,7 +3065,8 @@ function registerChromeIpc() {
   // 测试通道 'restart-service' 复用同一实现，保证集成测试覆盖真实 IPC 路径。
   ipcMain.handle('chrome:restart-service', async (event, payload = {}) => {
     if (payload?.intent !== 'restart-service') return { ok: false, error: 'missing-intent' };
-    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false, error: 'unauthorized' };
+    // 与其余插件管理 IPC 同口径：frame-origin 精确校验（修复历史只查 sender）。
+    if (!pluginManagerIpcAllowed(event)) return { ok: false, error: 'unauthorized' };
     return restartService();
   });
 
@@ -3085,13 +3100,23 @@ function registerChromeIpc() {
         if (!(await confirmPluginAction('确定要回滚到快照 ' + String(value) + ' 吗？'))) {
           return { ok: false, error: '用户取消', canceled: true };
         }
-        return g.restore(value);
+        guardMutationBusy = true;
+        try {
+          return g.restore(value);
+        } finally {
+          guardMutationBusy = false;
+        }
       }
       case 'check':
         return { ok: true, report: g.healthCheck() };
       case 'repair': {
-        const r = g.repair();
-        return { ok: true, applied: r.applied };
+        guardMutationBusy = true;
+        try {
+          const r = g.repair();
+          return { ok: true, applied: r.applied };
+        } finally {
+          guardMutationBusy = false;
+        }
       }
       case 'incident':
         return g.readIncident(value);
@@ -3410,7 +3435,7 @@ function registerChromeIpc() {
   ipcMain.handle('dsh:plugin-set-enabled', async (event, { id, enabled } = {}) => {
     if (!pluginManagerIpcAllowed(event)) return { ok: false, error: 'unauthorized' };
     try {
-      const res = await ensurePluginCenter().lifecycle.setEnabled(String(id), !!enabled);
+      const res = await pluginSetEnabled(String(id), !!enabled);
       if (!res.ok) return res;
       log('plugin-manager', '已' + (enabled ? '启用' : '关闭') + '插件 ' + id);
       return { ok: true, restartRequired: true };
@@ -3424,7 +3449,7 @@ function registerChromeIpc() {
   // 第三方 = 完整移除（bundles 登记 + dependencies + 目录 + store 副本）。
   ipcMain.handle('dsh:plugin-uninstall', async (event, { id } = {}) => {
     if (!pluginManagerIpcAllowed(event)) return { ok: false, error: 'unauthorized' };
-    if (!(await confirmPluginAction('确定要卸载该插件吗？卸载后需重启生效。'))) {
+    if (!(await confirmPluginAction(ensurePluginCenter().ipc.confirmMessages.uninstall))) {
       return { ok: false, error: '用户取消', canceled: true };
     }
     try {
@@ -3440,12 +3465,16 @@ function registerChromeIpc() {
   ipcMain.handle('dsh:plugin-restore', async (event, { id } = {}) => {
     if (!pluginManagerIpcAllowed(event)) return { ok: false, error: 'unauthorized' };
     // 恢复 = 重新装配（含解除自动隔离）：与卸载/更新同级的破坏性确认。
-    if (!(await confirmPluginAction('确定要恢复该插件吗？恢复后需重启生效（被自动隔离的插件恢复后若仍出错会再次被隔离）。'))) {
+    if (!(await confirmPluginAction(ensurePluginCenter().ipc.confirmMessages.restore))) {
       return { ok: false, error: '用户取消', canceled: true };
     }
     try {
       const res = await ensurePluginCenter().lifecycle.restore(String(id));
-      if (res.ok) log('plugin-manager', '已恢复插件 ' + id);
+      if (res.ok) {
+        // 恢复同样解除隔离：清掉本会话去重，插件若仍坏可再次触发自动隔离（闭环）。
+        isolatedEntryIds.delete(String(id));
+        log('plugin-manager', '已恢复插件 ' + id);
+      }
       return res;
     } catch (err) {
       log('plugin-manager', '恢复插件 ' + id + ' 失败: ' + ((err && err.message) || err));
@@ -3468,11 +3497,18 @@ function registerChromeIpc() {
   // 原子替换 → 失败回滚 → 重启生效。
   ipcMain.handle('dsh:plugin-update', async (event, { id } = {}) => {
     if (!pluginManagerIpcAllowed(event)) return { ok: false, error: 'unauthorized' };
-    if (!(await confirmPluginAction('确定要更新该插件吗？更新后需重启生效。'))) {
+    if (!(await confirmPluginAction(ensurePluginCenter().ipc.confirmMessages.update))) {
       return { ok: false, error: '用户取消', canceled: true };
     }
     try {
-      return await ensurePluginCenter().updates.update(String(id));
+      const res = await ensurePluginCenter().updates.update(String(id));
+      // 更新链返回 { ok:false, error: PluginError }：统一收敛为
+      // { ok:false, code, error } 形态（与 set-enabled/uninstall 同构，
+      // 渲染端无需识别两种错误形状）。
+      if (res && res.ok === false && res.error) {
+        return { ok: false, code: res.error && res.error.code, error: String((res.error && res.error.message) || res.error) };
+      }
+      return res;
     } catch (err) {
       log('plugin-manager', '更新插件 ' + id + ' 失败: ' + ((err && err.message) || err));
       return { ok: false, code: err && err.code, error: String((err && err.message) || err) };
@@ -3610,7 +3646,7 @@ function registerChromeIpc() {
         };
       }
       if (diagMutationBusy) return { ok: false, error: '另有恢复/重排任务进行中，请稍候' };
-      if (!(await confirmPluginAction('确定要用该备份覆盖当前配置吗？此操作不可撤销。'))) {
+      if (!(await confirmPluginAction(ensurePluginCenter().ipc.confirmMessages['backup-restore']))) {
         return { ok: false, error: '用户取消', canceled: true };
       }
       // 恢复前落一份「回滚前」快照：配置覆盖后若启动异常，可经守护回滚。
@@ -3781,7 +3817,7 @@ function registerChromeIpc() {
         return { ok: false, error: '顺序清单格式错误' };
       }
       if (diagMutationBusy) return { ok: false, error: '另有恢复/重排任务进行中，请稍候' };
-      if (!(await confirmPluginAction('确定要应用新的 bundle 顺序吗？重启后生效。'))) {
+      if (!(await confirmPluginAction(ensurePluginCenter().ipc.confirmMessages['order-apply']))) {
         return { ok: false, error: '用户取消', canceled: true };
       }
       diagMutationBusy = true;
@@ -3815,12 +3851,12 @@ function registerChromeIpc() {
       const filtered = names.filter((n) => !n.startsWith('@deepseek-ai/'));
       if (filtered.length === 0) return { ok: false, error: '官方基础组件不可移除' };
       if (diagMutationBusy) return { ok: false, error: '另有恢复/重排任务进行中，请稍候' };
-      if (!(await confirmPluginAction('确定要从启动清单移除这些条目吗？'))) {
+      if (!(await confirmPluginAction(ensurePluginCenter().ipc.confirmMessages['remove-bundle']))) {
         return { ok: false, error: '用户取消', canceled: true };
       }
       diagMutationBusy = true;
       try {
-        const removed = removeBundlesFromProfile(profileDir, filtered);
+        const removed = await removeBundlesFromProfile(profileDir, filtered);
         if (removed.length > 0) {
           log('diagnostics', '已从启动清单移除失效 bundle（备份于 package.json.bak-*）: ' + removed.join(', '));
         }
@@ -4107,6 +4143,16 @@ function confirmPluginAction(message) {
     defaultId: 0,
     cancelId: 1,
   }).then(({ response }) => response === 0);
+}
+
+/** 设置插件开关（IPC 与测试通道共用的唯一实现）。
+ *  用户重新启用 = 解除自动隔离：清掉本会话的隔离条目去重，插件若仍坏，
+ *  下一轮 loader 标记会再次触发自动隔离（闭环在会话内也可重复）。 */
+function pluginSetEnabled(id, enabled) {
+  return ensurePluginCenter().lifecycle.setEnabled(String(id), !!enabled).then((res) => {
+    if (res && res.ok && enabled) isolatedEntryIds.delete(String(id));
+    return res;
+  });
 }
 
 /** 读插件包 package.json 的 description（profile node_modules → app assets 兜底）。 */
@@ -4758,6 +4804,19 @@ function setupTestChannel() {
         restartingServer = false;
       }
     },
+    // 插件生命周期直通（E2E 场景走真实 plugin-core 链路；IPC 鉴权由单测覆盖）。
+    'plugin-uninstall': (args) => ensurePluginCenter().lifecycle.uninstall(String(args && args.id)),
+    'plugin-restore': (args) => {
+      // 与 dsh:plugin-restore IPC 同路径：恢复即解除隔离，清本会话去重（闭环可重复）。
+      return ensurePluginCenter().lifecycle.restore(String(args && args.id)).then((res) => {
+        if (res && res.ok) isolatedEntryIds.delete(String(args && args.id));
+        return res;
+      });
+    },
+    'plugin-set-enabled': (args) => pluginSetEnabled(args && args.id, !!args.enabled),
+    // 存活探针强制失败钩子（E2E：进程存活但 HTTP 层故障 → 假活判定/配额上限）。
+    'probe-fail-on': () => { testForceProbeFail = true; return true; },
+    'probe-fail-off': () => { testForceProbeFail = false; return true; },
     // 与 chrome:restart-service IPC 完全一致的路径（供集成测试复现端口稳定性）。
     'restart-service': () => restartService(),
     'reload-main': () => {
@@ -4930,7 +4989,14 @@ async function boot() {
       // 服务存活探针（防「假活」）：进程存活但 HTTP 不响应 → 守护重启。
       supervision = ensurePluginCenter().supervision({
         getBaseUrl: () => webUrl,
+        // 集成测试可压缩探活周期（生产环境恒为默认值：interval 30s / grace 120s /
+        // cooldown 60s / 阈值 3 次）。
+        intervalMs: Number(process.env.DSH_DESKTOP_TEST_SUPERVISION_INTERVAL || '30000'),
+        graceMs: Number(process.env.DSH_DESKTOP_TEST_SUPERVISION_GRACE || '120000'),
+        cooldownMs: Number(process.env.DSH_DESKTOP_TEST_SUPERVISION_COOLDOWN || '60000'),
+        failThreshold: Number(process.env.DSH_DESKTOP_TEST_SUPERVISION_THRESHOLD || '3'),
         httpGet: (url, opts) => new Promise((resolve) => {
+          if (testForceProbeFail) { resolve({ statusCode: 0 }); return; }
           const req = http.get(url, { timeout: opts && opts.timeout ? opts.timeout : 3000 }, (res) => {
             res.resume();
             resolve({ statusCode: res.statusCode || 0 });
@@ -4938,9 +5004,31 @@ async function boot() {
           req.on('error', () => resolve({ statusCode: 0 }));
           req.on('timeout', () => { try { req.destroy(); } catch {} resolve({ statusCode: 0 }); });
         }),
-        isBusy: () => restartingServer || crashLoopRecovering,
+        isBusy: () => restartingServer || crashLoopRecovering || diagMutationBusy || guardMutationBusy,
         onZombie: async () => {
-          log('supervision', '探活连续失败，判定服务假活，触发守护重启');
+          const now = Date.now();
+          if (now - zombieWindowStart > ZOMBIE_WINDOW_MS) {
+            zombieWindowStart = now;
+            zombieRestartCount = 0;
+            zombieGiveUpNotified = false;
+          }
+          if (zombieRestartCount >= ZOMBIE_RESTART_MAX) {
+            if (!zombieGiveUpNotified) {
+              zombieGiveUpNotified = true;
+              log('supervision', '假活自动重启达到上限，停止自动重启');
+              showBox({
+                type: 'error',
+                title: 'DSH 服务无响应',
+                message: '检测到 Web 服务连续无响应且自动重启无效（可能有插件占死事件循环）。可在设置 → 插件 中排查最近安装或更新的插件。',
+                buttons: ['知道了'],
+                defaultId: 0,
+                cancelId: 0,
+              });
+            }
+            return;
+          }
+          zombieRestartCount += 1;
+          log('supervision', `探活连续失败，判定服务假活，触发守护重启（第 ${zombieRestartCount}/${ZOMBIE_RESTART_MAX} 次）`);
           if (serverProc && !restartingServer && !crashLoopRecovering) {
             await restartService();
           }
@@ -4994,10 +5082,20 @@ if (!gotLock) {
   // 定位/设备类一律拒绝并记日志。
   app.on('web-contents-created', (_event, wc) => {
     try {
-      wc.session.setPermissionRequestHandler((_webContents, permission, callback) => {
+      wc.session.setPermissionRequestHandler((_webContents, permission, callback, details) => {
         const allowed = ['fullscreen', 'pointerLock', 'notifications', 'clipboard-read', 'clipboard-sanitized-write'].includes(permission);
-        if (!allowed) log('perm', '拒绝渲染进程权限请求: ' + permission);
-        callback(allowed);
+        // origin 精确校验：仅放行当前 dsh web 页面的请求（第三方页面/恢复页/
+        // 恶意重定向页面一律拒绝）——修复「白名单对所有 webContents 全放行」的
+        // origin 盲区。
+        let originOk = false;
+        try {
+          const reqUrl = details && typeof details.requestingUrl === 'string' ? details.requestingUrl : '';
+          const currentWeb = webUrl || '';
+          originOk = reqUrl !== '' && currentWeb !== '' && new URL(reqUrl).origin === new URL(currentWeb).origin;
+        } catch { originOk = false; }
+        const ok = allowed && originOk;
+        if (!ok) log('perm', '拒绝渲染进程权限请求: ' + permission + (originOk ? '' : '（origin 不匹配: ' + (details && details.requestingUrl) + '）'));
+        callback(ok);
       });
     } catch (err) {
       log('perm', '权限处理器注册失败: ' + ((err && err.message) || err));
