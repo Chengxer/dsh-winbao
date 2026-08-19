@@ -1,0 +1,720 @@
+'use strict';
+
+// ---------------------------------------------------------------------------
+// plugin-core 补丁层文本手术（patch-surgery）：cordis.patch.yml 全部读写
+// 的唯一实现。合并并修正历史三份实现（scripts/plugin-manager-patch.js、
+// profile-patch-heal.js、patch-row-heal.js + companion-profile.js 的补丁段）：
+//
+//   · loader id 正则全仓统一（含点号），修复「点号 id 能写不能愈」漂移；
+//   · 所有改写保持原文件 EOL（CRLF 输入不再被全文改写为 LF）；
+//   · idNameRe 支持单引号/双引号/无引号 name 形态（包改名自愈不再漏修）；
+//   · removeBundledRowDuplicates 的 id 级去重由调用方注入 bundleEntryIds
+//     （guard 侧已接线 collectBundleEntryIds，修复死代码盲区）。
+//
+// 契约：除 parsePatchRows 外的每个函数都以「原文本 → { text/patch, ... }」
+// 纯函数形态工作（不落盘、不持有路径）；写入由调用方经 fs-atomic 的
+// writeFileAtomic + WriteGate 完成。无修改时返回原文本（零写入）。
+// ---------------------------------------------------------------------------
+
+const { LOADER_ID_RE } = require('./ids');
+const { escRegExp, detectEol, splitLines, joinLines, preserveEol, yamlQuote } = require('./text');
+
+// 新 patch 文件的头部（历史两种入口逐字一致）。
+const PATCH_HEADER = '# dsh web profile patch（由 DSH Desktop 维护）\n';
+
+// billion-context-dsh（compaction-acp）与默认 compaction-basic 互斥的禁用块。
+const ACP_DISABLE_BLOCK = '\n# billion-context-dsh：禁用 preset realm 的 compaction-basic（ACP 模型驱动后端接管压缩决策）\n- id: compaction-basic\n  disabled: true\n';
+
+// 桌面宠物（harness-pet）默认关闭的禁用块。
+const PET_DISABLE_BLOCK = '\n# harness-pet：桌面宠物默认关闭（设置 → 插件 → 管理 可一键开启）\n- id: harness-pet\n  disabled: true\n';
+
+// 顶层条目 id 行（缩进 0-2）：统一字符集，含点号。
+const ID_ROW_RE = /^(\s*)-\s*id:\s*([A-Za-z0-9][A-Za-z0-9_.-]*)/;
+// 任意缩进的条目 id 行（insert 块内层 / 顶层共用）。
+const ANY_ID_ROW_RE = /^([\t ]*)-\s*id:\s*([A-Za-z0-9][A-Za-z0-9_.-]*)(?![A-Za-z0-9_.-])/;
+
+// ---------------------------------------------------------------------------
+// 行级解析（inventory / heal 共用）
+// ---------------------------------------------------------------------------
+
+/**
+ * 把 patch 文本解析为结构化的行集合（纯文本扫描，YAML 损坏时仍尽力解析，
+ * 比 js-yaml 全有全无更适合管理场景）。
+ * @param {string} text cordis.patch.yml 原文
+ * @returns {{ top: Array<{id:string,name:string,disabled:boolean,removed:boolean,hasConfig:boolean}>,
+ *            inserts: Array<{id:string,name:string,disabled:boolean,removed:boolean,hasConfig:boolean}> }}
+ */
+function parsePatchRows(text) {
+  const top = [];
+  const inserts = [];
+  const lines = splitLines(text);
+  let current = null; // { bucket, row }
+  const flush = () => {
+    if (!current) return;
+    current.bucket.push(current.row);
+    current = null;
+  };
+  for (const line of lines) {
+    const m = ANY_ID_ROW_RE.exec(line);
+    if (m) {
+      flush();
+      const indent = m[1].replace(/\t/g, '  ').length;
+      const row = { id: m[2], name: '', disabled: false, removed: false, hasConfig: false };
+      current = { bucket: indent >= 4 ? inserts : top, row };
+      continue;
+    }
+    if (!current) continue;
+    const indent = (line.match(/^[\t ]*/) || [''])[0].replace(/\t/g, '  ').length;
+    // 回到更浅层或新的同级块：本条目结束。
+    const isSiblingBlock = /^[\t ]*- (?:id|insert)\s*:/.test(line);
+    if (isSiblingBlock && indent < 4) { flush(); continue; }
+    const nm = /^\s*name:\s*['"]?([^'"\s]+)['"]?\s*$/.exec(line);
+    if (nm) current.row.name = nm[1];
+    else if (/^\s*disabled:\s*(true|false)\s*$/.test(line)) current.row.disabled = /true/.test(line);
+    else if (/^\s*removed:\s*(true|false)\s*$/.test(line)) current.row.removed = /true/.test(line);
+    else if (/^\s*config\s*:/.test(line)) current.row.hasConfig = true;
+  }
+  flush();
+  return { top, inserts };
+}
+
+/** 提取全部条目 id（顶层 + insert 内层，去重；与历史 patchRowIds 语义兼容）。 */
+function patchRowIds(text) {
+  const ids = [];
+  const seen = new Set();
+  for (const line of splitLines(text)) {
+    const m = ANY_ID_ROW_RE.exec(line);
+    if (m && !seen.has(m[2])) {
+      seen.add(m[2]);
+      ids.push(m[2]);
+    }
+  }
+  return ids;
+}
+
+// ---------------------------------------------------------------------------
+// 开关 / 卸载（历史 plugin-manager-patch.js，唯一实现 + EOL 保持）
+// ---------------------------------------------------------------------------
+
+// 顶层用户层条目（缩进 0-2 空格）+ 完整子树（含行尾换行）。
+// 子树用非贪婪 [\s\S]*? 匹配，并以「下一同级 - id: / - insert: / 注释 / 文件尾」
+// 前瞻收口，避免贪婪续行组把同一 insert 块内后续兄弟条目一并吞掉（issue #66）。
+function topLevelEntryRe(id) {
+  return new RegExp('(?:^|\\n)([ \\t]{0,2})- id:\\s*' + escRegExp(id) + '(?![ \\t]*[A-Za-z0-9_.-])[^\\n]*\\n([\\s\\S]*?)(?=(?:\\n[ \\t]{0,2}- id:)|(?:\\n[ \\t]{0,2}- insert:)|(?:\\n#)|\\s*$)', 'g');
+}
+
+// insert 块内的内层条目（缩进 >= 4）+ 完整子树（含行尾换行）。
+function insertInnerEntryRe(id) {
+  return new RegExp('(?:^|\\n)[ \\t]+- id:\\s*' + escRegExp(id) + '(?![ \\t]*[A-Za-z0-9_.-])[^\\n]*\\n([\\s\\S]*?)(?=(?:\\n[ \\t]+- id:)|(?:\\n[ \\t]{0,2}- id:)|(?:\\n[ \\t]{0,2}- insert:)|\\s*$)', 'g');
+}
+
+// 本模块写入的标记注释行（整行，含行尾换行）。零宽 lookbehind 锚定行首，
+// 连续多行同类注释能逐条匹配（历史消费型行首锚点会隔行跳过）。
+function markerCommentRe(id) {
+  return new RegExp('(?:^|(?<=\\n))# [^\\n]*关闭 ' + escRegExp(id) + '[^\\n]*(?:\\n|$)', 'g');
+}
+
+function uninstallCommentRe(id) {
+  return new RegExp('(?:^|(?<=\\n))# [^\\n]*卸载 ' + escRegExp(id) + '[^\\n]*(?:\\n|$)', 'g');
+}
+
+/** 清理被掏空的孤立 `- insert:` 空块。 */
+function dropEmptyInsertBlocks(out) {
+  return out.replace(/(?:^|\n)- insert:\s*\n(?![ \t]+-)/g, (m) => (m[0] === '\n' ? '\n' : ''));
+}
+
+/**
+ * 卸载/恢复标记手术：
+ *   卸载 —— 与「关闭」同款登记点手术（移出 insert 块、孤儿块清理、确保顶层
+ *           disabled: true），再在顶层条目补 `removed: true`（卸载标记，
+ *           同步器据此跳过文件复制，避免下次启动「复活」）。
+ *   恢复 —— 移除 removed 行；无 config 则整个条目移除（配套插件下次启动由
+ *           同步器重新 insert + 复制文件；基础层插件由基础 patch 重新提供）。
+ * @param {string} text cordis.patch.yml 原文
+ * @param {string} id 插件 id
+ * @param {boolean} removed true=卸载，false=恢复
+ * @param {string} [name] 包名（追加新条目时使用）
+ * @returns {string} 修改后的文本（幂等；无变化时返回原文本）
+ */
+function setPluginRemoved(text, id, removed, name) {
+  if (typeof text !== 'string') throw new TypeError('text must be a string');
+  if (typeof id !== 'string' || !id) throw new TypeError('id must be a non-empty string');
+  if (!LOADER_ID_RE.test(id)) throw new TypeError('id 含非法字符（仅允许字母/数字/下划线/点/连字符）: ' + id);
+  // EOL 保持：内部统一按 LF 手术（正则以 \n 为界），输出按原 EOL 还原——
+  // CRLF 文件不再被局部手术留下混合换行。
+  const original = text;
+  const normalized = original.includes('\r\n') ? original.replace(/\r\n/g, '\n') : original;
+  let out = normalized;
+  const pkgName = typeof name === 'string' && name ? name : id;
+
+  if (removed) {
+    // 1) 与禁用同款：移出 insert 块 + 孤儿块清理
+    out = out.replace(insertInnerEntryRe(id), (m) => (m[0] === '\n' ? '\n' : ''));
+    out = dropEmptyInsertBlocks(out);
+    // 2) 顶层条目：确保 disabled: true + removed: true
+    const topRe = topLevelEntryRe(id);
+    if (topRe.test(out)) {
+      topRe.lastIndex = 0;
+      out = out.replace(topRe, (block) => {
+        if (!/(?:^|\n)[ \t]{0,2}removed\s*:/.test(block)) {
+          block = block.replace(/\n$/, '') + '\n  removed: true\n';
+        }
+        if (!/(?:^|\n)[ \t]{0,2}disabled\s*:/.test(block)) {
+          if (/(?:^|\n)[ \t]{0,2}name\s*:/.test(block)) {
+            block = block.replace(/(?:\n[ \t]{0,2}name\s*:[^\n]*)/, (m) => m + '\n  disabled: true');
+          } else {
+            block = block.replace(/\n$/, '') + '\n  disabled: true\n';
+          }
+        }
+        return block;
+      });
+    } else {
+      // 先清历史遗留注释（恢复/卸载反复操作不堆积），再追加「注释 + 条目」
+      out = out.replace(uninstallCommentRe(id), '');
+      out = out.replace(markerCommentRe(id), '');
+      const block = '\n# 插件管理（设置页「插件」栏）：卸载 ' + id + '\n- id: ' + id + '\n  name: ' + yamlQuote(pkgName) + '\n  disabled: true\n  removed: true\n';
+      out = out.replace(/\s*$/, '') + block;
+    }
+    return out === normalized ? original : preserveEol(original, out);
+  }
+
+  // 恢复：移除 removed/disabled 行；无 config 则整个条目移除（含卸载注释）
+  out = out.replace(topLevelEntryRe(id), (m) => {
+    const withoutFlags = m
+      .replace(/\n[ \t]{0,2}removed\s*:\s*true[^\n]*/g, '')
+      .replace(/\n[ \t]{0,2}disabled\s*:\s*(?:true|false)[^\n]*/g, '');
+    if (/(?:^|\n)[ \t]{0,2}config\s*:/.test(withoutFlags)) return withoutFlags;
+    return m[0] === '\n' ? '\n' : '';
+  });
+  out = out.replace(uninstallCommentRe(id), '');
+  return out === normalized ? original : preserveEol(original, out);
+}
+
+/**
+ * 开关手术：写入/移除用户层 disabled 条目（纯文本，保持格式与注释）。
+ *   关闭 —— 先从任何 `- insert:` 块内移除该 id 的内层条目（避免 loader 双登记
+ *           崩溃），再保证存在一个顶层 `- id: <id>` 条目且带 `disabled: true`；
+ *   启用 —— 移除顶层条目的 disabled 行；条目无 config 时整个条目移除。
+ * @param {string} text cordis.patch.yml 原文
+ * @param {string} id 插件 id
+ * @param {boolean} enabled true=启用，false=关闭
+ * @param {string} [name] 包名（追加新条目时写入 name 行；缺省用 id 占位）
+ * @returns {string} 修改后的文本（幂等；无变化时返回原文本）
+ */
+function togglePluginInPatch(text, id, enabled, name) {
+  if (typeof text !== 'string') throw new TypeError('text must be a string');
+  if (typeof id !== 'string' || !id) throw new TypeError('id must be a non-empty string');
+  if (!LOADER_ID_RE.test(id)) throw new TypeError('id 含非法字符（仅允许字母/数字/下划线/点/连字符）: ' + id);
+  // EOL 保持：内部统一 LF，输出按原 EOL 还原（与 setPluginRemoved 同契约）。
+  const original = text;
+  const normalized = original.includes('\r\n') ? original.replace(/\r\n/g, '\n') : original;
+  let out = normalized;
+  const pkgName = typeof name === 'string' && name ? name : id;
+
+  if (!enabled) {
+    // 1) 从 insert 块内移除内层条目（同一 id 只保留一个登记点）
+    out = out.replace(insertInnerEntryRe(id), (m) => (m[0] === '\n' ? '\n' : ''));
+    // 1.5) 清理被掏空的孤立 `- insert:` 空块
+    out = dropEmptyInsertBlocks(out);
+    // 2) 顶层条目：存在则确保 disabled: true；不存在则追加
+    const topRe = topLevelEntryRe(id);
+    if (topRe.test(out)) {
+      topRe.lastIndex = 0;
+      out = out.replace(topRe, (block) => {
+        // 只认 0-2 空格缩进的 disabled/name 行（本模块写入的格式），
+        // 不碰 config 块内更深缩进的同名键。
+        if (/(?:^|\n)[ \t]{0,2}disabled\s*:/.test(block)) return block;
+        if (/(?:^|\n)[ \t]{0,2}name\s*:/.test(block)) {
+          return block.replace(/(?:\n[ \t]{0,2}name\s*:[^\n]*)/, (m) => m + '\n  disabled: true');
+        }
+        return block.replace(/\n$/, '') + '\n  disabled: true\n';
+      });
+    } else {
+      // 追加前先清掉历史遗留的标记注释（上一次启用只删条目、注释残留时
+      // 会重复堆积），再追加一份「注释 + 条目」，保证多次开关不叠加。
+      out = out.replace(markerCommentRe(id), '');
+      const block = '\n# 插件管理（设置页「插件」栏）：关闭 ' + id + '\n- id: ' + id + '\n  name: ' + yamlQuote(pkgName) + '\n  disabled: true\n';
+      out = out.replace(/\s*$/, '') + block;
+    }
+    return out === normalized ? original : preserveEol(original, out);
+  }
+
+  // 启用：顶层条目移除 disabled 行（0-2 空格缩进）；无 config 则整个条目移除；
+  // 连带移除本模块的标记注释（避免反复开关时注释堆积）。
+  out = out.replace(topLevelEntryRe(id), (m) => {
+    const withoutDisabled = m.replace(/\n[ \t]{0,2}disabled\s*:\s*(?:true|false)[^\n]*/g, '');
+    if (/(?:^|\n)[ \t]{0,2}config\s*:/.test(withoutDisabled)) return withoutDisabled;
+    return m[0] === '\n' ? '\n' : '';
+  });
+  out = out.replace(markerCommentRe(id), '');
+  return out === normalized ? original : preserveEol(original, out);
+}
+
+// ---------------------------------------------------------------------------
+// 重复注册去重 / 块级移除（历史 profile-patch-heal.js，唯一实现 + 统一 id 正则）
+// ---------------------------------------------------------------------------
+
+/**
+ * 把文本切分为顶层条目块。顶层条目 = 行首（列 0）以 `- ` 开头的行，
+ * 其后到下一个顶层条目之前的所有行属于该块。块的 insert 属性表示
+ * 块首行为 `- insert:`（注册列表块）。
+ * @param {string[]} lines 文件按行切分（已去行尾符）
+ * @returns {{begin:number,end:number,lines:string[],insert:boolean}[]}
+ */
+function topLevelBlocks(lines) {
+  const starts = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (/^-(\s|$)/.test(lines[i])) starts.push(i);
+  }
+  const blocks = [];
+  for (let s = 0; s < starts.length; s += 1) {
+    const begin = starts[s];
+    const end = s + 1 < starts.length ? starts[s + 1] : lines.length;
+    blocks.push({
+      begin,
+      end,
+      lines: lines.slice(begin, end),
+      insert: /^-\s*insert\s*:/.test(lines[begin]),
+    });
+  }
+  return blocks;
+}
+
+/** 修复后文本只剩注释/空行时补 `[]`，保证文件仍是合法顶层数组。 */
+function ensurePatchArray(lines) {
+  if (!lines.some((l) => /^-(\s|$)/.test(l))) lines.push('[]');
+  return lines;
+}
+
+/**
+ * 移除「重复注册」的 loader 条目（issue #17 存量自愈）。语义与历史实现
+ * 逐字一致（详见历史 profile-patch-heal.js 注释），差异仅在：id 字符集含
+ * 点号、输出保持原 EOL。
+ * @param {string} text cordis.patch.yml 原文
+ * @returns {{ text: string, removed: string[] }}
+ */
+function dedupePatchEntries(text) {
+  const eol = detectEol(text);
+  const lines = splitLines(text);
+  const blocks = topLevelBlocks(lines);
+  const registered = new Set();
+  const removed = [];
+  const out = [];
+  if (blocks.length > 0 && blocks[0].begin > 0) out.push(...lines.slice(0, blocks[0].begin));
+  for (const block of blocks) {
+    if (!block.insert) {
+      out.push(...block.lines);
+      continue;
+    }
+    const kept = [block.lines[0]];
+    let blockDupCount = 0;
+    let i = 1;
+    while (i < block.lines.length) {
+      const m = ANY_ID_ROW_RE.exec(block.lines[i]);
+      if (!m) {
+        kept.push(block.lines[i]);
+        i += 1;
+        continue;
+      }
+      const id = m[2];
+      if (registered.has(id)) {
+        removed.push(id);
+        blockDupCount += 1;
+        i += 1;
+        // 删除该注册行及其完整子树：缩进大于 id 行的所有后续行都属于本条目
+        //（含 config 内嵌套 YAML 列表项），到缩进 ≤ id 行处停下。
+        const indent = m[1].replace(/\t/g, '  ').length;
+        while (i < block.lines.length) {
+          const l = block.lines[i];
+          const li = (l.match(/^\s*/) || [''])[0].replace(/\t/g, '  ').length;
+          if (l.trim() === '' || li > indent) {
+            i += 1;
+            continue;
+          }
+          break;
+        }
+        continue;
+      }
+      registered.add(id);
+      kept.push(block.lines[i]);
+      i += 1;
+    }
+    if (blockDupCount > 0 && kept.length === 1) continue;
+    out.push(...kept);
+  }
+  if (removed.length === 0) return { text, removed: [] };
+  return { text: joinLines(ensurePatchArray(out), eol), removed };
+}
+
+/**
+ * 移除「已迁移为 bundle 的插件」在 patch 层残留的旧注册条目（双登记自愈）。
+ * 语义与历史实现逐字一致（详见历史 profile-patch-heal.js 注释）。
+ * @param {string} text cordis.patch.yml 原文
+ * @param {string[]} ids 需要从 patch 层移除的 loader id 集合
+ * @returns {{ text: string, removed: string[] }}
+ */
+function dropBlocksByIds(text, ids) {
+  const removal = new Set((ids || []).filter((i) => typeof i === 'string' && i));
+  if (removal.size === 0) return { text, removed: [] };
+  const eol = detectEol(text);
+  const lines = splitLines(text);
+  const blocks = topLevelBlocks(lines);
+  if (blocks.length === 0) return { text, removed: [] };
+  const removed = [];
+  const out = [];
+  if (blocks[0].begin > 0) out.push(...lines.slice(0, blocks[0].begin));
+  for (const block of blocks) {
+    const idRows = block.lines
+      .map((line, idx) => ({ line, idx, m: ANY_ID_ROW_RE.exec(line) }))
+      .filter((r) => r.m !== null)
+      .map((r) => ({ ...r, id: r.m[2] }));
+    const hitIds = idRows.filter((r) => removal.has(r.id)).map((r) => r.id);
+    if (hitIds.length === 0) {
+      out.push(...block.lines);
+      continue;
+    }
+    if (!block.insert) {
+      const bodyLines = block.lines.slice(1).filter((l) => l.trim() !== '');
+      const nameOnly = bodyLines.length > 0 && bodyLines.every((l) => /^\s*name\s*:/.test(l));
+      if (nameOnly) {
+        removed.push(...hitIds);
+        continue;
+      }
+      out.push(...block.lines);
+      continue;
+    }
+    if (hitIds.length === idRows.length) {
+      removed.push(...hitIds);
+      continue;
+    }
+    const keep = block.lines.map((line) => ({ line, drop: false }));
+    for (const r of idRows) {
+      if (!removal.has(r.id)) continue;
+      removed.push(r.id);
+      const indent = (r.line.match(/^\s*/) || [''])[0].replace(/\t/g, '  ').length;
+      keep[r.idx].drop = true;
+      let j = r.idx + 1;
+      while (j < block.lines.length) {
+        const l = block.lines[j];
+        const li = (l.match(/^\s*/) || [''])[0].replace(/\t/g, '  ').length;
+        if (l.trim() === '' || li > indent) {
+          keep[j].drop = true;
+          j += 1;
+          continue;
+        }
+        break;
+      }
+    }
+    for (const k of keep) if (!k.drop) out.push(k.line);
+  }
+  if (removed.length === 0) return { text, removed: [] };
+  return { text: joinLines(ensurePatchArray(out), eol), removed };
+}
+
+// ---------------------------------------------------------------------------
+// 行级配置自愈（历史 patch-row-heal.js，唯一实现 + EOL 保持）
+// ---------------------------------------------------------------------------
+
+/** 把 config 对象序列化为 patch 行 YAML 行（baseIndent = 行内 `- id:` 缩进）。 */
+function configLinesFor(config, baseIndent = 4) {
+  const step = ' '.repeat(baseIndent + 2);
+  const step2 = ' '.repeat(baseIndent + 4);
+  let out = `${step}config:\n`;
+  for (const [k, v] of Object.entries(config || {})) {
+    out += `${step2}${k}: ${JSON.stringify(v)}\n`;
+  }
+  return out;
+}
+
+/**
+ * 把行的 config 块缩进对齐到自身 `- id:` 行（config 须在 id 缩进 + 2，键在 + 4）。
+ * 幂等；返回可能修改后的 patch。
+ */
+function normalizeRowConfigIndent(patch, id) {
+  if (typeof patch !== 'string' || patch === '' || !id) return patch;
+  const esc = escRegExp(String(id));
+  const rowRe = new RegExp(`^([\\t ]*)- id: ${esc}\\b`);
+  const eol = detectEol(patch);
+  const lines = splitLines(patch);
+  let changed = false;
+  for (let i = 0; i < lines.length; i++) {
+    const m = rowRe.exec(lines[i]);
+    if (!m) continue;
+    const idIndent = m[1].replace(/\t/g, '  ').length;
+    const wantConfig = ' '.repeat(idIndent + 2) + 'config:';
+    for (let j = i + 1; j < lines.length; j++) {
+      const cur = lines[j];
+      const t = cur.trim();
+      if (t === '' || /^#/.test(t)) continue;
+      if (/^[\t ]*- id:/.test(cur) || t === 'insert:') break;
+      const curIndent = (cur.match(/^[\t ]*/) || [''])[0].replace(/\t/g, '  ').length;
+      if (curIndent <= idIndent) break;
+      if (!/^[\t ]*config:/.test(cur) || t !== 'config:') continue;
+      if (cur !== wantConfig) {
+        const diff = curIndent - (idIndent + 2);
+        lines[j] = wantConfig;
+        for (let k = j + 1; k < lines.length; k++) {
+          const kl = lines[k];
+          if (kl.trim() === '' || /^#/.test(kl)) continue;
+          const ki = (kl.match(/^[\t ]*/) || [''])[0].replace(/\t/g, '  ').length;
+          if (ki <= idIndent + 2) break;
+          lines[k] = ' '.repeat(ki - diff) + kl.trimStart();
+        }
+        changed = true;
+      }
+      break;
+    }
+  }
+  return changed ? joinLines(lines, eol) : patch;
+}
+
+/** 确保每个 soul-md 行携带 config.path（幂等）。 */
+function healSoulMdPatchRow(patch, config = { path: 'soul.md' }) {
+  const healed = [];
+  if (typeof patch !== 'string' || patch === '') return { patch, healed };
+  const normalized = normalizeRowConfigIndent(patch, 'soul-md');
+  if (normalized !== patch) healed.push('soul-md');
+  patch = normalized;
+  const rowRe = /(^[\t ]*- id: soul-md\b[^\n]*\n[\t ]*name: ['"]?[^'"\n]+['"]?\n)(?![\t ]*config:)/gm;
+  const eol = detectEol(patch);
+  let out = patch.replace(rowRe, (m) => m + configLinesFor(config, (m.match(/^[\t ]*/) || [''])[0].replace(/\t/g, '  ').length).replace(/\n/g, eol));
+  if (out !== patch) healed.push('soul-md');
+  return { patch: out, healed };
+}
+
+/** 给已存在但缺 config 块的行补 config（dsh-pet 同族自愈，幂等）。 */
+function healRowConfig(patch, id, config) {
+  const healed = [];
+  if (typeof patch !== 'string' || patch === '' || !id || !config) return { patch, healed };
+  const normalized = normalizeRowConfigIndent(patch, id);
+  if (normalized !== patch) healed.push(id);
+  patch = normalized;
+  const eol = detectEol(patch);
+  const rowRe = new RegExp(
+    `(^[\\t ]*- id: ${escRegExp(String(id))}\\b[^\\n]*\\n[\\t ]*name: ['"]?[^'"\\n]+['"]?\\n)(?![\\t ]*config:)`,
+    'gm'
+  );
+  const out = patch.replace(rowRe, (m) => m + configLinesFor(config, (m.match(/^[\t ]*/) || [''])[0].replace(/\t/g, '  ').length).replace(/\n/g, eol));
+  if (out !== patch) healed.push(id);
+  return { patch: out, healed };
+}
+
+// ---------------------------------------------------------------------------
+// bundle 双登记去重（历史 patch-row-heal.js 下半段，id 级去重已接线）
+// ---------------------------------------------------------------------------
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+/** 收集一个 bundle 包自身 cordis.patch.yml 声明的全部 loader id（缺失/损坏不贡献）。 */
+function bundlePatchEntryIds(bundleDir) {
+  const ids = new Set();
+  if (!bundleDir) return ids;
+  try {
+    const pkgPath = path.join(bundleDir, 'package.json');
+    if (!fs.existsSync(pkgPath)) return ids;
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    const b = pkg && pkg.dsh && pkg.dsh.bundle;
+    let patchRel = 'cordis.patch.yml';
+    if (typeof b === 'string') patchRel = b;
+    else if (b && typeof b.patch === 'string') patchRel = b.patch;
+    const patch = fs.readFileSync(path.join(bundleDir, patchRel), 'utf8');
+    for (const id of patchRowIds(patch)) ids.add(id);
+  } catch { /* 包/补丁缺失或损坏 → 不贡献任何 id */ }
+  return ids;
+}
+
+/** 全部 profile bundle 包声明 id 的并集（覆盖 git/fork/link 安装、包名与 overlay 行不一致）。 */
+function collectBundleEntryIds(bundleNames, profileNodeModules) {
+  const ids = new Set();
+  for (const name of bundleNames || []) {
+    const dir = name ? path.join(profileNodeModules, ...String(name).split('/')) : '';
+    for (const id of bundlePatchEntryIds(dir)) ids.add(id);
+  }
+  return ids;
+}
+
+/**
+ * 移除与 profile bundle 自身装配重复的 insert 块（双登记 → duplicate loader
+ * entry id 崩溃）。name 级（历史）+ id 级（bundleEntryIds，本次接线）双重判定。
+ * @returns {{ patch: string, removed: string[] }}
+ */
+function removeBundledRowDuplicates(patch, rowIds, bundleNames, bundleEntryIds) {
+  const removed = [];
+  if (typeof patch !== 'string' || patch === ''
+    || (!bundleNames || !bundleNames.length) && (!bundleEntryIds || !bundleEntryIds.size)) {
+    return { patch, removed };
+  }
+  const declaredIds = bundleEntryIds && bundleEntryIds.size ? bundleEntryIds : new Set();
+  const nameTargets = new Set(Object.entries(rowIds || {})
+    .filter(([, pkg]) => (bundleNames || []).includes(pkg))
+    .map(([id]) => id));
+  const isDup = (id) => (id !== null && declaredIds.has(id)) || (id !== null && nameTargets.has(id));
+  const eol = detectEol(patch);
+  const lines = splitLines(patch);
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^-\s*insert:/.test(line)) {
+      let id = null;
+      const mid = /^\s*-\s*id:\s*([A-Za-z0-9][A-Za-z0-9_.-]*)\s*$/.exec(lines[i + 1] || '');
+      if (mid) id = mid[1];
+      if (isDup(id)) {
+        removed.push(id);
+        let j = i + 1;
+        while (j < lines.length && !/^-\s*insert:/.test(lines[j]) && /^#/.test(lines[j]) === false && /^\s+\S/.test(lines[j])) j++;
+        i = j - 1;
+        continue;
+      }
+    }
+    out.push(line);
+  }
+  let text = joinLines(out, eol).replace(/\n{3,}/g, eol + eol);
+  if (!text.endsWith('\n')) text += '\n';
+  return { patch: text, removed };
+}
+
+// ---------------------------------------------------------------------------
+// 语法自愈 / 标记提取 / 默认禁用 / 旧市场清理（历史 companion-profile +
+// plugin-sync 的补丁段，唯一实现）
+// ---------------------------------------------------------------------------
+
+/** 移除与列表混存的顶层 []（bare array 形态自愈）。 */
+function healPatchListSyntax(text) {
+  const bareArray = /^\s*\[\]\s*$/m.test(text);
+  const hasEntries = /^\s*-\s+(?:id|insert)\s*:/m.test(text);
+  if (bareArray && hasEntries) {
+    return { text: text.replace(/^\s*\[\]\s*$\n?/m, ''), healed: true };
+  }
+  return { text, healed: false };
+}
+
+/** 从 patch 文本提取「卸载标记」id（纯文本扫描，YAML 损坏时仍可用）。 */
+function removedPluginIdsFromPatch(patch) {
+  const ids = new Set();
+  const text = String(patch || '');
+  const entryRe = /(?:^|\n)([ \t]{0,2})- id:[ \t]*([A-Za-z0-9][A-Za-z0-9_.-]*)([\s\S]*?)(?=(?:\n[ \t]{0,2}- id:)|(?:\n[ \t]{0,2}- insert:)|\s*$)/g;
+  let m;
+  while ((m = entryRe.exec(text)) !== null) {
+    if (/(?:^|\n)[ \t]{0,2}removed[ \t]*:[ \t]*true\b/i.test(m[3])) ids.add(m[2]);
+  }
+  return ids;
+}
+
+/** 移除旧插件市场（@deepseek-ai/dsh-plugin-marketplace）的 insert 条目（幂等）。 */
+function removeLegacyMarketplacePatchLines(patch) {
+  const before = patch;
+  const text = patch.replace(/^\s*-\s*insert:\s*$\n^\s*-\s*id:\s*plugin-marketplace\s*$\n^\s*name:\s*['"]@deepseek-ai\/dsh-plugin-marketplace['"]\s*$\n?/gm, '');
+  return { patch: text, changed: text !== before };
+}
+
+/**
+ * 幂等写入默认禁用条目（compaction-basic / harness-pet）。
+ * @returns {{ patch: string, changed: boolean }}
+ */
+function ensureDisabledPatchEntry(patch, idPattern, block) {
+  if (idPattern.test('\n' + patch)) return { patch, changed: false };
+  if (/^\s*\[\]\s*$/m.test(patch)) return { patch: patch.replace(/\[\]/m, block.trim()), changed: true };
+  if (patch.trim() === '') return { patch: PATCH_HEADER + block.trim(), changed: true };
+  return { patch: patch.replace(/\s*$/, '\n') + block, changed: true };
+}
+
+/**
+ * 把非 bundle 配套插件注册进 profile patch 层（幂等，语义与历史 companion-profile
+ * 逐字一致；idNameRe 支持三种引号形态——修复双引号/无引号 name 改名漏修）。
+ * @returns {{ patch: string, changed: boolean, dropped: string[], updated: string[], added: string[] }}
+ */
+function registerCompanionPatchEntries(patch, opts) {
+  const { plugins, bundleNames, missingNames, removedIds, onDrop, onEntry } = opts;
+  // EOL 保持：内部统一 LF，输出按原 EOL 还原。
+  const original = String(patch);
+  const text0 = original.includes('\r\n') ? original.replace(/\r\n/g, '\n') : original;
+  let text = text0;
+  let changed = false;
+  const dropped = [];
+  const updated = [];
+  const added = [];
+
+  const bundleIds = new Set();
+  for (const p of plugins) {
+    if (bundleNames.has(p.name)) bundleIds.add(p.id);
+  }
+  if (bundleIds.size > 0 && text.includes('- id:')) {
+    const migration = dropBlocksByIds(text, [...bundleIds]);
+    if (migration.removed.length > 0) {
+      text = migration.text;
+      changed = true;
+      const ids = [...new Set(migration.removed)];
+      dropped.push(...ids);
+      if (onDrop) onDrop('已把 bundle 插件移出 profile patch（避免双登记）: ' + ids.join(', '));
+    }
+  }
+  if (missingNames.size > 0 && text.includes('- id:')) {
+    const missingIds = plugins.filter((p) => missingNames.has(p.name)).map((p) => p.id);
+    if (missingIds.length > 0) {
+      const drop = dropBlocksByIds(text, missingIds);
+      if (drop.removed.length > 0) {
+        text = drop.text;
+        changed = true;
+        dropped.push(...drop.removed);
+        if (onDrop) onDrop('已把源缺失插件移出 profile patch（避免注册不存在的包）: ' + [...new Set(drop.removed)].join(', '));
+      }
+    }
+  }
+  for (const p of plugins) {
+    if (removedIds && removedIds.has(p.id)) continue;
+    if (bundleNames.has(p.name)) continue;
+    if (missingNames.has(p.name)) continue;
+    const reId = escRegExp(p.id);
+    // 引号三形态：'x' / "x" / x。分组：1=前缀、2=引号、3=名（替换时 $2 复用）。
+    const idNameRe = new RegExp('(id:\\s*' + reId + '(?![A-Za-z0-9_.-])[^\\n]*\\n[ \\t]*name:\\s*)([\'"]?)([^\'"\\n]*)\\2');
+    const m = text.match(idNameRe);
+    if (m) {
+      if (m[3] !== p.name) {
+        text = text.replace(idNameRe, '$1$2' + p.name + '$2');
+        changed = true;
+        updated.push(p.id);
+        if (onEntry) onEntry('已更新补丁条目 ' + p.id + ': ' + m[3] + ' → ' + p.name);
+      }
+      continue;
+    }
+    if (new RegExp('(?:^|\\n)\\s*-?\\s*id\\s*:\\s*' + reId + '(?![A-Za-z0-9_.-])').test('\n' + text)) {
+      continue;
+    }
+    const block = `- insert:\n    - id: ${p.id}\n      name: '${p.name}'\n`;
+    if (/^\s*\[\]\s*$/m.test(text)) text = text.replace(/\[\]/m, block);
+    else if (text.trim() === '') text = PATCH_HEADER + block;
+    else text = text.replace(/\s*$/, '\n') + block;
+    changed = true;
+    added.push(p.id);
+    if (onEntry) onEntry('已添加补丁条目 ' + p.id + ' → ' + p.name);
+  }
+  return { patch: text === text0 ? original : preserveEol(original, text), changed, dropped, updated, added };
+}
+
+module.exports = {
+  PATCH_HEADER,
+  ACP_DISABLE_BLOCK,
+  PET_DISABLE_BLOCK,
+  LOADER_ID_RE,
+  parsePatchRows,
+  patchRowIds,
+  togglePluginInPatch,
+  setPluginRemoved,
+  dedupePatchEntries,
+  dropBlocksByIds,
+  topLevelBlocks,
+  ensurePatchArray,
+  configLinesFor,
+  normalizeRowConfigIndent,
+  healSoulMdPatchRow,
+  healRowConfig,
+  bundlePatchEntryIds,
+  collectBundleEntryIds,
+  removeBundledRowDuplicates,
+  healPatchListSyntax,
+  removedPluginIdsFromPatch,
+  removeLegacyMarketplacePatchLines,
+  ensureDisabledPatchEntry,
+  registerCompanionPatchEntries,
+};
