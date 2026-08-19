@@ -528,6 +528,21 @@ const PATCH_SPECS = [
     successLog: (root) => '会话历史尾部恢复补丁: 已应用到 ' + root,
     failLog: (root, err) => '会话历史尾部恢复补丁失败(' + root + '): ' + err.message,
   },
+  {
+    id: 'tool-source-compat',
+    group: 'package',
+    order: 220,
+    kind: 'root',
+    layout: 'nm-roots',
+    wslLayout: 'nm-roots',
+    apply: rootAppliers.patchToolSourceCompat,
+    marker: null,
+    requires: [],
+    failPolicy: 'warn',
+    cli: true,
+    successLog: (root) => 'tool source 容错补丁: 已应用到 ' + root,
+    failLog: (root, err) => 'tool source 容错补丁失败(' + root + '): ' + err.message,
+  },
 ];
 
 /**

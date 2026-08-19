@@ -22,6 +22,13 @@ function argvProfile() {
         return argv[flag + 1];
     return undefined;
 }
+// 受监管环境（DSH Desktop 壳层 / systemd / pm2 等 supervisor）下重启权归监管方：
+// 自重启会 SIGTERM 掉被监管的 dsh web 进程再拉起游离替身，壳层会把自杀当
+// 「服务意外退出」弹窗、替身脱离看管（退出时杀不掉、日志不在 dsh-web.log）。
+// 壳层注入 DSH_DESKTOP_SUPERVISED=1；显式 config.allowRestart 仍然优先。
+function supervisedRestartDisabled() {
+    return process.env.DSH_DESKTOP_SUPERVISED === '1' || process.env.DSH_SUPERVISOR === '1';
+}
 export function apply(ctx, config) {
     ctx.inject(['webServer', 'loader'], (hostCtx) => {
         const host = hostCtx;
@@ -29,7 +36,7 @@ export function apply(ctx, config) {
         if (desktopProfiles === undefined) {
             const resolved = {
                 profile: config?.profile ?? argvProfile() ?? 'web',
-                allowRestart: config?.allowRestart ?? true,
+                allowRestart: config?.allowRestart ?? !supervisedRestartDisabled(),
             };
             host.effect(() => mountMarketRoutes(host, resolved), 'dsh-market: http routes');
             return;

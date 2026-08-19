@@ -89,18 +89,19 @@ test('防护类补丁与包级补丁均已登记（无遗漏 apply*）', () => {
     'profile-patch-guard', 'profile-bundle-guard-appboot', 'profile-bundle-guard-profileboot',
     'settings-section-guard', 'workspace-search-rail-fix', 'plugin-inventory-tab-merge',
     'web-search-baseurl', 'menu-viewport', 'session-manage', 'open-project-dir',
-    'session-persistence',
+    'session-persistence', 'tool-source-compat',
   ];
   for (const id of expected) assert.ok(ids.has(id), `遗漏补丁 ${id}`);
 });
 
-test('getSpecsByCli：返回 9 个 cli:true 补丁（8 runtime + session-persistence）', () => {
+test('getSpecsByCli：返回 10 个 cli:true 补丁（8 runtime + session-persistence + tool-source-compat）', () => {
   const specs = getSpecsByCli();
-  assert.equal(specs.length, 9, 'cli 清单应恰为 9 项');
+  assert.equal(specs.length, 10, 'cli 清单应恰为 10 项');
   const expected = new Set([
     'slot-legacy-key', 'slot-unkeyed-compat', 'slot-error-isolation',
     'runtime-flash-fix', 'prompt-expose-fix', 'shell-description-compat',
     'code-mode-compat', 'attachment-mime-trust', 'session-persistence',
+    'tool-source-compat',
   ]);
   assert.deepEqual(new Set(specs.map((s) => s.id)), expected, 'cli 清单 id 集合不符');
   for (const s of specs) assert.equal(s.cli, true, `${s.id} 应标记 cli:true`);
@@ -132,9 +133,13 @@ test('getSpecsByCli：每个 spec 的 transform/apply 与 patch-adapters 导出�
     'code-mode-compat': adapters.transformCodeModeCompat,
     'attachment-mime-trust': adapters.transformAttachmentMimeTrust,
   };
+  const rootApplyMap = {
+    'session-persistence': adapters.rootAppliers.patchSessionPersistence,
+    'tool-source-compat': adapters.rootAppliers.patchToolSourceCompat,
+  };
   for (const spec of getSpecsByCli()) {
     if (spec.kind === 'root') {
-      assert.equal(spec.apply, adapters.rootAppliers.patchSessionPersistence, `${spec.id} 的 apply 应与 rootAppliers 同源`);
+      assert.equal(spec.apply, rootApplyMap[spec.id], `${spec.id} 的 apply 应与 rootAppliers 同源`);
     } else {
       assert.equal(spec.transform, transformMap[spec.id], `${spec.id} 的 transform 应与 patch-adapters 导出同源`);
     }

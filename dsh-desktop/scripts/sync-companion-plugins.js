@@ -314,6 +314,8 @@ function applyRuntimePatches(home, dryRun) {
     donePrefix: false,
     anchorLog: (m) => warn(m),
   });
+  // 空 tool-call 容错（读端 dsh-session + 写端 dsh-agent-loop）已以 tool-source-compat
+  // 规格登记进 patch-registry（cli:true），由上方 applyAll(getSpecsByCli()) 统一应用。
 }
 
 // ---------------------------------------------------------------------------

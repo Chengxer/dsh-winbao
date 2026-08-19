@@ -2127,7 +2127,7 @@ window.__ModuleLoader__.load({ id: "dshmarket", factory: (require) => {
 							setRestartNoticeDismissed(sessionStorage.getItem("dshm-restart-dismissed") === status.boot);
 						} catch {}
 					}
-					setRestartEnabled(status.restart === true);
+					setRestartEnabled(status.restart === true || (typeof window !== "undefined" && window.dshDesktop !== undefined && typeof window.dshDesktop.restartService === "function")); // [desktop-restart-fix] 桌面壳层桥可监管重启时也给按钮
 				}).catch(() => {});
 				refreshInstalled();
 			}, [refreshInstalled]);
@@ -2403,7 +2403,15 @@ window.__ModuleLoader__.load({ id: "dshmarket", factory: (require) => {
 					};
 					poll();
 				};
-				const requestRestart = (attemptsLeft) => {
+					// [desktop-restart-fix] 桌面壳层监管下走桥接重启（chrome:restart-service）：
+				// 服务端自重启会 SIGTERM 掉被监管进程再拉游离替身，壳层会当「服务意外退出」弹窗。
+				const bridge = typeof window !== "undefined" ? window.dshDesktop : undefined;
+				if (bridge !== undefined && typeof bridge.restartService === "function") {
+					Promise.resolve().then(() => bridge.restartService()).catch(() => {});
+					awaitNewBoot();
+					return;
+				}
+			const requestRestart = (attemptsLeft) => {
 					fetch("/dsh-market/restart", {
 						method: "POST",
 						headers: { "content-type": "application/json" },
