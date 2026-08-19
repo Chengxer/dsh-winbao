@@ -69,6 +69,7 @@ window.__ModuleLoader__.load({
 			diagSelfHealTitle: "最近启动自愈",
 			diagSelfHealRemoved: "已自动移出启动清单 {0}",
 			diagSelfHealDisabled: "已自动禁用 {0}",
+			diagSelfHealReset: "已重置补丁配置 {0}",
 			backupTitle: "备份配置",
 			backupExport: "导出备份…",
 			backupExporting: "导出中…",
@@ -933,7 +934,7 @@ window.__ModuleLoader__.load({
 					if (!items || items.length === 0) return null;
 					return jsxs("div", { style: { fontSize: 12, padding: "8px 10px", borderRadius: 8, marginTop: 6, background: "color-mix(in srgb, var(--dsw-alias-state-info-primary, #5b9bd5) 10%, transparent)", color: "var(--dsw-alias-state-info-primary, #5b9bd5)", display: "flex", flexDirection: "column", gap: 3 }, children: [
 						jsx("span", { style: { fontWeight: 600 }, children: L.diagSelfHealTitle }),
-						items.map((it, i) => jsx("div", { key: i, style: { wordBreak: "break-all" }, children: (it.kind === "overlay" ? L.diagSelfHealDisabled : L.diagSelfHealRemoved).replace("{0}", (it.names || []).join("、")) + "（" + new Date(it.ts).toLocaleString() + "）" }))
+						items.map((it, i) => jsx("div", { key: i, style: { wordBreak: "break-all" }, children: (it.kind === "overlay" ? L.diagSelfHealDisabled : it.kind === "patch-layer" ? L.diagSelfHealReset : L.diagSelfHealRemoved).replace("{0}", (it.kind === "patch-layer" && it.backup ? String(it.backup).split(/[\\/]/).pop() : (it.names || []).join("、"))) + "（" + new Date(it.ts).toLocaleString() + "）" }))
 					] });
 				};
 				// 自愈历史随报告放在 sections.selfHeal（顶层仅 ok/errors/warnings/infos），

@@ -19,8 +19,9 @@
 //   4. 菜单锚点矩形统一走 getAnchorRect：⋯ 按钮点击时返回按钮矩形，右键时
 //      返回光标矩形。
 //
-// 桥 window.__dshDesktopOpenDir 由配套插件 dsh-session-manager 提供（复用
-// preload 已暴露的 window.dshDesktop.openPath → dsh:file-open → shell.openPath）。
+// 桥 openPath 为 preload 已暴露的宿主能力 window.dshDesktop.openPath（显式
+// 直接引用，不再经 dsh-session-manager 插件的 window.__dshDesktopOpenDir 别名
+// 中转）；桥缺失时（纯浏览器）`?.` 可选链静默降级为无操作。
 //
 // 用法：
 //   node scripts/patch-open-project-dir.js [<node_modules 根目录>]
@@ -44,7 +45,7 @@ const UI_PROJECT_ITEMS_INSERT = '}, {\n\t\t\t\tid: "delete",\n\t\t\t\tlabel: t("
 
 // 1b. 项目行菜单 onSelect：放行 open-folder 并调用桥。
 const UI_PROJECT_SELECT_ANCHOR = 'if (id !== "rename" && id !== "delete") return;\n\t\t\t\t\t\t\t\tif (id === "rename") actions.rename();\n\t\t\t\t\t\t\t\telse actions.delete();';
-const UI_PROJECT_SELECT_INSERT = 'if (id !== "rename" && id !== "delete" && id !== "open-folder") return;\n\t\t\t\t\t\t\t\tif (id === "rename") actions.rename();\n\t\t\t\t\t\t\t\telse if (id === "delete") actions.delete();\n\t\t\t\t\t\t\t\telse if (id === "open-folder") window.__dshDesktopOpenDir?.(row.cwd);';
+const UI_PROJECT_SELECT_INSERT = 'if (id !== "rename" && id !== "delete" && id !== "open-folder") return;\n\t\t\t\t\t\t\t\tif (id === "rename") actions.rename();\n\t\t\t\t\t\t\t\telse if (id === "delete") actions.delete();\n\t\t\t\t\t\t\t\telse if (id === "open-folder") window.dshDesktop?.openPath?.(row.cwd);';
 
 // 1c. 项目行 div：右键弹出同一菜单（光标锚点；无 actions 的未分组桶不弹）。
 const UI_PROJECT_DIV_ANCHOR = 'role: "treeitem",\n\t\t\t\t"aria-expanded": row.expanded,\n\t\t\t\tonClick: onToggle,';
@@ -71,12 +72,12 @@ const UI_SESSION_STATE_ANCHOR = 'const showStatus = statuses[0].state !== "done"
 const UI_SESSION_STATE_INSERT = 'const showStatus = statuses[0].state !== "done" || row.completed;\n\t\t\tconst [menuOpen, setMenuOpen] = (0, react.useState)(false);\n\t\t\tconst [menuRect, setMenuRect] = (0, react.useState)(null);';
 
 // 2c. 会话行菜单项数组：delete 项后按需追加 open-folder（无 cwd 不显示）。
-const UI_SESSION_ITEMS_ANCHOR = '// dsh-desktop patch (session manage): 归档下方增加删除。\n\t\t\t\t{\n\t\t\t\t\tid: "delete",\n\t\t\t\t\tlabel: t("menu.deleteSession")\n\t\t\t\t}\n\t\t\t];';
-const UI_SESSION_ITEMS_INSERT = '// dsh-desktop patch (session manage): 归档下方增加删除。\n\t\t\t\t{\n\t\t\t\t\tid: "delete",\n\t\t\t\t\tlabel: t("menu.deleteSession")\n\t\t\t\t},\n\t\t\t\t// dsh-desktop patch (open project dir): 打开会话所在项目目录（无 cwd 的孤儿/未分组会话不显示）。\n\t\t\t\t...(cwd ? [{\n\t\t\t\t\tid: "open-folder",\n\t\t\t\t\tlabel: t("menu.openProjectDir"),\n\t\t\t\t\ticon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconFolderOpen16, {})\n\t\t\t\t}] : [])\n\t\t\t];';
+const UI_SESSION_ITEMS_ANCHOR = '// dsh-desktop patch (session manage): 归档下方增加删除。\n\t\t\t\t// 桥 window.__dshSessionManager 由 dsh-session-manager 插件提供；桥缺失\n\t\t\t\t// 时隐藏「删除对话」项（显式降级，而非可选链静默无反应）。\n\t\t\t\t...(window.__dshSessionManager && typeof window.__dshSessionManager.deleteSession === "function" ? [{\n\t\t\t\t\tid: "delete",\n\t\t\t\t\tlabel: t("menu.deleteSession")\n\t\t\t\t}] : [])\n\t\t\t];';
+const UI_SESSION_ITEMS_INSERT = '// dsh-desktop patch (session manage): 归档下方增加删除。\n\t\t\t\t// 桥 window.__dshSessionManager 由 dsh-session-manager 插件提供；桥缺失\n\t\t\t\t// 时隐藏「删除对话」项（显式降级，而非可选链静默无反应）。\n\t\t\t\t...(window.__dshSessionManager && typeof window.__dshSessionManager.deleteSession === "function" ? [{\n\t\t\t\t\tid: "delete",\n\t\t\t\t\tlabel: t("menu.deleteSession")\n\t\t\t\t}] : []),\n\t\t\t\t// dsh-desktop patch (open project dir): 打开会话所在项目目录（无 cwd 的孤儿/未分组会话不显示）。\n\t\t\t\t...(cwd ? [{\n\t\t\t\t\tid: "open-folder",\n\t\t\t\t\tlabel: t("menu.openProjectDir"),\n\t\t\t\t\ticon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconFolderOpen16, {})\n\t\t\t\t}] : [])\n\t\t\t];';
 
 // 2d. 会话行菜单 onSelect：open-folder 调用桥。
 const UI_SESSION_SELECT_ANCHOR = 'if (id === "delete") window.__dshSessionManager?.deleteSession(node.id);';
-const UI_SESSION_SELECT_INSERT = 'if (id === "delete") window.__dshSessionManager?.deleteSession(node.id);\n\t\t\t\t\t\t\t\t\tif (id === "open-folder") window.__dshDesktopOpenDir?.(cwd);';
+const UI_SESSION_SELECT_INSERT = 'if (id === "delete") window.__dshSessionManager?.deleteSession(node.id);\n\t\t\t\t\t\t\t\t\tif (id === "open-folder") window.dshDesktop?.openPath?.(cwd);';
 
 // 2e. 会话行 div：右键弹出同一菜单（光标锚点；blank 占位行无菜单不弹）。
 const UI_SESSION_DIV_ANCHOR = '"aria-selected": selected,\n\t\t\t\t\tonClick: () => {\n\t\t\t\t\t\tonOpen(node.id);\n\t\t\t\t\t},';
@@ -127,7 +128,7 @@ const UI_REPLACEMENTS = [
 // ---------------------------------------------------------------------------
 // 工具：在文件中做「锚点必须存在 + 标记幂等」的替换
 // ---------------------------------------------------------------------------
-function applyReplacements(file, replacements, log) {
+function applyReplacements(file, replacements, log, stats, options) {
   let src;
   try {
     src = fs.readFileSync(file, 'utf8');
@@ -142,12 +143,17 @@ function applyReplacements(file, replacements, log) {
   for (const { anchor, insert } of replacements) {
     if (!src.includes(anchor)) {
       log('open-project-dir 补丁: 锚点未匹配（dsh 版本可能已变化），跳过 ' + file + ' :: ' + anchor.slice(0, 60));
+      if (stats) stats.anchorMissing += 1;
       return false;
     }
     src = src.replace(anchor, insert);
   }
   src = '// ' + MARKER + ': 侧栏「打开项目目录」+ 右键菜单（issue #85）\n' + src;
   try {
+    if (options && options.dryRun) {
+      log('open-project-dir 补丁: dry-run: 将应用 ' + file);
+      return false; // dryRun 不落盘，不计为已写
+    }
     writeFileAtomic(file, src);
     log('open-project-dir 补丁: 已应用 ' + file);
     return true;
@@ -163,7 +169,7 @@ function applyReplacements(file, replacements, log) {
  * @param {(msg: string) => void} [log]
  * @returns {number} 实际发生修改的文件数
  */
-function patchOpenProjectDir(nmRoot, log = () => {}) {
+function patchOpenProjectDir(nmRoot, log = () => {}, stats, options) {
   const targets = [
     {
       file: path.join(nmRoot, '@deepseek-ai', 'dsh-client-ui-workspace', 'lib', 'client.js'),
@@ -173,7 +179,7 @@ function patchOpenProjectDir(nmRoot, log = () => {}) {
   let changed = 0;
   for (const t of targets) {
     if (!fs.existsSync(t.file)) continue;
-    if (applyReplacements(t.file, t.replacements, log)) changed += 1;
+    if (applyReplacements(t.file, t.replacements, log, stats, options)) changed += 1;
   }
   return changed;
 }

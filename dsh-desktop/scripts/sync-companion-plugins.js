@@ -28,23 +28,14 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
 
 const { installBuiltinPresets } = require('./install-minimal-win-preset');
 const { COMPANION_PLUGINS } = require('./lib/companion-plugins');
 const { CORE_BUNDLE_NAMES } = require('../profile-manifest');
 const { writeFileAtomic } = require('./lib/patch-io');
-const { applyPatchToFiles } = require('./lib/patch-engine');
+const { applyAll } = require('./integration/patch-runner');
+const { getSpecsByCli } = require('./lib/patch-registry');
 const { reconcileProfileBundles, createEntryListYamlParser } = require('./lib/profile-reconcile');
-const {
-  FLASH_PKG_REL, EXPOSE_PKG_REL, PW_REL, BASH_REL, CODE_PRESET_REL, patchTargets,
-  slotCompatPatchTargets,
-  transformFlashFix, transformExposeFix,
-  transformShellDescriptionOptional, transformCodeModeCompat,
-  transformAttachmentMimeTrust, ATTACH_LOCAL_REL,
-  transformLegacySlotKey, transformSlotUnkeyedCompat,
-  PERSISTENCE_PKG_REL, transformPersistenceAll,
-} = require('./lib/runtime-patches');
 const {
   ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK,
   ensureDisabledPatchEntry, removeLegacyMarketplacePatchLines,
@@ -91,18 +82,41 @@ function packageDirFromBin(binPath) {
   return '';
 }
 
+// Windows 可执行扩展名（按 PATH 解析优先级）。
+const WINDOWS_PATHEXT = ['.com', '.exe', '.bat', '.cmd'];
+
+/**
+ * 纯 JS 的 PATH 命令解析：不做任何子进程 spawn。
+ *
+ * 旧实现用 `spawnSync('where.exe')`（Windows）/ `sh -lc 'command -v'`（POSIX），
+ * 在部分 Windows / Node 版本组合下会触发原生崩溃（0xC0000409 / ENOENT / exit
+ * 127），且依赖系统 where.exe。改为直接扫描 process.env.PATH 各目录：
+ *   - Windows：按 PATHEXT 扩展名探测，返回全部命中（对齐 where.exe -a 语义）；
+ *   - POSIX：按可执行位探测，返回第一个命中（对齐 command -v 语义）。
+ * 无子进程、无外部依赖、跨版本确定。
+ */
 function commandLocations(cmd) {
-  try {
-    const win = process.platform === 'win32';
-    const res = spawnSync(win ? 'where.exe' : 'sh', win ? [cmd] : ['-lc', `command -v ${cmd} 2>/dev/null || true`], {
-      encoding: 'utf8',
-      windowsHide: true,
-      timeout: 15000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    if (res.status !== 0) return [];
-    return (res.stdout || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-  } catch { return []; }
+  const locations = [];
+  const entries = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const win = process.platform === 'win32';
+  for (const dir of entries) {
+    if (win) {
+      // 传入的 cmd 已含扩展名则直接探测，否则按 PATHEXT 顺序试探（含无扩展名形态）。
+      const names = cmd.includes('.') ? [cmd] : [cmd, ...WINDOWS_PATHEXT.map((ext) => cmd + ext)];
+      for (const name of names) {
+        const full = path.join(dir, name);
+        try { if (fs.statSync(full).isFile()) locations.push(full); } catch { /* 该形态不存在，继续 */ }
+      }
+    } else {
+      const full = path.join(dir, cmd);
+      try {
+        fs.accessSync(full, fs.constants.X_OK);
+        locations.push(full);
+        break; // POSIX 与 command -v 一致：取第一个可执行
+      } catch { /* 该目录无可执行，继续 */ }
+    }
+  }
+  return [...new Set(locations)];
 }
 
 function findDshPackageDir(home, explicit) {
@@ -264,134 +278,41 @@ function syncPlugins(home, dryRun, dshPkgDir) {
 }
 
 // ---------------------------------------------------------------------------
-// 运行时补丁（与 main.js applyRuntimeFlashFix / applyPromptExposeFix 共用
-// scripts/lib/runtime-patches.js 的同一变换）：覆盖 profile fallback 与壳托管
-// 安装目录 agent 两份副本；bundle 初始化后的 dsh 安装（npm 版）两份副本通常
-// 互为同一文件（fallback 符号链接写穿），幂等。
+// 运行时补丁：复用 patch-runner 的 applyAll + patch-registry 的 getSpecsByCli()，
+// 由 registry 的 cli:true 字段单一驱动（CLI 与 main.js 不再各持一份手写清单，
+// 杜绝漂移）。CLI 同步期仅应用 cli:true 的 9 个补丁（= 8 个 HEAD 原有补丁 +
+// 1 个 slot-error-isolation：第一轮 review 有意补漏的第三层错误隔离安全网）：
+//   slot-legacy-key / slot-unkeyed-compat / slot-error-isolation /
+//   runtime-flash-fix / prompt-expose-fix / shell-description-compat /
+//   code-mode-compat / attachment-mime-trust / session-persistence。
+// image-send / vision-key（宿主侧识图能力，仅桌面壳经 main.js 应用）与
+// guard 组 / 其余 package 组补丁 cli:false，不在同步期应用。
+//
+// 注：runtime-flash-fix 的 doneLog 与 registry 统一为「已修复会话列表刷新闪跳」，
+// 属有意修复历史文案漂移（非保持 CLI 历史文案），与 registry 单一数据源原则一致。
+//
+// ctx 构造：wslMode:true 走 spec.wslLayout（WSL 两份副本 profile fallback +
+// agent）；appDir/userDataDir 指向 os.tmpdir() 下刻意不存在的哨兵根（含 pid，
+// 唯一不可碰撞），使 resolveNmRoots 的 nm-roots 四根中仅 home 的 profile/agent
+// 两根存在（等价旧 patchTargets 两份副本），其余被 applyRoot 的 existsSync
+// 跳过。dry-run + donePrefix:false + anchorLog:warn 保持 CLI 历史日志契约。
 // ---------------------------------------------------------------------------
 
 function applyRuntimePatches(home, dryRun) {
-  // keyed slot 兼容：rc.6 旧插件把 keyed slot 的注册身份放在 `id`，rc.7
-  // 改为强制 `key`；更老的插件 key/id 都不传（dsh-advisor / dsh-llm-fallbacks），
-  // 会导致单个插件拖垮整个 loader。ui-slots 把旧 id 提升为 key；client-runner
-  // 为既无 key 又无 id 的注册派生包级兜底 key。覆盖顶层与嵌套依赖副本。
-  applyPatchToFiles({
-    prefix: 'keyed slot 旧插件兼容补丁',
-    files: slotCompatPatchTargets(home),
+  const cliCtx = {
+    home,
+    // 刻意不存在的哨兵根（os.tmpdir() + pid 唯一不可碰撞）：使 resolveNmRoots 的
+    // appDir/userDataDir 根被 existsSync 跳过，仅保留 home 的 profile/agent 两根。
+    // 用 tmpdir 而非 home 下固定名，避免与 home 下真实同名目录碰撞导致误扫描。
+    appDir: path.join(os.tmpdir(), 'dsh-cli-app-' + process.pid),
+    userDataDir: path.join(os.tmpdir(), 'dsh-cli-ud-' + process.pid),
+    wslMode: true,
     log: (m) => log(m),
-    anchorLog: (m) => warn(m),
-    transform: transformLegacySlotKey,
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file) => '已兼容旧插件的 keyed slot id ' + file,
-    donePrefix: false,
-    failLog: (file, err) => 'keyed slot 旧插件兼容补丁失败(' + file + '): ' + err.message,
+  };
+  applyAll(cliCtx, getSpecsByCli(), {
     dryRun,
-    dryRunChangedLog: (file) => 'dry-run: 将兼容旧插件的 keyed slot id ' + file,
-  });
-  applyPatchToFiles({
-    prefix: 'keyed slot 无 key 兼容补丁',
-    files: slotCompatPatchTargets(home),
-    log: (m) => log(m),
-    anchorLog: (m) => warn(m),
-    transform: transformSlotUnkeyedCompat,
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file) => '已兼容 keyed slot 无 key 注册 ' + file,
     donePrefix: false,
-    failLog: (file, err) => 'keyed slot 无 key 兼容补丁失败(' + file + '): ' + err.message,
-    dryRun,
-    dryRunChangedLog: (file) => 'dry-run: 将兼容 keyed slot 无 key 注册 ' + file,
-  });
-  // 会话列表刷新闪跳修复（mergeOrderedBaseline 保留本地新会话）。
-  applyPatchToFiles({
-    prefix: 'runtime 补丁',
-    files: patchTargets(home, FLASH_PKG_REL),
-    log: (m) => log(m),
     anchorLog: (m) => warn(m),
-    transform: (src) => transformFlashFix(src),
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file) => '已应用会话列表闪跳修复 ' + file,
-    donePrefix: false,
-    failLog: (file, err) => 'runtime 补丁失败(' + file + '): ' + err.message,
-    dryRun,
-    dryRunChangedLog: (file) => 'dry-run: 将应用会话列表闪跳修复 ' + file,
-  });
-
-  // 设置暴露白名单补丁（dsh-prompt / 第三方思考 / 识图 / 会话调整）。
-  applyPatchToFiles({
-    prefix: '提示词暴露补丁',
-    files: patchTargets(home, EXPOSE_PKG_REL),
-    log: (m) => log(m),
-    anchorLog: (m) => warn(m),
-    transform: transformExposeFix,
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file, note) => '已把 ' + note.join(', ') + ' 加入设置白名单 ' + file,
-    donePrefix: false,
-    failLog: (file, err) => '提示词暴露补丁失败(' + file + '): ' + err.message,
-    dryRun,
-    dryRunChangedLog: (file, note) => 'dry-run: 将把 ' + note.join(', ') + ' 加入设置白名单 ' + file,
-  });
-
-  // shell 工具 description 可选化补丁（code 模式 run_code 程序常省略 description）。
-  for (const rel of [PW_REL, BASH_REL]) {
-    applyPatchToFiles({
-      prefix: 'shell description 兼容补丁',
-      files: patchTargets(home, rel),
-      log: (m) => log(m),
-      anchorLog: (m) => warn(m),
-      transform: transformShellDescriptionOptional,
-      alreadyLog: (file) => '已应用，跳过 ' + file,
-      doneLog: (file) => '已把 description 改为可选 ' + file,
-      donePrefix: false,
-      failLog: (file, err) => 'shell description 兼容补丁失败(' + file + '): ' + err.message,
-      dryRun,
-      dryRunChangedLog: (file) => 'dry-run: 将把 description 改为可选 ' + file,
-    });
-  }
-
-  // code preset 兼容补丁（code → both：保留 run_code，同时允许直接调用原生工具）。
-  applyPatchToFiles({
-    prefix: 'code 模式兼容补丁',
-    files: patchTargets(home, CODE_PRESET_REL),
-    log: (m) => log(m),
-    anchorLog: (m) => warn(m),
-    transform: transformCodeModeCompat,
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file) => '已把 code preset 切换为 both ' + file,
-    donePrefix: false,
-    failLog: (file, err) => 'code 模式兼容补丁失败(' + file + '): ' + err.message,
-    dryRun,
-    dryRunChangedLog: (file) => 'dry-run: 将把 code preset 切换为 both ' + file,
-  });
-
-  // 图片字节信任补丁（浏览器声明的 MIME 跟随扩展名不可信，以解码字节为准）。
-  applyPatchToFiles({
-    prefix: '图片字节信任补丁',
-    files: patchTargets(home, ATTACH_LOCAL_REL),
-    log: (m) => log(m),
-    anchorLog: (m) => warn(m),
-    transform: transformAttachmentMimeTrust,
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file) => '已信任图片解码字节 ' + file,
-    donePrefix: false,
-    failLog: (file, err) => '图片字节信任补丁失败(' + file + '): ' + err.message,
-    dryRun,
-    dryRunChangedLog: (file) => 'dry-run: 将信任图片解码字节 ' + file,
-  });
-
-  // 会话持久化容错：尾部擕裂的半条 JSONL 走崩溃恢复流程；整个日志损坏
-  // （坏帧头/零填充头）的会话告警跳过，不得击穿启动扫描。
-  applyPatchToFiles({
-    prefix: '会话持久化容错补丁',
-    files: patchTargets(home, PERSISTENCE_PKG_REL),
-    log: (m) => log(m),
-    anchorLog: (m) => warn(m),
-    transform: transformPersistenceAll,
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file) => '已应用 zstd 尾部/损坏会话容错 ' + file,
-    donePrefix: false,
-    failLog: (file, err) => '会话持久化容错补丁失败(' + file + '): ' + err.message,
-    dryRun,
-    dryRunChangedLog: (file) => 'dry-run: 将应用 zstd 尾部/损坏会话容错 ' + file,
   });
 }
 

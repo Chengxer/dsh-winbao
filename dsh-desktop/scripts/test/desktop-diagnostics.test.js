@@ -256,3 +256,55 @@ test('runDiagnostics 报告携带自愈历史（sections + infos）', () => {
   assert.strictEqual(report.sections.selfHeal[0].kind, 'bundle');
   assert.ok(report.infos.some((i) => /最近启动自愈.*已自动移除.*dsh-vision/.test(i.message)));
 });
+
+test('readSelfHealHistory kind 白名单 + patch-layer backup 透传', () => {
+  const dir = tmpdir();
+  const file = path.join(dir, 'self-heal-history.json');
+  write(dir, 'self-heal-history.json', JSON.stringify([
+    { kind: 'patch-layer', names: ['补丁配置'], backup: 'C:\\Users\\alice\\.dsh\\cordis.patch.yml.broken-123', ts: 3000 },
+    { kind: 'bad-kind', names: ['x'], ts: 2000 },
+    { names: ['no-kind'], ts: 1000 },
+  ]));
+  const out = readSelfHealHistory(file, fs);
+  assert.strictEqual(out.length, 3);
+  // patch-layer 原样保留 + backup 透传 + names 存人类可读标签而非绝对路径
+  assert.strictEqual(out[0].kind, 'patch-layer');
+  assert.strictEqual(out[0].backup, 'C:\\Users\\alice\\.dsh\\cordis.patch.yml.broken-123');
+  assert.deepStrictEqual(out[0].names, ['补丁配置']);
+  // 未知 kind 兜底 bundle
+  assert.strictEqual(out[1].kind, 'bundle');
+  assert.deepStrictEqual(out[1].names, ['x']);
+  assert.strictEqual(out[1].backup, undefined);
+  // 缺 kind 字段兜底 bundle
+  assert.strictEqual(out[2].kind, 'bundle');
+  assert.deepStrictEqual(out[2].names, ['no-kind']);
+  assert.strictEqual(out[2].backup, undefined);
+});
+
+test('runDiagnostics 自愈历史 action 三态', () => {
+  const dir = tmpdir();
+  const profile = path.join(dir, 'profile');
+  write(profile, 'cordis.patch.yml', '[{"id":"web","insert":[]}]');
+  write(profile, 'package.json', JSON.stringify({ dsh: { profile: { bundles: [] } } }));
+  const hist = path.join(dir, 'self-heal-history.json');
+  write(dir, 'self-heal-history.json', JSON.stringify([
+    { kind: 'overlay', names: ['balance'], ts: Date.now() - 60000 },
+    { kind: 'patch-layer', names: ['补丁配置'], backup: path.join(dir, 'cordis.patch.yml.broken-1'), ts: Date.now() - 120000 },
+    { kind: 'bundle', names: ['@dsh-external/dsh-vision'], ts: Date.now() - 180000 },
+  ]));
+  const report = runDiagnostics({
+    profileDir: profile,
+    patchFile: path.join(profile, 'cordis.patch.yml'),
+    assetsDir: null,
+    coreDirDshAt: null,
+    crashDir: null,
+    logs: {},
+    selfHealHistoryFile: hist,
+    yaml: { load: (t) => JSON.parse(t) },
+    env: {},
+  }, fs);
+  assert.strictEqual(report.sections.selfHeal.length, 3);
+  assert.ok(report.infos.some((i) => /最近启动自愈.*已自动禁用.*balance/.test(i.message)));
+  assert.ok(report.infos.some((i) => /最近启动自愈.*已重置补丁配置.*cordis\.patch\.yml\.broken-1/.test(i.message)));
+  assert.ok(report.infos.some((i) => /最近启动自愈.*已自动移除.*dsh-vision/.test(i.message)));
+});

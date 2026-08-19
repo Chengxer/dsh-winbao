@@ -125,7 +125,7 @@ function patchClient(src) {
  * @param {(msg: string) => void} [log]
  * @returns {number} 实际发生修改的文件数
  */
-function patchWebSearchBaseUrl(nmRoot, log = () => {}) {
+function patchWebSearchBaseUrl(nmRoot, log = () => {}, stats, options) {
   const targets = [
     path.join(nmRoot, '@deepseek-ai', 'dsh-web-search-deepseek', 'lib', 'index.js'),
     path.join(nmRoot, '@deepseek-ai', 'dsh-client-ui-settings-plugins', 'lib', 'client.js'),
@@ -144,6 +144,7 @@ function patchWebSearchBaseUrl(nmRoot, log = () => {}) {
     const result = patch(src);
     if (result.skipped) {
       log('web-search baseURL 补丁: 锚点未匹配（dsh 版本可能已变化），跳过 ' + file);
+      if (stats) stats.anchorMissing += 1;
       continue;
     }
     if (!result.changed) {
@@ -151,9 +152,13 @@ function patchWebSearchBaseUrl(nmRoot, log = () => {}) {
       continue; // 已应用（幂等）
     }
     try {
-      writeFileAtomic(file, result.src);
-      changedFiles += 1;
-      log('web-search baseURL 补丁: 已应用 ' + file);
+      if (options && options.dryRun) {
+        log('web-search baseURL 补丁: dry-run: 将应用 ' + file);
+      } else {
+        writeFileAtomic(file, result.src);
+        changedFiles += 1;
+        log('web-search baseURL 补丁: 已应用 ' + file);
+      }
     } catch (err) {
       log('web-search baseURL 补丁: 写入失败 ' + file + ': ' + err.message);
     }

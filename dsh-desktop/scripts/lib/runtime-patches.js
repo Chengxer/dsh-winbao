@@ -13,7 +13,27 @@
 // 变换均为纯函数，字节级输出与旧实现一致；锚点失配时绝不改写文件内容。
 // ---------------------------------------------------------------------------
 
-const path = require('node:path');
+// 路径构造与包内相对路径常量已迁出到 patch-target-resolver.js（唯一实现），
+// 这里 re-export 一个版本周期，避免 main.js / sync-companion-plugins.js /
+// 既有单测断链。变换（transform）与锚点常量仍保留在本模块。
+const {
+  FLASH_PKG_REL,
+  EXPOSE_PKG_REL,
+  PERSISTENCE_PKG_REL,
+  SLOT_KEY_COMPAT_PKG_REL,
+  SLOT_UNKEYED_COMPAT_PKG_REL,
+  SLOT_COMPAT_PKG_RELS,
+  PW_REL,
+  BASH_REL,
+  CODE_PRESET_REL,
+  ATTACH_LOCAL_REL,
+  patchTargets,
+  localCopyFiles,
+  guardCopyFiles,
+  localNodeModulesRoots,
+  slotCompatCopyFiles,
+  slotCompatPatchTargets,
+} = require('./patch-target-resolver');
 
 /** dsh-client-runtime 会话列表刷新闪跳修复（mergeOrderedBaseline 保留本地新会话）。 */
 const FLASH_OLD = '(value) => baselineByKey.get(keyOf(value))).filter((value) => value !== void 0);';
@@ -26,13 +46,6 @@ const SETTINGS_NAMESPACES = ['dsh-prompt', 'dsh-third-party-thinking', 'dsh-visi
 // the legacy list injection is unnecessary and must be treated as idempotent.
 const DYNAMIC_SETTINGS_ANCHOR = 'namespaces: settings.describe({ redactSecrets: true }).map(namespaceView)';
 
-/** 各补丁目标包内的相对路径（@deepseek-ai/<rel>）。 */
-const FLASH_PKG_REL = path.join('dsh-client-runtime', 'lib', 'client.js');
-const EXPOSE_PKG_REL = path.join('dsh-host-apiproxy', 'lib', 'index.js');
-const PERSISTENCE_PKG_REL = path.join('dsh-session-persistence-jsonl', 'lib', 'index.js');
-const SLOT_KEY_COMPAT_PKG_REL = path.join('dsh-client-ui-slots', 'lib', 'index.js');
-const SLOT_UNKEYED_COMPAT_PKG_REL = path.join('dsh-cordis-client-runner', 'lib', 'client.js');
-const SLOT_COMPAT_PKG_RELS = [SLOT_KEY_COMPAT_PKG_REL, SLOT_UNKEYED_COMPAT_PKG_REL];
 // rc.6 keyed slots accepted the registration identity through `id`. rc.7 split
 // list identity (`id`) from keyed dispatch identity (`key`), which makes
 // otherwise compatible third-party browser plugins fail the whole loader. Some
@@ -104,86 +117,9 @@ const PERSISTENCE_COMPLETE_CHECK_NEW = [
   PERSISTENCE_COMPLETE_CHECK,
 ].join('\n');
 
-/**
- * WSL 托管模式 / sync CLI 共用目标：profile fallback + agent 两份副本。
- * bundle 初始化后的 dsh 安装（npm 版）两份副本通常互为同一文件（fallback
- * 符号链接写穿），逐文件幂等判定保证重复目标安全。
- * @param {string} home 目标 dsh 数据目录（WSL 模式为 UNC 等价路径）
- * @param {string} pkgRel @deepseek-ai/<pkgRel>
- * @returns {string[]}
- */
-function patchTargets(home, pkgRel) {
-  const mk = (root) => path.join(root, 'node_modules', '@deepseek-ai', pkgRel);
-  return [
-    mk(path.join(home, 'profiles')),
-    mk(path.join(home, 'agent')),
-  ];
-}
-
-// ---------------------------------------------------------------------------
-// 运行时补丁候选路径构造（纯函数：路径根由调用方传入，便于单测；main.js 绑定
-// 模块级变量）。三种布局与旧实现逐项一致，并补齐同系列补丁的历史覆盖缺口：
-//   - localCopyFiles         本地模式三副本（profile fallback → 内置副本 → 更新 overlay）；
-//   - guardCopyFiles         防护类补丁四副本（内置副本优先 + overlay 嵌套 dsh
-//                            依赖副本 + profile fallback）；
-//   - localNodeModulesRoots  包级补丁的 node_modules 根目录列表（extraRoots 用于
-//                            WSL 模式追加 WSL agent 直连根，与 patchTargets 的
-//                            agent 兜底语义一致）。
-// ---------------------------------------------------------------------------
-
-function localCopyFiles(home, appDir, userDataDir, pkgRel) {
-  return [
-    path.join(home, 'profiles', 'node_modules', '@deepseek-ai', pkgRel),
-    path.join(appDir, 'node_modules', '@deepseek-ai', pkgRel),
-    path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', pkgRel),
-  ];
-}
-
-function guardCopyFiles(home, appDir, userDataDir, pkgRel) {
-  return [
-    path.join(appDir, 'node_modules', '@deepseek-ai', pkgRel),
-    path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', pkgRel),
-    path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai', pkgRel),
-    path.join(home, 'profiles', 'node_modules', '@deepseek-ai', pkgRel),
-  ];
-}
-
-function localNodeModulesRoots(home, appDir, userDataDir, extraRoots = []) {
-  return [
-    path.join(home, 'profiles', 'node_modules'),
-    path.join(appDir, 'node_modules'),
-    path.join(userDataDir, 'agent', 'node_modules'),
-    ...extraRoots,
-  ];
-}
-
-/**
- * Slot compatibility targets include the nested dependency copies shipped by a
- * clean dsh overlay. Some npm layouts do not hoist client-ui-slots or
- * cordis-client-runner to the agent/profile root, so patching only the top-level
- * copies is insufficient.
- */
-function slotCompatCopyFiles(home, appDir, userDataDir) {
-  const nested = (root, pkgRel) => path.join(root, 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai', pkgRel);
-  const files = [];
-  for (const pkgRel of SLOT_COMPAT_PKG_RELS) {
-    files.push(...localCopyFiles(home, appDir, userDataDir, pkgRel));
-    files.push(...guardCopyFiles(home, appDir, userDataDir, pkgRel));
-    files.push(nested(path.join(home, 'profiles'), pkgRel));
-    files.push(nested(appDir, pkgRel));
-  }
-  return [...new Set(files)];
-}
-function slotCompatPatchTargets(home) {
-  const nested = (root, pkgRel) => path.join(root, 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai', pkgRel);
-  const files = [];
-  for (const pkgRel of SLOT_COMPAT_PKG_RELS) {
-    files.push(...patchTargets(home, pkgRel));
-    files.push(nested(path.join(home, 'profiles'), pkgRel));
-    files.push(nested(path.join(home, 'agent'), pkgRel));
-  }
-  return [...new Set(files)];
-}
+// 路径构造函数（patchTargets / localCopyFiles / guardCopyFiles /
+// localNodeModulesRoots / slotCompatCopyFiles / slotCompatPatchTargets）已迁出
+// 到 patch-target-resolver.js，本模块顶部 re-export 保持兼容。
 
 /**
  * 闪跳修复变换（纯函数）。锚点失配的 detail 含文件路径，与两个调用方
@@ -361,40 +297,56 @@ function transformSlotUnkeyedCompat(src, file) {
 // 目标：register 函数中 throw 语句之前注入 early return。
 // ---------------------------------------------------------------------------
 const SLOT_ERROR_ISOLATE_MARKER = 'dsh-desktop compat: isolate keyed-slot registration errors';
-// 搜索 "requires options.key" 或 "requires.*key" 的 throw 语句及其上下文。
-const SLOT_ERROR_ISOLATE_REGEX = /([ \t]*)(throw new Error\([^)]*keyed slot[^)]*options\.key[^)]*\))/;
-function transformSlotErrorIsolation(src, file) {
-  if (src.includes(SLOT_ERROR_ISOLATE_MARKER)) return { status: 'already' };
-  const m = SLOT_ERROR_ISOLATE_REGEX.exec(src);
-  if (!m) {
-    // 精确搜索已知的 throw 模式（多种变体）
-    const altThrow = /([ \t]*)(throw new Error\([^)]*requires options\.key[^)]*\))/;
-    const m2 = altThrow.exec(src);
-    if (!m2) {
-      return {
-        status: 'anchor-missing',
-        detail: '未找到 keyed slot throw 锚点（版本可能已变更），跳过 ' + file,
-      };
-    }
-    const indent = m2[1];
-    const injected = [
-      indent + '// ' + SLOT_ERROR_ISOLATE_MARKER + ': convert fatal throw into warn+skip so one',
-      indent + '// unkeyed plugin cannot take down the whole dsh web loader.',
-      indent + 'console.warn("[dsh-desktop compat] keyed slot registration missing key, auto-deriving from registrant; plugin:", options.registrant || options.id || "unknown");',
-      indent + 'options.key = options.id !== void 0 ? String(options.id) : String(options.registrant || "auto-" + Math.random().toString(36).slice(2, 8));',
-      m2[0],
-    ].join('\n');
-    return { status: 'changed', src: src.replace(m2[0], injected), note: 'alt throw' };
-  }
-  const indent = m[1];
-  const injected = [
-    indent + '// ' + SLOT_ERROR_ISOLATE_MARKER + ': convert fatal throw into warn+skip so one',
-    indent + '// unkeyed plugin cannot take down the whole dsh web loader.',
-    indent + 'console.warn("[dsh-desktop compat] keyed slot registration missing key, auto-deriving from registrant; plugin:", options.registrant || options.id || "unknown");',
-    indent + 'options.key = options.id !== void 0 ? String(options.id) : String(options.registrant || "auto-" + Math.random().toString(36).slice(2, 8));',
-    m[0],
+// v2 修复标记：v1 曾把 throw 与派生 key 一并注入且保留了原 throw（且 `if` 守卫
+// 被注释吞掉，导致 throw 无条件执行），v2 改为「if 守卫内 warn + 派生 key，不
+// throw」，真正实现「缺 key 时派生而非拖垮 loader」。
+const SLOT_ERROR_ISOLATE_MARKER_V2 = SLOT_ERROR_ISOLATE_MARKER + ' (v2)';
+// 原始单行 throw：`if (options.key === void 0) throw ...`（错误消息任意）。
+const SLOT_ERROR_ISOLATE_ORIGINAL = /([ \t]*)if \(options\.key === void 0\)[ \t]*throw[^\n]*/;
+// v1 buggy 输出：`if (options.key === void 0) // marker...` + 3 行（注释/warn/派生）+ 独立 throw 行。
+const SLOT_ERROR_ISOLATE_V1 = /([ \t]*)if \(options\.key === void 0\)[^\n]*\n(?:[^\n]*\n){3}[ \t]*throw[^\n]*/;
+// v1 buggy 输出（standalone throw 源）：旧 SLOT_ERROR_ISOLATE_REGEX 匹配独立
+// `throw new Error(...)`（无 if 前缀），其注入产物以 `// marker...` 开头，后跟 3 行
+// （注释/warn/派生）+ throw。若只用 SLOT_ERROR_ISOLATE_V1（要求 if 前缀）会漏修、
+// 无条件 throw 保留，故此处补一条无 if 前缀的回退匹配。
+const SLOT_ERROR_ISOLATE_V1_STANDALONE = /([ \t]*)\/\/[^\n]*isolate keyed-slot registration errors[^\n]*\n(?:[^\n]*\n){3}[ \t]*throw[^\n]*/;
+
+/** 构造 v2 隔离块：warn + 派生 key，不 throw。 */
+function buildSlotIsolateBlock(indent) {
+  return [
+    indent + 'if (options.key === void 0) {',
+    indent + '\t// ' + SLOT_ERROR_ISOLATE_MARKER_V2 + ': derive a key instead of throwing so one',
+    indent + '\t// unkeyed plugin cannot take down the whole dsh web loader.',
+    indent + '\tconsole.warn("[dsh-desktop compat] keyed slot registration missing key, auto-deriving from registrant; plugin:", options.registrant || options.id || "unknown");',
+    indent + '\toptions.key = options.id !== void 0 ? String(options.id) : String(options.registrant || "auto-" + Math.random().toString(36).slice(2, 8));',
+    indent + '}',
   ].join('\n');
-  return { status: 'changed', src: src.replace(m[0], injected) };
+}
+
+function transformSlotErrorIsolation(src, file) {
+  if (src.includes(SLOT_ERROR_ISOLATE_MARKER_V2)) return { status: 'already' };
+  // 1) 原始单行 throw → 注入 v2（warn + 派生 key，不 throw）。
+  const m = SLOT_ERROR_ISOLATE_ORIGINAL.exec(src);
+  if (m) {
+    return { status: 'changed', src: src.replace(m[0], buildSlotIsolateBlock(m[1])), note: 'v2' };
+  }
+  // 2) v1 buggy 输出（含旧 marker + 无条件 throw）→ 修复为 v2。
+  if (src.includes(SLOT_ERROR_ISOLATE_MARKER)) {
+    // 2a) 常规 v1：`if (options.key === void 0) // marker...` + 3 行 + throw。
+    const v1 = SLOT_ERROR_ISOLATE_V1.exec(src);
+    if (v1) {
+      return { status: 'changed', src: src.replace(v1[0], buildSlotIsolateBlock(v1[1])), note: 'v1-repair' };
+    }
+    // 2b) standalone v1：旧 SLOT_ERROR_ISOLATE_REGEX 分支的独立 throw 源（无 if 前缀）。
+    const v1s = SLOT_ERROR_ISOLATE_V1_STANDALONE.exec(src);
+    if (v1s) {
+      return { status: 'changed', src: src.replace(v1s[0], buildSlotIsolateBlock(v1s[1])), note: 'v1-repair' };
+    }
+  }
+  return {
+    status: 'anchor-missing',
+    detail: '未找到 keyed slot throw 锚点（版本可能已变更），跳过 ' + file,
+  };
 }
 
 // 模型工具兼容补丁（问题背景：code 模式的 run_code 程序经常省略 shell 工具
@@ -412,9 +364,6 @@ const SHELL_DESC_VALIDATE_NEW = "\tif (typeof args.description !== \"string\" ||
 const SHELL_DESC_SCHEMA_OLD = "\t\t\tdescription: {\n\t\t\t\ttype: \"string\",\n\t\t\t\trequired: true,\n\t\t\t\tdescription: \"Clear, concise description of what this command does in active voice, 5-10 words (shown in the UI). Examples:";
 // 已废弃：仅作旧补丁回滚识别锚点（引擎 schema 校验器拒绝 required: false）。
 const SHELL_DESC_SCHEMA_NEW = "\t\t\tdescription: {\n\t\t\t\ttype: \"string\",\n\t\t\t\trequired: false, // " + SHELL_DESC_MARKER + "\n\t\t\t\tdescription: \"Clear, concise description of what this command does in active voice, 5-10 words (shown in the UI). Examples:";
-
-const PW_REL = path.join("dsh-tool-pwsh", "lib", "index.js");
-const BASH_REL = path.join("dsh-tool-bash", "lib", "index.js");
 
 /** shell 工具 description 兜底变换（pwsh/bash 共用，锚点逐字节一致）。
  *  只改 validate 校验（缺省时用 command 首行补值）；schema 的
@@ -445,8 +394,6 @@ const CODE_MODE_NEW = `- id: tool-presentation
     # ${CODE_MODE_MARKER}
     mode: both`;
 
-const CODE_PRESET_REL = path.join('dsh', 'config', 'agent-presets', 'code', 'agent.cordis.yml');
-
 /** code preset `mode: code` → `mode: both` 变换（幂等，锚点失配跳过）。 */
 // ---------------------------------------------------------------------------
 // 图片字节信任补丁（问题背景：浏览器声明的 MIME 跟随文件扩展名，不可信——
@@ -460,8 +407,6 @@ const CODE_PRESET_REL = path.join('dsh', 'config', 'agent-presets', 'code', 'age
 const ATTACH_MIME_MARKER = "dsh-desktop compat: trust decoded image bytes";
 const ATTACH_MIME_OLD = '\tif (detected.mediaType !== declaredMediaType) throw new AttachmentError("Declared image type does not match its bytes.", "IMAGE_TYPE_MISMATCH");';
 const ATTACH_MIME_NEW = '\t// ' + ATTACH_MIME_MARKER + '. The browser-declared MIME follows the file extension and is\n\t// untrusted (a webp/jpeg renamed to .png arrives as image/png while the bytes decode as\n\t// webp); the decoded bytes are authoritative, so record the detected type instead of\n\t// rejecting the whole send.\n\tif (detected.mediaType !== declaredMediaType && typeof declaredMediaType === "string" && declaredMediaType.startsWith("image/")) declaredMediaType = detected.mediaType;';
-
-const ATTACH_LOCAL_REL = path.join("dsh-attachment-local", "lib", "index.js");
 
 /** attachment-local 图片字节信任变换（幂等，锚点失配跳过）。 */
 function transformAttachmentMimeTrust(src, file) {
@@ -509,6 +454,7 @@ module.exports = {
   transformLegacySlotKey,
   transformSlotUnkeyedCompat,
   SLOT_ERROR_ISOLATE_MARKER,
+  SLOT_ERROR_ISOLATE_MARKER_V2,
   transformSlotErrorIsolation,
   slotCompatCopyFiles,
   slotCompatPatchTargets,

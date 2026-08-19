@@ -42,28 +42,18 @@ const {
 const { installBuiltinPresets } = require('./scripts/install-minimal-win-preset');
 const { SessionWatcher, scanZstdFrames } = require('./session-watcher');
 const { RendererRecovery } = require('./renderer-recovery');
-const { CORE_BUNDLE_NAMES } = require('./profile-manifest');
-const { dedupePatchEntries, parseFailedLoaderIds, mapPackagesToPatchIds, findMissingBundleDeclarations, scanBundleContracts, removeBundlesFromProfile } = require('./profile-patch-heal');
-const { PROFILE_BUNDLE_GUARD_MARKER, PROFILE_BOOT_GUARD_MARKER, verifyBundleDir, isPatchListValid, applyAppBootBundleGuard, applyProfileBootBundleGuard, applyProfileBootHealGuard } = require('./profile-bundle-heal');
+const { parseFailedLoaderIds, mapPackagesToPatchIds, findMissingBundleDeclarations, scanBundleContracts, removeBundlesFromProfile } = require('./profile-patch-heal');
 // profile manifest 装配对账（唯一实现）：启动前把 dsh.profile.bundles 对账到
 // 「每条登记都可装配」状态（无效登记移除 + 隔离记录、核心补齐、损坏重建、
 // 重置恢复），配合 profile-bundle-heal 的运行时防护构成双层防线。
-const { reconcileProfileBundles, createEntryListYamlParser, resolveBundleDirLike } = require('./scripts/lib/profile-reconcile');
+const { createEntryListYamlParser } = require('./scripts/lib/profile-reconcile');
 // 统一补丁引擎与共享数据源（scripts/lib/）：main.js 的运行时补丁、同步脚本
 // 与 after-pack 共用同一实现，杜绝重复与漂移。
 const { COMPANION_PLUGINS } = require('./scripts/lib/companion-plugins');
 const { writeFileAtomic } = require('./scripts/lib/patch-io');
-const { applyPatchToFiles } = require('./scripts/lib/patch-engine');
 const { selectReleaseAsset } = require('./scripts/lib/github-release-assets');
-const { FLASH_PKG_REL, EXPOSE_PKG_REL, PW_REL, BASH_REL, CODE_PRESET_REL, patchTargets, localCopyFiles, guardCopyFiles, localNodeModulesRoots, slotCompatCopyFiles, slotCompatPatchTargets, transformFlashFix, transformExposeFix, transformShellDescriptionOptional, transformCodeModeCompat, transformAttachmentMimeTrust, transformLegacySlotKey, transformSlotUnkeyedCompat, transformSlotErrorIsolation, SLOT_ERROR_ISOLATE_MARKER, SLOT_KEY_COMPAT_PKG_REL, ATTACH_LOCAL_REL } = require('./scripts/lib/runtime-patches');
-const { ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK, removeLegacyMarketplacePatchLines, removedPluginIdsFromPatch, ensureDisabledPatchEntry, registerCompanionPatchEntries, syncCompanionFiles } = require('./scripts/lib/companion-profile');
 // 内置 Agent 预设保护：客户端更新（覆盖安装）前快照用户改过的预设，更新后恢复。
 const presetGuard = require('./scripts/lib/preset-guard');
-const { patchWebSearchBaseUrl } = require('./scripts/patch-web-search-baseurl');
-const { patchMenuViewport } = require('./scripts/patch-menu-viewport');
-const { patchSessionManage } = require('./scripts/patch-session-manage');
-const { patchOpenProjectDir } = require('./scripts/patch-open-project-dir');
-const { patchSessionPersistence } = require('./scripts/patch-session-persistence');
 // 「设置 → 插件 → 诊断与管理」：诊断 / 备份与恢复 / 日志包导出 / 防砖体检 /
 // bundle 顺序检测与重排（纯函数模块，node --test 单测覆盖）。
 const desktopDiagnostics = require('./scripts/desktop-diagnostics');
@@ -74,6 +64,10 @@ const zlib = require('node:zlib');
 // 插件保护中心（借鉴 EAC）：快照 / 回滚 / 静态体检 / 自动修复 / 守护启动 /
 // 事故报告。跑在 Electron 主进程里，绝不动 harness 内核或用户会话数据。
 const { createGuard } = require('./plugin-guard');
+// 第三方插件集成层（同步 / 补丁 / 预检 / 故障隔离）唯一编排入口：main.js 只
+// 调 createPluginIntegration + 细粒度方法，不再各自维护 syncCompanionPlugins
+// 与 18 个 apply* 样板。
+const { createPluginIntegration } = require('./scripts/integration');
 
 // ---------------------------------------------------------------------------
 // 启动期崩溃兜底（issue #30「便携版有进程无界面」）：模块加载 / 启动早期
@@ -1052,10 +1046,51 @@ function notifyBundleRepair(removed) {
   }
 }
 
+// 补丁层自愈重置的用户可见提示：cordis.patch.yml 解析失败被重置为最小文件（原内容
+// 已备份到 backup）。用户数据被改写，属数据类事件，须给出可见提示 + 备份路径。
+function notifyPatchReset(kind, backup) {
+  if (process.env.DSH_DESKTOP_TEST === '1') return;
+  try {
+    const label = kind === 'home' ? '家级补丁层（cordis.patch.yml）' : 'profile 补丁层（cordis.patch.yml）';
+    showNotification({
+      title: 'DSH Desktop 补丁配置已重置',
+      body: `检测到 ${label} 无法解析，已备份原内容并重置为最小文件，避免启动失败。原配置已备份为 ${path.basename(backup)}，完整路径见「设置 → 插件 → 诊断与管理 → 诊断」。`,
+    });
+    appendSelfHealHistory('patch-layer', ['补丁配置'], backup);
+  } catch (err) {
+    log('boot', '补丁重置提示失败: ' + err.message);
+  }
+}
+
+// 插件补丁应用失败的用户可见提示：消除「部分失败静默」。区分三类信号——
+// degraded（关键补丁已降级，建议升级）、errors/failed（补丁未生效）、
+// anchorMissing（锚点失配，版本差异）——任一非零即提示。集成测试态不弹真实
+// 通知（与其它自愈提示一致，断言走 desktop.log）。
+function notifyPatchFailures(report) {
+  try {
+    if (!report) return;
+    const degradedCount = (report.degraded || []).length;
+    const hardCount = (report.errors || []).length + (report.failed || 0);
+    const anchorMiss = report.anchorMissing || 0;
+    if (degradedCount === 0 && hardCount === 0 && anchorMiss === 0) return;
+    const parts = [];
+    if (degradedCount > 0) parts.push(`${degradedCount} 个关键补丁已降级（建议升级 DSH Desktop）`);
+    if (hardCount > 0) parts.push(`${hardCount} 个插件补丁未生效`);
+    if (anchorMiss > 0) parts.push(`${anchorMiss} 处补丁锚点失配（版本差异）`);
+    if (process.env.DSH_DESKTOP_TEST === '1') return;
+    showNotification({
+      title: 'DSH Desktop 插件补丁提示',
+      body: `检测到 ${parts.join('、')}，相关第三方插件可能异常，建议升级 DSH Desktop 后重试。`,
+    });
+  } catch (err) {
+    log('boot', '补丁提示失败: ' + err.message);
+  }
+}
+
 // 自愈事件持久化：模态框/系统通知都是一次性的，错过就没了；写入
 // userData/self-heal-history.json 后，用户随时可在「设置 → 插件 →
 // 诊断与管理 → 诊断」中回看「上次启动自愈了什么」。
-function appendSelfHealHistory(kind, names) {
+function appendSelfHealHistory(kind, names, backup) {
   try {
     const file = path.join(userDataDir, 'self-heal-history.json');
     let items = [];
@@ -1063,11 +1098,13 @@ function appendSelfHealHistory(kind, names) {
       const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (Array.isArray(parsed)) items = parsed;
     }
-    items.unshift({
-      kind: kind === 'overlay' ? 'overlay' : 'bundle',
+    const entry = {
+      kind,
       names: Array.isArray(names) ? names : [names],
       ts: Date.now(),
-    });
+    };
+    if (typeof backup === 'string' && backup) entry.backup = backup;
+    items.unshift(entry);
     fs.writeFileSync(file, JSON.stringify(items.slice(0, 5), null, 2) + '\n', 'utf8');
   } catch (err) {
     log('boot', '自愈历史写入失败: ' + err.message);
@@ -1314,6 +1351,38 @@ function ensureGuard() {
   return guardInstance;
 }
 
+// ---------------------------------------------------------------------------
+// 插件集成门面实例（scripts/integration）。延迟创建：依赖 userDataDir / dshHome
+// / 后端模式解析就绪，首次调用发生在 boot 或更新流程阶段。
+// ---------------------------------------------------------------------------
+let pluginIntegration = null;
+function ensurePluginIntegration() {
+  if (!pluginIntegration) {
+    pluginIntegration = createPluginIntegration({
+      getHome: () => effectiveDshHome(),
+      appDir: __dirname,
+      getUserDataDir: () => userDataDir,
+      wslMode: () => isWslMode(),
+      log: (m) => log('boot', m),
+      loadYaml: () => loadDshYamlDialect(),
+      loadSettings: () => updater.loadSettings(updCtx()),
+      saveSettings: (s) => updater.saveSettings(updCtx(), s),
+      getInstallAnchorDir: () => path.dirname(dshPackageJson()),
+      onManifestResetRecovered: (recovered) => notifyManifestResetRecovered(recovered),
+      onHealReset: (kind, backup) => notifyPatchReset(kind, backup),
+      hostDetectors: {
+        // preload 在 Electron 壳内始终暴露 window.dshDesktop.openPath。
+        openPath: () => true,
+        // 桥 window.__dshSessionManager 由 dsh-session-manager 插件提供：
+        // 以「插件已同步落盘」作为主进程侧探测信号（渲染进程运行时仍以注入的
+        // 桥守卫为准，二者共同构成显式降级 + 告警）。
+        deleteSession: () => fs.existsSync(path.join(effectiveDshHome() || path.join(os.homedir(), '.dsh'), 'profiles', 'web', 'node_modules', 'dsh-session-manager')),
+      },
+    });
+  }
+  return pluginIntegration;
+}
+
 // 设置页「WSL 后端」用的状态快照：当前 local 模式（未配置过）或 force 时，
 // 按已保存的 wslDistro/wslInstallDir 做一次探测；失败不抛错，错误进 status。
 // 全部探测走异步原语（configureAsync/statusAsync），绝不阻塞主进程
@@ -1352,9 +1421,7 @@ async function startServer(unsafePortRetries = 4, overlays = []) {
     await killTree(serverProc);
     serverProc = null;
   }
-  healProfilePatch();
-  healHomePatch();
-  logProfileBundleHealth();
+  ensurePluginIntegration().healBeforeServer();
   if (isWslMode()) {
     // WSL 托管模式：经 wsl.exe 在 WSL 内启动 dsh web（仍 --port 0 由 WSL 内 OS
     // 分配；稳定端口持久化只作用于本地 spawn）。受限端口重启走同一递归。
@@ -2537,54 +2604,18 @@ async function runUpdateFlow(manual) {
         // 新 WSL agent 已就位：与 local 一致，立即补同步配套插件/内置预设并重打
         // 运行时补丁（全部幂等），否则「稍后重启」后再重启服务会以未修复、且
         // 缺少壳内置模式的新版本启动。
-        syncCompanionPlugins();
+        ensurePluginIntegration().syncPlugins();
         syncBuiltinAgentPresets();
-        applySlotCompatFix();
-        preScanPluginHealth();
-        applyRuntimeFlashFix();
-        applyPromptExposeFix();
-        applyShellDescriptionCompatFix();
-        applyCodeModeCompatFix();
-        applyImageSendFix();
-        applyAttachmentMimeTrustFix();
-        applyVisionKeyFix();
-        applyProfilePatchGuard();
-        applyProfileBundleGuard();
-        applySettingsSectionGuard();
-        applyWorkspaceSearchRailFix();
-        applyPluginInventoryTabMergeFix();
-        // 与 local 分支、与 WSL 启动分支一致：包级补丁同样立即重打（幂等），
-        // 避免「稍后重启」后以未修复的新 WSL agent 启动（历史漂移补齐）。
-        applyWebSearchBaseUrlFix();
-        applyMenuViewportFix();
-        applySessionManageFix();
-        applyOpenProjectDirFix();
-        applySessionPersistenceFix();
+        notifyPatchFailures(ensurePluginIntegration().applyPatches());
+        ensurePluginIntegration().preflightHealth();
       } else {
         await updater.applyUpdate(ctx, latest);
         // 新 overlay 已就位：立即重打运行时补丁（全部幂等），否则「稍后重启」后再
         // 点「重启 dsh web 服务」会用未修复的新版本启动（识图发送、设置暴露等回归）。
         // 同时把壳内置 Agent 预设补进新 overlay（干净 npm 包不含 8 个壳预设）。
         syncLocalAgentPresets();
-        applySlotCompatFix();
-        preScanPluginHealth();
-        applyRuntimeFlashFix();
-        applyPromptExposeFix();
-        applyShellDescriptionCompatFix();
-        applyCodeModeCompatFix();
-        applyImageSendFix();
-        applyAttachmentMimeTrustFix();
-        applyVisionKeyFix();
-        applyProfilePatchGuard();
-        applyProfileBundleGuard();
-        applySettingsSectionGuard();
-        applyWorkspaceSearchRailFix();
-        applyPluginInventoryTabMergeFix();
-        applyWebSearchBaseUrlFix();
-        applyMenuViewportFix();
-        applySessionManageFix();
-        applyOpenProjectDirFix();
-        applySessionPersistenceFix();
+        notifyPatchFailures(ensurePluginIntegration().applyPatches());
+        ensurePluginIntegration().preflightHealth();
       }
       // 进度窗已非模态，但完成对话框弹出前仍先关闭它，避免叠窗/对话框被遮挡。
       closeUpdateWindow(progressWin);
@@ -3781,32 +3812,6 @@ function startBalanceLoop() {
   ensureBalanceScheduler().start();
 }
 
-// ---------------------------------------------------------------------------
-// 配套 dsh 插件同步（注入 web profile：余额小部件 + 文件更改追踪/还原）
-// ---------------------------------------------------------------------------
-// 配套插件清单 COMPANION_PLUGINS 的唯一数据源在 scripts/lib/companion-plugins.js
-//（与 scripts/sync-companion-plugins.js 共用，杜绝两处清单漂移）。
-// 过期插件清理 / 旧市场清理 / 文件同步 / bundle 校验 / 补丁条目注册等纯逻辑
-// 也统一收口在 scripts/lib/companion-profile.js，本文件只保留与桌面壳耦合的
-// manifest 恢复流程。
-
-// ---------------------------------------------------------------------------
-// profile patch 自愈：cordis.patch.yml 损坏会让 dsh web 装配 profile 时抛错并
-// 以 exit 1 退出，桌面端「启动失败」。每次启动 dsh web 前调用本函数：
-//   1. 顶层孤立 `[]` 与列表条目混存 → 移除 `[]` 行（修复为单一顶层列表）；
-//   2. issue #17 存量：同一 loader id 被注册多次（旧版本插件安装写入的重复
-//      insert 条目 → cordis loader "duplicate loader entry id: X"）→ 注册行级
-//      去重，保留首次注册、备份原文件；config 覆盖/disabled 禁用条目是用户
-//      配置，绝不改动（PR #24 v2）；
-//   3. 仍无法解析（其它损坏形态）→ 备份为 cordis.patch.yml.broken-<ts> 并
-//      重置为最小合法文件，日志告警，备份保留用户内容供恢复。
-//   健康文件零写入（幂等）。
-// ---------------------------------------------------------------------------
-function profilePatchFile() {
-  const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
-  return path.join(home, 'profiles', 'web', 'cordis.patch.yml');
-}
-
 // 原子写统一收口在 scripts/lib/patch-io.js 的 writeFileAtomic（临时文件 + rename）。
 // 惰性加载 js-yaml（随内置 dsh 存在于 resources/app/node_modules，传递依赖）；
 // 缺失时静默降级为仅做结构化修复（不阻断启动）。方言构造与
@@ -3819,376 +3824,6 @@ function loadDshYamlDialect() {
   const parse = createEntryListYamlParser();
   dshYamlDialect = parse ? { load: (content) => parse(content) } : null;
   return dshYamlDialect;
-}
-
-// profile patch 自愈的签名缓存：cordis.patch.yml 是本项目高频自愈对象，但
-// 每次启动实际需要改动的情形很少。以「文件路径 + 大小 + 精确 mtimeMs」为
-// 签名，签名一致说明文件内容未被任何写入方触碰（写入必改 mtime），可跳过
-// 读文件 + js-yaml 解析 + 去重扫描。进程内 memo 同时消除 startServer 里对
-// 同一文件的第二次全量解析。文件被改（含本进程后续的同步写入）→ 签名变化
-// → 自动重新自愈，无陈旧判断。
-let patchHealMemo = null; // { file, size, mtimeMs }
-
-function patchHealCachePath() {
-  return path.join(userDataDir, 'profile-patch-heal-cache.json');
-}
-
-function patchFileSignature(file) {
-  try {
-    const st = fs.statSync(file);
-    return { size: st.size, mtimeMs: st.mtimeMs };
-  } catch {
-    return null;
-  }
-}
-
-function readPersistedPatchHeal() {
-  try {
-    const c = JSON.parse(fs.readFileSync(patchHealCachePath(), 'utf8'));
-    if (c && c.v === 1 && typeof c.file === 'string' && typeof c.size === 'number' && typeof c.mtimeMs === 'number') return c;
-  } catch {}
-  return null;
-}
-
-function writePersistedPatchHeal(file, sig) {
-  try {
-    fs.writeFileSync(patchHealCachePath(), JSON.stringify({
-      v: 1,
-      file,
-      size: sig.size,
-      mtimeMs: sig.mtimeMs,
-      at: new Date().toISOString(),
-    }));
-  } catch {}
-}
-
-function healProfilePatch() {
-  try {
-    const file = profilePatchFile();
-    if (!fs.existsSync(file)) return;
-    // 启动提速：签名一致 → 该文件已在当前内容状态下自愈过，直接跳过。
-    const sig = patchFileSignature(file);
-    if (sig) {
-      const memoHit = patchHealMemo && patchHealMemo.file === file &&
-        patchHealMemo.size === sig.size && patchHealMemo.mtimeMs === sig.mtimeMs;
-      if (memoHit) return;
-      const persisted = readPersistedPatchHeal();
-      if (persisted && persisted.file === file && persisted.size === sig.size && persisted.mtimeMs === sig.mtimeMs) {
-        patchHealMemo = { file, size: sig.size, mtimeMs: sig.mtimeMs };
-        return;
-      }
-    }
-    let text = fs.readFileSync(file, 'utf8');
-    const bareArray = /^\s*\[\]\s*$/m.test(text);
-    const hasEntries = /^\s*-\s+(?:id|insert)\s*:/m.test(text);
-    if (bareArray && hasEntries) {
-      text = text.replace(/^\s*\[\]\s*$\n?/m, '');
-      writeFileAtomic(file, text);
-      log('boot', 'profile patch 自愈: 移除了与列表混存的顶层 []（cordis.patch.yml）');
-    }
-    const yaml = loadDshYamlDialect();
-    if (!yaml) return;
-    let parsed;
-    let error = null;
-    try { parsed = yaml.load(text); } catch (err) { error = err; }
-    // 合法判定与 dsh-app-boot parsePatchList 同构：顶层数组且每项为映射。
-    if (!error && isPatchListValid(parsed)) {
-      // issue #17 存量自愈：注册行级去重（PR #24 v2）。重复注册（旧版本
-      // 插件安装写入的第二个同 id insert 条目）会让 cordis loader 抛
-      // "duplicate loader entry id: X"，且该状态永远无法自愈；只删重复
-      // 注册行，用户手写的 config/disabled 覆盖条目原样保留。
-      const dedupe = dedupePatchEntries(text);
-      if (dedupe.removed.length > 0) {
-        const backup = file + '.dup-' + Date.now();
-        try { fs.copyFileSync(file, backup); } catch {}
-        writeFileAtomic(file, dedupe.text);
-        log('boot', 'profile patch 自愈: 移除了重复注册的 loader 条目 ' + [...new Set(dedupe.removed)].join(', ') + '，原文件已备份到 ' + backup);
-        text = dedupe.text;
-      }
-    }
-    if (error || !isPatchListValid(parsed)) {
-      const backup = file + '.broken-' + Date.now();
-      try { fs.renameSync(file, backup); } catch { fs.copyFileSync(file, backup); }
-      fs.writeFileSync(file, '# recovered by DSH Desktop: 原内容无法解析，已备份到\n# ' + backup + '\n[]\n', 'utf8');
-      const cause = error ? String((error && error.message) || error)
-        : (Array.isArray(parsed) ? '条目不是映射（顶层数组每项须为映射）' : '顶层非数组');
-      log('boot', 'profile patch 自愈: 解析失败（' + cause + '），已备份到 ' + backup + ' 并重置为最小文件');
-    }
-    // 完整自愈流程已跑完（含 yaml 解析）：记录当前内容签名，下次启动命中跳过。
-    const after = patchFileSignature(file);
-    if (after) {
-      patchHealMemo = { file, size: after.size, mtimeMs: after.mtimeMs };
-      writePersistedPatchHeal(file, after);
-    }
-  } catch (err) {
-    log('boot', 'profile patch 自愈失败: ' + err.message);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 家级补丁层预检（$DSH_HOME/cordis.patch.yml）：dsh 官方 composeProfile 对
-// 该文件 fail-loud（"failed to parse patches" → dsh web 退出码 1），此前只由
-// dsh profile-boot 的运行时防护（锚点改写）兜底。这里在启动前用与 dsh 相同
-// 的 entry-list 方言预检：损坏 → 备份 .broken-<ts> + 重置为最小合法文件
-// （与 healProfilePatch 同款语义，原文永不丢弃）。健康文件零写入（幂等，
-// 进程内签名 memo，避免重复解析）。
-// ---------------------------------------------------------------------------
-let homePatchHealMemo = null; // { file, size, mtimeMs }
-
-function healHomePatch() {
-  try {
-    const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
-    const file = path.join(home, 'cordis.patch.yml');
-    if (!fs.existsSync(file)) return;
-    const sig = patchFileSignature(file);
-    if (sig && homePatchHealMemo && homePatchHealMemo.file === file &&
-        homePatchHealMemo.size === sig.size && homePatchHealMemo.mtimeMs === sig.mtimeMs) {
-      return;
-    }
-    const yaml = loadDshYamlDialect();
-    if (!yaml) return; // 无 yaml 依赖：跳过解析（运行时防护兜底）
-    let parsed = null;
-    let error = null;
-    try { parsed = yaml.load(fs.readFileSync(file, 'utf8')); } catch (err) { error = err; }
-    // 合法判定与 dsh-app-boot parsePatchList 同构：顶层数组且每项为映射
-    // （只查 Array.isArray 会放过「条目是标量/字符串/嵌套数组/null」的畸形
-    // 文件，composeProfile 仍会 fail-loud）。
-    if (!error && isPatchListValid(parsed)) {
-      homePatchHealMemo = { file, size: sig.size, mtimeMs: sig.mtimeMs };
-      return;
-    }
-    const backup = file + '.broken-' + Date.now();
-    try { fs.renameSync(file, backup); } catch { fs.copyFileSync(file, backup); }
-    fs.writeFileSync(file, '# recovered by DSH Desktop: 原内容无法解析，已备份到\n# ' + backup + '\n[]\n', 'utf8');
-    const cause = error ? String((error && error.message) || error)
-      : (Array.isArray(parsed) ? '条目不是映射（顶层数组每项须为映射）' : '顶层非数组');
-    log('boot', '家级补丁层自愈: 解析失败（' + cause + '），已备份到 ' + backup + ' 并重置为最小文件');
-    const after = patchFileSignature(file);
-    if (after) homePatchHealMemo = { file, size: after.size, mtimeMs: after.mtimeMs };
-  } catch (err) {
-    log('boot', '家级补丁层自愈失败: ' + err.message);
-  }
-}
-
-// 目录级同步（dirNeedsSync + syncDir）收口在 scripts/lib/companion-profile.js，
-// 由 syncCompanionFiles 使用；本文件不再维护副本。
-
-// ---------------------------------------------------------------------------
-// profile bundle 健康检查（只读）：启动对账（reconcileProfileBundles）已把
-// 无效的非核心登记从 manifest 移除，这里把对账后仍存在的异常条目（核心
-// bundle 缺失 / 损坏等，启动防护兜底跳过）落到 desktop.log。不修改任何文件。
-// ---------------------------------------------------------------------------
-function logProfileBundleHealth() {
-  try {
-    const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
-    const profileDir = path.join(home, 'profiles', 'web');
-    let manifest = null;
-    try {
-      manifest = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
-    } catch (err) {
-      log('boot', 'profile bundle 健康检查: manifest 不可读（' + err.message + '），交由启动防护自愈');
-      return;
-    }
-    const bundles = (manifest && manifest.dsh && manifest.dsh.profile && Array.isArray(manifest.dsh.profile.bundles)) ? manifest.dsh.profile.bundles : [];
-    const installAnchor = path.dirname(dshPackageJson());
-    for (const name of bundles) {
-      if (typeof name !== 'string' || name === '') continue;
-      // 与对账（reconcileProfileBundles）同一解析实现（createRequire.resolve.paths
-      // 双锚点，含 NODE_PATH / 全局 node_modules）：诊断口径与对账判定一致，
-      // 避免「对账判定可解析、健康检查误报缺失」的口径撕裂。
-      const dir = resolveBundleDirLike(path.join(installAnchor, 'package.json'), name)
-        || resolveBundleDirLike(path.join(profileDir, 'package.json'), name);
-      if (!dir) {
-        log('boot', 'profile bundle 缺失（对账后仍存在，启动防护兜底跳过）: ' + name + ' —— 用 dsh plugin --profile web install 可修复');
-        continue;
-      }
-      const check = verifyBundleDir(dir);
-      if (!check.ok) log('boot', 'profile bundle 不可用（对账后仍存在，启动防护兜底跳过）: ' + name + ' —— ' + check.reason);
-    }
-  } catch (err) {
-    log('boot', 'profile bundle 健康检查失败: ' + err.message);
-  }
-}
-
-function syncCompanionPlugins() {
-  if (!IS_WIN) return;
-  try {
-    healProfilePatch();
-    const home = effectiveDshHome();
-    if (!home) { log('boot', 'DSH_HOME 未解析，跳过配套插件同步'); return; }
-    const profileDir = path.join(home, 'profiles', 'web');
-    const patchFile = path.join(profileDir, 'cordis.patch.yml');
-    // 插件管理「卸载」标记（removed: true 的顶层条目）：本次启动跳过文件复制
-    // 与 manifest 装配，避免「卸载后一重启又被复活」。纯文本提取（共享实现
-    // removedPluginIdsFromPatch，与 scripts/sync-companion-plugins.js 同一数据源），
-    // 解析失败不影响同步。
-    let patchText = '';
-    try { patchText = fs.readFileSync(patchFile, 'utf8'); } catch { /* 无 patch 文件 */ }
-    const removedIds = removedPluginIdsFromPatch(patchText);
-    // 插件文件同步 / 过期插件清理 / 旧市场目录清理 / 源缺失扫描 / bundle
-    // 落盘校验 / 卸载标记跳过 / 更新版本保留：与 scripts/sync-companion-plugins.js
-    // 共用 scripts/lib/companion-profile.js 的同一实现（日志文案经回调保持
-    // 本函数原有输出）。
-    // 源缺失原则（issue #34 诊断的自愈死循环）：缺失源一律不写 patch 注册
-    //（否则「注册了但包不存在」会让 dsh web 启动崩溃）；若 manifest 仍登记
-    // 为 bundle，则视为用户意图禁用，从 bundles 移除。
-    const { bundleNames, missingNames: missingSourceNames } = syncCompanionFiles({
-      assetsRoot: path.join(__dirname, 'assets', 'plugins'),
-      profileDir,
-      vendorRoot: path.join(__dirname, 'node_modules'),
-      removedIds,
-      log: (m) => log('boot', m),
-      fail: (m) => log('boot', m),
-      onCopyFail: (sf, err) => log('boot', '同步配套插件文件失败 ' + sf + ': ' + err.message),
-      onVerifyFail: (name, reason) => log('boot', '配套 bundle 校验失败（按源缺失处理，不注册）: ' + name + ' —— ' + reason),
-    });
-
-    // v0.3.5 起插件市场整体切换为 zat-dsh-engine（MIT）：清理旧版
-    // @deepseek-ai/dsh-plugin-marketplace 的 patch 行（幂等）。
-    try {
-      let legacyPatch = fs.readFileSync(patchFile, 'utf8');
-      const legacy = removeLegacyMarketplacePatchLines(legacyPatch);
-      if (legacy.changed) {
-        writeFileAtomic(patchFile, legacy.patch);
-        log('boot', '已从 cordis.patch.yml 移除旧插件市场条目');
-      }
-    } catch {}
-
-    // v0.3.11 起内置插件市场 zat-dsh-engine 默认移除（用户要求）：存量 profile
-    // 里已装配的副本一次性清理（目录 + manifest bundles 登记）。settings 标记
-    // zatEngineRetired 保证只清一次——用户之后从 dshmarket 主动重装不受影响。
-    retireZatEngine(profileDir);
-
-    // billion-context-dsh（compaction-acp）是模型驱动的 ACP 压缩后端：同一
-    // realm 内与 dsh 默认的 compaction-basic 不能并存（插件 README 的官方
-    // 安装说明）。幂等写入禁用条目：patch 中已存在 compaction-basic 条目
-    // （含用户手写的 disabled 块）则不动，尊重用户配置。
-    if (bundleNames.has('billion-context-dsh')) {
-      try {
-        let patch = '';
-        try { patch = fs.readFileSync(patchFile, 'utf8'); } catch { /* 全新 profile：patch 文件尚未创建，视为空 */ }
-        const entry = ensureDisabledPatchEntry(patch, new RegExp('(?:^|\\n)\\s*-?\\s*id\\s*:\\s*compaction-basic\\b'), ACP_DISABLE_BLOCK);
-        if (entry.changed) {
-          writeFileAtomic(patchFile, entry.patch);
-          log('boot', '已禁用 compaction-basic（billion-context-dsh 接管压缩后端）');
-        }
-      } catch (err) {
-        log('boot', '写入 compaction-basic 禁用条目失败: ' + err.message);
-      }
-    }
-
-    // 桌面宠物（harness-pet）默认关闭：客户端常驻 rAF 逐帧绘制 canvas（issue
-    // #34 诊断为软渲染/流式输出下的持续阻塞源），且旧版保存的开关值会覆盖
-    // 客户端默认。插件级 disabled 条目一票否决任何已保存状态；需要时可在
-    // 设置 → 插件 → 管理 一键开启（与 dsh-plugin-manager 同机制）。幂等：
-    // patch 中已存在 harness-pet 条目（含用户手写）则不动，尊重用户配置。
-    if (bundleNames.has('harness-pet')) {
-      try {
-        let patch = '';
-        try { patch = fs.readFileSync(patchFile, 'utf8'); } catch { /* 全新 profile：patch 文件尚未创建，视为空 */ }
-        const entry = ensureDisabledPatchEntry(patch, new RegExp('(?:^|\\n)\\s*-?\\s*id\\s*:\\s*harness-pet\\b'), PET_DISABLE_BLOCK);
-        if (entry.changed) {
-          writeFileAtomic(patchFile, entry.patch);
-          log('boot', '已默认关闭桌面宠物（harness-pet，可在插件管理开启）');
-        }
-      } catch (err) {
-        log('boot', '写入 harness-pet 禁用条目失败: ' + err.message);
-      }
-    }
-
-    // profile manifest 装配对账（收口在 scripts/lib/profile-reconcile.js 唯一
-    // 实现，main.js 与 sync-companion-plugins.js 共用）：损坏备份重建、核心
-    // 补齐、全量逐条校验（无效且非核心的登记移除并记入隔离记录
-    // dsh-desktop.broken-bundles.json）、配套登记追加、源缺失/卸载标记移除、
-    // 重置后用户 bundle 恢复（issue #48）。全部原子写，健康 manifest 零写入
-    // （幂等）。parsePatch 注入与 dsh 相同的 entry-list 方言（js-yaml 缺失时
-    // 降级为不检查补丁层可解析性，运行时防护兜底）。
-    const removedBundles = COMPANION_PLUGINS.filter((p) => removedIds.has(p.id)).map((p) => p.name);
-    const reconciled = reconcileProfileBundles(profileDir, {
-      installAnchorDir: path.dirname(dshPackageJson()),
-      coreNames: CORE_BUNDLE_NAMES,
-      addNames: bundleNames,
-      missingNames: missingSourceNames,
-      removedBundles: new Set(removedBundles),
-      excludeFromRecover: new Set([...CORE_BUNDLE_NAMES, ...COMPANION_PLUGINS.map((p) => p.name)]),
-      parsePatch: loadDshYamlDialect(),
-      log: (m) => log('boot', m),
-    });
-    if (reconciled.reset && reconciled.manifest &&
-        Array.isArray(reconciled.manifest.dsh && reconciled.manifest.dsh.profile && reconciled.manifest.dsh.profile.bundles)) {
-      notifyManifestResetRecovered(reconciled.recovered);
-    }
-
-    // 非 bundle 插件注册到 profile 的 patch 层（幂等）。bundle 迁移自愈
-    //（issue #17 同族：升级为 bundle 的插件残留 insert 行会造成同 id 双登记）、
-    // 源缺失残留移除、卸载标记跳过、用户已有条目尊重与 name 就地改名统一收口
-    // 在共享实现 registerCompanionPatchEntries（与 scripts/sync-companion-plugins.js
-    // 同一数据源；用户手写的 config/disabled 覆盖条目由 dropBlocksByIds 语义原样保留）。
-    // 注意：必须在 legacy/ACP/PET 三步落盘之后重新读盘——它们都可能改写过
-    // 文件，注册层基于旧快照写回会覆盖这几步的成果。
-    let patch = '';
-    try { patch = fs.readFileSync(patchFile, 'utf8'); } catch { patch = ''; }
-    const registration = registerCompanionPatchEntries(patch, {
-      plugins: COMPANION_PLUGINS,
-      bundleNames,
-      missingNames: missingSourceNames,
-      removedIds,
-      onDrop: (m) => log('boot', m),
-    });
-    if (registration.changed) {
-      writeFileAtomic(patchFile, registration.patch);
-      log('boot', '已同步配套插件到 web profile: ' + COMPANION_PLUGINS.map((p) => p.id).join(', '));
-    }
-  } catch (err) {
-    log('boot', '同步配套插件失败: ' + err.message);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 插件管理数据与写盘（设置页「插件」页「管理」标签；IPC 见 dsh:plugin-list /
-// dsh:plugin-set-enabled）
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// 退役插件一次性清理：v0.3.11 起内置插件市场 zat-dsh-engine 默认移除。
-// 存量 profile 里已装配的副本（profile node_modules 目录 + manifest bundles
-// 登记）清一次；settings 标记 zatEngineRetired 保证幂等且不再干预——用户
-// 之后从 dshmarket 主动重装不受影响。
-// ---------------------------------------------------------------------------
-function retireZatEngine(profileDir) {
-  const RETIRED_NAME = 'zat-dsh-engine';
-  try {
-    const s = updater.loadSettings(updCtx());
-    if (s.zatEngineRetired) return;
-    const pkgDir = path.join(profileDir, 'node_modules', RETIRED_NAME);
-    if (fs.existsSync(pkgDir)) {
-      // 只清内置装配特征（dsh.bundle.patch 声明）的副本，避免误删同名第三方包。
-      let isBuiltin = false;
-      try {
-        const p = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'));
-        isBuiltin = !!(p && p.dsh && p.dsh.bundle && p.dsh.bundle.patch);
-      } catch {}
-      if (isBuiltin) {
-        fs.rmSync(pkgDir, { recursive: true, force: true });
-        log('boot', '已移除内置插件市场 ' + RETIRED_NAME + '（v0.3.11 起默认移除）');
-      }
-    }
-    const manifestFile = path.join(profileDir, 'package.json');
-    try {
-      const m = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
-      if (m && m.dsh && m.dsh.profile && Array.isArray(m.dsh.profile.bundles) && m.dsh.profile.bundles.includes(RETIRED_NAME)) {
-        m.dsh.profile.bundles = m.dsh.profile.bundles.filter((n) => n !== RETIRED_NAME);
-        writeFileAtomic(manifestFile, JSON.stringify(m, null, 2) + '\n');
-        log('boot', '已从 web profile bundles 移除 ' + RETIRED_NAME + ' 登记');
-      }
-    } catch (err) {
-      log('boot', '清理 ' + RETIRED_NAME + ' manifest 登记失败: ' + err.message);
-    }
-    s.zatEngineRetired = true;
-    updater.saveSettings(updCtx(), s);
-  } catch (err) {
-    log('boot', '退役清理 ' + RETIRED_NAME + ' 失败: ' + err.message);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -4825,741 +4460,6 @@ function syncLocalAgentPresets() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 运行时补丁候选路径（构造收口在 scripts/lib/runtime-patches.js 的纯函数里，
-// 这里只绑定模块级变量）：
-//   本地模式三副本 = profile fallback（junction 写穿内置副本）→ 内置 app 副本
-//   → 用户更新过的 agent overlay；防护类补丁（app-boot / settings / workspace /
-//   插件页标签合并）另覆盖 overlay 嵌套 dsh 依赖副本，且内置副本优先。
-//   WSL 托管模式目标 = WSL 安装目录（profile fallback + agent，经 UNC 写穿），
-//   由 patchTargets 统一构造；包级补丁在 WSL 模式追加 WSL agent 直连根。
-// ---------------------------------------------------------------------------
-function runtimeCopyFiles(pkgRel) {
-  return localCopyFiles(dshHome || path.join(os.homedir(), '.dsh'), __dirname, userDataDir, pkgRel);
-}
-
-function runtimeGuardFiles(pkgRel) {
-  return guardCopyFiles(effectiveDshHome() || path.join(os.homedir(), '.dsh'), __dirname, userDataDir, pkgRel);
-}
-
-// node_modules 根目录版本（web-search / menu-viewport / session-manage 三个
-// 包级补丁用）：WSL 模式下 home 为 UNC 等价路径（经 UNC 覆盖 WSL profile），
-// 并追加 WSL agent 直连根兜底（与 patchTargets 的 agent 条目语义一致）。
-function runtimeNodeModulesRoots() {
-  const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
-  const extraRoots = isWslMode() ? [path.join(home, 'agent', 'node_modules')] : [];
-  return localNodeModulesRoots(home, __dirname, userDataDir, extraRoots);
-}
-
-// ---------------------------------------------------------------------------
-// keyed slot 兼容补丁：rc.6 旧插件把 keyed slot 的注册身份放在 `id`，rc.7
-// 改为强制 `key`；dsh-advisor / dsh-llm-fallbacks 则 key/id 都不传，会导致
-// 单个第三方插件拖垮整个 loader（keyed slot "settings.plugin.item" requires
-// options.key）。ui-slots 侧把旧 `id` 提升为 `key`；runner 侧在真正调用
-// register 前为既无 key 又无 id 的注册派生包级兜底 key。两份补丁都幂等，
-// 并覆盖顶层与 dsh 嵌套依赖副本，dsh 更新后下次启动自动重打。
-// ---------------------------------------------------------------------------
-function applySlotCompatFix() {
-  const wslHome = effectiveDshHome();
-  const files = isWslMode()
-    ? slotCompatPatchTargets(wslHome)
-    : slotCompatCopyFiles(dshHome || path.join(os.homedir(), '.dsh'), __dirname, userDataDir);
-  applyPatchToFiles({
-    prefix: 'keyed slot 旧插件兼容补丁',
-    files,
-    log: (m) => log('boot', m),
-    transform: transformLegacySlotKey,
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file) => '已兼容旧插件的 keyed slot id ' + file,
-    failLog: (file, err) => 'keyed slot 旧插件兼容补丁失败(' + file + '): ' + err.message,
-  });
-  applyPatchToFiles({
-    prefix: 'keyed slot 无 key 兼容补丁',
-    files,
-    log: (m) => log('boot', m),
-    transform: transformSlotUnkeyedCompat,
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file) => '已兼容 keyed slot 无 key 注册 ' + file,
-    failLog: (file, err) => 'keyed slot 无 key 兼容补丁失败(' + file + '): ' + err.message,
-  });
-  // 第三轮：keyed slot 注册错误隔离（安全网）。
-  // 当前两轮补丁因版本差异均未命中时，在 ui-slots register 函数的 throw
-  // 语句前注入 guard，让缺少 key 的注册自动派生 key 而不是 throw，避免
-  // 单个第三方插件拖垮整个 loader（dsh web 60s 超时 → 桌面版 + 网页版均不可用）。
-  // 目标文件与第一轮相同（SLOT_KEY_COMPAT_PKG_REL = dsh-client-ui-slots）。
-  applyPatchToFiles({
-    prefix: 'keyed slot 错误隔离补丁',
-    files,
-    log: (m) => log('boot', m),
-    transform: transformSlotErrorIsolation,
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file, note) => '已隔离 keyed slot 注册错误 ' + file + (note ? ' (' + note + ')' : ''),
-    failLog: (file, err) => 'keyed slot 错误隔离补丁失败(' + file + '): ' + err.message,
-  });
-}
-
-// ---------------------------------------------------------------------------
-// 启动前 bundle 健康预检：扫描 profile 中的 bundle 包，检查是否存在已知的
-// "未提供 key 的 keyed slot 注册" 模式（dsh-vision-router 等第三方插件）。
-// 对已知会崩溃且补丁未命中的 bundle，在日志中警告并通知用户。
-// 纯读操作，不修改任何文件；实际修复由上述三层补丁负责。
-// ---------------------------------------------------------------------------
-function preScanPluginHealth() {
-  try {
-    const home = effectiveDshHome() || dshHome || path.join(os.homedir(), '.dsh');
-    const profileDir = path.join(home, 'profiles', 'web');
-    const pkgJsonPath = path.join(profileDir, 'package.json');
-    if (!fs.existsSync(pkgJsonPath)) return;
-    let pkgJson;
-    try { pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8')); } catch { return; }
-    const bundles = (pkgJson['dsh'] && pkgJson['dsh'].profile && pkgJson['dsh'].profile.bundles) || [];
-    if (!Array.isArray(bundles) || bundles.length === 0) return;
-    // 检查每个 bundle 的 dsh-cordis-client-runner / dsh-client-ui-slots 副本是否已被补丁。
-    const nmRoots = [
-      path.join(home, 'profiles', 'node_modules'),
-      path.join(__dirname, 'node_modules'),
-      path.join(userDataDir, 'agent', 'node_modules'),
-    ];
-    const unpatched = [];
-    for (const root of nmRoots) {
-      const uiSlotsFile = path.join(root, '@deepseek-ai', SLOT_KEY_COMPAT_PKG_REL);
-      if (!fs.existsSync(uiSlotsFile)) continue;
-      try {
-        const content = fs.readFileSync(uiSlotsFile, 'utf8');
-        // 若三层补丁均未命中，说明 ui-slots 文件存在但锚点不匹配
-        const hasAnyPatch = content.includes(SLOT_ERROR_ISOLATE_MARKER)
-          || content.includes('dsh-desktop compat: accept legacy keyed-slot id as key');
-        if (!hasAnyPatch) {
-          unpatched.push(uiSlotsFile);
-        }
-      } catch {}
-    }
-    if (unpatched.length > 0) {
-      log('boot', '插件健康预检: ui-slots 文件未被补丁覆盖（版本差异），slot 错误隔离可能未生效: ' + unpatched.join(', '));
-      log('boot', '建议: 若启动后出现 "keyed slot requires options.key" 错误，请升级 DSH Desktop 或联系插件开发者添加 options.key');
-    }
-  } catch (err) {
-    log('boot', '插件健康预检失败（不影响启动）: ' + ((err && err.message) || err));
-  }
-}
-
-// ---------------------------------------------------------------------------
-// dsh web 运行时闪跳修复：官方 dsh-client-runtime 在会话列表刷新
-// （mergeOrderedBaseline）时会丢弃「本地已创建、宿主全量列表尚未回显」的
-// 新会话，使 current 瞬时变 undefined，UI 闪回「选择工作区/无会话」状态。
-// 这里幂等地把补丁写进运行时文件；dsh 包更新后本函数会在下次启动重新应用。
-// ---------------------------------------------------------------------------
-function applyRuntimeFlashFix() {
-  // 覆盖运行副本：profile fallback、内置 app 副本、更新 overlay；
-  // wsl 托管模式目标换成 WSL 安装目录（profile fallback + agent，经 UNC 写穿，
-  // fallback 符号链接未创建时由 agent 直连目标兜底）。
-  const wslHome = effectiveDshHome();
-  const files = isWslMode()
-    ? patchTargets(wslHome, FLASH_PKG_REL)
-    : runtimeCopyFiles(FLASH_PKG_REL);
-  applyPatchToFiles({
-    prefix: 'runtime 补丁',
-    files,
-    log: (m) => log('boot', m),
-    transform: transformFlashFix,
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file) => '已修复会话列表刷新闪跳 ' + file,
-    failLog: (file, err) => 'runtime 补丁失败(' + file + '): ' + err.message,
-  });
-}
-
-// ---------------------------------------------------------------------------
-// dsh-host-apiproxy 设置暴露补丁：官方代理只把少数命名空间暴露给浏览器端
-// 配置客户端（WEB_SETTINGS_NAMESPACES 白名单）。我们配套的 dsh-prompt-custom /
-// dsh-third-party-thinking / dsh-vision / dsh-conversation-tweaks 等设置节
-// 依赖这些命名空间暴露，否则设置页对应栏目显示「设置不可用」甚至消失。
-// 这里幂等地把命名空间追加进白名单，并同时覆盖三处运行副本：
-//   - profile fallback（即内置 app 副本，通过 junction 写穿）
-//   - 内置 app node_modules
-//   - 用户更新过的 agent overlay（部分用户看不见插件设置的根因：overlay 副本从未被补）
-// ---------------------------------------------------------------------------
-function applyPromptExposeFix() {
-  // 覆盖运行副本：profile fallback、内置 app 副本、更新 overlay；
-  // wsl 托管模式目标换成 WSL 安装目录（profile fallback + agent，经 UNC 写穿）。
-  const wslHome = effectiveDshHome();
-  const files = isWslMode()
-    ? patchTargets(wslHome, EXPOSE_PKG_REL)
-    : runtimeCopyFiles(EXPOSE_PKG_REL);
-  applyPatchToFiles({
-    prefix: '提示词暴露补丁',
-    files,
-    log: (m) => log('boot', m),
-    transform: transformExposeFix,
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file, note) => '已把 ' + note.join(', ') + ' 加入设置白名单 ' + file,
-    failLog: (file, err) => '提示词暴露补丁失败(' + file + '): ' + err.message,
-  });
-}
-
-// ---------------------------------------------------------------------------
-// shell 工具 description 可选化补丁：code 模式的 run_code 程序经常省略
-// `description`（该字段只用于 UI/日志，不影响执行），但官方 schema 与
-// validate 都强制要求，导致大量 INVALID_ARGS。本补丁把 pwsh/bash 的
-// description 改为可选，缺省时用 command 首行生成。幂等；覆盖三份运行副本，
-// WSL 覆盖 profile fallback + agent。
-// ---------------------------------------------------------------------------
-function applyShellDescriptionCompatFix() {
-  const wslHome = effectiveDshHome();
-  for (const rel of [PW_REL, BASH_REL]) {
-    const files = isWslMode()
-      ? patchTargets(wslHome, rel)
-      : runtimeCopyFiles(rel);
-    applyPatchToFiles({
-      prefix: 'shell description 兼容补丁',
-      files,
-      log: (m) => log('boot', m),
-      transform: transformShellDescriptionOptional,
-      alreadyLog: (file) => '已应用，跳过 ' + file,
-      doneLog: (file) => '已把 description 改为可选 ' + file,
-      failLog: (file, err) => 'shell description 兼容补丁失败(' + file + '): ' + err.message,
-    });
-  }
-}
-
-// ---------------------------------------------------------------------------
-// code preset 兼容补丁：官方 code 模式只允许直接调用 run_code，但 DeepSeek
-// 模型会直接调用 read/grep/todo_write/report 而收到 UNKNOWN_TOOL。把
-// tool-presentation 从 code 改为 both：run_code 保留，原生工具也可直接调用。
-// 幂等；覆盖三份运行副本，WSL 覆盖 profile fallback + agent。
-// ---------------------------------------------------------------------------
-function applyCodeModeCompatFix() {
-  const wslHome = effectiveDshHome();
-  const files = isWslMode()
-    ? patchTargets(wslHome, CODE_PRESET_REL)
-    : runtimeCopyFiles(CODE_PRESET_REL);
-  applyPatchToFiles({
-    prefix: 'code 模式兼容补丁',
-    files,
-    log: (m) => log('boot', m),
-    transform: transformCodeModeCompat,
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file) => '已把 code preset 切换为 both ' + file,
-    failLog: (file, err) => 'code 模式兼容补丁失败(' + file + '): ' + err.message,
-  });
-}
-
-// ---------------------------------------------------------------------------
-// 图片字节信任补丁：官方 attachment-local 严格比对「浏览器声明的 MIME」与
-// 「字节解码出的格式」，而声明跟随文件扩展名不可信（webp/jpeg 改名 .png 后
-// file.type 仍是 image/png，字节却是 webp），不一致直接拒发整条消息，用户
-// 看到「仅支持 PNG、JPG、WebP、GIF」却发不出去。本补丁把声明为 image/* 时
-// 的媒体类型改为以字节实际格式为准记录，不再拒绝发送。幂等；覆盖三份运行
-// 副本，WSL 覆盖 profile fallback + agent。
-// ---------------------------------------------------------------------------
-function applyAttachmentMimeTrustFix() {
-  const wslHome = effectiveDshHome();
-  const files = isWslMode()
-    ? patchTargets(wslHome, ATTACH_LOCAL_REL)
-    : runtimeCopyFiles(ATTACH_LOCAL_REL);
-  applyPatchToFiles({
-    prefix: '图片字节信任补丁',
-    files,
-    log: (m) => log('boot', m),
-    transform: transformAttachmentMimeTrust,
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file) => '已信任图片解码字节 ' + file,
-    failLog: (file, err) => '图片字节信任补丁失败(' + file + '): ' + err.message,
-  });
-}
-// ---------------------------------------------------------------------------
-// 文本模型自动识图补丁：官方 apiproxy 在 session.prompt 入口检查模型是否支持
-// image 输入，不支持就直接拒绝。本补丁复用已安装的 dsh-vision 插件配置
-// （设置 → 识图插件（view_image）的 VLM baseURL/model/apiKey），把图片转述为
-// 详细文字（含 OCR）后再发送，文本模型也能“看图”。幂等；本地模式覆盖三处
-// 运行副本，WSL 托管模式覆盖 WSL profile fallback + agent（与闪跳/白名单
-// 补丁同模式，经 UNC 写穿）。
-// ---------------------------------------------------------------------------
-function applyImageSendFix() {
-  // 幂等标记必须是桌面端自有注释：历史实现用「存在同名函数」判已应用，
-  // 新版 dsh-host-apiproxy 已原生内置 describeImagesWithVision —— 会误判
-  // 「已应用」而静默跳过门槛补丁，文本模型图片发送重新失效。
-  const DESKTOP_MARKER = 'DSH Desktop: reuse the dsh-vision VLM config';
-  const HELPER_ANCHOR = '/** Validate one prompt as a batch before publishing any durable image object. */';
-  const HELPER = `
-/** DSH Desktop: reuse the dsh-vision VLM config to describe images as text so text-only models can "see" them. */
-async function describeImagesWithVision(ctx, content) {
-	const settings = ctx.get("settings");
-	let vision = null;
-	if (settings !== void 0 && typeof settings.get === "function") {
-		// dsh-desktop fix: read the resolved HOST-side value (settings.get), not the
-		// redacted wire snapshot. redactSecrets strips role('secret') fields, so
-		// describe({redactSecrets:true}) drops apiKey and every keyed VLM endpoint
-		// answers 401 — image sends failed for configured users.
-		const resolved = settings.get("dsh-vision");
-		if (resolved !== void 0 && typeof resolved === "object") vision = resolved;
-	}
-	if (vision === null && settings !== void 0 && typeof settings.describe === "function") {
-		try {
-			const descriptor = settings.describe({ redactSecrets: true }).find((candidate) => String(candidate.ns) === "dsh-vision");
-			if (descriptor !== void 0 && descriptor.value !== void 0 && typeof descriptor.value === "object") vision = descriptor.value;
-		} catch {}
-	}
-	if (vision === null || typeof vision.baseURL !== "string" || vision.baseURL.trim() === "" || typeof vision.model !== "string" || vision.model.trim() === "") {
-		throw new Error("未配置识图服务：请到 设置 → 识图插件（view_image） 填写 VLM 接口地址与模型");
-	}
-	const apiKey = typeof vision.apiKey === "string" ? vision.apiKey.trim() : "";
-	const endpoint = vision.baseURL.replace(/\\/+$/, "") + "/chat/completions";
-	const out = [];
-	let imageNo = 0;
-	for (const part of content) {
-		if (part.type !== "image") {
-			if (part.type === "text") out.push(part);
-			continue;
-		}
-		imageNo += 1;
-		const dataUrl = \`data:\${part.mediaType};base64,\${part.data}\`;
-		const payload = {
-			model: vision.model,
-			stream: false,
-			messages: [
-				{ role: "system", content: "You are an image understanding assistant. Describe the image in exhaustive detail and transcribe every visible text (OCR). If it is a UI, document, table, chart or code, preserve its structure. Answer in Chinese unless the user's language clearly differs." },
-				{ role: "user", content: [
-					{ type: "text", text: "请把这张图片完整转述为文字：包含画面内容、结构与全部可见文字（逐字 OCR）。" },
-					{ type: "image_url", image_url: { url: dataUrl } }
-				] }
-			]
-		};
-		const headers = { "content-type": "application/json" };
-		if (apiKey !== "") headers.authorization = "Bearer " + apiKey;
-		const response = await fetch(endpoint, {
-			method: "POST",
-			headers,
-			body: JSON.stringify(payload),
-			signal: AbortSignal.timeout(120000)
-		});
-		if (!response.ok) {
-			const bodyText = await response.text().catch(() => "");
-			throw new Error("识图服务返回 HTTP " + response.status + "：" + bodyText.slice(0, 400));
-		}
-		const data = await response.json();
-		const description = data && data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : "";
-		if (typeof description !== "string" || description.trim() === "") throw new Error("识图服务未返回有效文字描述");
-		out.push({ type: "text", text: "[图片" + imageNo + "] " + description.trim() });
-	}
-	return out;
-}
-`;
-  const GATE_MARKER = 'if (modelInfo.inputModalities !== void 0 && !modelInfo.inputModalities.includes("image")) return err(request, {';
-  const GATE_NEW = `if (modelInfo.inputModalities !== void 0 && !modelInfo.inputModalities.includes("image")) {
-							try {
-								admittedContent = await describeImagesWithVision(ctx, content);
-							} catch (error) {
-								return err(request, {
-									code: "attachment-error",
-									message: \`图片自动转述失败：\${error instanceof Error ? error.message : String(error)}。请在 设置 → 识图插件（view_image） 配置 VLM 后重试。\`,
-									details: { reason: "IMAGE_DESCRIPTION_FAILED" }
-								});
-							}
-						}`;
-
-  const wslHome = effectiveDshHome();
-  const files = isWslMode()
-    ? patchTargets(wslHome, EXPOSE_PKG_REL)
-    : runtimeCopyFiles(EXPOSE_PKG_REL);
-  applyPatchToFiles({
-    prefix: '识图发送补丁',
-    files,
-    log: (m) => log('boot', m),
-    transform: (src, file) => {
-      if (src.includes(DESKTOP_MARKER)) return { status: 'already' };
-      // 上游已原生内置同名 helper（新版 dsh）：不重复插入（重复定义会留下
-      // 被后者遮蔽的死代码），只做门槛替换；其 apiKey 脱敏缺陷由
-      // applyVisionKeyFix 就地修复。
-      const nativeHelper = src.includes('async function describeImagesWithVision');
-      if (!nativeHelper) {
-        // 1) 插入转述 helper（此后所有索引必须基于插入后的 src 重新计算）
-        const anchorIdx = src.indexOf(HELPER_ANCHOR);
-        if (anchorIdx === -1) {
-          return { status: 'anchor-missing', detail: '未找到 helper 插入锚点（版本可能已变更），跳过 ' + file };
-        }
-        src = src.slice(0, anchorIdx) + HELPER + '\n' + src.slice(anchorIdx);
-      }
-      // 2) prompt 入口：声明 admittedContent
-      const hasImageIdx = src.indexOf('const hasImage = content.some((part) => part.type === "image");');
-      if (hasImageIdx === -1) {
-        return { status: 'anchor-missing', detail: '未找到 hasImage 入口（版本可能已变更），跳过 ' + file };
-      }
-      src = src.slice(0, hasImageIdx) + 'let admittedContent = content;\n\t\t\t\t' + src.slice(hasImageIdx);
-      // 3) 把“模型不支持图片”的直接拒绝替换为自动转述
-      const gateIdx = src.indexOf(GATE_MARKER);
-      if (gateIdx === -1) {
-        return { status: 'anchor-missing', detail: '未找到模型图片门槛（版本可能已变更），跳过 ' + file };
-      }
-      const gateEnd = src.indexOf('});', gateIdx);
-      if (gateEnd === -1) {
-        return { status: 'anchor-missing', detail: '图片门槛收尾异常，跳过 ' + file };
-      }
-      src = src.slice(0, gateIdx) + GATE_NEW + src.slice(gateEnd + 3);
-      // 4) durablePromptContent 使用转述后的内容（从门槛之后查找调用点，避免命中函数定义）
-      const callIdx = src.indexOf('durablePromptContent(ctx, content)', gateIdx);
-      if (callIdx === -1) {
-        return { status: 'anchor-missing', detail: '未找到 durablePromptContent 调用，跳过 ' + file };
-      }
-      src = src.slice(0, callIdx) + 'durablePromptContent(ctx, admittedContent)' + src.slice(callIdx + 'durablePromptContent(ctx, content)'.length);
-      return { status: 'changed', src };
-    },
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file) => '已启用文本模型图片自动转述 ' + file,
-    failLog: (file, err) => '识图发送补丁失败(' + file + '): ' + err.message,
-  });
-}
-
-// ---------------------------------------------------------------------------
-// 图片自动转述 apiKey 修复：官方 apiproxy 内置的 describeImagesWithVision 用
-// settings.describe({ redactSecrets: true }) 读 dsh-vision 配置——redactSecrets
-// 会把 role('secret') 的 apiKey 整字段删除，带密钥校验的 VLM 端点必然 401，
-// prompt 被拒、客户端提示「图片发送失败」。这里幂等改写为先读 settings.get()
-// 的宿主侧未脱敏解析值（保留 apiKey），describe 快照降级为回退。dsh 更新后
-// 本函数会在下次启动重新应用。本地模式覆盖三处运行副本；WSL 托管模式覆盖
-// WSL profile fallback + agent（与闪跳/白名单补丁同模式，经 UNC 写穿）。
-// ---------------------------------------------------------------------------
-function applyVisionKeyFix() {
-  const guardMarker = 'dsh-desktop fix: read the resolved HOST-side value';
-  const from = '\tlet vision = null;\n\tif (settings !== void 0 && typeof settings.describe === "function") {\n\t\ttry {\n\t\t\tconst descriptor = settings.describe({ redactSecrets: true }).find((candidate) => String(candidate.ns) === "dsh-vision");\n\t\t\tif (descriptor !== void 0 && descriptor.value !== void 0 && typeof descriptor.value === "object") vision = descriptor.value;\n\t\t} catch {}\n\t}';
-  const to = '\tlet vision = null;\n\tif (settings !== void 0 && typeof settings.get === "function") {\n\t\t// dsh-desktop fix: read the resolved HOST-side value (settings.get), not the\n\t\t// redacted wire snapshot. redactSecrets strips role(\'secret\') fields, so\n\t\t// describe({redactSecrets:true}) drops apiKey and every keyed VLM endpoint\n\t\t// answers 401 — image sends failed for configured users.\n\t\tconst resolved = settings.get("dsh-vision");\n\t\tif (resolved !== void 0 && typeof resolved === "object") vision = resolved;\n\t}\n\tif (vision === null && settings !== void 0 && typeof settings.describe === "function") {\n\t\ttry {\n\t\t\tconst descriptor = settings.describe({ redactSecrets: true }).find((candidate) => String(candidate.ns) === "dsh-vision");\n\t\t\tif (descriptor !== void 0 && descriptor.value !== void 0 && typeof descriptor.value === "object") vision = descriptor.value;\n\t\t} catch {}\n\t}';
-  const wslHome = effectiveDshHome();
-  const files = isWslMode()
-    ? patchTargets(wslHome, EXPOSE_PKG_REL)
-    : runtimeCopyFiles(EXPOSE_PKG_REL);
-  applyPatchToFiles({
-    prefix: '识图密钥补丁',
-    files,
-    log: (m) => log('boot', m),
-    transform: (src, file) => {
-      if (src.includes(guardMarker)) return { status: 'already' };
-      if (!src.includes(from)) {
-        return { status: 'anchor-missing', detail: '锚点未匹配（版本可能已变化），跳过 ' + file };
-      }
-      return { status: 'changed', src: src.replace(from, to) };
-    },
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file) => '已修复 apiKey 被脱敏截断 ' + file,
-    failLog: (file, err) => '识图密钥补丁失败(' + file + '): ' + err.message,
-  });
-}
-// ---------------------------------------------------------------------------
-// dsh 装配层防护：profile 自有的 cordis.patch.yml 属于用户数据，dsh 官方设计是
-// 「补丁文件损坏必须启动失败」（fail loud）。但该文件损坏会让桌面端永久无法
-// 启动。这里像 applyRuntimeFlashFix 一样幂等地改写 @deepseek-ai/dsh-app-boot：
-// 把 loadProfile 对 profile patch 的严格加载替换为「解析失败 → 备份 + 重置为
-// 空列表并继续启动」的自愈加载；CLI 等其它入口同样受益。dsh 更新后本函数会在
-// 下次启动重新应用。
-// ---------------------------------------------------------------------------
-function applyProfilePatchGuard() {
-  const guardMarker = 'function loadUserPatchLayer';
-  const callSite = '\t\tpatches: options.userLayer !== false && existsSync(patchPath) ? loadOverlayPatches(binName, patchPath) : []';
-  const callReplacement = '\t\tpatches: loadUserPatchLayer(binName, patchPath, options)';
-  const insertAfter = '\treturn parsePatchList(binName, file, content, "overlay");\n}';
-  const injected =
-    '/** dsh-desktop guard: the profile\'s own patch layer is user-owned data; a broken file must not brick\n' +
-    ' * the surface. Back the broken file up, reset the layer to an empty list, and boot without it.\n' +
-    ' */\n' +
-    'function loadUserPatchLayer(binName, patchPath, options) {\n' +
-    '\tif (options.userLayer === false || !existsSync(patchPath)) return [];\n' +
-    '\ttry {\n' +
-    '\t\treturn loadOverlayPatches(binName, patchPath);\n' +
-    '\t} catch (error) {\n' +
-    '\t\ttry {\n' +
-    '\t\t\tconst backup = `${patchPath}.broken-${Date.now()}`;\n' +
-    '\t\t\twriteFileSync(backup, readFileSync(patchPath, "utf8"));\n' +
-    '\t\t\twriteFileSync(patchPath, "# recovered by dsh: the previous content failed to parse and was moved to\\n# " + backup + "\\n[]\\n");\n' +
-    '\t\t} catch {}\n' +
-    '\t\tprocess.stderr.write(`${binName}: ${patchPath} failed to parse (${String(error?.message ?? error)}); the broken file was moved aside and the profile booted without its patch layer\\n`);\n' +
-    '\t\treturn [];\n' +
-    '\t}\n' +
-    '}';
-  applyPatchToFiles({
-    prefix: 'profile patch 防护',
-    files: runtimeGuardFiles(path.join('dsh-app-boot', 'lib', 'index.js')),
-    log: (m) => log('boot', m),
-    transform: (src, file) => {
-      if (src.includes(guardMarker)) return { status: 'already' }; // 已应用（幂等，静默）
-      if (!src.includes(callSite) || !src.includes(insertAfter)) {
-        return { status: 'anchor-missing', detail: file + ' 锚点未匹配（dsh 版本可能已变化），跳过' };
-      }
-      const out = src.replace(callSite, callReplacement);
-      return { status: 'changed', src: out.replace(insertAfter, insertAfter + '\n\n' + injected) };
-    },
-    doneLog: (file) => '已注入自愈加载到 ' + file,
-    failLog: (file, err) => 'profile patch 防护失败: ' + err.message,
-  });
-}
-
-// ---------------------------------------------------------------------------
-// profile bundle 装配防护：官方 dsh-app-boot 对 profile bundle 缺失/损坏
-// fail-loud（resolveBundleDir 抛 cannot resolve profile bundle、无
-// dsh.bundle.patch 声明抛 declares no dsh.bundle、bundle 补丁层损坏抛
-// failed to parse overlay），都会让 dsh web 以退出码 1 启动失败。这里像
-// applyProfilePatchGuard 一样幂等地改写 @deepseek-ai/dsh-app-boot：bundle
-// 层逐个跳过（stderr 诊断，profile manifest 损坏则备份 + 模板重建）；同时
-// 改写 dsh 的 profile-boot 装配（家级 cordis.patch.yml 与 profile 补丁层
-// 损坏时备份 + 重置，覆盖启动与 HMR 热重载）。变换逻辑收口在
-// profile-bundle-heal.js；dsh 更新后本函数会在下次启动重新应用。
-// ---------------------------------------------------------------------------
-function applyProfileBundleGuard() {
-  const appBootFiles = runtimeGuardFiles(path.join('dsh-app-boot', 'lib', 'index.js'));
-  const appBootTransform = (src, file) => {
-    const out = applyAppBootBundleGuard(src);
-    if (!out.changed) {
-      if (!src.includes(PROFILE_BUNDLE_GUARD_MARKER)) {
-        return { status: 'anchor-missing', detail: file + ' 锚点未匹配（dsh 版本可能已变化），跳过' };
-      }
-      return { status: 'already' }; // 已注入（幂等，静默）
-    }
-    return { status: 'changed', src: out.src };
-  };
-  applyPatchToFiles({
-    prefix: 'profile bundle 防护',
-    files: appBootFiles,
-    log: (m) => log('boot', m),
-    transform: appBootTransform,
-    doneLog: (file) => '已注入自愈装配到 ' + file,
-    failLog: (file, err) => 'profile bundle 防护失败(' + file + '): ' + err.message,
-  });
-
-  // dsh/lib/profile-boot-*.js：家级 cordis.patch.yml 与 profile 补丁层自愈。
-  const home = effectiveDshHome() || path.join(os.homedir(), '.dsh');
-  const profileBootDirs = [
-    path.join(__dirname, 'node_modules', '@deepseek-ai', 'dsh', 'lib'),
-    path.join(userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh', 'lib'),
-    path.join(home, 'profiles', 'node_modules', '@deepseek-ai', 'dsh', 'lib'),
-  ];
-  const profileBootFiles = [];
-  for (const dir of profileBootDirs) {
-    let names;
-    try { names = fs.readdirSync(dir).filter((f) => /^profile-boot-.+\.js$/.test(f)); } catch { continue; }
-    for (const name of names) profileBootFiles.push(path.join(dir, name));
-  }
-  const profileBootTransform = (src, file) => {
-    let current = src;
-    let changed = false;
-    // heal 调用防护（独立幂等标记）：入口 bundle 无 heal 调用时静默。
-    const heal = applyProfileBootHealGuard(current);
-    if (heal.changed) { current = heal.src; changed = true; }
-    const bundle = applyProfileBootBundleGuard(current);
-    if (bundle.changed) { current = bundle.src; changed = true; }
-    if (changed) return { status: 'changed', src: current };
-    if (!current.includes(PROFILE_BOOT_GUARD_MARKER)) {
-      return { status: 'anchor-missing', detail: file + ' 锚点未匹配（dsh 版本可能已变化），跳过' };
-    }
-    return { status: 'already' }; // 已注入（幂等，静默）
-  };
-  applyPatchToFiles({
-    prefix: 'profile bundle 防护',
-    files: profileBootFiles,
-    log: (m) => log('boot', m),
-    transform: profileBootTransform,
-    doneLog: (file) => '已注入自愈装配到 ' + file,
-    failLog: (file, err) => 'profile bundle 防护失败(' + file + '): ' + err.message,
-  });
-}
-
-// ---------------------------------------------------------------------------
-// dsh-settings 注册防护：settings.yaml 中某命名空间的存储配置节非法（非对象或
-// 字段类型错误，常见于手改文件）时，installSettingsSection 里的 register() 会
-// 抛异常 → 消费插件 fiber 失败 → dsh fail-loud 启动崩溃。这里幂等地改写
-// @deepseek-ai/dsh-settings：register 失败改为告警 + 回退组合配置，命名空间
-// 本次启动不可用但不阻断启动。dsh 更新后本函数会在下次启动重新应用。
-// ---------------------------------------------------------------------------
-function applySettingsSectionGuard() {
-  const guardMarker = 'dsh-desktop guard: an invalid stored section must not brick';
-  const anchor = '\t\tconst scope = sctx.settings.register(ns, schema, {';
-  const guarded =
-    '\t\tlet scope;\n' +
-    '\t\ttry {\n' +
-    '\t\t\tscope = sctx.settings.register(ns, schema, {\n' +
-    '\t\t\t\tbase: entry,\n' +
-    '\t\t\t\t...hooks.validate === void 0 ? {} : { validate: hooks.validate }\n' +
-    '\t\t\t});\n' +
-    '\t\t} catch (error) {\n' +
-    '\t\t\t// dsh-desktop guard: an invalid stored section must not brick the consumer\n' +
-    '\t\t\t// fiber (fail-loud boot). Fall back to the composition config; the\n' +
-    '\t\t\t// namespace simply stays unavailable until the stored section is fixed.\n' +
-    '\t\t\tsctx.logger.warn("settings: registration for \\"%s\\" failed; falling back to the composition config this boot", ns);\n' +
-    '\t\t\tsctx.logger.warn(error);\n' +
-    '\t\t\ttry {\n' +
-    '\t\t\t\thooks.setSource(() => entry);\n' +
-    '\t\t\t\thooks.onChange();\n' +
-    '\t\t\t} catch {}\n' +
-    '\t\t\treturn;\n' +
-    '\t\t}\n' +
-    '\t\thooks.setSource(() => scope.get());';
-  const from2 = '\t\tconst scope = sctx.settings.register(ns, schema, {\n\t\t\tbase: entry,\n\t\t\t...hooks.validate === void 0 ? {} : { validate: hooks.validate }\n\t\t});\n\t\thooks.setSource(() => scope.get());';
-  applyPatchToFiles({
-    prefix: 'settings 注册防护',
-    files: runtimeGuardFiles(path.join('dsh-settings', 'lib', 'index.js')),
-    log: (m) => log('boot', m),
-    transform: (src, file) => {
-      if (src.includes(guardMarker)) return { status: 'already' }; // 已应用（幂等，静默）
-      if (!src.includes(anchor)) {
-        return { status: 'anchor-missing', detail: file + ' 锚点未匹配（dsh 版本可能已变化），跳过' };
-      }
-      return { status: 'changed', src: src.replace(from2, guarded) };
-    },
-    doneLog: (file) => '已注入到 ' + file,
-    failLog: (file, err) => 'settings 注册防护失败: ' + err.message,
-  });
-}
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// dsh-client-ui-workspace 搜索栏修复：侧边栏收起（rail）时点「搜索会话」会
-// 先 expandSidebar() 再 setSearchExpanded(true)。React 状态提交后，宽侧边栏
-// 新挂的 document click 监听会捕获同一个 click（旧 rail 按钮已不在 searchRoot
-// 内），立即把 searchExpanded 复位为 false——表现为「只是切到对话，搜索框没
-// 展开」。这里幂等地给监听加 searchOnExpand 宽限，并补进依赖数组。
-// ---------------------------------------------------------------------------
-function applyWorkspaceSearchRailFix() {
-  const guardMarker = 'dsh-desktop fix: rail search expansion';
-  const oldGuard = '\t\t\t\tif (!wide || !searchExpanded) return;';
-  const newGuard = '\t\t\t\tif (!wide || !searchExpanded || searchOnExpand) return; // ' + guardMarker;
-  const oldDeps = '\t\t\t}, [\n\t\t\t\tnormalizedQuery,\n\t\t\t\twide,\n\t\t\t\tsearchExpanded\n\t\t\t]);';
-  const newDeps = '\t\t\t}, [\n\t\t\t\tnormalizedQuery,\n\t\t\t\twide,\n\t\t\t\tsearchExpanded,\n\t\t\t\tsearchOnExpand\n\t\t\t]);';
-  applyPatchToFiles({
-    prefix: 'workspace 搜索栏修复',
-    files: runtimeGuardFiles(path.join('dsh-client-ui-workspace', 'lib', 'client.js')),
-    log: (m) => log('boot', m),
-    transform: (src, file) => {
-      if (src.includes(guardMarker)) return { status: 'already' };
-      if (!src.includes(oldGuard) || !src.includes(oldDeps)) {
-        return { status: 'anchor-missing', detail: '锚点未匹配（dsh 版本可能已变化），跳过 ' + file };
-      }
-      return { status: 'changed', src: src.replace(oldGuard, newGuard).replace(oldDeps, newDeps) };
-    },
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file) => '已注入到 ' + file,
-    failLog: (file, err) => 'workspace 搜索栏修复失败(' + file + '): ' + err.message,
-  });
-}
-
-// ---------------------------------------------------------------------------
-// 插件页标签合并补丁：官方「全部」只读清单与 dsh-plugin-manager 的「管理」标签
-// 功能重叠（管理已含全量列表 + 搜索 + 分类 + 开关）。幂等地从插件页标签列表
-// 中过滤掉 id 为 "all" 的只读清单，让「管理」成为唯一的插件列表入口。
-// 目标与其它防护类补丁一致：内置副本 + 更新 overlay（含嵌套 dsh 依赖副本）+
-// profile fallback；锚点不匹配（上游将来修复后）自动跳过。
-// ---------------------------------------------------------------------------
-function applyPluginInventoryTabMergeFix() {
-  const marker = 'dsh-desktop fix: hide inventory tab';
-  const oldPat = 'tabs = ctx.slots.entries("settings.plugins.tab").map((entry) => ({';
-  const newPat = 'tabs = ctx.slots.entries("settings.plugins.tab").filter((entry) => (entry.options.id ?? "") !== "all").map((entry) => ({ // ' + marker;
-  const files = runtimeGuardFiles(path.join('dsh-client-ui-settings-plugins', 'lib', 'client.js'));
-  applyPatchToFiles({
-    prefix: '插件页标签合并',
-    files,
-    log: (m) => log('boot', m),
-    transform: (src, file) => {
-      if (src.includes(marker)) return { status: 'already' };
-      if (!src.includes(oldPat)) {
-        return { status: 'anchor-missing', detail: '锚点未匹配（dsh 版本可能已变化），跳过 ' + file };
-      }
-      return { status: 'changed', src: src.replace(oldPat, newPat) };
-    },
-    alreadyLog: (file) => '已应用，跳过 ' + file,
-    doneLog: (file) => '已隐藏「全部」只读清单 ' + file,
-    failLog: (file, err) => '插件页标签合并失败(' + file + '): ' + err.message,
-  });
-}
-
-// ---------------------------------------------------------------------------
-// issue #20 运行时补丁：dsh-web-search-deepseek 的「接口地址」契约与拼接修复。
-// 补丁本体在 scripts/patch-web-search-baseurl.js（与打包补丁共用同一实现，
-// 避免两处漂移）；这里覆盖三处运行副本：profile fallback（junction 写穿）、
-// 内置 app 副本、用户更新过的 agent overlay。锚点不匹配（上游将来修复后）
-// 自动跳过，绝不损坏文件。
-// ---------------------------------------------------------------------------
-function applyWebSearchBaseUrlFix() {
-  const targets = runtimeNodeModulesRoots();
-  for (const root of targets) {
-    if (!root || !fs.existsSync(root)) continue;
-    try {
-      const n = patchWebSearchBaseUrl(root, (m) => log('boot', m));
-      if (n > 0) log('boot', 'web-search baseURL 补丁: 已应用到 ' + root);
-    } catch (err) {
-      log('boot', 'web-search baseURL 补丁失败(' + root + '): ' + err.message);
-    }
-  }
-}
-// ---------------------------------------------------------------------------
-// issue #36 运行时补丁：dsh-client-ui-primitives 的 Menu portal 弹层在条目很多
-// （内置 8 个 Agent 预设 + npm 自带 + 用户安装叠加）时没有高度上限，place()
-// 会把超出视口的弹层推到屏幕上方，顶部条目被裁掉且无法触达（「预设多了
-// 上面的会不显示」）。补丁本体在 scripts/patch-menu-viewport.js（与打包补丁
-// 共用同一实现）；覆盖三处运行副本：profile fallback、内置 app 副本、用户
-// 更新过的 agent overlay。锚点不匹配（上游将来修复后）自动跳过，绝不损坏。
-// ---------------------------------------------------------------------------
-function applyMenuViewportFix() {
-  const targets = runtimeNodeModulesRoots();
-  for (const root of targets) {
-    if (!root || !fs.existsSync(root)) continue;
-    try {
-      const n = patchMenuViewport(root, (m) => log('boot', m));
-      if (n > 0) log('boot', 'menu 视口补丁: 已应用到 ' + root);
-    } catch (err) {
-      log('boot', 'menu 视口补丁失败(' + root + '): ' + err.message);
-    }
-  }
-}
-// ---------------------------------------------------------------------------
-// 对话删除 / 归档管理运行时补丁（dsh-session-manager 插件的前置依赖）：
-// dsh-workspace（unarchiveSession）+ dsh-host-apiproxy（unarchiveSession /
-// deleteSession RPC）+ dsh-client-connection（API 面 + schema）+
-// dsh-client-ui-workspace（会话行菜单「删除对话」）。补丁本体在
-// scripts/patch-session-manage.js（幂等、锚点不匹配自动跳过）；覆盖三处运行
-// 副本：profile fallback、内置 app 副本、用户更新过的 agent overlay。
-// ---------------------------------------------------------------------------
-function applySessionManageFix() {
-  const targets = runtimeNodeModulesRoots();
-  for (const root of targets) {
-    if (!root || !fs.existsSync(root)) continue;
-    try {
-      const n = patchSessionManage(root, (m) => log('boot', m));
-      if (n > 0) log('boot', '对话删除补丁: 已应用到 ' + root);
-    } catch (err) {
-      log('boot', '对话删除补丁失败(' + root + '): ' + err.message);
-    }
-  }
-}
-// ---------------------------------------------------------------------------
-// issue #85 运行时补丁：侧栏项目/会话行 ⋯ 菜单「打开项目目录」+ 右键菜单
-// （dsh-client-ui-workspace）。补丁本体在 scripts/patch-open-project-dir.js
-// （幂等、锚点不匹配自动跳过）；覆盖三处运行副本：profile fallback、内置
-// app 副本、用户更新过的 agent overlay。桥 window.__dshDesktopOpenDir 由
-// dsh-session-manager 插件提供（window.dshDesktop.openPath → shell.openPath）。
-// ---------------------------------------------------------------------------
-function applyOpenProjectDirFix() {
-  const targets = runtimeNodeModulesRoots();
-  for (const root of targets) {
-    if (!root || !fs.existsSync(root)) continue;
-    try {
-      const n = patchOpenProjectDir(root, (m) => log('boot', m));
-      if (n > 0) log('boot', '打开项目目录补丁: 已应用到 ' + root);
-    } catch (err) {
-      log('boot', '打开项目目录补丁失败(' + root + '): ' + err.message);
-    }
-  }
-}
-// ---------------------------------------------------------------------------
-// 会话持久化容错补丁：进程中断可能留下一个结构完整的 zstd frame，但其
-// 解压文本以半条 JSONL 结束。只允许最终 frame 进入官方已有的 torn-tail
-// 截断/重放流程；中段损坏继续拒绝。
-// ---------------------------------------------------------------------------
-function applySessionPersistenceFix() {
-  const targets = runtimeNodeModulesRoots();
-  for (const root of targets) {
-    if (!root || !fs.existsSync(root)) continue;
-    try {
-      const n = patchSessionPersistence(root, (m) => log('boot', m));
-      if (n > 0) log('boot', '会话持久化容错补丁: 已应用到 ' + root);
-    } catch (err) {
-      log('boot', '会话持久化容错补丁失败(' + root + '): ' + err.message);
-    }
-  }
-}
 // 快捷方式维护：修复「没有桌面快捷方式 / 快捷方式指向的文件消失」，
 // 并让快捷方式图标跟随图标设计更新（.lnk 单独指定 icon.ico）。
 // ---------------------------------------------------------------------------
@@ -6277,51 +5177,17 @@ async function boot() {
     // 目录选择器 overlay（只作用于本地内置 dsh）。
     setupTestChannel();
     await wslBackend.ensureInstalled();
-    syncCompanionPlugins();
+    ensurePluginIntegration().syncPlugins();
     syncBuiltinAgentPresets();
-    applySlotCompatFix();
-    preScanPluginHealth();
-    applyRuntimeFlashFix();
-    applyPromptExposeFix();
-    applyShellDescriptionCompatFix();
-    applyCodeModeCompatFix();
-    applyImageSendFix();
-    applyAttachmentMimeTrustFix();
-    applyVisionKeyFix();
-    applyProfilePatchGuard();
-    applyProfileBundleGuard();
-    applySettingsSectionGuard();
-    applyWorkspaceSearchRailFix();
-    applyPluginInventoryTabMergeFix();
-    applyWebSearchBaseUrlFix();
-    applyMenuViewportFix();
-    applySessionManageFix();
-    applyOpenProjectDirFix();
-    applySessionPersistenceFix();
+    notifyPatchFailures(ensurePluginIntegration().applyPatches());
+    ensurePluginIntegration().preflightHealth();
   } else {
     // 先修复 profile fallback 联接再同步/补丁依赖文件：EPERM 环境下补丁写不进去。
     await repairProfileFallback(home);
-    syncCompanionPlugins();
+    ensurePluginIntegration().syncPlugins();
     syncLocalAgentPresets();
-    applySlotCompatFix();
-    preScanPluginHealth();
-    applyRuntimeFlashFix();
-    applyPromptExposeFix();
-    applyShellDescriptionCompatFix();
-    applyCodeModeCompatFix();
-    applyImageSendFix();
-    applyAttachmentMimeTrustFix();
-    applyVisionKeyFix();
-    applyProfilePatchGuard();
-    applyProfileBundleGuard();
-    applySettingsSectionGuard();
-    applyWorkspaceSearchRailFix();
-    applyPluginInventoryTabMergeFix();
-    applyWebSearchBaseUrlFix();
-    applyMenuViewportFix();
-    applySessionManageFix();
-    applyOpenProjectDirFix();
-    applySessionPersistenceFix();
+    notifyPatchFailures(ensurePluginIntegration().applyPatches());
+    ensurePluginIntegration().preflightHealth();
     setupTestChannel();
     if (runKoffiPreflight()) clearAutoPickerBrowseOverlay();
     else enablePickerBrowseOverlay();

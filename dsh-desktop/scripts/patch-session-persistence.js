@@ -18,18 +18,27 @@ const {
   transformPersistenceAll,
 } = require('./lib/runtime-patches');
 
-function patchSessionPersistence(nmRoot, log = () => {}) {
+function patchSessionPersistence(nmRoot, log = () => {}, stats, options = {}) {
   const file = path.join(nmRoot, '@deepseek-ai', PERSISTENCE_PKG_REL);
   if (!fs.existsSync(file)) return 0;
+  const doneLog = (target) => '已应用 zstd 尾部/损坏会话容错 ' + target;
   return applyPatchToFiles({
     prefix: '会话持久化容错补丁',
     files: [file],
     log,
     transform: transformPersistenceAll,
     alreadyLog: (target) => '已应用，跳过 ' + target,
-    doneLog: (target) => '已应用 zstd 尾部/损坏会话容错 ' + target,
-    anchorLog: log,
+    doneLog,
+    // CLI 场景经 applyRoot 透传 options：donePrefix=false 输出无前缀单行、
+    // anchorLog=warn 把失配走告警通道；缺省保持原默认（log / true）。
+    donePrefix: options && options.donePrefix,
+    anchorLog: (options && options.anchorLog) || log,
     failLog: (target, error) => '会话持久化容错补丁失败(' + target + '): ' + error.message,
+    // CLI 同步期 dry-run 经 applyRoot 透传 options.dryRun；dry-run 文案与
+    // sync-companion-plugins.js 的新容错措辞（将应用 zstd 尾部/损坏会话容错）一致。
+    dryRun: options && options.dryRun,
+    dryRunChangedLog: (target) => 'dry-run: 将应用 zstd 尾部/损坏会话容错 ' + target,
+    stats,
   });
 }
 

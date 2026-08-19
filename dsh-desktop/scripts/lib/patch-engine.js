@@ -44,6 +44,8 @@ const { writeFileAtomic, readFileCached } = require('./patch-io');
  * @param {boolean} [spec.dryRun]        只判定不落盘（输出 dryRunChangedLog）
  * @param {(file: string, note?: any) => string} [spec.dryRunChangedLog]
  * @param {(file: string, content: string) => void} [spec.write] 写入实现；缺省原子写
+ * @param {{anchorMissing?: number, failed?: number}} [spec.stats] 可观测性计数（锚点失配
+ *   与逐文件失败回流到调用方报告，缺省不累计）
  * @returns {number} 实际写入的文件数
  */
 function applyPatchToFiles(spec) {
@@ -60,6 +62,7 @@ function applyPatchToFiles(spec) {
     dryRun = false,
     dryRunChangedLog = null,
     write = writeFileAtomic,
+    stats = null,
   } = spec;
   let written = 0;
   for (const file of files) {
@@ -77,6 +80,7 @@ function applyPatchToFiles(spec) {
       }
       if (result.status === 'anchor-missing') {
         anchorLog(`${prefix}: ${result.detail}`);
+        if (stats) stats.anchorMissing += 1;
         continue;
       }
       if (dryRun) {
@@ -89,6 +93,7 @@ function applyPatchToFiles(spec) {
       log(donePrefix ? `${prefix}: ${body}` : body);
     } catch (err) {
       log(failLog(file, err));
+      if (stats) stats.failed += 1;
     }
   }
   return written;

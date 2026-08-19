@@ -27,11 +27,12 @@ test('补丁脚本：一次应用、二次幂等、anchor 缺失跳过且不损�
   assert.strictEqual(n, 1, '应补丁 1 个文件');
   const patched = fs.readFileSync(tree.file, 'utf8');
   assert.ok(patched.includes(MARKER), '应写入幂等标记');
-  assert.ok(patched.includes('window.__dshDesktopOpenDir?.(row.cwd)'), '项目行 open-folder 应调用桥');
-  assert.ok(patched.includes('window.__dshDesktopOpenDir?.(cwd)'), '会话行 open-folder 应调用桥');
+  assert.ok(patched.includes('window.dshDesktop?.openPath?.(row.cwd)'), '项目行 open-folder 应直接引用宿主 openPath');
+  assert.ok(patched.includes('window.dshDesktop?.openPath?.(cwd)'), '会话行 open-folder 应直接引用宿主 openPath');
   assert.ok(patched.includes('right: e.clientX + 1, bottom: e.clientY + 1'), '右键锚点矩形应含四边');
   assert.ok(patched.includes('getAnchorRect: () => menuRect'), '菜单应走 getAnchorRect');
   assert.ok(patched.includes('...(cwd ? [{'), '会话行 open-folder 应仅在 cwd 存在时显示');
+  assert.ok(patched.includes('window.__dshSessionManager && typeof window.__dshSessionManager.deleteSession === "function"'), '删除项应按桥可见性显示');
   assert.ok(patched.includes('"menu.openProjectDir": "打开项目目录"'), '应写入中文翻译');
   assert.ok(patched.includes('"menu.openProjectDir": "Open project directory"'), '应写入英文翻译');
   // 第二次：零写入且内容不变

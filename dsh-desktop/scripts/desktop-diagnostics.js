@@ -245,9 +245,10 @@ function readSelfHealHistory(file, fs = require('node:fs')) {
     return data
       .filter((it) => it && typeof it === 'object' && typeof it.ts === 'number' && Array.isArray(it.names))
       .map((it) => ({
-        kind: it.kind === 'overlay' ? 'overlay' : 'bundle',
+        kind: ['bundle', 'overlay', 'patch-layer'].includes(it.kind) ? it.kind : 'bundle',
         names: it.names.filter((n) => typeof n === 'string'),
         ts: it.ts,
+        backup: typeof it.backup === 'string' && it.backup ? it.backup : undefined,
       }))
       .filter((it) => it.names.length > 0)
       .slice(0, 5);
@@ -325,8 +326,9 @@ function runDiagnostics(opts, fs = require('node:fs')) {
   const selfHeal = readSelfHealHistory(opts.selfHealHistoryFile, fs);
   sections.selfHeal = selfHeal;
   for (const it of selfHeal) {
-    const action = it.kind === 'overlay' ? '已自动禁用' : '已自动移除';
-    infos.push(e(`最近启动自愈（${new Date(it.ts).toLocaleString()}）：${action} ${it.names.join('、')}`));
+    const action = it.kind === 'overlay' ? '已自动禁用' : it.kind === 'patch-layer' ? '已重置补丁配置' : '已自动移除';
+    const label = it.kind === 'patch-layer' && it.backup ? path.basename(it.backup) : it.names.join('、');
+    infos.push(e(`最近启动自愈（${new Date(it.ts).toLocaleString()}）：${action} ${label}`));
   }
 
   // --- 环境 ---

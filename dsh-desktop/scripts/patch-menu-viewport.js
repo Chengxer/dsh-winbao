@@ -34,7 +34,7 @@ const NEW_Y_CLAMP = [
 const OLD_STYLE = 'style: portal ? fixedPos ?? MEASURE_STYLE : void 0,';
 const NEW_STYLE = 'style: portal ? { ...(fixedPos ?? MEASURE_STYLE), maxHeight: "min(calc(100vh - 24px), 560px)", overflowY: "auto" } : void 0,';
 
-function patchFile(file, log = () => {}) {
+function patchFile(file, log = () => {}, stats, options) {
   let src;
   try {
     src = fs.readFileSync(file, 'utf8');
@@ -48,11 +48,16 @@ function patchFile(file, log = () => {}) {
   }
   if (!src.includes(OLD_Y_CLAMP) || !src.includes(OLD_STYLE)) {
     log('menu-viewport 补丁: 锚点未匹配（dsh 版本可能已变化），跳过 ' + file);
+    if (stats) stats.anchorMissing += 1;
     return false;
   }
   src = src.replace(OLD_Y_CLAMP, NEW_Y_CLAMP).replace(OLD_STYLE, NEW_STYLE);
   src = '// ' + MARKER + ': Menu portal 列表视口封顶（issue #36）\n' + src;
   try {
+    if (options && options.dryRun) {
+      log('menu-viewport 补丁: dry-run: 将应用 ' + file);
+      return false; // dryRun 不落盘，不计为已写
+    }
     writeFileAtomic(file, src);
     log('menu-viewport 补丁: 已应用 ' + file);
     return true;
@@ -68,10 +73,10 @@ function patchFile(file, log = () => {}) {
  * @param {(msg: string) => void} [log]
  * @returns {number} 实际发生修改的文件数
  */
-function patchMenuViewport(nmRoot, log = () => {}) {
+function patchMenuViewport(nmRoot, log = () => {}, stats, options) {
   const file = path.join(nmRoot, '@deepseek-ai', 'dsh-client-ui-primitives', 'lib', 'index.js');
   if (!fs.existsSync(file)) return 0;
-  return patchFile(file, log) ? 1 : 0;
+  return patchFile(file, log, stats, options) ? 1 : 0;
 }
 
 module.exports = { patchMenuViewport, MARKER };

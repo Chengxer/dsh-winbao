@@ -93,11 +93,11 @@ const CONN_FACADE_INSERT = 'archiveSession: (payload, signal) => this.callUnary(
 // 4. dsh-client-ui-workspace：会话行菜单「删除对话」+ 翻译
 // ---------------------------------------------------------------------------
 const UI_MENU_ANCHOR = '{\n\t\t\t\t\tid: "archive",\n\t\t\t\t\tlabel: t("menu.archiveSession"),\n\t\t\t\t\ticon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconArchiveOutline20, { size: 16 })\n\t\t\t\t}\n\t\t\t];';
-const UI_MENU_INSERT = '{\n\t\t\t\t\tid: "archive",\n\t\t\t\t\tlabel: t("menu.archiveSession"),\n\t\t\t\t\ticon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconArchiveOutline20, { size: 16 })\n\t\t\t\t},\n\t\t\t\t// dsh-desktop patch (session manage): 归档下方增加删除。\n\t\t\t\t{\n\t\t\t\t\tid: "delete",\n\t\t\t\t\tlabel: t("menu.deleteSession")\n\t\t\t\t}\n\t\t\t];';
+const UI_MENU_INSERT = '{\n\t\t\t\t\tid: "archive",\n\t\t\t\t\tlabel: t("menu.archiveSession"),\n\t\t\t\t\ticon: (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconArchiveOutline20, { size: 16 })\n\t\t\t\t},\n\t\t\t\t// dsh-desktop patch (session manage): 归档下方增加删除。\n\t\t\t\t// 桥 window.__dshSessionManager 由 dsh-session-manager 插件提供；桥缺失\n\t\t\t\t// 时隐藏「删除对话」项（显式降级，而非可选链静默无反应）。\n\t\t\t\t...(window.__dshSessionManager && typeof window.__dshSessionManager.deleteSession === "function" ? [{\n\t\t\t\t\tid: "delete",\n\t\t\t\t\tlabel: t("menu.deleteSession")\n\t\t\t\t}] : [])\n\t\t\t];';
 // 旧版补丁（v1：当前会话行不显示删除）→ 升级为无条件显示（用户反馈当前会话
-// 行的 ⋯ 菜单里看不到删除按钮）。
+// 行的 ⋯ 菜单里看不到删除按钮）。v2 起改为按桥可见性显示（桥缺失隐藏）。
 const UI_MENU_UPGRADE_ANCHOR = '...(node.id !== currentId ? [{\n\t\t\t\t\tid: "delete",\n\t\t\t\t\tlabel: t("menu.deleteSession")\n\t\t\t\t}] : [])';
-const UI_MENU_UPGRADE_INSERT = '{\n\t\t\t\t\tid: "delete",\n\t\t\t\t\tlabel: t("menu.deleteSession")\n\t\t\t\t}';
+const UI_MENU_UPGRADE_INSERT = '...(window.__dshSessionManager && typeof window.__dshSessionManager.deleteSession === "function" ? [{\n\t\t\t\t\tid: "delete",\n\t\t\t\t\tlabel: t("menu.deleteSession")\n\t\t\t\t}] : [])';
 
 const UI_SELECT_ANCHOR = 'if (id === "archive") onArchive(node.id);';
 const UI_SELECT_INSERT = 'if (id === "archive") onArchive(node.id);\n\t\t\t\t\t\t\t\t\tif (id === "delete") window.__dshSessionManager?.deleteSession(node.id);';
@@ -110,7 +110,7 @@ const UI_EN_INSERT = '"menu.archiveSession": "Archive session",\n\t\t\t"menu.del
 // ---------------------------------------------------------------------------
 // 工具：在文件中做「锚点必须存在 + 标记幂等」的替换
 // ---------------------------------------------------------------------------
-function applyReplacements(file, replacements, upgradeRules, log) {
+function applyReplacements(file, replacements, upgradeRules, log, stats, options) {
   let src;
   try {
     src = fs.readFileSync(file, 'utf8');
@@ -130,6 +130,10 @@ function applyReplacements(file, replacements, upgradeRules, log) {
     }
     if (upgraded) {
       try {
+        if (options && options.dryRun) {
+          log('session-manage 补丁: dry-run: 将升级 ' + file);
+          return false; // dryRun 不落盘，不计为已写
+        }
         writeFileAtomic(file, src);
         log('session-manage 补丁: 已升级 ' + file);
         return true;
@@ -144,12 +148,17 @@ function applyReplacements(file, replacements, upgradeRules, log) {
   for (const { anchor, insert } of replacements) {
     if (!src.includes(anchor)) {
       log('session-manage 补丁: 锚点未匹配（dsh 版本可能已变化），跳过 ' + file + ' :: ' + anchor.slice(0, 60));
+      if (stats) stats.anchorMissing += 1;
       return false;
     }
     src = src.replace(anchor, insert);
   }
   src = '// ' + MARKER + ': 对话删除/归档管理运行时补丁\n' + src;
   try {
+    if (options && options.dryRun) {
+      log('session-manage 补丁: dry-run: 将应用 ' + file);
+      return false; // dryRun 不落盘，不计为已写
+    }
     writeFileAtomic(file, src);
     log('session-manage 补丁: 已应用 ' + file);
     return true;
@@ -165,7 +174,7 @@ function applyReplacements(file, replacements, upgradeRules, log) {
  * @param {(msg: string) => void} [log]
  * @returns {number} 实际发生修改的文件数
  */
-function patchSessionManage(nmRoot, log = () => {}) {
+function patchSessionManage(nmRoot, log = () => {}, stats, options) {
   const targets = [
     {
       file: path.join(nmRoot, '@deepseek-ai', 'dsh-workspace', 'lib', 'index.js'),
@@ -218,7 +227,7 @@ function patchSessionManage(nmRoot, log = () => {}) {
   let changed = 0;
   for (const t of targets) {
     if (!fs.existsSync(t.file)) continue;
-    if (applyReplacements(t.file, t.replacements, t.upgradeRules || [], log)) changed += 1;
+    if (applyReplacements(t.file, t.replacements, t.upgradeRules || [], log, stats, options)) changed += 1;
   }
   return changed;
 }
