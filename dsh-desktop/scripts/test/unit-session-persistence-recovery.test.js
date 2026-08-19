@@ -11,6 +11,8 @@ const {
   PERSISTENCE_PKG_REL,
   PERSISTENCE_TORN_MARKER,
   transformPersistenceTornTail,
+  PERSISTENCE_CORRUPT_MARKER,
+  transformPersistenceCorruptGuard,
 } = require('../lib/runtime-patches');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
@@ -50,6 +52,10 @@ test('session persistence patch is applied and idempotent', () => {
   const source = fs.readFileSync(target, 'utf8');
   assert.match(source, new RegExp(PERSISTENCE_TORN_MARKER));
   assert.equal(transformPersistenceTornTail(source, target).status, 'already');
+  // 上游 #112：patchSessionPersistence 现经 transformPersistenceAll 同时应用
+  // 「损坏会话日志容错」补丁，两个补丁都应已应用（幂等）。
+  assert.match(source, new RegExp(PERSISTENCE_CORRUPT_MARKER));
+  assert.equal(transformPersistenceCorruptGuard(source, target).status, 'already');
 });
 
 test('complete final zstd frame with torn JSONL returns a repair marker', async () => {

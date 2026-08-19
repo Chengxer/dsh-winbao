@@ -124,6 +124,17 @@ test('runtime transform re-export 可用', () => {
   assert.equal(transformFlashFix(src, 't.js').status, 'already');
 });
 
+test('transformPersistenceAll re-export 可用（损坏会话容错收口，勿回退旧名）', () => {
+  // 语义修正：session-persistence 已从 transformPersistenceTornTail 升级为
+  // transformPersistenceAll（含 #112 损坏会话容错），patch-adapters 的 re-export
+  // 必须同步，且不得残留旧导出名。
+  const adapters = require('../lib/patch-adapters');
+  assert.equal(typeof adapters.transformPersistenceAll, 'function', '应 re-export transformPersistenceAll');
+  assert.equal(adapters.transformPersistenceTornTail, undefined, '不应再导出旧的 transformPersistenceTornTail');
+  // re-export 的 transformPersistenceAll 应能实际执行（失配 → anchor-missing）。
+  assert.equal(adapters.transformPersistenceAll('export const x = 1;', 't.js').status, 'anchor-missing');
+});
+
 test('golden fixture：插件页标签合并补丁三态', () => {
   const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'plugin-inventory-tab-merge.golden.json'), 'utf8'));
   assert.equal(fixture.id, 'plugin-inventory-tab-merge');
