@@ -94,6 +94,15 @@ try {
 } catch (err) {
   console.log('[patch-deps] session-persistence 尾部恢复补丁跳过: ' + (err && err.message ? err.message : err));
 }
+// 空 tool-call 持久化会把 tool/result 的 callId 写成空串，restore 严格校验
+// 直接击穿（整个会话打不开）。读端 dsh-session 容错 + 写端 dsh-agent-loop 防护。
+try {
+  const { patchToolSourceCompat } = require('./lib/tool-source-patch');
+  const n = patchToolSourceCompat(path.join(root, 'node_modules'), (m) => console.log(m));
+  if (n > 0) console.log('[patch-deps] tool source 容错补丁已应用（dev node_modules）');
+} catch (err) {
+  console.log('[patch-deps] tool source 容错补丁跳过: ' + (err && err.message ? err.message : err));
+}
 // rc.6 第三方客户端插件用 `id` 注册 keyed slot；rc.7 改为强制 `key`，而
 // dsh-advisor / dsh-llm-fallbacks key/id 都不传，单个插件就能拖垮整个 loader。
 // 只在 keyed slot 缺 key 时兜底；显式 key 与其它 slot 行为保持原样。

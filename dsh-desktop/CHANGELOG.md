@@ -3,6 +3,21 @@
 DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行时与 dsh CLI，
 一键启动 Web UI。
 
+## [0.4.1] — 2026-08-19
+
+> 热修复版：插件市场装插件后「服务意外退出」崩溃事故根治（三层防线）+ 空 tool-call 存量会话打不开修复。
+
+### 修复
+- **空 tool-call 持久化导致存量会话打不开（SessionPersistenceCorruptionError）根治**：session writer 曾把 id/name 为空的 tool-call 写入持久化（assistant message 的 tool-call block、tool/call 事件的 callId/name 均为空串），随后生成 callId/toolCallId 为空的 tool/result；export 能导出该 JSONL，但 dsh-session restore 的 `assertMessageEventShape` 严格校验要求 tool/result 必须有非空 tool source，整个会话「历史加载失败」打不开（事故会话 seq 连续 0..515255、帧可解，仅此一条空链击穿）。双端修复（新增 `scripts/lib/tool-source-patch.js`，幂等、锚点失配自动跳过，接入 main.js 启动 / patch-deps / after-pack / sync-companion-plugins 四条布线，覆盖内置副本 / profile fallback / agent overlay / WSL）：
+  - **读端容错（存量会话能打开）**：dsh-session 校验遇到空 callId/缺 kind 的 tool/result 时就地修复——优先采用 block.toolCallId 非空侧，否则合成 `recovered-seq-<seq>` 并拉齐两侧，告警落日志；修复写入失败（对象已冻结）保留原严格报错；两侧 callId 都非空且不一致仍是真损坏继续拒绝。
+  - **写端防护（不再产生新坏数据）**：dsh-agent-loop `appendToolCall`/`appendToolResult` 遇空 block.id 时合成 `recovered-<turn>-<step>-call`（两函数同规则保证 tool/call 与 tool/result 一致）并告警，空 name 落 `invalid-tool-call`。
+  - **测试**：新增 `unit-tool-source-compat`（7 项：双变换真实 vendored 文件锚点命中/幂等、空 callId 就地修复放行、缺失形态以非空侧为准、双非空不一致仍拒绝、正常事件不受影响）。
+- **插件市场装插件后「DSH 服务意外退出」崩溃根治（三层防线）**：用户从插件市场安装插件后点「立即重启」，dshmarket 直连其服务端自重启端点 `scheduleRestart()`——SIGTERM 掉被壳层监管的 dsh web 进程，再由 detached 助手拉起替身。壳层把自杀当「服务意外退出」弹窗（即事故截图），且替身进程脱离监管：退出应用时杀不掉、日志不落 dsh-web.log、用户点弹窗「重新启动」会拉起第三个实例撞端口。dshmarket 原有桌面分支（`allowRestart: false`，注释写明 "The shell remains responsible for restart"）依赖壳层注册 `desktopProfiles` 服务，而壳层从未注册，永远落入普通 DSH 分支（自重启开启）。三层根治：
+  - **L1 重启权收归壳层**：壳层 `childEnv` 注入 `DSH_DESKTOP_SUPERVISED=1` 监管标识；dshmarket 服务端见到标识默认禁用自重启端点（显式 `config.allowRestart` 仍优先）；dshmarket 客户端「立即重启」在壳层桥（`window.dshDesktop.restartService`，即 `chrome:restart-service` 监管重启）可用时优先走桥，boot-id 轮询重载逻辑原样复用——按钮可用、重启受监管、不弹窗、不产生游离进程（与 dsh-hub 同款桥接模式）；
+  - **L2 壳层稳定性看管（任何环插件均受益）**：① 「最后良好」快照延迟落定——旧实现 dsh web 一达就绪横幅即 `markGood`，环插件「启动成功、几秒后拖死宿主」的形态会把含环插件的配置固化成回滚基线、回滚永久无效；现改为服务连续存活 30s 才 `confirmPendingGood` 落定并清零崩溃环计数；② 就绪后崩溃环自愈——进程达就绪后 30s 内意外退出不再直接弹窗，而是自动走守护重启（体检/修复/回滚到最后良好快照），上限 2 次，耗尽才降级弹窗；③ 「服务已停止」弹窗的「重新启动」按钮改走守护启动（旧为裸 `startAndShow`，环插件会导致「点一次崩一次」死循环）；④ `restartService`（插件市场/集成测试共用的原地重启）同样改走守护启动；⑤ 回滚 lift 修复：旧实现回滚后成功拉起时把 `listSnapshots()[0]`（= restore 前的 pre-restore 快照 = 坏状态）标为良好，现改为对回滚后的健康状态新拍快照待落定；⑥ 意外退出弹窗延迟 500ms 再读日志，给 stderr 尾部真实崩溃栈落盘窗口（exit 事件可能早于最后几个 stdio data 事件，立即读会丢现场）；
+  - **L3 dsh web 进程崩溃屏蔽**：新增 `scripts/lib/web-crash-shield.js`（纯 Node 核心依赖，经 `--require` 注入 + `DSH_CRASH_SHIELD=1` 自装）：就绪横幅出现前保持 fail-fast（启动失败快速退出语义不变，既有启动自愈照常工作）；就绪后 uncaughtException/unhandledRejection 吞掉并打日志到 stderr（随管道落 dsh-web.log），环插件运行时错误不再击穿整个宿主；风暴断路——60s 窗口内错误超 20 次恢复抛出（进程退出 → 壳层崩溃环自愈接管回滚），避免僵尸态。`scripts/**/*` 已在四个打包配置的 files 清单，随包分发。
+  - **测试**：新增 `unit-web-crash-shield`（8 项：启动期 fail-fast、就绪后吞错落日志、unhandledRejection 同语义、风暴断路与窗口清零、就绪横幅探测 arm、事件监听注册）与 `unit-plugin-guard`（5 项：成功不立即落定、confirm 后落定、崩溃环场景回滚目标为此前稳定快照而非环配置、setPendingGood(null) 安全、失败无快照落事故报告）。
+
 ## [0.4.0] — 2026-08-19
 
 ### 新增

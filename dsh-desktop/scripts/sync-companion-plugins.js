@@ -46,6 +46,10 @@ const {
   PERSISTENCE_PKG_REL, transformPersistenceAll,
 } = require('./lib/runtime-patches');
 const {
+  SESSION_VALIDATION_REL, AGENT_LOOP_REL,
+  transformToolSourceTolerance, transformEmptyToolCallGuard,
+} = require('./lib/tool-source-patch');
+const {
   ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK,
   ensureDisabledPatchEntry, removeLegacyMarketplacePatchLines,
   registerCompanionPatchEntries, syncCompanionFiles, removedPluginIdsFromPatch,
@@ -392,6 +396,35 @@ function applyRuntimePatches(home, dryRun) {
     failLog: (file, err) => '会话持久化容错补丁失败(' + file + '): ' + err.message,
     dryRun,
     dryRunChangedLog: (file) => 'dry-run: 将应用 zstd 尾部/损坏会话容错 ' + file,
+  });
+
+  // 空 tool-call 容错：读端 dsh-session 校验放宽（存量会话 callId 为空不再击穿）
+  // + 写端 dsh-agent-loop 防护（不再持久化空 id/name 的 tool-call）。
+  applyPatchToFiles({
+    prefix: 'tool source 容错补丁',
+    files: patchTargets(home, SESSION_VALIDATION_REL),
+    log: (m) => log(m),
+    anchorLog: (m) => warn(m),
+    transform: transformToolSourceTolerance,
+    alreadyLog: (file) => '已应用，跳过 ' + file,
+    doneLog: (file) => '已应用空 tool source 容错 ' + file,
+    donePrefix: false,
+    failLog: (file, err) => 'tool source 容错补丁失败(' + file + '): ' + err.message,
+    dryRun,
+    dryRunChangedLog: (file) => 'dry-run: 将应用空 tool source 容错 ' + file,
+  });
+  applyPatchToFiles({
+    prefix: '空 tool-call 写端防护补丁',
+    files: patchTargets(home, AGENT_LOOP_REL),
+    log: (m) => log(m),
+    anchorLog: (m) => warn(m),
+    transform: transformEmptyToolCallGuard,
+    alreadyLog: (file) => '已应用，跳过 ' + file,
+    doneLog: (file) => '已应用空 tool-call 写端防护 ' + file,
+    donePrefix: false,
+    failLog: (file, err) => '空 tool-call 写端防护补丁失败(' + file + '): ' + err.message,
+    dryRun,
+    dryRunChangedLog: (file) => 'dry-run: 将应用空 tool-call 写端防护 ' + file,
   });
 }
 

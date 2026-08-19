@@ -64,6 +64,7 @@ const { patchMenuViewport } = require('./scripts/patch-menu-viewport');
 const { patchSessionManage } = require('./scripts/patch-session-manage');
 const { patchOpenProjectDir } = require('./scripts/patch-open-project-dir');
 const { patchSessionPersistence } = require('./scripts/patch-session-persistence');
+const { patchToolSourceCompat } = require('./scripts/lib/tool-source-patch');
 // 「设置 → 插件 → 诊断与管理」：诊断 / 备份与恢复 / 日志包导出 / 防砖体检 /
 // bundle 顺序检测与重排（纯函数模块，node --test 单测覆盖）。
 const desktopDiagnostics = require('./scripts/desktop-diagnostics');
@@ -708,6 +709,10 @@ function childEnv() {
   }
   if (dshHome) env.DSH_HOME = dshHome;
   env.NO_COLOR = '1';
+  // 监管标识：dsh web 由本壳层 spawn/看管，重启权归壳层（chrome:restart-service）。
+  // 插件（如 dshmarket 的自重启端点）见到此标识必须放弃进程自杀式重启，
+  // 否则壳层会把自杀当「服务意外退出」弹窗，且游离的替身进程脱离监管。
+  env.DSH_DESKTOP_SUPERVISED = '1';
   return env;
 }
 
@@ -1314,6 +1319,49 @@ function ensureGuard() {
   return guardInstance;
 }
 
+// ---------------------------------------------------------------------------
+// 服务稳定性看管（插件市场崩溃事故根治面之二）：
+//   · 就绪后稳定窗口：服务需连续存活 SERVICE_STABLE_MS 才把本次启动快照
+//     落定为「最后良好」（guard.confirmPendingGood）并清零崩溃环计数；
+//   · 就绪后崩溃环自愈：进程达就绪后短窗口内意外退出（典型：坏插件拖死
+//     宿主）不走普通弹窗，而是直接走守护重启（体检/修复/回滚），上限
+//     CRASH_LOOP_MAX 次，耗尽后才降级为弹窗。
+// ---------------------------------------------------------------------------
+const SERVICE_STABLE_MS = 30000;
+const CRASH_LOOP_MAX = 2;
+let crashLoopCount = 0;
+let crashLoopRecovering = false;
+let serviceStableTimer = null;
+const procReadyAt = new WeakMap(); // proc -> 达就绪横幅的时间戳
+
+function armStabilityWatch(proc) {
+  if (serviceStableTimer) { clearTimeout(serviceStableTimer); serviceStableTimer = null; }
+  serviceStableTimer = setTimeout(() => {
+    serviceStableTimer = null;
+    if (serverProc !== proc) return; // 已换进程/已退出，不作数
+    crashLoopCount = 0;
+    try { ensureGuard().confirmPendingGood(); } catch (err) { log('guard', '稳定落定失败: ' + ((err && err.message) || err)); }
+  }, SERVICE_STABLE_MS);
+  if (serviceStableTimer.unref) serviceStableTimer.unref();
+}
+
+// 就绪后短窗口内意外退出 → 守护重启自愈（含回滚到最后良好快照）。
+// 返回 true 表示已接管（调用方不再弹窗）。
+function tryCrashLoopRecovery() {
+  if (crashLoopRecovering || crashLoopCount >= CRASH_LOOP_MAX) return false;
+  crashLoopRecovering = true;
+  crashLoopCount += 1;
+  log('dsh', `就绪后 ${SERVICE_STABLE_MS / 1000}s 内意外退出（第 ${crashLoopCount}/${CRASH_LOOP_MAX} 次），守护重启自愈（体检/修复/回滚）`);
+  startAndShowGuarded()
+    .then(() => log('dsh', '崩溃环自愈成功，服务已恢复'))
+    .catch((err) => {
+      log('dsh', '崩溃环自愈失败: ' + ((err && err.message) || err));
+      handleBootFailure(err);
+    })
+    .finally(() => { crashLoopRecovering = false; });
+  return true;
+}
+
 // 设置页「WSL 后端」用的状态快照：当前 local 模式（未配置过）或 force 时，
 // 按已保存的 wslDistro/wslInstallDir 做一次探测；失败不抛错，错误进 status。
 // 全部探测走异步原语（configureAsync/statusAsync），绝不阻塞主进程
@@ -1390,9 +1438,15 @@ async function startServer(unsafePortRetries = 4, overlays = []) {
       .flatMap((p) => ['--patch', p]);
     // web 子命令在遇到第一个应用参数（如 --host）后会透传剩余参数，故
     // --patch 必须位于 --host 之前，否则 overlay 不会被 dsh 启动器解析。
-    const proc = spawn(nodeBin, ['--use-system-ca', bin, 'web', ...patchArgs, '--host', '127.0.0.1', '--port', String(webPort)], {
+    // --require 崩溃屏蔽：就绪后插件运行时错误不再拖死宿主（启动期保持
+    // fail-fast，不影响启动自愈）。文件不存在时不注入（dev 检出兜底）。
+    const crashShield = path.join(__dirname, 'scripts', 'lib', 'web-crash-shield.js');
+    const shieldArgs = fs.existsSync(crashShield) ? ['--require', crashShield] : [];
+    const spawnEnv = childEnv();
+    if (shieldArgs.length) spawnEnv.DSH_CRASH_SHIELD = '1'; // 防护垫自装开关
+    const proc = spawn(nodeBin, ['--use-system-ca', ...shieldArgs, bin, 'web', ...patchArgs, '--host', '127.0.0.1', '--port', String(webPort)], {
       cwd: userDataDir,
-      env: childEnv(),
+      env: spawnEnv,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -1456,6 +1510,10 @@ function watchServerProc(proc, out, opts = {}) {
             updater.saveSettings(updCtx(), settings);
           }
         } catch {}
+        // 就绪看管：记录达就绪时刻 + 挂稳定窗口计时（存活达标才落定
+        // 「最后良好」快照，防坏插件污染回滚基线）。
+        procReadyAt.set(proc, Date.now());
+        armStabilityWatch(proc);
         finish(resolve, m[1]);
       }
     };
@@ -1470,6 +1528,7 @@ function watchServerProc(proc, out, opts = {}) {
     proc.on('error', (err) => { endOut(); finish(reject, err); });
     proc.on('exit', (code, signal) => {
       endOut();
+      if (serviceStableTimer) { clearTimeout(serviceStableTimer); serviceStableTimer = null; }
       log('dsh', `进程退出 code=${code} signal=${signal}`);
       // 原地重启（插件市场）或已替换为新进程时，不打扰用户、也不清掉新进程的句柄。
       const intentional = restartingServer || serverProc !== proc;
@@ -1478,18 +1537,31 @@ function watchServerProc(proc, out, opts = {}) {
         finish(reject, new Error(`dsh web 启动失败（退出码 ${code}）。日志: ${path.join(logsDir, 'dsh-web.log')}`));
       }
       if (!quitting && !intentional && !handedOff && webUrl && mainWindow && !mainWindow.isDestroyed()) {
-        showBox({
-          type: 'error',
-          title: 'DSH 服务已停止',
-          message: 'DeepSeek Harness 服务意外退出。',
-          detail: '日志文件：' + path.join(logsDir, 'dsh-web.log') + logTailSnippet(),
-          buttons: ['重新启动', '退出'],
-          defaultId: 0,
-          cancelId: 1,
-        }).then(({ response }) => {
-          if (response === 0) startAndShow().catch((err) => handleBootFailure(err));
-          else app.quit();
-        });
+        // 就绪后崩溃环：进程曾达就绪但在稳定窗口内意外退出（典型：坏插件
+        // 拖死宿主）——直接走守护重启自愈（体检/修复/回滚到最后良好快照），
+        // 不打扰用户；自愈次数耗尽才降级为弹窗。
+        const readyAt = procReadyAt.get(proc) || 0;
+        const uptime = readyAt ? Date.now() - readyAt : Infinity;
+        if (readyAt && uptime < SERVICE_STABLE_MS && tryCrashLoopRecovery()) return;
+        // 普通意外退出：稍等再弹窗，给 stderr 尾部的真实崩溃栈落盘窗口
+        // （exit 事件可能早于最后几个 stdio data 事件，立即读日志会丢现场）。
+        setTimeout(() => {
+          if (quitting || crashLoopRecovering) return;
+          if (!mainWindow || mainWindow.isDestroyed()) return;
+          showBox({
+            type: 'error',
+            title: 'DSH 服务已停止',
+            message: 'DeepSeek Harness 服务意外退出。',
+            detail: '日志文件：' + path.join(logsDir, 'dsh-web.log') + logTailSnippet(),
+            buttons: ['重新启动', '退出'],
+            defaultId: 0,
+            cancelId: 1,
+          }).then(({ response }) => {
+            // 守护重启：坏插件导致的启动失败会先体检/修复/回滚，避免死循环。
+            if (response === 0) startAndShowGuarded().catch((err) => handleBootFailure(err));
+            else app.quit();
+          });
+        }, 500);
       }
     });
     // Safety net in case the URL line never appears.
@@ -1575,8 +1647,14 @@ async function startAndShowGuarded(overlays = []) {
   // 成功拉起后它就是最新一份 = 当前良好状态）。
   g.setRollbackLift(async () => {
     const url = await startAndShow(overlays);
-    const snaps = g.listSnapshots();
-    if (snaps.length) g.markGood(snaps[0].id);
+    // 回滚后成功拉起：对当前（已回滚的）状态新拍一份快照作为待落定良好基线。
+    // （旧实现 markGood(listSnapshots()[0]) 拿到的是 restore 前的 pre-restore
+    // 快照 = 坏状态，会把坏配置固化成回滚基线。）稳定存活后由
+    // armStabilityWatch 的 confirmPendingGood 落定。
+    try {
+      const meta = g.snapshot('boot-recovered');
+      g.setPendingGood(meta ? meta.id : null);
+    } catch { /* 快照失败无碍：下次启动重建 */ }
     return url;
   });
   return g.guardedBoot(
@@ -1595,7 +1673,9 @@ async function restartService() {
   restartingServer = true;
   try {
     await killTree(serverProc);
-    const url = await startAndShow();
+    // 守护启动：重启后若新装的坏插件导致启动失败，先体检/修复/回滚，
+    // 避免用户卡在「重启即崩」死循环（插件市场安装后重启是高危时刻）。
+    const url = await startAndShowGuarded();
     log('service', 'dsh web 服务已重启: ' + url);
     return { ok: true, url };
   } catch (err) {
@@ -5557,6 +5637,14 @@ function applySessionPersistenceFix() {
       if (n > 0) log('boot', '会话持久化容错补丁: 已应用到 ' + root);
     } catch (err) {
       log('boot', '会话持久化容错补丁失败(' + root + '): ' + err.message);
+    }
+    // 空 tool-call 容错（读端 dsh-session 校验放宽 + 写端 dsh-agent-loop 防护）：
+    // 存量会话 tool/result callId 为空会被严格校验击穿导致对话打不开。
+    try {
+      const t = patchToolSourceCompat(root, (m) => log('boot', m));
+      if (t > 0) log('boot', 'tool source 容错补丁: 已应用到 ' + root);
+    } catch (err) {
+      log('boot', 'tool source 容错补丁失败(' + root + '): ' + err.message);
     }
   }
 }

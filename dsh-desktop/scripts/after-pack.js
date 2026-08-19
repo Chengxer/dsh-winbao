@@ -38,6 +38,7 @@ const { patchSessionManage } = require('./patch-session-manage');
 const { patchOpenProjectDir } = require('./patch-open-project-dir');
 const { patchSessionPersistence } = require('./patch-session-persistence');
 const { patchSlotCompat } = require('./patch-slot-compat');
+const { patchToolSourceCompat } = require('./lib/tool-source-patch');
 
 // Regexes for files that are safe to delete (pure metadata / dev artifacts).
 const DROP_BASENAME = /^(LICENSE.*|README.*|CHANGELOG.*|HISTORY.*|COPYING.*|NOTICE.*|AUTHORS.*|SECURITY.*|CONTRIBUTING.*|\.gitignore|\.npmignore|\.editorconfig|\.eslintrc.*|\.prettierrc.*|\.babelrc.*)$/i;
@@ -160,6 +161,8 @@ module.exports = async function afterPack(context) {
     console.log(`afterPack: open project dir ${odChanged > 0 ? 'patched' : 'already up to date'}`);
     const spChanged = patchSessionPersistence(appNm, (m) => console.log('afterPack: ' + m));
     console.log(`afterPack: session torn-tail recovery ${spChanged > 0 ? 'patched' : 'already up to date'}`);
+    const tsChanged = patchToolSourceCompat(appNm, (m) => console.log('afterPack: ' + m));
+    console.log(`afterPack: empty tool-call tolerance ${tsChanged > 0 ? 'patched' : 'already up to date'}`);
     const skChanged = patchSlotCompat(appNm, (m) => console.log('afterPack: ' + m));
     console.log(`afterPack: keyed slot compatibility ${skChanged > 0 ? 'patched' : 'already up to date'}`);
   } else {

@@ -548,11 +548,25 @@ function createGuard(opts) {
   // V4.2：opts.preRetry(errText) 是配置级修复钩子（pnpm allowBuilds 等），
   // 返回 { applied: [...] }（或真值）即视为「已修复」，与 repair() 结果合并
   // 后一起重试一次；返回 false 则走原链路。钩子只调用一次。
+  // V4.3（插件市场崩溃事故）：「良好」标记延迟——启动即达就绪横幅但几秒后
+  // 被坏插件拖死的形态若立即 markGood，会把含坏插件的配置固化成回滚基线，
+  // 回滚永久无效。现改为 setPendingGood，由调用方在服务稳定存活后
+  // confirmPendingGood() 落定。
+  let pendingGoodId = null;
+  function setPendingGood(id) { pendingGoodId = id || null; }
+  function confirmPendingGood() {
+    if (!pendingGoodId) return false;
+    const id = pendingGoodId;
+    pendingGoodId = null;
+    markGood(id);
+    log('guard', `服务稳定存活，快照 ${id} 落定为最后良好`);
+    return true;
+  }
   async function guardedBoot(startOnce, describeFailure, opts = {}) {
     const snap = snapshot('boot');
     try {
       const url = await startOnce();
-      if (snap) markGood(snap.id);
+      setPendingGood(snap ? snap.id : null);
       return url;
     } catch (firstErr) {
       log('guard', '守护启动：首次拉起失败，进入体检修复流程');
@@ -579,7 +593,7 @@ function createGuard(opts) {
           log('guard', '已应用修复: ' + all.join('；'));
           try {
             const url = await startOnce();
-            if (snap) markGood(snap.id);
+            setPendingGood(snap ? snap.id : null);
             reportIncident('boot-recovered', '首次启动失败，自动修复后恢复。\n修复项：\n- ' + all.join('\n- ') + '\n\n原始错误：\n' + String((firstErr && firstErr.message) || firstErr));
             return url;
           } catch (secondErr) {
@@ -709,6 +723,7 @@ function createGuard(opts) {
 
   return {
     snapshot, listSnapshots, restore, markGood, lastGoodSnapshot,
+    setPendingGood, confirmPendingGood,
     healthCheck, repair, repairJunctions, junctionFindings,
     reportIncident, listIncidents, readIncident, resolveIncident,
     guardedBoot, setRollbackLift, attributeBootFailure,
