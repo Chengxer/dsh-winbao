@@ -351,7 +351,8 @@ module.exports = {
   },
   // 幂等 marker（单一数据源）：registry 与 transform 的 already 判定引用同一常量，
   // 杜绝「marker 跨模块复制漂移」。slot 系 marker 来自 runtime-patches（与 slot
-  // transform 同源），bundle-guard 系来自 profile-bundle-heal，其余为本文档声明化。
+  // transform 同源），bundle-guard 系来自 profile-bundle-heal，loader 隔离系
+  // 来自 loader-isolation，其余为本文档声明化。
   markers: {
     SLOT_KEY_COMPAT_MARKER,
     SLOT_UNKEYED_COMPAT_MARKER,
@@ -365,5 +366,6 @@ module.exports = {
     SETTINGS_SECTION_MARKER,
     WORKSPACE_SEARCH_RAIL_MARKER,
     PLUGIN_INVENTORY_TAB_MARKER,
+    ...require('./loader-isolation').markers,
   },
 };

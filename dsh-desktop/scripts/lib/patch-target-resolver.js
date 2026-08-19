@@ -32,6 +32,9 @@ const PW_REL = path.join('dsh-tool-pwsh', 'lib', 'index.js');
 const BASH_REL = path.join('dsh-tool-bash', 'lib', 'index.js');
 const CODE_PRESET_REL = path.join('dsh', 'config', 'agent-presets', 'code', 'agent.cordis.yml');
 const ATTACH_LOCAL_REL = path.join('dsh-attachment-local', 'lib', 'index.js');
+// loader 自动隔离补丁目标（cordis-plugin-loader 是 @deepseek-ai scope 下的包）。
+const LOADER_PKG_REL = path.join('cordis-plugin-loader', 'lib', 'index.js');
+const APP_BOOT_PKG_REL = path.join('dsh-app-boot', 'lib', 'index.js');
 
 /** @deepseek-ai/<pkgRel> 落点（以 node_modules/@deepseek-ai 根为准）。 */
 function mkAi(root, pkgRel) {
@@ -186,6 +189,8 @@ module.exports = {
   BASH_REL,
   CODE_PRESET_REL,
   ATTACH_LOCAL_REL,
+  LOADER_PKG_REL,
+  APP_BOOT_PKG_REL,
   resolvePatchTargets,
   resolveNmRoots,
   // 兼容期旧签名（一个版本周期后删除）。
