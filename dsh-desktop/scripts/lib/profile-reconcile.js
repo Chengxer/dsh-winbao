@@ -46,6 +46,7 @@ const {
   writeFileAtomic,
 } = require('../../profile-bundle-heal');
 const { ensureCoreBundles, CORE_BUNDLE_NAMES } = require('../../profile-manifest');
+const { PACKAGE_NAME_RE } = require('../plugin-core/lib/ids');
 
 /** 无效登记隔离记录文件名（位于 profile 目录内，dsh 不读取）。 */
 const BROKEN_BUNDLES_RECORD_FILENAME = 'dsh-desktop.broken-bundles.json';
@@ -185,6 +186,10 @@ function validateBundleEntry(packageName, opts) {
   if (typeof packageName !== 'string' || packageName === '') {
     return { ok: false, code: BUNDLE_CHECK_CODES.INVALID_NAME, reason: '登记项不是非空字符串' };
   }
+  // 包名形状校验（防 ../ 越出 node_modules 探测；与 dsh 解析路径同构防御）。
+  if (!PACKAGE_NAME_RE.test(packageName)) {
+    return { ok: false, code: BUNDLE_CHECK_CODES.INVALID_NAME, reason: '登记项包名非法: ' + packageName };
+  }
   // installAnchorDir 为空（CLI 未定位到 dsh 包等）时跳过第一锚点：相对路径的
   // node_modules 探测会意外解析到进程 cwd，绝不能据此判定健康。profileDir
   // 同理：为空时第二锚点同样跳过（绝不基于进程 cwd 的相对探测判定）。
@@ -306,7 +311,9 @@ function reconcileProfileBundles(profileDir, opts) {
     try { manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8')); } catch { manifestReset = true; }
   }
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
-    manifestReset = true;
+    // 修复审计发现：「文件缺失（全新安装）」不得被当作「损坏重建」——
+    // reset 只表示「存在但损坏/非法而被重建」；缺失走正常初始化路径。
+    if (manifestExists) manifestReset = true;
     manifest = { name: 'dsh-profile-' + path.basename(profileDir), private: true };
   }
   result.reset = manifestReset;
@@ -331,7 +338,7 @@ function reconcileProfileBundles(profileDir, opts) {
   // 更糟），下次运行再试。
   if (manifestReset && manifestExists && coresResolvable) {
     if (!dryRun) {
-      const backup = manifestFile + '.broken-' + Date.now();
+      const backup = manifestFile + '.broken-' + Date.now() + '-' + process.pid;
       try {
         fs.copyFileSync(manifestFile, backup);
         result.backup = backup;
@@ -368,6 +375,20 @@ function reconcileProfileBundles(profileDir, opts) {
     }
   }
 
+  // 隔离记录去重统一入口：同 code+reason 的既有条目不重写（保留首次
+  // removedAt，避免每次启动对同一持续损坏状态做无意义重写）。
+  const quarantineEntry = (name, code, reason) => {
+    const existing = recordNext.entries[name];
+    if (existing && existing.code === code && existing.reason === reason) return false;
+    recordNext.entries[name] = { code, reason, removedAt: new Date().toISOString() };
+    recordDirty = true;
+    return true;
+  };
+
+  // 策略性移除实际名单：只上报「确实在清单里被移除」的名字，保留集合
+  // 插入序（修复审计发现：整个集合无条件上报导致日志/返回值误导）。
+  const actualRemovedFrom = (before, namesSet) => [...namesSet].filter((n) => before.includes(n));
+
   if (bundlesUsable) {
     // 1. 存量自愈（issue #16）：缺失的核心 bundles 补齐到最前，其余原样保留。
     const resolvableCores = resolvableCoreNames(coreNames, installAnchorDir);
@@ -382,9 +403,7 @@ function reconcileProfileBundles(profileDir, opts) {
     // 2. 全量逐条校验：无效且非核心的登记移除 + 隔离记录；核心异常保留
     //    （启动防护兜底跳过，缺失核心是安装损坏而非数据问题）。
     //    策略性移除的名字（配套源缺失 / 插件管理卸载标记）不在本步判定：
-    //    它们由步骤 4/6 按「用户意图禁用」移除，绝不写入隔离记录（隔离记录
-    //    只记录无效登记，不记录用户主动禁用——否则卸载/源缺失会在记录里
-    //    留下误导性的 UNRESOLVABLE 条目）。
+    //    它们由步骤 4/6 按「用户意图禁用」移除，绝不写入隔离记录。
     const kept = [];
     for (const name of bundles) {
       if (missingNames.has(name) || removedBundles.has(name)) {
@@ -407,13 +426,7 @@ function reconcileProfileBundles(profileDir, opts) {
         continue;
       }
       result.removed.push({ name, code: check.code, reason: check.reason });
-      recordNext.entries[name] = {
-        code: check.code,
-        reason: check.reason,
-        removedAt: new Date().toISOString(),
-      };
-      recordDirty = true;
-      result.quarantined.push(name);
+      if (quarantineEntry(name, check.code, check.reason)) result.quarantined.push(name);
       log('已把无效的 profile bundle 登记移除: ' + name + ' —— ' + check.reason + '（重装该插件后重新登记即可恢复）');
       result.changed = true;
     }
@@ -487,11 +500,12 @@ function reconcileProfileBundles(profileDir, opts) {
     // 4. 源缺失 / 校验失败的配套登记移除（视为用户禁用，幂等）。
     if (missingNames.size > 0) {
       const before = bundles.length;
+      const actual = actualRemovedFrom(bundles, missingNames);
       manifest.dsh.profile.bundles = bundles.filter((n) => !missingNames.has(n));
       if (manifest.dsh.profile.bundles.length !== before) {
-        result.removedByPolicy.push(...missingNames);
+        result.removedByPolicy.push(...actual);
         result.changed = true;
-        log('配套 bundle 源缺失，已从 web profile bundles 移除（视为禁用）: ' + [...missingNames].join(', '));
+        log('配套 bundle 源缺失，已从 web profile bundles 移除（视为禁用）: ' + actual.join(', '));
       }
       bundles = manifest.dsh.profile.bundles;
     }
@@ -550,14 +564,15 @@ function reconcileProfileBundles(profileDir, opts) {
       }
     }
 
-    // 6. 插件管理「卸载」标记的配套登记移除。
+    // 6. 插件管理「卸载」标记的登记移除（含第三方已卸载名）。
     if (removedBundles.size > 0) {
       const before = bundles.length;
+      const actual = actualRemovedFrom(bundles, removedBundles);
       manifest.dsh.profile.bundles = bundles.filter((n) => !removedBundles.has(n));
       if (manifest.dsh.profile.bundles.length !== before) {
-        result.removedByPolicy.push(...removedBundles);
+        result.removedByPolicy.push(...actual);
         result.changed = true;
-        log('已卸载 bundle 插件，从 web profile bundles 移除: ' + [...removedBundles].join(', '));
+        log('已卸载 bundle 插件，从 web profile bundles 移除: ' + actual.join(', '));
       }
       bundles = manifest.dsh.profile.bundles;
     }
@@ -565,7 +580,13 @@ function reconcileProfileBundles(profileDir, opts) {
 
   // --- 落盘（原子写；隔离记录只在有修改时写回） ---
   if (result.changed && !dryRun) {
-    writeFileAtomic(manifestFile, JSON.stringify(manifest, null, 2) + '\n');
+    try {
+      writeFileAtomic(manifestFile, JSON.stringify(manifest, null, 2) + '\n');
+    } catch (err) {
+      // 修复审计发现：manifest 写失败曾直接冒泡（CLI 无兜底直接 exit 1）。
+      // 磁盘保持原样，下次运行重试；主进程/CLI 均不因一次 rename 失败中断。
+      log('profile manifest 写入失败（磁盘保持原样，下次运行重试）: ' + ((err && err.message) || err));
+    }
   }
   if (recordDirty && !dryRun) {
     // dry-run 的记录修改只反映在返回值，不落盘。

@@ -23,6 +23,7 @@ const { COMPANION_PLUGINS } = require('../lib/companion-plugins');
 const { CORE_BUNDLE_NAMES } = require('../../profile-manifest');
 const { isPatchListValid, verifyBundleDir } = require('../../profile-bundle-heal');
 const { dedupePatchEntries } = require('../../profile-patch-heal');
+const { PluginStateStore } = require('../plugin-core/lib/state-store');
 const { reconcileProfileBundles, resolveBundleDirLike } = require('../lib/profile-reconcile');
 const {
   ACP_DISABLE_BLOCK,
@@ -276,6 +277,17 @@ function createPluginSync(ctx) {
       let patchText = '';
       try { patchText = fs.readFileSync(patchFile, 'utf8'); } catch { /* 无 patch 文件 */ }
       const removedIds = removedPluginIdsFromPatch(patchText);
+      // 卸载决策双源：patch removed 行 ∪ 家级状态存储（抗 patch 重置复活，
+      // 与 CLI 同步器共用同一文件）。状态不可用时按单源处理（不阻塞启动）。
+      let stateStore = null;
+      try {
+        stateStore = new PluginStateStore({ file: path.join(home, 'desktop-plugin-state.json'), log: (m) => log(m) });
+      } catch (err) {
+        log('插件状态存储不可用，卸载决策仅按 patch 行: ' + err.message);
+      }
+      if (stateStore) {
+        for (const id of Object.keys(stateStore.getUninstalled())) removedIds.add(id);
+      }
       const { bundleNames, missingNames: missingSourceNames } = syncCompanionFiles({
         assetsRoot: path.join(appDir, 'assets', 'plugins'),
         profileDir,
@@ -331,14 +343,25 @@ function createPluginSync(ctx) {
         }
       }
 
-      // profile manifest 装配对账（唯一实现）。
-      const removedBundles = COMPANION_PLUGINS.filter((p) => removedIds.has(p.id)).map((p) => p.name);
+      // profile manifest 装配对账（唯一实现）。removedBundles 覆盖内置配套 +
+      // 第三方已卸载（state 决策里的非配套名），第三方 bundle 卸载后不再残留
+      // 「每次启动解析失败」的登记。
+      const companionRemoved = COMPANION_PLUGINS.filter((p) => removedIds.has(p.id)).map((p) => p.name);
+      const removedBundles = new Set(companionRemoved);
+      if (stateStore) {
+        const companionNames = new Set(COMPANION_PLUGINS.map((p) => p.name));
+        for (const [id, entry] of Object.entries(stateStore.getUninstalled())) {
+          const name = entry && entry.name;
+          if (name && !companionNames.has(name)) removedBundles.add(name);
+          else if (!name) removedBundles.add(id);
+        }
+      }
       const reconciled = reconcileProfileBundles(profileDir, {
         installAnchorDir: getInstallAnchorDir(),
         coreNames: CORE_BUNDLE_NAMES,
         addNames: bundleNames,
         missingNames: missingSourceNames,
-        removedBundles: new Set(removedBundles),
+        removedBundles,
         excludeFromRecover: new Set([...CORE_BUNDLE_NAMES, ...COMPANION_PLUGINS.map((p) => p.name)]),
         parsePatch: loadYaml(),
         log: (m) => log(m),

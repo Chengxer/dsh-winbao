@@ -39,9 +39,15 @@ function readBundleStack(profileDir, fs = require('node:fs')) {
   } catch (err) {
     return { bundles: [], community: [], error: `profile package.json 缺失或不可读: ${(err && err.message) || err}` };
   }
-  const bundles = (manifest && manifest.dsh && manifest.dsh.profile && Array.isArray(manifest.dsh.profile.bundles))
-    ? manifest.dsh.profile.bundles.filter((n) => typeof n === 'string')
+  const raw = (manifest && manifest.dsh && manifest.dsh.profile && Array.isArray(manifest.dsh.profile.bundles))
+    ? manifest.dsh.profile.bundles
     : [];
+  // 非字符串项：拒绝静默丢弃（修复审计发现：历史 filter 会在写回时永久删除
+  // 这些项）。只读路径上报 error，写路径（applyBundleOrder）据此拒绝写入。
+  if (raw.some((n) => typeof n !== 'string')) {
+    return { bundles: [], community: [], error: 'dsh.profile.bundles 含非字符串条目，为保护数据拒绝处理' };
+  }
+  const bundles = raw;
   return { bundles, community: bundles.filter((n) => !isOfficialBundle(n)) };
 }
 
@@ -109,14 +115,15 @@ function validateOrder(bundleNames, rules) {
       const otherPos = position.get(other);
       if (otherPos === undefined) continue;
       if (otherPos >= pos) {
-        conflicts.push({ name: rule.name, reason: `必须晚于 ${other} 加载，但 ${other} 当前在前（位置 ${otherPos} vs ${pos}）` });
+        // 中立措辞（修复历史「当前在前」与判定相反的人读误导）：只陈述位置。
+        conflicts.push({ name: rule.name, reason: `必须晚于 ${other} 加载（当前顺序：${rule.name} 位置 ${pos}，${other} 位置 ${otherPos}）` });
       }
     }
     for (const other of rule.before || []) {
       const otherPos = position.get(other);
       if (otherPos === undefined) continue;
       if (otherPos <= pos) {
-        conflicts.push({ name: rule.name, reason: `必须早于 ${other} 加载，但 ${other} 当前在后（位置 ${otherPos} vs ${pos}）` });
+        conflicts.push({ name: rule.name, reason: `必须早于 ${other} 加载（当前顺序：${rule.name} 位置 ${pos}，${other} 位置 ${otherPos}）` });
       }
     }
   }

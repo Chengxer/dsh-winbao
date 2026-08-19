@@ -854,11 +854,19 @@ SCENARIOS['runtime-patches-suite'] = async (t) => {
   // 闪跳修复（dsh-client-runtime）
   const runtime = readOf(path.join('dsh-client-runtime', 'lib', 'client.js'));
   t.assert(runtime.includes('(value) => baselineByKey.get(keyOf(value)) ?? value).filter((value) => value !== void 0);'), '闪跳修复应落盘');
-  // host-apiproxy：白名单 + 识图转述 + 密钥修复 + 会话删除 RPC
+  // host-apiproxy：白名单 + 识图转述 + 密钥修复 + 会话删除 RPC。
+  // 注：rc.7 起设置命名空间改为插件自描述的动态描述符，静态白名单注入按设计
+  // 跳过（transformExposeFix 的 DYNAMIC_SETTINGS_ANCHOR 判定 'already'），因此
+  // 'dsh-conversation-tweaks' 字面量在 rc.7 产物中不存在——改为断言「动态锚点
+  // 或旧版静态白名单产物二者之一存在」（陈旧断言与 rc.7 现实同步）。
   const apiproxy = readOf(path.join('dsh-host-apiproxy', 'lib', 'index.js'));
-  for (const marker of ['"dsh-conversation-tweaks"', 'describeImagesWithVision', 'dsh-desktop fix: read the resolved HOST-side value', 'unarchiveSession']) {
+  for (const marker of ['describeImagesWithVision', 'dsh-desktop fix: read the resolved HOST-side value', 'unarchiveSession']) {
     t.assert(apiproxy.includes(marker), 'host-apiproxy 应包含补丁标记: ' + marker);
   }
+  t.assert(
+    apiproxy.includes('"dsh-conversation-tweaks"') || apiproxy.includes('namespaces: settings.describe({ redactSecrets: true })'),
+    'host-apiproxy 应为「旧版静态白名单已注入」或「rc.7 动态描述符（注入按设计跳过）」之一'
+  );
   // 三个静默幂等的防护类补丁（app-boot / settings）
   const appBoot = readOf(path.join('dsh-app-boot', 'lib', 'index.js'));
   t.assert(appBoot.includes('function loadUserPatchLayer'), 'profile patch 防护应注入');
@@ -1008,6 +1016,60 @@ SCENARIOS['session-delete-flow'] = async (t) => {
   t.assert(d2.json && d2.json.result && d2.json.result.ok && d2.json.result.value.deleted === true, '空闲 live 会话删除应成功（摘除后删除）: ' + JSON.stringify(d2.json && d2.json.result));
   await waitFor(() => !sessionDirExists(sessionId2), 10000, '第二个会话目录删除');
   t.assert(!sessionDirExists(sessionId2), '第二个会话目录应已删除');
+  const q = await t.quitAndCheck();
+  t.assert(q.exit.code === 0 && q.cleanExit === true, '干净退出');
+};
+
+SCENARIOS['plugin-auto-isolation'] = async (t) => {
+  // 插件错误自动隔离（loader-isolation + quarantine 全链路，真实 Electron）：
+  //   1. profile 装配一个「模块顶层 throw」的坏 bundle + 正常配套插件；
+  //   2. loader 树级隔离补丁使坏条目被跳过（stderr 标记），其余插件照常组合，
+  //      应用正常启动（其他功能完全不受影响）；
+  //   3. 壳层观察标记 → 落盘 quarantine（disabled 覆盖行 + 状态存储）+ 通知；
+  //   4. 重启服务 → 隔离持久化 → 再次正常启动，坏条目不再拖垮任何环节。
+  const profileDir = path.join(t.dshHome, 'profiles', 'web');
+  fs.mkdirSync(path.join(profileDir, 'node_modules', 'broken-plugin', 'lib'), { recursive: true });
+  fs.writeFileSync(path.join(profileDir, 'node_modules', 'broken-plugin', 'package.json'), JSON.stringify({
+    name: 'broken-plugin',
+    version: '1.0.0',
+    main: 'lib/index.js',
+    dsh: { bundle: { patch: './cordis.patch.yml' } },
+  }, null, 2) + '\n');
+  fs.writeFileSync(path.join(profileDir, 'node_modules', 'broken-plugin', 'lib', 'index.js'),
+    'throw new Error("simulated plugin failure: broken-plugin");\n');
+  fs.writeFileSync(path.join(profileDir, 'node_modules', 'broken-plugin', 'cordis.patch.yml'), [
+    '- insert:',
+    '    - id: broken-plugin',
+    "      name: 'broken-plugin'",
+    '',
+  ].join('\n'));
+  fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-web',
+    private: true,
+    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'broken-plugin'] } },
+  }, null, 2) + '\n');
+
+  // 坏 bundle 存在时应用仍应正常启动（隔离生效，其他功能不受影响）。
+  await t.waitFor('boot-ready', 240000, '坏插件被隔离后正常启动');
+  await t.waitFor('界面已稳定', 60000, '稳定期完成');
+  // loader 侧隔离标记出现在 dsh-web.log（经壳层管道落盘）。
+  t.assert(t.grepLog('loader 自动隔离条目: broken-plugin'), '应观察到 loader 隔离标记');
+  t.assert(t.grepLog('已自动隔离插件 broken-plugin'), '应落盘 quarantine（disabled 覆盖）');
+  // 隔离持久化：profile patch 出现 disabled 覆盖行；家级状态存储有决策。
+  const patch = fs.readFileSync(path.join(profileDir, 'cordis.patch.yml'), 'utf8');
+  t.assert(/^\s*- id: broken-plugin\s*$/m.test(patch), 'patch 应含 broken-plugin 条目');
+  t.assert(/\bdisabled:\s*true\b/.test(patch), 'patch 应含 disabled: true 覆盖行');
+  const state = JSON.parse(fs.readFileSync(path.join(t.dshHome, 'desktop-plugin-state.json'), 'utf8'));
+  t.assert(state.quarantine && state.quarantine['broken-plugin'], '状态存储应记录隔离决策');
+  // 正常配套插件仍被装配（其他功能不受影响）。
+  const manifest = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
+  t.assert(Array.isArray(manifest.dsh.profile.bundles), 'manifest bundles 应为数组');
+  t.assert(manifest.dsh.profile.bundles.includes('harness-pet'), '配套插件应照常装配');
+
+  // 重启服务：隔离持久化 → 再次正常启动（坏条目不再拖垮启动）。
+  const st = await t.send('restart-service', undefined, 120000);
+  t.assert(st.ok, '重启命令应成功: ' + JSON.stringify(st));
+  await t.waitFor('界面已稳定', 120000, '隔离后重启稳定');
   const q = await t.quitAndCheck();
   t.assert(q.exit.code === 0 && q.cleanExit === true, '干净退出');
 };

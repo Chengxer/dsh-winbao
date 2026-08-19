@@ -82,7 +82,8 @@ function healProfileModuleShadowing(home, profile = 'web', log = () => {}) {
       const target = safeReadlink(shadow);
       if (!target) continue;
       const norm = (p) => String(p).replace(/\//g, '\\').toLowerCase();
-      const storeRoot = norm(path.join(profileModulesDir, '.pnpm'));
+      // 补目录分隔符：防止 .pnpm-evil 等兄弟目录被误判为「在 store 内」。
+      const storeRoot = norm(path.join(profileModulesDir, '.pnpm')) + '\\';
       if (norm(path.resolve(path.dirname(shadow), target)).startsWith(storeRoot)) {
         try { fs.unlinkSync(shadow); } catch { fs.rmSync(shadow, { force: true, recursive: true, maxRetries: 3, retryDelay: 150 }); }
         removed.push(full);

@@ -218,6 +218,11 @@ function validatedBackup(value) {
     // 恢复写入可经链接直通真实插件目录（合法备份绝不包含它：collectFiles 跳过），
     // 来路不明的备份含此段时直接拒绝，封死「经链接写穿」攻击面。
     if (p.split('/').includes('node_modules')) throw new Error(`备份路径含 node_modules 段（符号链接装配点），拒绝: ${p}`);
+    // home 根下不得出现 profiles 段：profile 内容由 profile/ 前缀单独收集，
+    // home/profiles/web/... 形态可双写 profile 配置（破坏 profile/home 隔离边界）。
+    if (p.startsWith('home/') && p.split('/').includes('profiles')) {
+      throw new Error(`home 路径含 profiles 段（profile 由 profile/ 前缀单独管理），拒绝: ${p}`);
+    }
     // 深度恢复防逃逸：逐段校验
     const parts = p.split('/');
     for (const part of parts) assertSafeRelPath(part);
@@ -278,7 +283,15 @@ function restoreBackup(backup, roots, fs = require('node:fs'), pathMod = require
     }
     return null;
   };
-  const within = (realDir, root) => realDir === root || realDir.startsWith(root + pathMod.sep);
+  // Windows 路径大小写不敏感：realpath 返回的规范大小写与调用方路径大小写
+  // 可能不一致，比较统一归一化（修复审计发现：大小写敏感 startsWith 会误拒绝）。
+  const IS_WIN = process.platform === 'win32';
+  const normCase = (s) => (IS_WIN ? String(s).toLowerCase() : String(s));
+  const within = (realDir, root) => {
+    const n = normCase(realDir);
+    const r = normCase(root);
+    return n === r || n.startsWith(r + pathMod.sep);
+  };
   for (const file of backup.files) {
     const target = targetOf(file.path);
     const dir = pathMod.dirname(target);
