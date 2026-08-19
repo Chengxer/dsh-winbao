@@ -1,0 +1,23 @@
+# DSH Desktop 桥 command 权限（自定义 ACL）
+#
+# Tauri 2 不会为 app command 自动生成权限；远程页（http://127.0.0.1 内核 Web UI）
+# 要调用桥 command，必须在 capability 引用一个显式放行它们的权限。
+# 这里按阶段分组放行，新增 command 时同步 contracts/ipc-commands.md 与本文件。
+#
+# 契约溯源：contracts/ipc-commands.md §2（阶段划分）。
+
+[[permission]]
+identifier = "bridge-phase1"
+description = "桥 command——Phase 1 核心生命周期（含 PoC echo_json）"
+commands.allow = [
+  "app_init",
+  "window_control",
+  "menu_action",
+  "copy_text",
+  "open_external",
+  "page_error",
+  "renderer_heartbeat",
+  "current_session",
+  "restart_service",
+  "echo_json",
+]

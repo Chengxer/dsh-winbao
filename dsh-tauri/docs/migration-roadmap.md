@@ -1,0 +1,122 @@
+# DSH Desktop — Electron → Tauri 迁移路线图
+
+> 分支 `tauri/modular`（自 main 切出）。Electron 线（`dsh-desktop/`）零改动，
+> main / kernel/dsh-rc8 照常演进；回退 = 弃分支。
+>
+> 架构决策与契约见 `contracts/`（bridge-api / ipc-commands / data-flow /
+> plugin-contract / error-codes）。本文件回答「什么时候做什么、怎么验收」。
+
+## 总架构（一句话）
+
+Rust 壳（7 个单向依赖的 crate）+ Node sidecar（复用 `dsh-desktop/scripts/`，
+零重写）+ 契约层（`contracts/` 单一事实源）。内核 Web UI 以远程页加载，
+`window.dshDesktop` 经 initialization_script 垫片桥接（签名与 Electron 版逐字一致）。
+
+## 两个既定决策（用户拍板，不再讨论）
+
+### D1 内核自动更新链：整体删除
+
+| Electron 触点（main.js 行号） | 处置 |
+|------------------------------|------|
+| `updater.js` 的 overlay 布局 / checkLatest / applyUpdate / rollback / overlayBinPath / overlayVersion | 不移植 |
+| `runUpdateFlow`（2614-2742） | 不移植；菜单 `check-agent-update` 返回 `E_CUT_FEATURE` |
+| 定时触发器（4675-4770 一带） | 不移植 |
+| skipVersion / 更新确认状态（settings） | 键读取时忽略（`shell_core::settings::is_cut_key`） |
+| overlay 三副本布局（patch-target-resolver） | Tauri 版补丁布局天然两副本（profile fallback + appDir），无 overlay 更新副本 |
+| WSL applyUpdate | 不移植 |
+
+内核版本随客户端发版升级（`dsh-desktop/package.json` 的 @deepseek-ai/* 依赖版本）。
+
+### D2 客户端自动更新：review 结论 + 替代方案
+
+**现状（Electron 版）安全 review 结论：无完整性校验。**
+
+- 下载判据只有：体积下限（≥64MB）+ content-length 一致性 + （Gitee 分片路径的）分片连续性；
+- **没有哈希校验，没有签名校验**——信任锚 = HTTPS + GitHub/Gitee API 的 size 元数据；
+- `DSH_DESKTOP_RELEASE_API` 环境变量可把更新源指向任意 endpoint，产物直接落盘执行（NSIS 安装器）；
+- 意味着：镜像被劫持 / API 被中间人（若 CA 环境异常，恰是本项目 --use-system-ca 存在的原因）情形下无防线。
+
+**Tauri 版方案：`tauri-plugin-updater`（minisign）。**
+
+- manifest（latest.json）+ 产物 + `.sig` 签名三元组；私钥离线，CI 打 tag 时签名；
+- 校验失败 fail-closed（`E_UPDATER_SIGNATURE`），不落盘不执行；
+- 双源策略：GitHub Releases 主源（updater endpoint 指向静态 JSON）；Gitee 镜像在
+  Phase 4 后期评估（updater 插件单 endpoint，需自建一个探活回落的小静态页或
+  文档指引手动下载——不为此引入复杂度）。
+
+## Phase 0（本次交付）——骨架 + 契约 + 三 PoC
+
+**实测记录（2026-08-19，本机）：**
+- `cargo build` ✓ / `cargo test` **18 套件 59 过 0 挂 0 警告**；
+- **PoC-C PASS**：真实拉起仓库内 rc.8 内核（5.6s 出就绪行 `dsh web: http://127.0.0.1:65234`，
+  `--no-open` 版本门控正确，taskkill /T /F 杀树成功）；
+- **PoC-A/B PASS**：主窗（decorations:false + 36px 自绘标题栏）加载 preview-server
+  的远程 http 页，A1-A9 + B1 共 10 项全过（含人工拖拽验证）；
+- 过程中实锤两个迁移知识点，已固化进代码注释与测试：
+  1. `--patch`/`--no-open` 必须放在 `web` 子命令**之后**（放前面会被父级解析器以
+     「--profile required」拒绝）；
+  2. 远程页调自定义 command 需要三件套：capability `remote.urls` 放行 origin +
+     `permissions/*.toml` 自定义权限（Tauri 2 不为 app command 自动生成）+
+     capability 引用该权限。
+
+| 项 | 验收 |
+|----|------|
+| `contracts/` 五份 | 每个桥方法有 file:line 溯源；43 通道映射表与 main.js 注册清点一致 |
+| 7 crate 骨架 | `cargo build` + `cargo test` 全绿；crate 不依赖 tauri（bridge 的命令注册在 app 层） |
+| PoC-A 远程页桥注入 | app 主窗加载 preview-server 的 http://127.0.0.1 PoC 页，A1-A9 全 PASS |
+| PoC-B 自绘标题栏 | 36px 拖拽 + min/max/close 可用（PoC 页手动项） |
+| PoC-C sidecar spawn | `cargo run -p poc-sidecar-spawn`：真实拉起仓库内 rc.8 内核，就绪行解析成功，进程树终结 |
+| 本文档 | D1/D2 决策与分期落地 |
+
+## Phase 1 —— 核心生命周期（app 可日用替代 loading 页）
+
+- kernel-process supervisor：Windows Job Object 绑定（杀树不依赖 taskkill 计时）、
+  崩溃环状态机接入 RunState、restartService（端口稳定化优先复用上次端口）。
+- 主窗生命周期：loading → 就绪换页、窗口状态记忆（位置/尺寸，settings）、
+  导航围栏（仅放行 127.0.0.1 内核 origin + 恢复页）、关闭行为（直关 or 托盘，Phase 3 托盘就绪前直关）。
+- bridge 补齐 Phase 1 command：recovery 四件套、copy_text（tauri-plugin-clipboard-manager）、
+  open_external（tauri-plugin-opener 或保留 cmd start）、sponsor_window。
+- 恢复页（recovery.html 的 Tauri 形态：静态文件经 preview-server 托管）。
+- **验收**：`DSH_KERNEL_URL` 模式下端到端跑通——先 `poc-sidecar-spawn` 拉内核、
+  再起 app 加载真实 Web UI，插件在页内调 dshDesktop 不报「not found」的命令全部可用。
+
+## Phase 2 —— sidecar 全链路（插件体系等价迁移）
+
+- sidecar-orchestrator 实装：boot 时序 Repair→Sync→Presets→Patches→Preflight
+  （Node 侧复用 scripts/，Rust 侧编排 + 超时 + 失败诊断上报）。
+- 脚本抽出：把 Electron main.js 内联的 heal/preset 逻辑抽成 `dsh-tauri/sidecar/` 独立入口
+  （Electron 版不动——新文件按契约脚本名组织）。
+- 插件管理六通道 + supervision 探活（PR #121 的 supervision 层语义：unref 陷阱已修）。
+- WriteGate 跨进程写锁（Rust 侧文件锁 + sidecar 遵守）。
+- **验收**：33 伴随插件同步 + 22 补丁在全新用户目录上幂等两连跑（对齐 Electron 集成测试口径）；
+  插件市场装/卸/禁用/恢复/更新回归。
+
+## Phase 3 —— 周边窗与诊断
+
+- 托盘 + 通知（限流与聚焦豁免：session-watcher 已有决策逻辑，接系统 API）。
+- 浮窗（分屏）/ 赞助窗 / 宠物窗（透明窗 PoC 先行：WebView2 transparent 已知有坑，
+  失败则宠物窗降级为不透明圆角小窗）。
+- fence 实装：zstd 首帧 cwd 解析、file-revert 逆序应用、备份/恢复/诊断命令族。
+- WSL 后端通道（wsl_config_* 三通道，sidecar 复用 wsl-backend.js 逻辑）。
+- **验收**：对齐 Electron 版集成测试清单逐项（kill-renderer / float-crash / early-crash /
+  unsafe-port / wsl-broken-fallback 等场景的 Tauri 等价物）。
+
+## Phase 4 —— 打包与分发
+
+- 打包：externalBin = vendor node.exe（sidecar 侧），resources = 内核 node_modules +
+  scripts + assets/plugins；NSIS/MSI（tauri-bundler）。
+- tauri-plugin-updater 接入（D2 方案）；latest.json 进 CI 发版流程（tag → build → sign → upload）。
+- 卸载策略：数据目录（%APPDATA%/dsh-desktop 与 ~/.dsh）默认保留——替代自研 C#
+  卸载器 + customInit 的整套「升级清数据」防线（Tauri 打包器无此坑）。
+- macOS：Gatekeeper「已损坏」场景 = 无签名包的既知问题，文档指引（与 Electron 线一致）。
+- **验收**：全新 Windows 机器安装 → 升级 → 卸载三段式，用户数据全程保留。
+
+## 风险登记簿
+
+| # | 风险 | 缓解 |
+|---|------|------|
+| R1 | 远程页（http://127.0.0.1）IPC 注入不可用（capability remote.urls 语义不符） | PoC-A 即验证点；兜底：内核页改 iframe+postMessage 桥（保底方案，性能略差） |
+| R2 | WebView2 透明窗（宠物窗）异常 | Phase 3 先 PoC；降级圆角不透明窗 |
+| R3 | 拖拽文件路径（getPathForFile 无 Tauri 等价） | onDragDropEvent 回填 file.path（bridge-api.md §6-R1） |
+| R4 | 22 个文本手术对内核版本敏感（rc.7→rc.8 已实证锚点漂移） | sidecar 零重写 + 锚点状态上报（already/anchor-missing/changed）进诊断 |
+| R5 | cargo/crates.io 网络受限环境构建慢 | 纯逻辑 crate 零依赖设计；tauri 依赖集中在 app 一个 crate |

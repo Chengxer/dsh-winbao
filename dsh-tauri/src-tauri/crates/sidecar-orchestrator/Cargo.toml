@@ -1,0 +1,9 @@
+[package]
+name = "sidecar-orchestrator"
+description = "Node sidecar 编排：boot 时序 + sidecar 命令构造（复用 dsh-desktop/scripts，零重写）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
