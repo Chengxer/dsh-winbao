@@ -91,7 +91,9 @@ class ScenarioContext {
     // 变量存在（哪怕是空串）就切换 Node 模式并原生断言崩溃。
     delete env.NODE_OPTIONS;
     delete env.ELECTRON_RUN_AS_NODE;
-    this.proc = spawn(electronPath, [mainJs], {
+    // 无 GPU 环境（CI / VM）补强：禁 GPU 走软件渲染，避免 GPU 进程反复崩溃
+    // 触发 gpu-crash-guard 降级窗口拖慢集成场景；本机有 GPU 时不影响断言语义。
+    this.proc = spawn(electronPath, ['--disable-gpu', mainJs], {
       cwd: repoRoot,
       env,
       stdio: ['ignore', this.outFd, this.outFd],

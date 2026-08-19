@@ -42,7 +42,17 @@ delete childEnv.ELECTRON_RUN_AS_NODE;
 
 // --disable-gpu：无 GPU 环境（VM / RDP / CI）下 Chromium GPU 进程会崩溃退出；
 // 隐藏窗口渲染层测试用软件渲染即可，跨环境更稳。--no-sandbox 同理利于无沙箱的 CI。
-const r = spawnSync(electron, ['--disable-gpu', '--no-sandbox', harnessDir], {
+// 无头 CI 补强：Windows Server 无显示会话时，原生窗口遮挡判定会把隐藏窗口
+// 判为「被遮挡」并节流渲染/定时器（测试假超时）；后台节流同理。
+const ELECTRON_ARGS = [
+  '--disable-gpu',
+  '--no-sandbox',
+  '--disable-features=CalculateNativeWinOcclusion',
+  '--disable-background-timer-throttling',
+  '--disable-renderer-backgrounding',
+  harnessDir,
+];
+const r = spawnSync(electron, ELECTRON_ARGS, {
   env: childEnv,
   encoding: 'utf8',
   windowsHide: true,

@@ -16,6 +16,16 @@ const os = require('node:os');
 
 app.setPath('userData', path.join(os.tmpdir(), 'dsh-balance-renderer-harness-' + Date.now()));
 
+// 无 GPU 环境（CI runner / VM / RDP）补强：驱动层已传 --disable-gpu，这里再从
+// app 侧关掉硬件加速双保险——二者任一缺失，无显示适配器机器上 GPU 进程会
+// 反复崩溃，隐藏窗口渲染层测试直接失败。
+app.disableHardwareAcceleration();
+// GPU 子进程崩溃不判测试失败：软件渲染下 GPU 进程可能根本不启动或被系统回收，
+// 渲染层断言本身才是判定标准。
+app.on('child-process-gone', (_event, details) => {
+  console.log('[renderer-harness] child-process-gone: ' + JSON.stringify(details));
+});
+
 let settled = false;
 function finish(code, detail) {
   if (settled) return;
