@@ -1508,7 +1508,11 @@ async function startServer(unsafePortRetries = 4, overlays = []) {
     const shieldArgs = fs.existsSync(crashShield) ? ['--require', crashShield] : [];
     const spawnEnv = childEnv();
     if (shieldArgs.length) spawnEnv.DSH_CRASH_SHIELD = '1'; // 防护垫自装开关
-    const proc = spawn(nodeBin, ['--use-system-ca', ...shieldArgs, bin, 'web', ...patchArgs, '--host', '127.0.0.1', '--port', String(webPort)], {
+    // rc.8 起 dsh web 默认 openBrowser=true（非 SSH 环境自动拉系统浏览器）。
+    // 桌面内嵌场景必须显式关闭；但 rc.7 及更早的 web 命令没有 --no-open 选项
+    // （commander 会按未知选项直接报错），故按当前内核版本门控传参。
+    const noOpenArgs = updater.compareVersions(dshVersion(), '0.1.0-rc.8') >= 0 ? ['--no-open'] : [];
+    const proc = spawn(nodeBin, ['--use-system-ca', ...shieldArgs, bin, 'web', ...patchArgs, ...noOpenArgs, '--host', '127.0.0.1', '--port', String(webPort)], {
       cwd: userDataDir,
       env: spawnEnv,
       windowsHide: true,

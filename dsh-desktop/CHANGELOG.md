@@ -3,6 +3,27 @@
 DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行时与 dsh CLI，
 一键启动 Web UI。
 
+## [Unreleased]
+
+> 内核升级：内置 DeepSeek Harness 从 0.1.0-rc.7 升至 **0.1.0-rc.8**（npm `next` tag，2026-08-19 发布）。含行为适配与补丁体系全量重锚定审查。**同时修复存量 rc.8 overlay 用户的补丁失配**（更新器按 dist-tags 最大值推荐版本，rc.8 发布当天起线上用户已可装到 rc.8 overlay，而既有补丁锚定 rc.7 形态）。
+
+### 升级与适配
+- **依赖平移**：`@deepseek-ai/dsh` 与 19 个 `@deepseek-ai/dsh-*` 兄弟包从 `0.1.0-rc.7` 精确锁版整体升至 `0.1.0-rc.8`（54 包全家桶齐发；cordis 系 1.x/4.x 版本线冻结不变；新增传递依赖 `dsh-tool-pwsh-persistent` 随 minimal preset 的 win32 pwsh 栈引入）。
+- **禁止内核自动开浏览器（关键行为适配）**：rc.8 `dsh web` 新增 `openBrowser` 默认 `true`（非 SSH 环境经 `open` 模块拉起系统浏览器；WSL 内经 `wslview` 弹 Windows 浏览器）。桌面内嵌场景由壳层 spawn 时显式传 `--no-open`（main.js `startServer()` 与 wsl-backend.js `spawnServer()`），**按内核版本门控**（≥ 0.1.0-rc.8 才传；rc.7 的 web 命令无此选项，commander 遇未知选项直接报错）。
+- **补丁锚点 rc.8 审查结果**（postinstall 链 + 22 项注册表 applyAll 实测）：session-manage（5 文件）、open-project-dir、session-persistence、tool-source 双端、keyed slot runner 侧、识图链路、settings/patch/bundle 三重防护、web-search、pi-ai-credits、picker-native 等 **17 组补丁在 rc.8 上原样命中，无需改动**。真实回归仅 2 处，已修复（双形态兼容，rc.7 overlay 副本仍走原锚点路径）：
+  - `profile-boot` 存根识别：rc.8 把两个 `profile-boot-*.js` 之一变成纯 re-export 存根（85 字节，真身在另一 bundle 且已注入防护），存根无装配面，按已处理跳过，不再计为失配；
+  - workspace 搜索栏修复：rc.8 **上游原生合入同款守卫**（`|| searchOnExpand` 无 marker 裸形态），命中即视为已修复。
+- **菜单视口封顶改为 CSS 注入（issue #36 的 rc.8 形态）**：rc.8 菜单组件移入压缩前端 dist 产物（`dsh-web-frontend`，mangled 标识符），文本手术锚点不再可用，且其放置夹紧在列表高于视口时仍裁顶部条目（与 rc.7 bug 同源）。改由 preload 以语义选择器注入 `[role="menu"]{max-height:min(calc(100vh - 24px),560px);overflow-y:auto}`——不依赖 CSS-module 哈希类名，对后续版本漂移稳健；rc.7 树仍由原文本补丁覆盖。
+- **keyed slot 兼容的 rc.8 布局**：rc.8 移除 `dsh-client-ui-slots` 独立包（slot core 并入前端 dist），core 侧两个补丁（legacy-key 提升、注册错误隔离）在 rc.8 布局下无目标可打（文件不存在即静默跳过，不计失配；`fault-isolation` 预检同为"文件不存在即跳过"，不误报）。注册链路防护由 **runner 侧** unkeyed 兼容补丁承载（rc.8 实测命中）：显式 key 优先、legacy `id` 提升、全无时按包身份派生——所有经 cordis-client-runner 的注册（含全部第三方客户端插件）均受覆盖。相关单测在 rc.8 布局下跳过对已不存在文件的真实锚点校验。
+- **已知后续项（fail-soft，不阻断）**：M3 主题按钮的设置页外观区锚（rc.6 CSS 哈希类 + `[class*="appearance"]` 回退链）在 rc.8 前端中已无 "appearance" 命名，注入静默失效，待运行时 DOM 侦察后重锚；`dsh-mini` 手机端 gui 快照（38 包自洽 rc7 副本）与桌面内核独立，重新采集列为后续任务。
+
+### 验证
+- `npm ci`（postinstall patch-deps 对 rc.8 实装）：17 组补丁全部命中，0 失配。
+- 注册表 applyAll：写入 16 处 / 失配 3 项（均为 rc.7 时代即存在的 slot 交叉失配基线，与升级前一致，零新增）/ 降级 1 项（同基线）。
+- 全量单测 633 项：630 过 / 0 挂 / 3 跳过（2 项既有环境跳过 + 1 项 rc.8 布局跳过）。
+- 真实 Electron 集成测试：31 场景 30 过（boot/heal 全家/补丁链/会话删除/识图/崩溃恢复/WSL 回退等，实际 spawn rc.8 内核，含 `--no-open` 门控链路）；`preview-fence` 为升级前即存在的开发环境性失败（rc.7 基线同败，与内核版本无关）。
+- 集成断言双形态化（`runtime-patches-suite`）：menu-viewport 前缀日志/primitives 落盘仅 rc.7 树要求，rc.8 树改为断言 preload 封顶 CSS 存在；workspace 搜索栏接受 marker 或 rc.8 原生守卫；提示词暴露接受 marker 或 rc.7+ 动态 settings 原生形态。
+
 ## [0.4.1] — 2026-08-19
 
 > 热修复版：插件市场装插件后「服务意外退出」崩溃事故根治（三层防线）+ 空 tool-call 存量会话打不开修复。
