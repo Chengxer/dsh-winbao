@@ -181,7 +181,7 @@ jobs:
             "$app/node_modules/@koromix/koffi-win32-$want/win32_$want/koffi.node",
             "$app/node_modules/@img/sharp-win32-$want/lib/*.node",
             "$app/node_modules/node-addon-require-builtin-win32-$want-msvc/prebuilt/*.node",
-            "$app/node_modules/node-pty/prebuilds/win32-$want/pty.node"
+            "$app/node_modules/node-pty/prebuilds/win32-$want/*.node"
           )
           $checked = 0
           foreach ($pattern in $targets) {
@@ -419,7 +419,7 @@ jobs:
             "$app/node_modules/@koromix/koffi-win32-$want/win32_$want/koffi.node",
             "$app/node_modules/@img/sharp-win32-$want/lib/*.node",
             "$app/node_modules/node-addon-require-builtin-win32-$want-msvc/prebuilt/*.node",
-            "$app/node_modules/node-pty/prebuilds/win32-$want/pty.node"
+            "$app/node_modules/node-pty/prebuilds/win32-$want/*.node"
           )
           $checked = 0
           foreach ($pattern in $targets) {
