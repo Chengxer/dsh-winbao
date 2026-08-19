@@ -61,6 +61,8 @@
 | dsh-side-session | 0.2.5 | MIT | https://github.com/hzhz314159/dsh-side-session |
 | billion-context-dsh | 0.2.1 | MIT | https://github.com/Tyan66666/billion-context-dsh |
 | dsh-hub | 1.1.2 | MIT | https://github.com/ARFCON/dsh-hub-DSH |
+| dshmarket | 1.11.1 | MIT | https://github.com/dsh-market/dsh-market |
+| graph-memory | 1.6.0-beta.1 | MIT | https://github.com/adoresever/graph-memory |
 
 ### 2.2 DeepSeek 官方配套插件（@deepseek-ai/dsh-*，MIT）
 

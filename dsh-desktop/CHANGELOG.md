@@ -3,6 +3,51 @@
 DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行时与 dsh CLI，
 一键启动 Web UI。
 
+## [Unreleased]
+
+### 重构：插件管理子系统（plugin-center，单一门面 + 统一数据流）
+
+- **统一门面与分层**：新增 `scripts/plugin-core/`（errors / ids / text / fs-atomic /
+  state-store / patch-surgery / manifest-store / inventory / lifecycle / updates /
+  scan / quarantine / markers / capability / supervision + `createPluginCenter`
+  组装根），main.js 的插件段只接线不持业务。公共接口与数据流规范见
+  `docs/plugin-center-architecture.md`；`scripts/lib/patch-io.js`、
+  `scripts/plugin-manager-patch.js`、`patch-row-heal.js`、`profile-patch-heal.js`
+  收敛为兼容再导出（全仓唯一实现，消除历史三处漂移）。
+- **插件错误自动隔离（新能力，四级）**：
+  - L1 加载期隔离：`scripts/lib/loader-isolation.js` 对 vendored
+    cordis-plugin-loader / dsh-app-boot 注入自动隔离——条目 apply / fiber 结算 /
+    激活审计失败只跳过并打 `[loader-isolation]` 标记，其余插件照常组合；
+    受保护核心（dsh-base / dsh-web-app）失败仍 fatal；
+  - L2 运行时异常隔离：web-crash-shield 升级（武装标记 + 按肇事来源归因计数），
+    installFailLoud 就绪后不再 exit(1)；
+  - L3 自动隔离落盘：壳层观察标记 → quarantine（官方 disabled 覆盖行 + 状态存储
+    `desktop-plugin-state.json` v2）→ 系统通知 + 守护重启；插件管理页可一键恢复
+    （闭环、无死循环）；
+  - L4 挂死恢复：dsh web 存活探针（连续 3 次探活失败且非忙态 → 守护重启），
+    补「进程存活但假死」盲区。
+- **安装/卸载自由面修复**：第三方 bundle 归入 community 组（可开关/可卸载）；
+  卸载完整清理（bundles 登记 + dependencies 键 + 目录 + .pnpm store 无引用副本），
+  决策落家级状态存储——patch 被自愈重置也不复活；第三方恢复返回
+  `PLUGIN_RESTORE_NO_SOURCE`（不再假成功）；运行中目录操作 rename 语义。
+- **更新链加固（fail-closed）**：npm integrity（sha512）/ GitHub digest 缺失一律
+  拒绝；下载仅 https（重定向禁降级/环）；tar 归档条目预检（拒绝 `../`、绝对路径、
+  symlink/hardlink/设备）与解压后链接复检；包名/版本契约校验；更新内容静态扫描
+  门禁（高危需确认）；原子替换 + rename 回滚。
+- **IPC 与权限收紧**：插件管理 IPC 全量 frame-origin 精确校验（修复 list/set-enabled
+  只查 sender 的不一致）；卸载/更新/备份恢复/重排等破坏性动作主进程二次确认；
+  `setPermissionRequestHandler` 拒绝摄像头/麦克风/定位等媒体权限（白名单放行
+  fullscreen/pointerLock/notifications/clipboard）。
+- **对账/同步修复**：reconcile 隔离记录同 code+reason 去重、removedByPolicy 只报
+  实际移除名、reset 仅表示「存在但损坏」、manifest 写失败仅告警、包名形状校验；
+  companion 过期清理加白名单并覆盖非 scope 落点；loader id 字符集全仓统一（点号
+  id 可写可愈）；removeBundledRowDuplicates 的 id 级去重接线；plugin-guard 扫描
+  收口 scan.js。
+- **测试**：新增 `unit-plugin-core-*`（basic / patch-surgery / lifecycle / updates）
+  与 `unit-loader-isolation` 共 60 项断言；新增集成场景 `plugin-auto-isolation`
+  （坏插件启动自动隔离全链路，真实 Electron 隔离环境）；全量单测 693 项 +
+  集成回归。
+
 ## [0.4.1] — 2026-08-19
 
 > 热修复版：插件市场装插件后「服务意外退出」崩溃事故根治（三层防线）+ 空 tool-call 存量会话打不开修复。
