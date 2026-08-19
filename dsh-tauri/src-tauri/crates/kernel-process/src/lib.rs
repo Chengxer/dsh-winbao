@@ -13,6 +13,7 @@
 //! - [`semver`]          —— 内核版本比较（比较 rc 前缀等 dsh 特有形态）
 
 pub mod crash_loop;
+pub mod job_object;
 pub mod port;
 pub mod ready_line;
 pub mod semver;

@@ -1,6 +1,6 @@
 [package]
 name = "dsh-tauri-app"
-description = "DSH Desktop Tauri 装配根：窗口壳 + 桥 command 注册（Phase 0 = PoC-A/B 载体）"
+description = "DSH Desktop Tauri 装配根：窗口壳 + 内核 supervisor + 桥 command 全量注册"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,13 +10,17 @@ authors.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-notification = "2"
+tauri-plugin-updater = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 bridge = { path = "../../crates/bridge" }
 kernel-process = { path = "../../crates/kernel-process" }
 preview-server = { path = "../../crates/preview-server" }
 shell-core = { path = "../../crates/shell-core" }
+fence = { path = "../../crates/fence" }
+session-watcher = { path = "../../crates/session-watcher" }
 
 [features]
 default = []

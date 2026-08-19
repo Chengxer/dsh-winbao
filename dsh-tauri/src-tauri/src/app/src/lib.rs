@@ -1,256 +1,378 @@
-//! # dsh-tauri-app —— 装配根（Phase 0：PoC-A/B 载体）
+//! # dsh-tauri-app —— 装配根
 //!
-//! 只做接线（#121「main 仅接线」原则）：窗口壳 + 桥 command 注册 + PoC 页托管。
-//! 业务逻辑全部在 crates/。
+//! 只做接线（#121「main 仅接线」原则）：
+//! 状态装配 → 主窗（loading）→ supervisor 事件路由（就绪换页/崩溃恢复页/托盘通知）
+//! → 桥 command 全量注册 → 托盘 → 退出清理（同步杀树）。
+//!
+//! 业务逻辑全部在 crates/ 与 sidecar/。
 //!
 //! 运行形态：
-//! - 默认：preview-server 托管 PoC 页（http://127.0.0.1:<port>/poc.html），
-//!   主窗 `decorations:false` + 注入 `bridge::BRIDGE_SHIM_JS`
-//!   → **PoC-A（远程页桥注入）+ PoC-B（自绘标题栏）**；
-//! - `DSH_KERNEL_URL=http://127.0.0.1:<port>`：主窗直连内核
-//!   （配合 `cargo run -p poc-sidecar-spawn` 拉起的实例）。
-//!
-//! Phase 0 已注册的 command 见各函数文档；未注册的契约 command（插件管理/诊断/
-//! 备份等）由垫片统一报「command not found」——阶段划分见 contracts/ipc-commands.md。
+//! - 默认：loading 页 → sidecar boot → 内核拉起 → 就绪换页到内核 Web UI；
+//! - `DSH_TAURI_POC=1`：PoC 回归模式（不拉内核，加载 PoC 页，Phase 0 验收复用）。
 
+mod commands;
+mod pages;
 mod poc_page;
+mod supervisor;
+mod windows;
 
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use bridge::{BridgeError, BRIDGE_SHIM_JS};
-use tauri::{Emitter, Manager, WebviewUrl};
+use supervisor::{Supervisor, SupervisorEvent};
+use tauri::{Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 
-/// tauri::Error → BridgeError（bridge crate 不依赖 tauri，转换放装配层）。
-fn terr(e: tauri::Error) -> BridgeError {
-    BridgeError::internal(e.to_string())
+/// supervisor 的共享句柄。
+pub type SupervisorHandle = Arc<Supervisor>;
+
+/// 桥侧运行时状态。
+pub struct AppState {
+    pub supervisor: Mutex<Option<SupervisorHandle>>,
+    pub loading_url: Mutex<String>,
+    pub recovery_url: Mutex<String>,
+    pub heartbeats: AtomicU32,
+    pub page_errors: AtomicU32,
+    pub current_session: Mutex<Option<String>>,
+    pub last_port: AtomicU32,
+    pub paths: shell_core::DshPaths,
+    /// supervisor 事件通道（restart_service 复用，保证换页/恢复页路由不断链）。
+    pub supervisor_tx: Mutex<Option<std::sync::mpsc::Sender<SupervisorEvent>>>,
 }
 
-/// 桥侧运行时状态（Phase 1 移入专门 crate；Phase 0 先做计数观测）。
-#[derive(Default)]
-struct BridgeState {
-    heartbeats: AtomicU32,
-    page_errors: AtomicU32,
-    current_session: Mutex<Option<String>>,
+impl AppState {
+    fn empty() -> Self {
+        Self {
+            supervisor: Mutex::new(None),
+            loading_url: Mutex::new(String::new()),
+            recovery_url: Mutex::new(String::new()),
+            heartbeats: AtomicU32::new(0),
+            page_errors: AtomicU32::new(0),
+            current_session: Mutex::new(None),
+            last_port: AtomicU32::new(0),
+            paths: shell_core::DshPaths::resolve(),
+            supervisor_tx: Mutex::new(None),
+        }
+    }
 }
+
+/// 保存主窗状态（窗口关闭回调用——shell-core 的 settings 持久化）。
+pub fn save_window_state(state: &AppState, (x, y, w, h, maxed): (i32, i32, f64, f64, bool)) -> Result<(), bridge::BridgeError> {
+    let store = shell_core::SettingsStore::new(state.paths.settings.clone());
+    store
+        .set("windowState", serde_json::json!({ "x": x, "y": y, "w": w, "h": h, "maximized": maxed }))
+        .map_err(|e| bridge::BridgeError::internal(e.0))
+}
+
+fn load_window_state(state: &AppState) -> Option<(i32, i32, f64, f64, bool)> {
+    let store = shell_core::SettingsStore::new(state.paths.settings.clone());
+    let v = store.get("windowState").ok()??;
+    let (x, y, w, h) = (
+        v.get("x")?.as_i64()? as i32,
+        v.get("y")?.as_i64()? as i32,
+        v.get("w")?.as_f64()?,
+        v.get("h")?.as_f64()?,
+    );
+    // 合理性钳制（防坏数据把窗口甩出屏幕）。
+    if !(200.0..=16384.0).contains(&w) || !(120.0..=16384.0).contains(&h) || x.abs() > 32_000 || y.abs() > 32_000 {
+        return None;
+    }
+    Some((x, y, w, h, v.get("maximized").and_then(|m| m.as_bool()).unwrap_or(false)))
+}
+
+/// 进程级单实例锁（退出时 Drop 删锁文件；强杀残留由陈锁回收逻辑兜底）。
+static INSTANCE_LOCK: std::sync::Mutex<Option<shell_core::SingleInstanceGuard>> = std::sync::Mutex::new(None);
 
 pub fn run() {
     tauri::Builder::default()
-        .manage(BridgeState::default())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            setup_main_window(app)?;
+            setup(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            app_init, window_control, menu_action, copy_text, open_external, page_error,
-            renderer_heartbeat, current_session, restart_service, echo_json,
+            // Phase 1
+            commands::app_init,
+            commands::window_control,
+            commands::menu_action,
+            commands::copy_text,
+            commands::open_external,
+            commands::file_open,
+            commands::page_error,
+            commands::renderer_heartbeat,
+            commands::current_session,
+            commands::restart_service,
+            commands::recovery_state,
+            commands::recovery_reload,
+            commands::recovery_restart,
+            commands::recovery_open_logs,
+            commands::sponsor_window,
+            commands::float_window,
+            commands::float_close,
+            // Phase 2
+            commands::plugin_list,
+            commands::plugin_set_enabled,
+            commands::plugin_uninstall,
+            commands::plugin_restore,
+            commands::plugin_check_updates,
+            commands::plugin_update,
+            // Phase 3
+            commands::file_revert,
+            commands::image_paste_save,
+            commands::balance_refresh,
+            commands::diag_run,
+            commands::diag_export,
+            commands::diag_validate,
+            commands::diag_order,
+            commands::diag_order_apply,
+            commands::diag_remove_bundle,
+            commands::backup_export,
+            commands::backup_restore,
+            commands::wsl_config_get,
+            commands::wsl_config_save,
+            commands::wsl_recheck,
+            commands::pet_window,
+            commands::pet_close,
+            commands::pet_move_to,
+            commands::pet_set_auto_open,
+            commands::sponsor_qr,
+            // PoC 工具（非契约成员）
+            commands::poc_echo_json,
         ])
-        .run(tauri::generate_context!())
-        .expect("tauri 运行失败");
+        .build(tauri::generate_context!())
+        .expect("tauri 构建")
+        .run(|app, event| {
+            match event {
+                tauri::RunEvent::ExitRequested { .. } => {
+                    if let Some(state) = app.try_state::<AppState>() {
+                        if let Some(sv) = state.supervisor.lock().unwrap().clone() {
+                            sv.shutdown();
+                        }
+                    }
+                }
+                tauri::RunEvent::Exit => {
+                    // std::process::exit 不跑 Drop：锁与内核树在此显式收尾
+                    //（Review#2：exit(0) 后锁残留实测）。
+                    if let Some(state) = app.try_state::<AppState>() {
+                        if let Some(sv) = state.supervisor.lock().unwrap().clone() {
+                            sv.shutdown();
+                        }
+                    }
+                    if let Some(mut g) = INSTANCE_LOCK.lock().unwrap().take() {
+                        g.release();
+                    }
+                }
+                _ => {}
+            }
+        });
 }
 
-/// 创建主窗：自绘标题栏（decorations:false）+ 垫片注入（PoC-A + PoC-B）。
-fn setup_main_window(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let url = resolve_page_url()?;
-    println!("[app] 主窗加载：{url}");
+fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    // ---- 静态页（loading / recovery / poc）经 preview-server 托管 ----
+    let state = AppState::empty();
+    let dir = std::env::temp_dir().join(format!("dsh-tauri-pages-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("loading.html"), pages::LOADING_HTML)?;
+    std::fs::write(dir.join("recovery.html"), pages::RECOVERY_HTML)?;
+    std::fs::write(dir.join("poc.html"), poc_page::POC_PAGE_HTML)?;
+    let srv = preview_server::PreviewServer::start(&dir)?;
+    let loading_url = srv.url("loading.html");
+    let recovery_url = srv.url("recovery.html");
+    *state.loading_url.lock().unwrap() = loading_url.clone();
+    *state.recovery_url.lock().unwrap() = recovery_url.clone();
+    std::mem::forget(srv);
 
-    let win = tauri::webview::WebviewWindowBuilder::new(
-        app,
-        "main",
-        WebviewUrl::External(url.parse::<tauri::Url>()?),
-    )
-    .title("DSH Desktop")
-    .inner_size(1280.0, 820.0)
-    .min_inner_size(980.0, 600.0)
-    .decorations(false) // PoC-B：自绘标题栏（36px，页面内 data-tauri-drag-region）
-    .initialization_script(BRIDGE_SHIM_JS) // PoC-A：远程页垫片注入
-    .build()?;
+    // ---- 单实例锁 ----
+    let paths = shell_core::DshPaths::resolve();
+    let guard = shell_core::SingleInstanceGuard::acquire(paths.app_data.join("single-instance.lock"))
+        .map_err(|_| "DSH Desktop 已在运行")?;
+    *INSTANCE_LOCK.lock().unwrap() = Some(guard);
 
-    // 最大化变化 → 桥事件 window-maximized（bridge-api.md §2.2#17）。
-    let handle = app.handle().clone();
-    let _guard = win.on_window_event(move |e| {
-        if matches!(e, tauri::WindowEvent::Resized(_)) {
-            if let Some(w) = handle.get_webview_window("main") {
-                if let Ok(max) = w.is_maximized() {
-                    let _ = handle.emit("window-maximized", max);
-                }
-            }
+    // ---- 主窗 ----
+    let poc_mode = std::env::var("DSH_TAURI_POC").ok().as_deref() == Some("1");
+    let saved = load_window_state(&state);
+    let initial_url = if poc_mode {
+        loading_url.replace("loading.html", "poc.html")
+    } else {
+        loading_url.clone()
+    };
+    windows::create_main_window(app.handle(), &initial_url, saved)?;
+
+    // ---- supervisor（PoC 模式不起内核）----
+    let supervisor = Arc::new(Supervisor::new(&find_repo_root()?));
+    *state.supervisor.lock().unwrap() = Some(Arc::clone(&supervisor));
+    app.manage(state);
+
+    if !poc_mode {
+        let preferred = load_preferred_port(app.handle());
+        let (tx, rx) = std::sync::mpsc::channel::<SupervisorEvent>();
+        if let Some(st) = app.try_state::<AppState>() {
+            *st.supervisor_tx.lock().unwrap() = Some(tx.clone());
         }
-    });
+        supervisor.spawn_boot(tx, preferred);
+        let handle = app.handle().clone();
+        std::thread::spawn(move || route_events(handle, rx));
+    }
+
+    setup_tray(app.handle())?;
     Ok(())
 }
 
-/// 主窗 URL：`DSH_KERNEL_URL`（仅限 127.0.0.1 origin）优先；否则 PoC 页。
-fn resolve_page_url() -> Result<String, Box<dyn std::error::Error>> {
-    if let Ok(u) = std::env::var("DSH_KERNEL_URL") {
-        if u.starts_with("http://127.0.0.1") || u.starts_with("https://127.0.0.1") {
-            return Ok(u);
-        }
-        return Err(format!("DSH_KERNEL_URL 仅允许 127.0.0.1 origin，得到 {u}").into());
-    }
-    // PoC 页写临时目录，preview-server 托管：远程 http 页，与内核 Web UI 同形态
-    // （IPC 链路验证的逼真度即来自于此）。
-    let dir = std::env::temp_dir().join(format!("dsh-tauri-poc-{}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("poc.html"), poc_page::POC_PAGE_HTML)?;
-    let srv = preview_server::PreviewServer::start(&dir)?;
-    let url = srv.url("poc.html");
-    std::mem::forget(srv); // 进程生命周期托管（Phase 1 做优雅关停）
-    Ok(url)
-}
-
-// ---------------------------------------------------------------------------
-// 桥 command（Phase 0 子集；签名对齐 contracts/ipc-commands.md §2.1）
-// ---------------------------------------------------------------------------
-
-/// `chrome:init` → 应用信息（bridge-api.md #1/#2）。同时广播一次余额事件，
-/// 供 PoC 页验证「主进程 → 远程页」事件链路（监听须先于本调用注册）。
-#[tauri::command]
-fn app_init(app: tauri::AppHandle) -> Result<serde_json::Value, BridgeError> {
-    let info = serde_json::json!({
-        "appVersion": env!("CARGO_PKG_VERSION"),
-        "phase": 0,
-        "shell": "tauri",
-        "kernel": "未随 Phase 0 app 拉起（用 cargo run -p poc-sidecar-spawn 验证）",
-        "platform": std::env::consts::OS,
-    });
-    let _ = app.emit("balance-changed", serde_json::json!({ "source": "poc", "ts": now_ms() }));
-    Ok(info)
-}
-
-/// `chrome:window` → 窗口控制（bridge-api.md §2.2）。
-#[tauri::command]
-fn window_control(window: tauri::WebviewWindow, action: String) -> Result<serde_json::Value, BridgeError> {
-    match action.as_str() {
-        "minimize" => window.minimize().map_err(terr)?,
-        "toggle-maximize" => {
-            let maxed = window.is_maximized().map_err(terr)?;
-            if maxed {
-                window.unmaximize().map_err(terr)?;
-            } else {
-                window.maximize().map_err(terr)?;
+/// supervisor 事件路由：换页 / 恢复页 / 通知 / 端口记忆。
+fn route_events(app: tauri::AppHandle, rx: std::sync::mpsc::Receiver<SupervisorEvent>) {
+    while let Ok(ev) = rx.recv() {
+        match ev {
+            SupervisorEvent::BootStep { name, ok, ms, error } => {
+                let _ = app.emit("boot-step", serde_json::json!({ "name": name, "ok": ok, "ms": ms, "error": error }));
             }
+            SupervisorEvent::KernelReady { url, port } => {
+                let _ = app.emit("kernel-ready", serde_json::json!({ "url": url }));
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.last_port.store(port as u32, Ordering::Relaxed);
+                    // 端口稳定化记忆（下次启动优先复用 → origin 稳定 → localStorage 偏好不丢）。
+                    let store = shell_core::SettingsStore::new(state.paths.settings.clone());
+                    let _ = store.set("lastWebPort", serde_json::json!(port));
+                }
+                let _ = commands::navigate_main(&app, &url);
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+            SupervisorEvent::KernelExit { code, .. } => {
+                eprintln!("[route] 内核退出 code={code:?}");
+            }
+            SupervisorEvent::CrashLoop { .. } => {
+                let _ = app.emit("kernel-fail", serde_json::json!({ "reason": "内核反复异常退出" }));
+                if let Some(state) = app.try_state::<AppState>() {
+                    let recovery = state.recovery_url.lock().unwrap().clone();
+                    let _ = commands::navigate_main(&app, &recovery);
+                }
+                let _ = app.notification().builder()
+                    .title("DSH Desktop")
+                    .body("内核服务反复异常退出，已进入恢复模式")
+                    .show();
+            }
+            SupervisorEvent::ProbeFailed { consecutive } => {
+                eprintln!("[route] 探活失败 ×{consecutive}");
+            }
+            SupervisorEvent::StateChanged(_) => {}
         }
-        "close" => window.close().map_err(terr)?,
-        "is-maximized" => {
-            return Ok(serde_json::json!(window.is_maximized().map_err(terr)?));
-        }
-        other => return Err(BridgeError::invalid_arg(format!("未知窗口动作：{other}"))),
     }
-    Ok(serde_json::Value::Null)
 }
 
-/// `chrome:menu` → 菜单动作（bridge-api.md §2.3）。
-/// `check-agent-update` 已裁撤（垫片层拦截 E_CUT_FEATURE；此处兜底）。
-#[tauri::command]
-fn menu_action(action: String, payload: Option<serde_json::Value>) -> Result<serde_json::Value, BridgeError> {
-    match action.as_str() {
-        "open-logs" => {
-            let dir = shell_core::DshPaths::resolve().logs;
-            let _ = std::fs::create_dir_all(&dir);
-            open_in_explorer(&dir)?;
-            Ok(serde_json::Value::Null)
+fn load_preferred_port(app: &tauri::AppHandle) -> Option<u16> {
+    let state = app.try_state::<AppState>()?;
+    let store = shell_core::SettingsStore::new(state.paths.settings.clone());
+    store.get("lastWebPort").ok()?.and_then(|v| v.as_u64()).and_then(|p| u16::try_from(p).ok())
+}
+
+fn find_repo_root() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    // 开发态：manifest 向上找 dsh-desktop/vendor/node。
+    let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for _ in 0..6 {
+        if dir.join("dsh-desktop").join("vendor").join("node").exists() {
+            return Ok(dir);
         }
-        "open-browser" => {
-            let url = payload
-                .and_then(|p| p.get("url").and_then(|v| v.as_str()).map(String::from))
-                .unwrap_or_else(|| "http://127.0.0.1".into());
-            open_http_url(&url)
+        if !dir.pop() {
+            break;
         }
-        "check-agent-update" => Err(BridgeError::cut("内核自动更新已在 Tauri 版移除（随客户端发版升级）")),
-        "check-client-update" => Err(BridgeError::internal("Phase 4：接 tauri-plugin-updater（minisign 签名校验）")),
-        other => Err(BridgeError::invalid_arg(format!("未知菜单动作：{other}"))),
     }
+    Err("未找到仓库根（dsh-desktop/vendor/node）".into())
 }
 
-/// `dsh:copy-text` → Phase 1 接 tauri-plugin-clipboard-manager。
-#[tauri::command]
-fn copy_text(text: String) -> Result<serde_json::Value, BridgeError> {
-    let _ = text;
-    Err(BridgeError::internal("Phase 1：接 tauri-plugin-clipboard-manager 后启用"))
+/// 托盘：显示主窗 / 打开日志 / 退出（退出前同步杀树）。
+fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let menu = tauri::menu::MenuBuilder::new(app)
+        .text("show", "显示主窗口")
+        .text("logs", "打开日志")
+        .separator()
+        .text("quit", "退出")
+        .build()?;
+    let tray = tauri::tray::TrayIconBuilder::with_id("main-tray")
+        .icon(app.default_window_icon().cloned().ok_or("无应用图标")?)
+        .tooltip("DSH Desktop")
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, ev| match ev.id().as_ref() {
+            "show" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+            "logs" => {
+                let dir = shell_core::DshPaths::resolve().logs;
+                let _ = std::fs::create_dir_all(&dir);
+                #[cfg(windows)]
+                let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+            }
+            "quit" => {
+                if let Some(state) = app.try_state::<AppState>() {
+                    if let Some(sv) = state.supervisor.lock().unwrap().clone() {
+                        sv.shutdown();
+                    }
+                }
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .build(app)?;
+    // 托盘生命周期：随进程退出回收；Drop 会摘图标，进程内需常驻 → forget。
+    std::mem::forget(tray);
+    Ok(())
 }
 
-/// `dsh:open-external` → 系统默认浏览器（仅 http/https）。
-#[tauri::command]
-fn open_external(url: String) -> Result<serde_json::Value, BridgeError> {
-    open_http_url(&url)
-}
-
-/// `dsh:page-error`（fire-and-forget）→ 计数 + 日志。
-#[tauri::command]
-fn page_error(state: tauri::State<BridgeState>, message: String) -> Result<serde_json::Value, BridgeError> {
-    let n = state.page_errors.fetch_add(1, Ordering::Relaxed) + 1;
-    eprintln!("[page-error #{n}] {message}");
-    Ok(serde_json::Value::Null)
-}
-
-/// `dsh:renderer-heartbeat`（fire-and-forget）→ 计数。
-#[tauri::command]
-fn renderer_heartbeat(state: tauri::State<BridgeState>) -> Result<serde_json::Value, BridgeError> {
-    state.heartbeats.fetch_add(1, Ordering::Relaxed);
-    Ok(serde_json::Value::Null)
-}
-
-/// `dsh:current-session`（fire-and-forget）→ 当前会话跟踪（session-watcher 语义）。
-#[tauri::command]
-fn current_session(state: tauri::State<BridgeState>, session_id: String) -> Result<serde_json::Value, BridgeError> {
-    let id = session_id.trim().to_string();
-    if id.is_empty() || id.len() > 256 {
-        return Err(BridgeError::invalid_arg("sessionId 为空或超长"));
-    }
-    *state.current_session.lock().unwrap() = Some(id);
-    Ok(serde_json::Value::Null)
-}
-
-/// `chrome:restart-service` → Phase 1（kernel-process supervisor 接入后启用）。
-#[tauri::command]
-fn restart_service() -> Result<serde_json::Value, BridgeError> {
-    Err(BridgeError::internal("Phase 1：kernel-process supervisor 接入后启用"))
-}
-
-/// PoC 专用：JSON 回显（验证参数序列化双向通路）。非契约成员。
-#[tauri::command]
-fn echo_json(payload: serde_json::Value) -> Result<serde_json::Value, BridgeError> {
-    Ok(payload)
-}
 
 // ---------------------------------------------------------------------------
-// OS 小工具（不引插件依赖的最小实现）
+// Review #1 固化：注册命令面 vs 契约映射表的机器核对（防漂移）
 // ---------------------------------------------------------------------------
 
-fn open_http_url(url: &str) -> Result<serde_json::Value, BridgeError> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err(BridgeError::invalid_arg(format!("仅允许 http/https：{url}")));
-    }
-    #[cfg(windows)]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()
-            .map_err(BridgeError::from)?;
-    }
-    #[cfg(not(windows))]
-    {
-        std::process::Command::new("xdg-open").arg(url).spawn().map_err(terr)?;
-    }
-    Ok(serde_json::Value::Null)
-}
+#[cfg(test)]
+mod contract_audit {
+    use bridge::commands::CHANNELS;
 
-fn open_in_explorer(dir: &std::path::Path) -> Result<serde_json::Value, BridgeError> {
-    #[cfg(windows)]
-    {
-        std::process::Command::new("explorer").arg(dir).spawn().map_err(BridgeError::from)?;
+    /// 从 lib.rs 源码提取 invoke_handler 注册的命令（`commands::name` 形态）。
+    fn registered() -> Vec<&'static str> {
+        let src = include_str!("lib.rs");
+        let segment = src
+            .split("generate_handler![")
+            .nth(1)
+            .and_then(|s| s.split(']').next())
+            .expect("invoke_handler 段");
+        segment
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter_map(|tok| tok.trim().strip_prefix("commands::"))
+            .map(|name| name.trim())
+            .filter(|n| !n.is_empty())
+            .collect()
     }
-    #[cfg(not(windows))]
-    {
-        eprintln!("[app] open logs dir: {}", dir.display());
-    }
-    Ok(serde_json::Value::Null)
-}
 
-fn now_ms() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
+    #[test]
+    fn every_uncut_contract_command_is_registered() {
+        let reg = registered();
+        for c in CHANNELS.iter().filter(|c| !c.cut) {
+            assert!(
+                reg.contains(&c.tauri) || c.tauri == "guard_action",
+                "契约命令未注册: {}（{}）",
+                c.tauri,
+                c.electron
+            );
+        }
+    }
+
+    #[test]
+    fn no_extra_commands_beyond_contract_and_poc() {
+        let known: Vec<&str> = CHANNELS.iter().map(|c| c.tauri).chain(["poc_echo_json"]).collect();
+        for r in registered() {
+            assert!(known.contains(&r), "注册了契约外命令: {r}（需入契约或移除）");
+        }
+    }
+
+    #[test]
+    fn cut_channel_not_registered() {
+        let reg = registered();
+        assert!(!reg.contains(&"guard_action"), "裁撤命令不得注册");
+    }
 }

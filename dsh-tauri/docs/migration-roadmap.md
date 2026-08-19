@@ -3,8 +3,8 @@
 > 分支 `tauri/modular`（自 main 切出）。Electron 线（`dsh-desktop/`）零改动，
 > main / kernel/dsh-rc8 照常演进；回退 = 弃分支。
 >
-> 架构决策与契约见 `contracts/`（bridge-api / ipc-commands / data-flow /
-> plugin-contract / error-codes）。本文件回答「什么时候做什么、怎么验收」。
+> **状态（2026-08-19）：Phase 0-4 已全量实装并通过两遍 review**（功能/契约对照 +
+> 安全/边界/并发）。证据链与已知限制见 `../CHANGELOG.md`。
 
 ## 总架构（一句话）
 
@@ -67,6 +67,24 @@ Rust 壳（7 个单向依赖的 crate）+ Node sidecar（复用 `dsh-desktop/scr
 | PoC-B 自绘标题栏 | 36px 拖拽 + min/max/close 可用（PoC 页手动项） |
 | PoC-C sidecar spawn | `cargo run -p poc-sidecar-spawn`：真实拉起仓库内 rc.8 内核，就绪行解析成功，进程树终结 |
 | 本文档 | D1/D2 决策与分期落地 |
+
+
+## 实装状态总览（2026-08-19，Phase 0-4 完成后）
+
+| Phase | 计划 | 状态 |
+|-------|------|------|
+| 0 骨架+契约+PoC | 见下表 | ✅ 全过（PoC-C 5.6s / PoC-A+B 10 项） |
+| 1 核心生命周期 | supervisor / 换页 / 恢复页 / 窗口记忆 / 导航围栏 | ✅ 实装实测（端到端截图 + 端口稳定化 63283 两轮一致） |
+| 2 sidecar 全链路 | boot 时序 / 插件六通道 / 探活 | ✅ 实装实测（boot 3.2s、37 插件、set-enabled 可逆往返） |
+| 3 周边窗与诊断 | 托盘 / 通知 / 浮窗 / 宠物窗 / fence / WSL 简版 | ✅ 实装（宠物窗透明窗为本机未单独截图项；WSL 为配置+探活简版，完整托管待后续） |
+| 4 打包与分发 | bundle 配置 / updater / 卸载策略 | ✅ 配置与代码就绪（出包需 tauri-cli+密钥，流程 docs/release-keys.md） |
+| Review ×2 | 功能契约 + 安全边界 | ✅ 修 7 项真缺陷（file_open 漂移 / cmd 注入 / sidecar 竞写 / 单实例死锁 / 强杀孤儿内核 等，详见 CHANGELOG） |
+
+### 遗留细目（不阻塞日用，按需迭代）
+- image_paste_save（剪贴板位图）→ E_NOT_IMPLEMENTED
+- 备份/诊断导出的系统对话框 → 接 tauri-plugin-dialog（当前固定目录）
+- WSL 完整托管（wsl-backend.js 复用）
+- 正式出包 + latest.json CI 链
 
 ## Phase 1 —— 核心生命周期（app 可日用替代 loading 页）
 

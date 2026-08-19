@@ -1,9 +1,17 @@
 [package]
 name = "kernel-process"
-description = "DSH 内核进程保姆：spawn 规格 / 就绪行解析 / 崩溃环 / 端口选择"
+description = "DSH 内核进程保姆：spawn 规格 / 就绪行解析 / 崩溃环 / 端口选择 / Job Object 杀树"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
 [dependencies]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

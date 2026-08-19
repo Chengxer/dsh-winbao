@@ -161,10 +161,10 @@ pub const POC_PAGE_HTML: &str = r#"<!doctype html>
       done('A7 check-agent-update 裁撤', msg.indexOf('E_CUT_FEATURE') >= 0, msg);
     }
 
-    // A8 未注册 command 的错误形态（Phase 2 command 举例）
+    // A8 未注册 command 的错误形态（用一个保证不存在的命令名）
     var a8 = add('A8 未注册 command 报错形态');
-    try { await B.pluginManager.list(); done('A8 未注册 command 报错形态', false, '不应成功'); }
-    catch (e) { done('A8 未注册 command 报错形态', true, String(e.message || e)); }
+    try { await window.__TAURI_INTERNALS__.invoke('definitely_not_a_command', {}); done('A8 未注册 command 报错形态', false, '不应成功'); }
+    catch (e) { done('A8 未注册 command 报错形态', true, String(e.message || e).slice(0, 80)); }
 
     // A9 参数序列化双向（echo）
     var a9 = add('A9 参数序列化（echo_json）');
