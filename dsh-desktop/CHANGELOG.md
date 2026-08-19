@@ -3,8 +3,17 @@
 DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行时与 dsh CLI，
 一键启动 Web UI。
 
-## [Unreleased]
+## [0.4.0] — 2026-08-19
+
+### 新增
+- **Quest 模式界面（dsh-quest-ui，默认关闭）**：全新 Qoder Quest 风格视觉重设计——输入区与画布彻底融合（去白底、去圆角、下栏拉高）、底部一体化（去胶囊 CSS / 幽灵按钮 / 余额同层 / 聚焦顶线）、全开布局（去胶囊 / 卡占满下栏 / 部件贴缘压底）。设置页弹窗重设计，聚焦线加浓加粗 + 编辑钮隐藏 + 临时会话移右上角 + 面板降噪。左侧栏启动时强制展开。多轮迭代至 v0.5.4：synapse 会话地图适配双 UI 通用 + 输入区底部一体化
+- **内置 dsh-synapse 会话地图插件（vendored，MIT）**：可视化会话关系图谱，快速跳转关联会话，随包分发并自动装配
+- **内置 Agent 预设保护（更新不再覆盖用户改过的 `assets/agent-presets`）**：用户直接修改安装目录内置预设后，客户端更新（NSIS/portable 覆盖安装）会整体替换 `resources/app` 把改动冲掉。现更新安装前把「用户改过」的文件快照到 `userData/preset-guard/backup`（覆盖安装不触碰 userData），新版本首次启动自动恢复（官方改过同一文件时用户版优先）；基线按版本管理（`preset-guard/baseline.json` 记逐文件 sha256），官方改动与用户改动始终可区分，下一轮更新仍能正确检测。更新未实际发生时快照自动丢弃。新增 `scripts/lib/preset-guard.js` 纯函数模块 + 9 项单测
+- **手机远程控制（DSH-Mobile v1.4.2）**：随包分发手机端 APK，「远程控制」按钮一键连接，支持外网穿透 + P0 同步修复 + 安全加固
+- **macOS 无签名构建 Gatekeeper 指引与配置显式化**：未签名 / ad-hoc 签名构建首次启动若提示「已损坏，无法打开」，README 与 troubleshooting.md 提供修复指引（`sudo xattr -cr` → codesign 重签 → 右键打开 → 终端直启取证）；构建配置显式关闭 `gatekeeperAssess` 与 `hardenedRuntime`（无 Developer ID 的包无意义，消除误导性警告）
+
 ### 修复
+- **自定义卸载器升级链路根治（2026-08 数据丢失事故修复）**：electron-builder 的 `uninstallOldVersion` 宏把注册表里旧的 `UninstallString` 指向的卸载器拷到临时目录执行 `old-uninstaller.exe /S /KEEP_APP_DATA --updated`，旧版自定义卸载器不识别这两个升级契约参数，静默模式下默认全删用户数据（sessions / settings / credentials 等全部丢失）。双层根治：① **卸载器侧**：识别 `/KEEP_APP_DATA`、`--updated`、`/updated`、`--upgrade` 等升级意图参数 → 等价 `/KeepAll` 保留全部用户数据；静默模式安全契约——无升级标记且无显式 `/FullWipe` 时拒绝删除用户数据直接退出；Roaming 目录（`%APPDATA%\DSH Desktop`，含 logs / settings.json / window-state）在保留应用设置或其他用户数据时不再删除；UAC 提权子进程在静默模式下 `WaitForExit` 等待完成，避免安装器与子进程并发删文件。② **安装器侧**（`installer.nsh` `customInit` 宏）：`.onInit` 阶段（早于 install section 的 `uninstallOldVersion`）抢先把旧安装目录里的 `Uninstall_DSH_Desktop.exe` 覆盖为本安装包自带的修复版——即使存量用户机器上仍是旧坏卸载器，升级安装时实际执行的也已是修复版。InstallLocation 缺失时回退解析 `UninstallString`（含引号剥离 + 文件名校验），覆盖路径万无一失。经实机演练验证：编译旧版坏卸载器 → 布置数据标记 → 静默覆盖安装新包 → 标记文件存活 / settings.yaml 完整 / Roaming 数据保留 / 卸载器被自动替换
 - **余额显示链路整体加固（架构重构而非补丁）**：本轮费用计算、余额查询、编排推送全链路系统性修复 21 处缺陷（2 严重 / 3 高 / 8 中 / 8 低），全部按「整体架构改进」落地：
   - **本轮费用输入项恒为 0（严重，OpenAI 兼容端点）**：`sessionCost` 的 `uncachedInputTokens + cacheWriteTokens` 求和先于 `||0` 守卫求值，openai-compat 适配器产出 `inputTokens` 形态且不产出 `cacheWriteTokens`，两处契约不匹配 → `undefined+undefined=NaN→0`，所有 one-api/SiliconFlow/Ollama 端点本轮费用只剩 cacheRead+output 计费。根治：① 客户端新增 `normalizeUsage` 归一化（投影/透传两种形态统一四桶、每操作数独立守卫）；② `openai-compat.js` 的 `mapUsage` 对齐 harness DISJOINT 契约（`inputTokens = prompt − cacheRead − cacheWrite`，缓存写单列、兼容多种 provider 字段命名）并附带 `model` 字段。
   - **重定向无条件携带 Authorization 泄露 API Key（严重，安全）**：`fetchJson` 跟随 3xx 时把密钥原样转发到新 URL，跨主机或 https→http 降级时计费凭证被发往非预期主机。根治：首跳（用户显式配置的端点）始终携带密钥；重定向跳仅「同主机且全程 https」保留，其余剥离并经 `warning` 显式告警。
@@ -56,6 +65,26 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
   - **防砖体检 manifest 读取失败假绿（#99）**：`desktop-validity.js` 的 `validatePlugins` 用 `catch {}` 静默吞掉 profile `package.json` 读取/解析失败——启动清单读不到时清单内缺陷全部降级为 warning，体检返回「未发现问题」（假绿）。现显式记录 `manifestError`、总结论判定失败（含 `dsh.profile.bundles` 字段存在但非数组的结构损坏变体；字段缺失仍视为合法空清单），设置页体检区红字提示「无法读取启动清单，体检结果不可信」，4 种情形回归测试（缺失/损坏 JSON/bundles 非数组/正常）；
   - **补丁条目 id 负向断言漏掉行内空白（#100）**：`togglePluginInPatch` 的条目定位负向断言 `(?![A-Za-z0-9_.-])` 对行内空格放行——非标 id `- id: foo bar` 会被 `toggle('foo')` 命中误加 disabled（insert 内层更会被整条误删）。负向断言加入空格/tab（只排除行内空白，不排除 `\n`——排除换行会让所有既有条目匹配不上退化为重复新建），3 项回归测试；
   - **行注释内引号吞代码（#75 补强）**：剥离器此前不处理 `//` 行注释，注释内的引号会被当字符串起始吞掉后续代码（漏报比误报更危险）。现行注释整体涂白到行尾（保留换行），8 场景探测全过。
+- **主窗口位置记忆（重启后回到用户放置的位置）**：主窗口关闭时持久化屏幕坐标与尺寸，下次启动恢复到用户上次放置的位置（跨屏校验 + 钳制回可视区），不再每次居中
+- **会话删除守卫改为实时查询运行状态**：删除非当前会话后补回输入框焦点（修复光标消失仍可输入的边界问题），修复删除后输入锁死与误弹失败提示
+- **清单 id 对齐 loader id 修复双登记崩溃（#104）**：插件清单 id 与 cordis loader id 不一致导致 `duplicate loader entry id` 启动失败，现统一对齐；side-session 升级 v0.3.0
+- **卸载器清理加固（P0-P8）**：自定义卸载器全面加固——进程关闭重试策略、目录删除重试、注册表清理完整性、快捷方式清理全覆盖；dist 脚本自动构建卸载器（`predist` 钩子）；卸载二次确认弹窗防误操作
+- **侧边临时会话透传服务端 error 字段**：模式 1 默认配置报错时正确展示服务端返回的错误信息，而非只显示「HTTP 502」；`deepseek-official` 供应商解析修复
+- **WSL 清理命令双重登录 shell 嵌套与失败清理超时**：WSL 后端清理命令不再嵌套多余的 `cmd /c`，失败清理流程超时兜底
+- **会话持久化容错增强**：进程中断留下的 zstd frame 尾部半截 JSONL 容错处理——只允许最后一个 frame 进入 torn-tail 截断/重放流程，中段损坏继续拒绝，覆盖内置 / profile / agent overlay 三份运行副本
+- **自动更新 null 版本兜底 + keyed slot 注册错误隔离**：版本比较对 null/undefined 安全兜底；keyed slot 注册缺少 key/id 时容忍而非崩溃
+- **打包白名单补齐 plugin-guard 依赖链**：`profile-module-heal.js`、`patch-row-heal.js`、`plugin-guard.js` 纳入四个 electron-builder 配置的 files 清单，防止启动期自愈链路因文件缺失而崩溃
+
+### 优化
+- **启动与运行性能系统性优化**：① 启动冒烟门禁与打包 `require` 完整性校验（`boot:ready` 时序标记 + `bench-baseline.json`）；② 补丁代际签名——签名命中跳过 18 个文件补充；③ koffi 预检异步化——boot 不等待，`startAndShow` 有界等待 3s 决定 overlay；④ SessionWatcher 句柄收敛——仅活跃会话 watch，冷会话复活才 scan；⑤ 会话根索引头部读取替代全目录扫描（TTL 失效增量重扫）；⑥ 非关键功能延后启动——会话监视器/余额轮询延至首屏稳定后 500ms；⑦ 长时内存观测——10 分钟采样后端/渲染 RSS 环形落盘；⑧ 崩溃转储清理增加数量上限（保留最近 5 个 + 最新豁免）；⑨ 无运行中会话时兜底扫描降为 0s；⑩ M3 设置页 observer 导航门控——离开设置页即断开；⑪ settings.yaml 写后校验与自动回写防损坏；⑫ NSIS 显式 lzma 压缩并关闭 solid 字典共享
+- **agent 更新检查去 npm CLI 化**：纯 HTTPS dist-tags/版本探测，不再 spawn npm 子进程，启动更快
+- **客户端更新检查双源并行 + 1h 窗口缓存 + 失败退避**：GitHub + Gitee 同时查询取最高版本，1 小时内不重复检查，失败后指数退避
+- **余额轮询最小化暂停 + 凭证 mtime 缓存 + HTTPS_PROXY 支持**：窗口不可见时暂停轮询，凭证文件未变化时跳过重读，支持系统代理
+- **自更新 SHA256SUMS 强制校验（fail-closed）**：下载完整性校验不通过即拒绝安装，不再静默放行
+- **统一日志轮转（5MB 双代滚动）**：覆盖 desktop/web/watchdog 日志，不再无限增长
+- **LLM 错误落盘与透出**：`llm-errors.jsonl`（5MB 环形缓冲），诊断模型小节可在设置页查看
+- **replayState 降级补丁**：legacy 会话续聊失败回落 foreignAssistant 模式，不再直接报错
+- **页面错误节流 + 图标 memo + 启动超时单常量**：减少渲染进程无效工作
 
 ## [0.3.10] — 2026-08-17
 ### 新增

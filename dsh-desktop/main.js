@@ -5544,7 +5544,7 @@ function applyOpenProjectDirFix() {
   }
 }
 // ---------------------------------------------------------------------------
-// 会话历史尾部恢复补丁：进程中断可能留下一个结构完整的 zstd frame，但其
+// 会话持久化容错补丁：进程中断可能留下一个结构完整的 zstd frame，但其
 // 解压文本以半条 JSONL 结束。只允许最终 frame 进入官方已有的 torn-tail
 // 截断/重放流程；中段损坏继续拒绝。
 // ---------------------------------------------------------------------------
@@ -5554,9 +5554,9 @@ function applySessionPersistenceFix() {
     if (!root || !fs.existsSync(root)) continue;
     try {
       const n = patchSessionPersistence(root, (m) => log('boot', m));
-      if (n > 0) log('boot', '会话历史尾部恢复补丁: 已应用到 ' + root);
+      if (n > 0) log('boot', '会话持久化容错补丁: 已应用到 ' + root);
     } catch (err) {
-      log('boot', '会话历史尾部恢复补丁失败(' + root + '): ' + err.message);
+      log('boot', '会话持久化容错补丁失败(' + root + '): ' + err.message);
     }
   }
 }
