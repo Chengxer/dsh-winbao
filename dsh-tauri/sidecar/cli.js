@@ -88,6 +88,7 @@ function loadModules(appDir) {
     desktopValidity: req('scripts/desktop-validity'),
     updater: req('updater'),
     sessionWatcher: req('session-watcher'),
+    pluginGuard: req('plugin-guard'),
   };
 }
 
@@ -132,6 +133,16 @@ function makeIntegration(mods, { appDir, home, userDataDir }) {
 // 插件管理（逻辑等价迁移自 main.js pluginManager* 内联实现，依赖模块共用）
 // ---------------------------------------------------------------------------
 
+/** 造 plugin-guard 实例（DI 对齐 main.js ensureGuard；纯 Node，electron-free）。 */
+
+function makeGuard(c) {
+  return c.mods.pluginGuard.createGuard({
+    getHome: () => c.home,
+    getProfile: () => 'web',
+    dshBin: () => path.join(c.appDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
+    log: (topic, msg) => process.stderr.write('[' + topic + '] ' + msg + '\n'),
+  });
+}
 function createPluginManager(mods, { appDir, home }) {
   const { COMPANION_PLUGINS } = mods.companionPlugins;
   const { togglePluginInPatch, setPluginRemoved } = mods.pluginManagerPatch;
@@ -794,6 +805,65 @@ async function main() {
         ].join(NL);
         try { fs.writeFileSync(file, content); return emit({ ok: true, path: file, ids: merged }); }
         catch (err) { return emit({ ok: false, error: String(err && err.message || err) }); }
+      }
+      case 'guard-snapshot': {
+        // 启动前快照（GUARD_FILES: package.json/pnpm-lock.yaml/pnpm-workspace.yaml/cordis.patch.yml）。
+        const c = ctx();
+        const reason = rest.find((a) => !a.startsWith('--')) || 'boot';
+        const g = makeGuard(c);
+        const r = g.snapshot(String(reason));
+        return emit(r && r.ok !== false ? { ok: true, id: r.id } : { ok: false });
+      }
+      case 'guard-mark-good': {
+        // 直接落定最后良好（Rust 编排器自持快照 id；guard 的 pendingGood 是实例内存态，
+        // 跨 CLI 进程不可用——改由编排器在稳定期到达时显式 markGood）。
+        const c = ctx();
+        const id = rest.find((x) => !x.startsWith('--'));
+        if (!id) { process.stderr.write('用法: guard-mark-good <id>'); process.exit(2); }
+        makeGuard(c).markGood(String(id));
+        return emit({ ok: true });
+      }
+      case 'guard-health': {
+        const c = ctx();
+        const r = makeGuard(c).healthCheck();
+        return emit({ ok: true, findings: (r && r.findings) || [] });
+      }
+      case 'guard-repair': {
+        // healthCheck + repair 一体（体检发现的可修复项全部应用）。
+        const c = ctx();
+        const g = makeGuard(c);
+        const hc = g.healthCheck();
+        const fixable = (hc.findings || []).filter((f) => f.fixable);
+        const rr = fixable.length ? g.repair(hc.findings) : { applied: [] };
+        return emit({ ok: true, applied: (rr && rr.applied) || [], findings: hc.findings || [] });
+      }
+      case 'guard-lastgood': {
+        const c = ctx();
+        const s = makeGuard(c);
+        const lg = s.lastGoodSnapshot ? s.lastGoodSnapshot() : null;
+        if (!lg) return emit({ ok: false, none: true });
+        return emit({ ok: true, id: lg.id, reason: lg.reason || '' });
+      }
+      case 'guard-restore': {
+        // 回滚到快照（restore 内部先留 pre-restore 快照，反悔有路）。
+        const c = ctx();
+        const id = rest.find((a) => !a.startsWith('--'));
+        if (!id) { process.stderr.write('用法: guard-restore <id>\n'); process.exit(2); }
+        const r = makeGuard(c).restore(String(id));
+        return emit(r);
+      }
+      case 'guard-incident': {
+        // 事故报告（guard/incidents/ 下落盘，恢复页/诊断可引用）。
+        const c = ctx();
+        const positional = rest.filter((a) => !a.startsWith('--'));
+        const kind = positional[0] || 'unknown';
+        const text = positional.slice(1).join(' ');
+        const g = makeGuard(c);
+        if (typeof g.reportIncident === 'function') {
+          const file = g.reportIncident(String(kind), String(text));
+          return emit({ ok: true, file: file || null });
+        }
+        return emit({ ok: false, error: 'guard 无 reportIncident' });
       }
       case 'balance-refresh': {
         // 余额探测：GET <base>/api/... 不可靠（需登录态）——真实实现在 Rust 侧

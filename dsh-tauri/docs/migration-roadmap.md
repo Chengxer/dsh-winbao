@@ -80,6 +80,17 @@ Rust 壳（7 个单向依赖的 crate）+ Node sidecar（复用 `dsh-desktop/scr
 | 4 打包与分发 | bundle 配置 / updater / 卸载策略 | ✅ 配置与代码就绪（出包需 tauri-cli+密钥，流程 docs/release-keys.md） |
 | Review ×2 | 功能契约 + 安全边界 | ✅ 修 7 项真缺陷（file_open 漂移 / cmd 注入 / sidecar 竞写 / 单实例死锁 / 强杀孤儿内核 等，详见 CHANGELOG） |
 
+### 启动稳定性保证（2026-08-20 追加）
+
+| 破坏场景 | 自愈层 | 实证 |
+|----------|--------|------|
+| 伴随插件文件损坏（磁盘坏块/更新中断） | boot 链 sync 重新同步覆盖 | stability_tests ×1 ✓
+| 配置破坏（package.json / patch） | 瀑布二层 repair / 三层 restore 快照回滚 | stability_tests ×1 ✓
+| 第三方插件运行时崩溃 | 崩溃自动重启 + safe-overlay 禁用（dsh-web.log 解析） | 单测 + 逻辑链 ✓
+| 内核反复崩溃 | 崩溃环（60s/5 次）→ 恢复页（重启重走全瀑布） | 单测 ✓
+| 页面白屏/JS 死循环（内核活着） | renderer 心跳监测 → 自动 reload | 实现 + 逻辑链（GUI 场景待真实回归） |
+| 强杀壳进程（孤儿内核） | Job Object KILL_ON_JOB_CLOSE | 实测端口零残留 ✓ |
+
 ### 遗留细目（不阻塞日用，按需迭代）
 - image_paste_save（剪贴板位图）→ E_NOT_IMPLEMENTED
 - 备份/诊断导出的系统对话框 → 接 tauri-plugin-dialog（当前固定目录）

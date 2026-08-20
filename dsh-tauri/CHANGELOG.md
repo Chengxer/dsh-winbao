@@ -71,6 +71,25 @@
   verbatim 恢复 / 裁撤键不删 / roundtrip）+ sidecar 4 测试（koffi/picker 逐行
   一致/safe-overlay 幂等）；端到端实测首启报告双行输出
 
+### 启动稳定性（坏插件也永远能打开 dsh——用户诉求：可用 dsh 第一位）
+- **守护瀑布**（对齐 Electron plugin-guard guardedBoot，经 sidecar 复用零重写）：
+  ```
+  guard-snapshot → 首次拉起(120s) ─成功→ 换页 + 45s 稳定落定为「最后良好」
+        └失败→ 重跑 boot 链（sync 修复 node_modules 损坏——自愈主力）
+              + guard-repair 体检修复 + safe-overlay 禁用坏插件 → 二次拉起(90s)
+                └失败→ 回滚最后良好快照（restore，先留 pre-restore 反悔快照）
+                      + 再清遮蔽 → 三次拉起(90s)
+                        └失败→ 事故报告落盘 + 恢复页（重启全链重走瀑布）
+  ```
+- **renderer 心跳监测**（RendererRecovery 语义）：换页后 60s 宽限，可见主窗
+  连续 ~40s 心跳零增长 → location.reload()（内核活着但页面白屏/JS 死循环兜底）
+- **关键洞察固化**：guard 快照只含 4 个配置文件（GUARD_FILES），node_modules
+  损坏的自愈主力是 boot 链 sync 重新同步——瀑布二层先重跑 sync 再 repair
+- sidecar 新增 guard-* 子命令族（snapshot/mark-good/health/repair/lastgood/
+  restore/incident——薄封装 createGuard，DI 对齐 ensureGuard）
+- **破坏性测试实证**（stability_tests，16s）：伴随插件入口写语法垃圾 → sync
+  覆盖修复 → 照常就绪；package.json 写坏 → 瀑布自愈 → 照常就绪
+
 ### 已知限制（后续迭代）
 - backup-export 2MB 上限为上游 desktop-backup.js 原生行为（与 Electron 版一致）
 - image_paste_save 返回 E_NOT_IMPLEMENTED（剪贴板位图）

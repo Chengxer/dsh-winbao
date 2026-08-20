@@ -19,6 +19,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kernel_process::{choose_stable_port, CrashLoopDetector, ReadyLineParser, SpawnSpec};
 use kernel_process::crash_loop::Verdict;
+/// 稳定落定窗口（Electron SERVICE_STABLE_MS 同语义：就绪后稳定存活此时长，
+/// 启动快照才成为「最后良好」回滚锚点）。
+const SERVICE_STABLE_SECS: u64 = 45;
+
 use shell_core::RunState;
 
 /// supervisor 对外事件（发给装配层，转发给窗口/托盘/日志）。
@@ -57,6 +61,10 @@ struct Inner {
     crash_count: usize,
     /// 注入内核的 --patch overlay 列表（picker 降级 / safe-boot 禁用）。
     overlays: Vec<std::path::PathBuf>,
+    /// 守护瀑布的就绪等待通道（spawn_boot 同步段持有 rx；stdout 线程/退出路径发 tx）。
+    ready_tx: Option<std::sync::mpsc::Sender<Result<String, String>>>,
+    /// 待落定良好快照 id（就绪稳定 SERVICE_STABLE_SECS 后 markGood）。
+    pending_good: Option<String>,
     /// restart_service 的代际号：旧世代的异步任务看到代际变了就自杀。
     generation: u64,
     stopping: bool,
@@ -80,6 +88,8 @@ impl Supervisor {
                 crash: CrashLoopDetector::new(),
                 crash_count: 0,
                 overlays: Vec::new(),
+                ready_tx: None,
+                pending_good: None,
                 generation: 0,
                 stopping: false,
             })),
@@ -108,6 +118,14 @@ impl Supervisor {
     }
 
     /// 完整启动链（后台线程跑；事件经 tx 推送）。
+    ///
+    /// **守护瀑布**（对齐 Electron plugin-guard guardedBoot——「坏插件也永远能打开 dsh」）：
+    /// ```text
+    /// guard-snapshot → 首次拉起(120s) ─成功→ 换页 + 稳定落定
+    ///        └失败→ 体检修复(repair) + safe-overlay 禁用坏插件 → 二次拉起(90s)
+    ///                └失败→ 回滚最后良好快照(restore) → 三次拉起(90s)
+    ///                        └失败→ 事故报告 + 恢复页（restart_service/恢复页重启全链重走瀑布）
+    /// ```
     pub fn spawn_boot(self: &Arc<Self>, tx: Sender<SupervisorEvent>, preferred_port: Option<u16>) {
         let this = Arc::clone(self);
         std::thread::spawn(move || {
@@ -130,6 +148,12 @@ impl Supervisor {
             }
             // ---- [1.5] koffi 预检 → 目录选择器降级 overlay（Electron 对齐，升级适配）----
             this.run_koffi_preflight();
+            // ---- [1.6] 启动前快照（plugin-guard；GUARD_FILES 四文件）----
+            let boot_snap = this.guard_cli_json(&["guard-snapshot", "boot"])
+                .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(String::from));
+            if let Some(id) = &boot_snap {
+                log_line(&format!("守护瀑布：启动快照 {id}"));
+            }
             // ---- [2] 端口 ----
             let port = match choose_stable_port(preferred_port) {
                 Some(p) => p,
@@ -139,17 +163,153 @@ impl Supervisor {
                 }
             };
             this.inner.lock().unwrap().port = Some(port);
-            // ---- [3] spawn 内核 ----
             this.set_state(RunState::Spawn);
-            if let Err(e) = Arc::clone(&this).spawn_kernel(port, &tx) {
-                this.enter_recovery(&tx, &format!("内核启动失败: {e}"));
-                return;
+
+            // ---- [3] 首次拉起（有界等待 120s，对齐 Electron waitUntilUp）----
+            match Arc::clone(&this).spawn_and_wait_ready(port, &tx, Duration::from_secs(120)) {
+                Ok(url) => return this.on_boot_success(&tx, url, port, gen, boot_snap),
+                Err(first) => {
+                    log_line(&format!("守护瀑布：首次拉起失败（{first}），进入体检修复"));
+                }
             }
-            // ---- [4] 探活循环 ----
-            this.probe_loop(port, tx, gen);
+            if this.cancelled(gen) { return; }
+
+            // ---- [4] 二层：重跑 boot 链（sync 重新同步伴随插件，修复 node_modules 损坏
+            // ——自愈主力；guard 快照只含 4 个配置文件，坏文件靠 sync 覆盖）+ 体检修复
+            // + safe overlay 禁用坏插件 → 二次拉起 ----
+            if let Err(e) = this.run_sidecar_boot(&tx, gen) {
+                log_line(&format!("守护瀑布：二层重跑 boot 链失败：{e}"));
+            }
+            let repaired = this.guard_cli_json(&["guard-repair"]);
+            let applied: Vec<String> = repaired
+                .and_then(|v| v.get("applied").and_then(|a| a.as_array()).map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect()))
+                .unwrap_or_default();
+            let safe_applied = this.refresh_safe_overlay();
+            log_line(&format!("守护瀑布：体检修复 applied={applied:?} safeOverlay禁用={safe_applied}"));
+            if !safe_applied && applied.is_empty() {
+                log_line("守护瀑布：无可修复项也无失败插件名单，直接进入回滚层");
+            }
+            let port2 = this.reuse_or_new_port(port);
+            match Arc::clone(&this).spawn_and_wait_ready(port2, &tx, Duration::from_secs(90)) {
+                Ok(url) => {
+                    this.guard_incident("boot-recovered", &format!("首次启动失败，体检修复后恢复。修复项：{applied:?}"));
+                    return this.on_boot_success(&tx, url, port2, gen, boot_snap);
+                }
+                Err(second) => log_line(&format!("守护瀑布：修复后仍失败（{second}），进入回滚")),
+            }
+            if this.cancelled(gen) { return; }
+
+            // ---- [5] 三层：回滚最后良好快照 → 三次拉起 ----
+            let lastgood = this.guard_cli_json(&["guard-lastgood"])
+                .and_then(|v| if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+                    v.get("id").and_then(|i| i.as_str()).map(|id| (id.to_string(), v.get("reason").and_then(|r| r.as_str()).unwrap_or("").to_string()))
+                } else { None });
+            let rollback_target = lastgood.filter(|(id, _)| boot_snap.as_deref() != Some(id.as_str()));
+            match rollback_target {
+                Some((id, reason)) => {
+                    log_line(&format!("守护瀑布：回滚到最后良好快照 {id}（{reason}）"));
+                    let _ = this.guard_cli_json(&["guard-restore", &id]);
+                    let _ = this.guard_cli_json(&["guard-repair"]); // 回滚后再清一次遮蔽
+                    let port3 = this.reuse_or_new_port(port);
+                    match Arc::clone(&this).spawn_and_wait_ready(port3, &tx, Duration::from_secs(90)) {
+                        Ok(url) => {
+                            this.guard_incident("rollback-recovered", &format!("回滚到快照 {id} 后恢复启动"));
+                            return this.on_boot_success(&tx, url, port3, gen, None);
+                        }
+                        Err(final_err) => {
+                            this.guard_incident("boot-failed", &format!("回滚到 {id} 后仍无法启动：{final_err}"));
+                            this.enter_recovery(&tx, &format!("回滚后仍失败：{final_err}"));
+                        }
+                    }
+                }
+                None => {
+                    this.guard_incident("boot-failed", &format!("启动失败且无可回滚快照（首次运行或快照耗尽）"));
+                    this.enter_recovery(&tx, "启动失败且无可回滚快照（可在恢复页重试）");
+                }
+            }
         });
     }
 
+    /// 就绪成功路径：换页事件 + 待落定快照 + 稳定落定线程（45s 后 markGood，
+    /// Electron armStabilityWatch 语义：稳定存活即成为「最后良好」回滚锚点）。
+    fn on_boot_success(self: &Arc<Self>, tx: &Sender<SupervisorEvent>, url: String, port: u16, gen: u64, snap: Option<String>) {
+        {
+            let mut g = self.inner.lock().unwrap();
+            g.pending_good = snap;
+        }
+        self.set_state(RunState::Ready);
+        let _ = tx.send(SupervisorEvent::KernelReady { url, port });
+        let this = Arc::clone(self);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(SERVICE_STABLE_SECS));
+            let g = this.inner.lock().unwrap();
+            if g.generation != gen || g.stopping { return; }
+            if let Some(id) = g.pending_good.clone() {
+                drop(g);
+                let _ = this.guard_cli_json(&["guard-mark-good", &id]);
+                let mut g2 = this.inner.lock().unwrap();
+                g2.pending_good = None;
+                g2.crash_count = 0; // 稳定落地 → 崩溃计数复位（Electron 同款）
+                this.inner_crash_reset();
+                log_line(&format!("守护瀑布：服务稳定存活，快照 {id} 落定为最后良好"));
+            }
+        });
+        self.probe_loop(port, tx.clone(), gen);
+    }
+
+    fn cancelled(&self, gen: u64) -> bool {
+        let g = self.inner.lock().unwrap();
+        g.generation != gen || g.stopping
+    }
+
+    /// 端口复用（同端口重试保 origin 稳定）；占用则换新端口。
+    fn reuse_or_new_port(&self, preferred: u16) -> u16 {
+        choose_stable_port(Some(preferred)).unwrap_or(preferred)
+    }
+
+    /// 拉起内核并同步等待就绪（瀑布核心原语）。
+    fn spawn_and_wait_ready(self: Arc<Self>, port: u16, tx: &Sender<SupervisorEvent>, timeout: Duration) -> Result<String, String> {
+        let (rtx, rrx) = std::sync::mpsc::channel::<Result<String, String>>();
+        self.inner.lock().unwrap().ready_tx = Some(rtx);
+        if let Err(e) = self.clone().spawn_kernel(port, tx) {
+            self.inner.lock().unwrap().ready_tx = None;
+            return Err(e);
+        }
+        let deadline = Instant::now() + timeout;
+        match rrx.recv_timeout(deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(1))) {
+            Ok(Ok(url)) => Ok(url),
+            Ok(Err(e)) => Err(e),
+            Err(_) => {
+                // 超时：杀掉半死进程，按失败处理。
+                self.kill_kernel();
+                self.inner.lock().unwrap().ready_tx = None;
+                Err(format!("{timeout:?} 内未就绪"))
+            }
+        }
+    }
+
+    /// guard 子命令薄跑（stdout 末行 JSON 解析；失败返回 None——瀑布降级而非崩）。
+    fn guard_cli_json(&self, args: &[&str]) -> Option<serde_json::Value> {
+        let out = Command::new(&self.node_exe)
+            .arg(&self.sidecar_cli)
+            .args(args)
+            .arg("--app-dir")
+            .arg(&self.app_dir)
+            .creation_flags_win()
+            .output()
+            .ok()?;
+        if !out.status.success() { return None; }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let line = stdout.trim_end().lines().last()?;
+        serde_json::from_str(line).ok()
+    }
+
+    /// 事故报告落盘（guard/incidents/）。
+    fn guard_incident(&self, kind: &str, detail: &str) {
+        let _ = self.guard_cli_json(&["guard-incident", kind, detail]);
+    }
+
+    fn inner_crash_reset(&self) { /* 兼容占位：crash_count 复位已直写 */ }
     /// sidecar boot（node cli.js boot），逐步从 stderr 解析 [sidecar] 行转发。
     fn run_sidecar_boot(&self, tx: &Sender<SupervisorEvent>, _gen: u64) -> Result<(), String> {
         let out = Command::new(&self.node_exe)
@@ -305,9 +465,8 @@ impl Supervisor {
                 if url.is_none() {
                     if let Some(u) = parser.feed(&format!("{text}\n")) {
                         url = Some(u.clone());
-                        let mut g = this.inner.lock().unwrap();
-                        g.kernel_url = Some(u.clone());
-                        drop(g);
+                        let rtx = { let mut g = this.inner.lock().unwrap(); g.kernel_url = Some(u.clone()); g.ready_tx.take() };
+                        if let Some(rtx) = rtx { let _ = rtx.send(Ok(u.clone())); }
                         this.set_state(RunState::Ready);
                         let _ = tx2.send(SupervisorEvent::KernelReady { url: u, port });
                     }
@@ -354,6 +513,10 @@ impl Supervisor {
             if g.stopping {
                 return;
             }
+            // 瀑布等待者唤醒：启动期退出 = 本次拉起失败。
+            if let Some(rtx) = g.ready_tx.take() {
+                let _ = rtx.send(Err(format!("内核启动期退出 code={code:?}")));
+            }
             g.kernel = None;
             g.crash_count += 1;
             let v = g.crash.record_crash(now);
@@ -391,8 +554,7 @@ impl Supervisor {
     fn probe_loop(self: &Arc<Self>, port: u16, tx: Sender<SupervisorEvent>, gen: u64) {
         let this = Arc::clone(self);
         std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(180);
-            let mut ready_seen = false;
+            // 瀑布已同步等到就绪，这里只管「就绪后失联」（连续 3 次 TCP 失联 → 按退出处理）。
             let mut consecutive = 0usize;
             loop {
                 std::thread::sleep(Duration::from_secs(3));
@@ -407,16 +569,7 @@ impl Supervisor {
                 }
                 let ok = std::net::TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().unwrap(), Duration::from_secs(2)).is_ok();
                 if ok {
-                    ready_seen = true;
                     consecutive = 0;
-                    continue;
-                }
-                if !ready_seen {
-                    if Instant::now() > deadline {
-                        this.kill_kernel();
-                        this.enter_recovery_tx(&tx, "就绪超时（180s 无监听）");
-                        return;
-                    }
                     continue;
                 }
                 consecutive += 1;
@@ -665,5 +818,128 @@ impl Supervisor {
     /// 测试辅助：直接设置状态（绕过迁移表）。
     fn set_state_for_test(&self, s: RunState) {
         self.inner.lock().unwrap().state = s;
+    }
+}
+
+#[cfg(test)]
+mod stability_tests {
+    use super::*;
+
+    fn repo_root() -> Option<std::path::PathBuf> {
+        let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        for _ in 0..6 {
+            if dir.join("dsh-desktop").join("vendor").join("node").exists() {
+                return Some(dir);
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        None
+    }
+
+    fn sandbox(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("dsh-tauri-wf-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// 伴随插件入口文件被写坏（用户磁盘坏块/更新中断的真实形态）：
+    /// boot 链 sync 重新同步应覆盖修复 → 瀑布首层即应就绪。
+    #[test]
+    fn broken_companion_file_is_healed_by_sync() {
+        let Some(root) = repo_root() else { eprintln!("[skip] 无依赖环境"); return; };
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = sandbox("broken");
+        std::env::set_var("DSH_HOME", &home);
+        std::env::set_var("DSH_TAURI_USERDATA", home.join("ud"));
+        // 1) 建档。
+        let sv0: Arc<Supervisor> = Arc::new(Supervisor::new(&root));
+        let (tx0, rx0) = std::sync::mpsc::channel();
+        sv0.run_sidecar_boot(&tx0, 0).expect("基线 boot");
+        drop(rx0);
+        // 2) 破坏一个伴随插件入口（写语法垃圾）。
+        let victim = home.join("profiles").join("web").join("node_modules").join("dsh-auto-compact");
+        assert!(victim.exists(), "伴随插件应已同步：{}", victim.display());
+        let entry = victim.join("lib").join("index.js");
+        if !entry.exists() {
+            for cand in ["index.js", "main.js"] {
+                if victim.join(cand).exists() {
+                    drop(entry);
+                    let _ = std::fs::write(victim.join(cand), "this is ( not valid javascript !!!");
+                    break;
+                }
+            }
+        } else {
+            std::fs::write(&entry, "this is ( not valid javascript !!!").unwrap();
+        }
+        // 3) 完整守护瀑布：期望依然 KernelReady（sync 修复坏文件）。
+        let sv: Arc<Supervisor> = Arc::new(Supervisor::new(&root));
+        let (tx, rx) = std::sync::mpsc::channel();
+        sv.spawn_boot(tx, None);
+        let deadline = Instant::now() + Duration::from_secs(180);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
+            match rx.recv_timeout(left) {
+                Ok(SupervisorEvent::BootStep { ok, name, .. }) => assert!(ok, "boot 步骤 {name} 失败"),
+                Ok(SupervisorEvent::KernelReady { url, .. }) => {
+                    assert!(url.starts_with("http://127.0.0.1:"), "{url}");
+                    sv.shutdown();
+                    std::env::remove_var("DSH_HOME");
+                    std::env::remove_var("DSH_TAURI_USERDATA");
+                    let _ = std::fs::remove_dir_all(&home);
+                    return; // PASS：坏插件被自愈，dsh 照常打开
+                }
+                Ok(other) => panic!("非预期事件: {other:?}"),
+                Err(_) => panic!("180s 内未就绪（坏插件未被自愈）"),
+            }
+        }
+    }
+
+    /// 配置类破坏（patch 非法内容 + 可回滚快照在场）：瀑布应回滚后救回。
+    #[test]
+    fn corrupted_patch_is_rolled_back_to_lastgood() {
+        let Some(root) = repo_root() else { eprintln!("[skip]"); return; };
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = sandbox("rollback");
+        std::env::set_var("DSH_HOME", &home);
+        std::env::set_var("DSH_TAURI_USERDATA", home.join("ud"));
+        let sv: Arc<Supervisor> = Arc::new(Supervisor::new(&root));
+        // 1) 建档 + 落定 lastgood 快照。
+        let (tx0, rx0) = std::sync::mpsc::channel();
+        sv.run_sidecar_boot(&tx0, 0).expect("基线 boot");
+        drop(rx0);
+        let snap = sv.guard_cli_json(&["guard-snapshot", "baseline"])
+            .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(String::from))
+            .expect("快照");
+        let _ = sv.guard_cli_json(&["guard-mark-good", &snap]);
+        // 2) 破坏 package.json（bundles 数组换成非法形态——repair 修不了、restore 能回滚）。
+        let pkg = home.join("profiles").join("web").join("package.json");
+        std::fs::write(&pkg, "{ this is not json !!!").unwrap();
+        // 3) 完整瀑布：boot 链 repair 先修 package.json（integration heal 有 manifest 修复），
+        //    即便修复失败也有 restore 层兜底——两路最终都应 KernelReady。
+        let (tx, rx) = std::sync::mpsc::channel();
+        sv.spawn_boot(tx, None);
+        let deadline = Instant::now() + Duration::from_secs(240);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
+            match rx.recv_timeout(left) {
+                Ok(SupervisorEvent::BootStep { name, ok, .. }) => {
+                    let _ = (name, ok); // boot 步骤在自愈中可能告警，最终以就绪判
+                }
+                Ok(SupervisorEvent::KernelReady { url, .. }) => {
+                    assert!(url.starts_with("http://127.0.0.1:"));
+                    sv.shutdown();
+                    std::env::remove_var("DSH_HOME");
+                    std::env::remove_var("DSH_TAURI_USERDATA");
+                    let _ = std::fs::remove_dir_all(&home);
+                    return; // PASS：配置破坏被自愈，dsh 照常打开
+                }
+                Ok(SupervisorEvent::CrashLoop { .. }) => panic!("瀑布未能救回配置破坏"),
+                Ok(other) => { let _ = other; }
+                Err(_) => panic!("240s 内未就绪（配置破坏未被自愈）"),
+            }
+        }
     }
 }

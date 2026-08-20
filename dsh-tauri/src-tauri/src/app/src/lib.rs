@@ -255,6 +255,8 @@ fn route_events(app: tauri::AppHandle, rx: std::sync::mpsc::Receiver<SupervisorE
                     let _ = w.show();
                     let _ = w.set_focus();
                 }
+                // renderer 心跳监测（Electron RendererRecovery 语义）：页面挂死自动重载。
+                watch_renderer_heartbeat(app.clone());
             }
             SupervisorEvent::KernelExit { code, .. } => {
                 eprintln!("[route] 内核退出 code={code:?}");
@@ -504,4 +506,54 @@ fn upgrade_first_run_report(state: &AppState) {
     if state.paths.app_data.join("window-state.json").exists() {
         eprintln!("[upgrade] 检测到 Electron 版 window-state.json：窗口位置将原样恢复");
     }
+}
+
+/// renderer 心跳监测（Electron RendererRecovery 语义）：换页后 60s 宽限
+///（页面加载），此后可见主窗连续 ~40s 心跳零增长 → location.reload()。
+/// 覆盖「内核活着但页面白屏/JS 死循环」——dsh 可用优先于页面完美。
+fn watch_renderer_heartbeat(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        // 宽限：等第一条心跳到达（或 60s 超时进入持续监测）。
+        let baseline = app
+            .try_state::<AppState>()
+            .map(|s| s.heartbeats.load(Ordering::Relaxed))
+            .unwrap_or(0);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            if let Some(state) = app.try_state::<AppState>() {
+                if state.heartbeats.load(Ordering::Relaxed) > baseline {
+                    break;
+                }
+            }
+        }
+        let mut last = app
+            .try_state::<AppState>()
+            .map(|s| s.heartbeats.load(Ordering::Relaxed))
+            .unwrap_or(0);
+        let mut stall: u32 = 0;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            let Some(state) = app.try_state::<AppState>() else { return };
+            let Some(win) = app.get_webview_window("main") else { return };
+            // 不可见窗口定时器被节流（与 Electron 判定口径一致）——不计失联。
+            if !win.is_visible().unwrap_or(true) {
+                stall = 0;
+                last = state.heartbeats.load(Ordering::Relaxed);
+                continue;
+            }
+            let now = state.heartbeats.load(Ordering::Relaxed);
+            if now == last {
+                stall += 1;
+            } else {
+                stall = 0;
+                last = now;
+            }
+            if stall >= 4 {
+                eprintln!("[renderer-recovery] 可见主窗心跳停摆 {}0 秒，自动重载页面", stall);
+                let _ = win.eval("try{location.reload()}catch(e){}");
+                stall = 0;
+            }
+        }
+    });
 }
