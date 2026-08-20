@@ -4,6 +4,12 @@
 
 Ships the full dsh runtime and official plugins — no Node.js install required, double-click to run
 
+> [!IMPORTANT]
+> **🎉 v0.5.0 — Full architecture migration & rewrite**: the desktop shell has moved from Electron to **Tauri 2 (Rust)** — more stable, better to use:
+> smaller installers, lower memory, faster startup; the "guardian waterfall" keeps the app **openable even with broken plugins / configs**.
+> User data is fully compatible with the old version — install over the top for a painless upgrade (see the [upgrade guide](dsh-tauri/docs/upgrade-guide.md) and [Architecture](#-architecture)).
+> Pre-v0.5.0 Electron builds remain available on [Releases](https://github.com/myYangyunfan/dsh_desktop/releases); only the Tauri architecture is maintained from now on.
+
 [![Release](https://img.shields.io/github/v/release/myYangyunfan/dsh_desktop?color=4D6BFE&label=Release)](https://github.com/myYangyunfan/dsh_desktop/releases) [![Stars](https://img.shields.io/github/stars/myYangyunfan/dsh_desktop?style=social)](https://github.com/myYangyunfan/dsh_desktop) [![Forks](https://img.shields.io/github/forks/myYangyunfan/dsh_desktop?style=social)](https://github.com/myYangyunfan/dsh_desktop/fork) [![Downloads](https://img.shields.io/github/downloads/myYangyunfan/dsh_desktop/total?color=4D6BFE)](https://github.com/myYangyunfan/dsh_desktop/releases) [![Issues](https://img.shields.io/github/issues/myYangyunfan/dsh_desktop?color=4D6BFE)](https://github.com/myYangyunfan/dsh_desktop/issues) ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20%C2%B7%20macOS%2012%2B-4D6BFE) ![License](https://img.shields.io/badge/license-MIT-4D6BFE) [![Release CI](https://img.shields.io/github/actions/workflow/status/myYangyunfan/dsh_desktop/release.yml?color=4D6BFE&label=Release%20CI)](https://github.com/myYangyunfan/dsh_desktop/actions) [![Gitee Stars](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fgitee.com%2Fapi%2Fv5%2Frepos%2Fmy-yang-yunfan%2Fdsh_desktop&query=%24.stargazers_count&label=Gitee%20Stars&color=4D6BFE)](https://gitee.com/my-yang-yunfan/dsh_desktop)
 
 [Gitee mirror](https://gitee.com/my-yang-yunfan/dsh_desktop) · [![中文](https://img.shields.io/badge/%E4%B8%AD%E6%96%87-4D6BFE?style=for-the-badge&logo=translate)](README.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
@@ -30,11 +36,11 @@ Ships the full dsh runtime and official plugins — no Node.js install required,
 
 ### Resilience
 
-- **Crash self-healing** — renderer freezes auto-reload with exponential backoff; a watchdog relaunches the main process
+- **Guardian waterfall** — the kernel boot chain self-heals level by level: broken plugins auto-repair, corrupt configs rebuild, crash loops restart in place; no incompatible state ever exits the app (core v0.5.0 Tauri feature)
+- **Crash self-healing** — renderer freezes detected via heartbeat and auto-reload; the supervisor probes the kernel and relaunches with backoff
 - **History compatibility** — session event vocabulary is patched automatically so third-party plugin events never break history loading
-- **Dual-source updates** — official dsh agent updates + client self-update (GitHub / Gitee sources, split-part auto-merge, in-place replace & restart; client self-update works on Windows install/portable and macOS (.app replacement) — other platforms: grab the latest build manually from Releases)
+- **Dual-source updates** — official dsh agent updates + client self-update (GitHub / Gitee sources, split-part auto-merge, in-place replace, upgrades reinstall to the old location with zero config loss)
 - **Shortcut self-healing** — desktop and Start Menu shortcuts are recreated automatically when missing
-- **Cloud builds** — pushing a tag triggers GitHub Actions to build and publish (see below)
 
 ## 📸 App Preview
 
@@ -54,6 +60,9 @@ Ships the full dsh runtime and official plugins — no Node.js install required,
 ## 🚀 Quick Start
 
 **Requirements**: Windows 10 / 11 (x64 / arm64) or macOS 12+ (Intel / Apple Silicon). No pre-installed Node.js or any other runtime. On ARM devices (e.g. Surface Pro X), grab the arm64 build.
+
+> [!NOTE]
+> The table below points to **pre-v0.5.0 Electron builds** (the last Electron line was 0.4.x). **From v0.5.0 the app switches to the Tauri architecture** — grab the latest Tauri installer from the [Releases](https://github.com/myYangyunfan/dsh_desktop/releases) page once published; the legacy builds below keep working, and installing over them migrates data automatically.
 
 ### International users (GitHub)
 
@@ -105,26 +114,29 @@ Questions, feedback, or just want to chat with other users? Join our QQ group (*
 
 ## 🛠 Build from Source
 
-```powershell
-cd dsh-desktop
-npm install
-npm run fetch-runtime    # bundle node.exe + npm CLI
-npm run dist             # build portable + NSIS (x64) -> dist/
-npm run dist:arm64       # cross-build arm64 (an x64 machine auto-fetches arm64 prebuilt native modules)
-# macOS (run on macOS; pick one arch):
-npm run dist:mac -- --x64     # build macOS x64 dmg + zip
-npm run dist:mac -- --arm64   # build macOS arm64 dmg + zip
-```
-
-Behind a firewall? `$env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'` and `$env:ELECTRON_BUILDER_BINARIES_MIRROR='https://npmmirror.com/mirrors/electron-builder-binaries/'`.
-
-## 🤖 Automated Releases
-
-A GitHub Actions pipeline (`.github/workflows/release.yml`) builds **Windows x64 + arm64** (portable + NSIS) and **macOS x64 + arm64** (dmg + zip, cross-built on Apple Silicon runners) in the cloud and uploads them to the Release whenever you push a `v*` tag — no local builds needed.
+For v0.5.0 (Tauri architecture) — prerequisites: the [Rust toolchain](https://rustup.rs/) and `dsh-desktop/` having had `npm install` (the kernel payload source):
 
 ```bash
-git tag v0.4.0 && git push origin v0.4.0
+# Tests (full Rust suite + sidecar)
+cd dsh-tauri
+cargo test --manifest-path src-tauri/Cargo.toml
+node --test sidecar/cli.test.js
+
+# Dev run
+cd src-tauri/src/app && cargo run
+
+# Package the win-x64 NSIS installer + installed-layout smoke test
+bash dsh-tauri/scripts/stage-payload.sh
+npx --yes @tauri-apps/cli build --config src-tauri/src/app/tauri.conf.json \
+  --target x86_64-pc-windows-msvc
+bash dsh-tauri/scripts/smoke-installed.sh
 ```
+
+See the [development manual §6](dsh-tauri/docs/development.md) for the full flow (incl. debug switches like `DSH_TAURI_DIAG` / `DSH_TAURI_DEVTOOLS`).
+
+## 🤖 Releases
+
+After the v0.5.0 architecture migration, the Electron-era cloud release pipeline (auto-building three-platform Electron packages on `v*` tags) was retired along with the architecture. Current release flow: local packaging (see above) + installed-layout smoke test, then manual upload to Releases; a Tauri GitHub Actions pipeline is on the roadmap.
 
 ## 🧩 Bundled Plugin Ecosystem
 
@@ -144,22 +156,36 @@ Shipped with the installer (full third-party inventory: [THIRD_PARTY_NOTICES.md]
 
 ## 🏗 Architecture
 
+**From v0.5.0 the app runs on the Tauri 2 (Rust) architecture** — the Electron shell has been retired; its full set of responsibilities (windows / IPC / updates / packaging) is re-implemented crate by crate on the Rust side, contract-first (`dsh-tauri/contracts/` — five hard contracts are the single source of truth for interfaces):
+
 ```
-┌─────────────────────────────────────────────────────┐
-│  Electron shell (main.js)                           │
-│  · Single-instance lock / frameless window / tray   │
-│  · Session watcher (session-watcher.js) → notif.    │
-│  · Official updates (updater.js) → user-consented   │
-│  · spawn bundled node (node.exe on Windows)         │
-└──────────────────┬──────────────────────────────────┘
-                   │  dsh web --host 127.0.0.1 --port <reused port>
-                   ▼
-        Bundled node + @deepseek-ai/dsh
-        Path resolution: user overlay > bundled package
-                   │  poll HTTP 200
-                   ▼
-        Native window loads Web UI (localhost only)
+┌──────────────────────────────────────────────────────────┐
+│  Tauri 2 shell (Rust · 7 one-way-dependency crates)      │
+│  · supervisor: boot guardian waterfall → spawn kernel    │
+│    → readiness swap → liveness probe → crash-loop        │
+│      in-place restart (never a blank window)             │
+│  · shell-core        paths / settings (self-heal) /      │
+│                     single instance                      │
+│  · kernel-process    spawn spec / ready line / Job       │
+│                     Object tree-kill                     │
+│  · bridge            Electron IPC 43 channels → Tauri    │
+│                     commands, full mapping + shim JS     │
+│                     (window.dshDesktop)                  │
+│  · fence / preview-server / session-watcher /            │
+│    sidecar-orchestrator (boot sequencing + Node sidecar  │
+│    reusing dsh-desktop/scripts kernel logic, zero        │
+│    rewrite)                                              │
+└──────────────────────┬───────────────────────────────────┘
+                       │  dsh web --host 127.0.0.1 --port <reused port>
+                       ▼
+            Bundled node + @deepseek-ai/dsh
+            Path resolution: user overlay > bundled package
+                       │  ready-line detection
+                       ▼
+            Native window loads Web UI (localhost only)
 ```
+
+Layering rules: crates never depend on the tauri runtime and are independently unit-tested (109 Rust tests green); the assembly root only wires things up; kernel-side Node logic lives in `dsh-desktop/scripts/`. See the [development manual](dsh-tauri/docs/development.md).
 
 ## 📄 License
 

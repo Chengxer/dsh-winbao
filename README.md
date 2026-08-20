@@ -4,6 +4,12 @@
 
 内置完整 dsh 运行时与全部官方插件，免装 Node.js，双击即用
 
+> [!IMPORTANT]
+> **🎉 v0.5.0 —— 全架构迁移与重构**：桌面壳从 Electron 全面迁移至 **Tauri 2（Rust）**，更稳定、更好用——
+> 安装包更小、内存更低、启动更快；「守护瀑布」让坏插件 / 坏配置也**永不白屏打不开**。
+> 用户数据与旧版完全兼容，覆盖安装即完成无痛升级（详见 [迁移指南](dsh-tauri/docs/upgrade-guide.md) 与 [架构](#-架构)）。
+> v0.5.0 之前的 Electron 版本仍可在 [Releases](https://github.com/myYangyunfan/dsh_desktop/releases) 下载，此后仅维护 Tauri 架构。
+
 [![Release](https://img.shields.io/github/v/release/myYangyunfan/dsh_desktop?color=4D6BFE&label=Release)](https://github.com/myYangyunfan/dsh_desktop/releases) [![Stars](https://img.shields.io/github/stars/myYangyunfan/dsh_desktop?style=social)](https://github.com/myYangyunfan/dsh_desktop) [![Forks](https://img.shields.io/github/forks/myYangyunfan/dsh_desktop?style=social)](https://github.com/myYangyunfan/dsh_desktop/fork) [![Downloads](https://img.shields.io/github/downloads/myYangyunfan/dsh_desktop/total?color=4D6BFE)](https://github.com/myYangyunfan/dsh_desktop/releases) [![Issues](https://img.shields.io/github/issues/myYangyunfan/dsh_desktop?color=4D6BFE)](https://github.com/myYangyunfan/dsh_desktop/issues) ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20%C2%B7%20macOS%2012%2B-4D6BFE) ![License](https://img.shields.io/badge/license-MIT-4D6BFE) [![Release CI](https://img.shields.io/github/actions/workflow/status/myYangyunfan/dsh_desktop/release.yml?color=4D6BFE&label=Release%20CI)](https://github.com/myYangyunfan/dsh_desktop/actions) [![Gitee Stars](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fgitee.com%2Fapi%2Fv5%2Frepos%2Fmy-yang-yunfan%2Fdsh_desktop&query=%24.stargazers_count&label=Gitee%20Stars&color=4D6BFE)](https://gitee.com/my-yang-yunfan/dsh_desktop)
 
 [Gitee 镜像](https://gitee.com/my-yang-yunfan/dsh_desktop) · [![English](https://img.shields.io/badge/English-4D6BFE?style=for-the-badge&logo=translate)](README.en.md) · [宣发落地页](landing/index.html)
@@ -30,11 +36,11 @@
 
 ### 工程韧性
 
-- **崩溃自愈** — 渲染进程假死指数退避自动重载；主进程异常退出由看门狗拉起
+- **守护瀑布** — 内核 boot 链逐级自愈：坏插件自动修复、坏配置自动重建、内核崩溃环原地重启，任何不兼容形态都不退出（v0.5.0 Tauri 架构核心特性）
+- **崩溃自愈** — 渲染层假死心跳检测自动重载；内核由 supervisor 探活 + 指数退避拉起
 - **历史兼容** — 自动修补会话事件词汇表，第三方插件写入的事件不破坏会话历史
-- **双源更新** — 官方 agent 更新 + 客户端自更新（GitHub / Gitee 双源，分片自动合并、原地替换；Windows 安装版/便携版与 macOS（.app 替换）均支持客户端自更新，其它平台从 Releases 手动下载新版）
+- **双源更新** — 官方 agent 更新 + 客户端自更新（GitHub / Gitee 双源，分片自动合并、原地替换，升级装回旧位置零配置丢失）
 - **快捷方式自愈** — 桌面与开始菜单快捷方式缺失即自动补建
-- **云端构建** — 推 tag 即触发 GitHub Actions 自动打包发布（见下）
 
 ## 📸 界面一览
 
@@ -54,6 +60,9 @@
 ## 🚀 快速开始
 
 **系统要求**：Windows 10 / 11（x64 / arm64）或 macOS 12+（Intel / Apple Silicon），无需预装 Node.js。ARM 设备（如 Surface Pro X）请下载 arm64 版本。
+
+> [!NOTE]
+> 下表为 **v0.5.0 之前的 Electron 版**（末代 Electron 版为 0.4.x）。**v0.5.0 起切换为 Tauri 架构**，新版本发布后请从 [Releases](https://github.com/myYangyunfan/dsh_desktop/releases) 页获取最新 Tauri 安装包；下表旧版仍可下载使用，覆盖安装即自动迁移数据。
 
 ### 国内用户（Gitee）
 
@@ -105,26 +114,29 @@ xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"
 
 ## 🛠 从源码构建
 
-```powershell
-cd dsh-desktop
-npm install
-npm run fetch-runtime    # 内置 node.exe + npm CLI
-npm run dist             # 构建 portable + NSIS（x64）→ dist/
-npm run dist:arm64       # 交叉构建 arm64（x64 构建机自动补装 arm64 预编译原生模块）
-# macOS（需在 macOS 上执行，x64 / arm64 二选一）：
-npm run dist:mac -- --x64     # 构建 macOS x64 dmg + zip
-npm run dist:mac -- --arm64   # 构建 macOS arm64 dmg + zip
-```
-
-网络受限时：`$env:ELECTRON_MIRROR='https://npmmirror.com/mirrors/electron/'`，`$env:ELECTRON_BUILDER_BINARIES_MIRROR='https://npmmirror.com/mirrors/electron-builder-binaries/'`。
-
-## 🤖 自动发布
-
-GitHub Actions 流水线（`.github/workflows/release.yml`）：推 `v*` tag 自动在云端构建 **Windows x64 + arm64**（portable + NSIS）与 **macOS x64 + arm64**（dmg + zip，Apple Silicon runner 交叉构建）并上传 Release，无需本地构建。
+v0.5.0（Tauri 架构）——前置：[Rust 工具链](https://rustup.rs/) + `dsh-desktop/` 已 `npm install`（内核 payload 源）：
 
 ```bash
-git tag v0.4.0 && git push origin v0.4.0
+# 测试（Rust 全量 + sidecar）
+cd dsh-tauri
+cargo test --manifest-path src-tauri/Cargo.toml
+node --test sidecar/cli.test.js
+
+# 开发运行
+cd src-tauri/src/app && cargo run
+
+# 打包 win-x64 NSIS 安装包 + 安装态冒烟
+bash dsh-tauri/scripts/stage-payload.sh
+npx --yes @tauri-apps/cli build --config src-tauri/src/app/tauri.conf.json \
+  --target x86_64-pc-windows-msvc
+bash dsh-tauri/scripts/smoke-installed.sh
 ```
+
+完整流程（含调试开关 `DSH_TAURI_DIAG` / `DSH_TAURI_DEVTOOLS` 等）见[开发手册 §6](dsh-tauri/docs/development.md)。
+
+## 🤖 发布
+
+v0.5.0 架构迁移后，Electron 时代的云端发布流水线（推 `v*` tag 自动构建三平台 Electron 包）已随架构退役。当前发布方式：本地打包（见上）+ 安装态冒烟通过后手动上传 Release；Tauri 的 GitHub Actions 云端流水线在规划中。
 
 ## 🧩 内置插件生态
 
@@ -144,22 +156,31 @@ git tag v0.4.0 && git push origin v0.4.0
 
 ## 🏗 架构
 
+**v0.5.0 起为 Tauri 2（Rust）架构**——Electron 壳已退役，其全部职责（窗口 / IPC / 更新 / 打包）由 Rust 侧逐 crate 复刻，契约先行（`dsh-tauri/contracts/` 五份硬契约为接口唯一事实源）：
+
 ```
-┌─────────────────────────────────────────────────────┐
-│  Electron 壳 (main.js)                              │
-│  · 单实例锁 / 无边框窗口 / 托盘 / 生命周期            │
-│  · 会话完成监听 (session-watcher.js) → 系统通知       │
-│  · 官方更新 (updater.js) → 用户同意后安装 overlay     │
-│  · spawn 内置 node（Windows 为 node.exe）             │
-└──────────────────┬──────────────────────────────────┘
-                   │  dsh web --host 127.0.0.1 --port <复用端口>
-                   ▼
-        内置 node + @deepseek-ai/dsh
-        路径解析：用户目录 overlay > 内置包
-                   │  轮询 HTTP 200
-                   ▼
-        原生窗口加载 Web UI（仅本机回环访问）
+┌──────────────────────────────────────────────────────────┐
+│  Tauri 2 壳（Rust · 7 个单向依赖 crate + 装配根）          │
+│  · supervisor：boot 守护瀑布 → spawn 内核 → 就绪换页       │
+│    → 探活 → 崩溃环原地重启（任何不兼容形态都不白屏）        │
+│  · shell-core        路径 / 设置（损坏自愈）/ 单实例        │
+│  · kernel-process    spawn 规格 / 就绪行 / Job Object 杀树  │
+│  · bridge            Electron IPC 43 通道 → Tauri command  │
+│                     全量映射 + 垫片 JS（window.dshDesktop） │
+│  · fence / preview-server / session-watcher /              │
+│    sidecar-orchestrator（boot 时序 + Node sidecar 复用     │
+│    dsh-desktop/scripts 内核侧逻辑，零重写）                 │
+└──────────────────────┬───────────────────────────────────┘
+                       │  dsh web --host 127.0.0.1 --port <复用端口>
+                       ▼
+            内置 node + @deepseek-ai/dsh
+            路径解析：用户目录 overlay > 内置包
+                       │  就绪行检测
+                       ▼
+            原生窗口加载 Web UI（仅本机回环访问）
 ```
+
+分层铁律：crates 不依赖 tauri 运行时、可独立单测（Rust 109 例全绿）；装配根只接线不实现；内核侧 Node 逻辑全部活在 `dsh-desktop/scripts/`。开发手册见 [`dsh-tauri/docs/development.md`](dsh-tauri/docs/development.md)。
 
 ## 📄 License
 

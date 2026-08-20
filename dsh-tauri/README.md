@@ -1,7 +1,8 @@
-# DSH Desktop — Tauri 版（`tauri/modular` 分支）
+# DSH Desktop — Tauri 版（主线架构，v0.5.0 起）
 
-DeepSeek Harness 桌面客户端的 Tauri 2 重构。**Electron 版（`../dsh-desktop/`）不受影响**，
-本目录在独立分支上演进；契约先行，Phase 0-4 已全量实装并出 win-x64 安装包。
+DeepSeek Harness 桌面客户端的 Tauri 2 重构。**v0.5.0 起为仓库主线架构**——Electron 壳已退役
+（壳文件与打包链于 2026-08 清理，内核侧 `dsh-desktop/scripts` 作为 payload 源保留复用）；
+契约先行，Phase 0-4 已全量实装并出 win-x64 安装包。
 
 > **开发手册（统一入口）**：[`docs/development.md`](docs/development.md) ——
 > 架构地图 / 接口索引与防漂移机制 / 加命令五步 / 加插件 / 打包冒烟 / 调试开关。
