@@ -63,6 +63,28 @@ test('boot：沙箱 home 四步全过并建档', { skip: !HAVE_DEPS }, (t) => {
   assert.ok(fs.existsSync(path.join(sb.dir, 'profiles', 'web', 'package.json')), 'profile package 应建档');
 });
 
+test('boot 容忍分级：自愈类子失败不阻断（坏 patch → 自愈 → ok:true）', { skip: !HAVE_DEPS }, (t) => {
+  const sb = sandbox(t.name);
+  t.after(() => fs.rmSync(sb.dir, { recursive: true, force: true }));
+  // 预置「内容无法解析」的 profile patch（heal 的子失败场景）：repair 步应
+  // 备份+重置自愈，boot 整体 ok:true——被容忍/自愈的子失败不得标步骤失败
+  // （曾致 loading 页误报「启动受阻」类横幅的语义边界）。
+  const patchFile = path.join(sb.dir, 'profiles', 'web', 'cordis.patch.yml');
+  fs.mkdirSync(path.dirname(patchFile), { recursive: true });
+  fs.writeFileSync(patchFile, 'this: is: [not: a: valid: patch: list\n');
+  const r = cli(['boot'], { env: sb.env, timeout: 180_000 });
+  assert.strictEqual(r.code, 0, `stderr: ${r.stderr.slice(-500)}`);
+  assert.strictEqual(r.json.ok, true, JSON.stringify(r.json));
+  for (const s of r.json.steps) {
+    assert.strictEqual(s.ok, true, `步骤 ${s.name} 不应被自愈类子失败标失败: ${JSON.stringify(s)}`);
+  }
+  // 自愈证据：原文件被备份（.broken-*），现场重置为带标记的最小文件。
+  const dir = path.dirname(patchFile);
+  const backups = fs.readdirSync(dir).filter((f) => f.startsWith('cordis.patch.yml.broken-'));
+  assert.ok(backups.length >= 1, '坏 patch 应有 .broken-* 备份');
+  assert.ok(fs.readFileSync(patchFile, 'utf8').includes('recovered by DSH Desktop'), '自愈后应含重置标记');
+});
+
 test('plugin-list：boot 后可列出 companion 插件', { skip: !HAVE_DEPS }, (t) => {
   const sb = sandbox(t.name);
   t.after(() => fs.rmSync(sb.dir, { recursive: true, force: true }));

@@ -30,7 +30,7 @@ dsh-tauri/
 
 | 契约 | 管什么 | 变更即破坏性？ |
 |------|--------|----------------|
-| `contracts/bridge-api.md` | `window.dshDesktop` 48 方法逐字段签名 + 页面事件（页面插件直接消费） | 是——升版本 + CHANGELOG 标注 |
+| `contracts/bridge-api.md` | `window.dshDesktop` 49 方法逐字段签名 + 页面事件（页面插件直接消费） | 是——升版本 + CHANGELOG 标注 |
 | `contracts/ipc-commands.md` | Electron IPC → Tauri command 43 通道映射 + 通用约定 | 是 |
 | `contracts/data-flow.md` | 配置叠加树 / 单一数据流 / **boot 守护瀑布** / 持久化与 env 覆盖通道 | 是 |
 | `contracts/plugin-contract.md` | 三层插件辨析（内核 cordis / 伴随 / 用户）+ seam 三角色 | 是 |
@@ -50,7 +50,7 @@ dsh-tauri/
 export PATH="$PATH:$USERPROFILE/.cargo/bin"   # cargo
 
 # 测试（改任何代码后的最低门槛）
-cd dsh-tauri/src-tauri && cargo test --workspace        # Rust 全量（~109 例）
+cd dsh-tauri/src-tauri && cargo test --workspace        # Rust 全量（~127 例，以实际输出为准）
 cd dsh-tauri && node --test sidecar/cli.test.js         # sidecar（12 例）
 cd dsh-desktop && node --test scripts/test/unit-compat-companion.test.js  # 共享脚本回归
 
@@ -131,7 +131,7 @@ bash dsh-tauri/scripts/smoke-installed.sh  # ③ 安装布局冒烟（绝不跑�
 
 | 层 | 命令 | 规模 |
 |----|------|------|
-| Rust 全量（crates+app，含契约审计/瀑布破坏性实测） | `cargo test --workspace` | ~109 |
+| Rust 全量（crates+app，含契约审计/瀑布破坏性实测） | `cargo test --workspace` | ~127 |
 | sidecar（boot 顺序/插件通道/诊断） | `node --test sidecar/cli.test.js` | 12 |
 | 共享 Node 脚本（Electron 线同源回归） | `node --test scripts/test/unit-*.test.js` | dsh-desktop 侧 |
 | 安装布局冒烟 | `smoke-installed.sh` | PASS/FAIL |

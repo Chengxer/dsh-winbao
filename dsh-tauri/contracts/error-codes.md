@@ -14,6 +14,7 @@
 | `E_NOT_FOUND` | 目标不存在（窗口/插件/会话/文件） | 各 command |
 | `E_CUT_FEATURE` | 该能力在 Tauri 版已裁撤（内核自动更新、GPU 守卫、自研客户端更新链） | menu_action 等 |
 | `E_TIMEOUT` | 下游超时（内核 HTTP / sidecar 探活） | kernel-process / sidecar |
+| `E_NOT_IMPLEMENTED` | 能力已规划未实装（占位拒绝，非裁撤——区别于 `E_CUT_FEATURE`） | image_paste_save（Phase 3 剪贴板位图） |
 
 ## 2. 内核进程域（kernel-process）
 
@@ -51,6 +52,7 @@
 |------|------|
 | `E_UPDATER_SIGNATURE` | minisign 签名校验失败（**Electron 版没有这一层**——Tauri 版新增的安全底线） |
 | `E_UPDATER_NETWORK` | manifest/产物下载失败 |
+| `E_UPDATER_CONFIG` | 更新链未配置（`DSH_UPDATER_ENDPOINT` / `DSH_UPDATER_PUBKEY`，发版 CI 注入；未配置时引导而非静默降级——release-keys.md §4） |
 
 ## 6. 规则
 
@@ -58,3 +60,10 @@
 2. `detail` 字段自由结构（诊断用），插件不得依赖其稳定性。
 3. fire-and-forget command 的错误只进日志，不达页面。
 4. 崩溃环 / 恢复页场景：`E_KERNEL_CRASH_LOOP` 是唯一把主窗切到恢复页的码。
+5. **入表口径（2026-08 清偿时钉板）**：错误码只覆盖 command 返回的跨进程
+   错误面。以下两类形态**刻意不入表**：
+   - 恢复页**状态值**（`recovery_state` 的 `{state:"no-kernel", reason}` 等，
+     见 data-flow.md §3.2）——那是状态查询的正常返回，不是错误；
+   - 内部监督**事件**（探活失败 `ProbeFailed`、假死可疑 `ZombieSuspect`——
+     TCP 通而 HTTP 连续无响应的 #122/#129 形态）——只进 desktop.log，终态
+     仍归 `E_KERNEL_CRASH_LOOP`（假死受控重启走崩溃环窗口限次，天然防死循环）。

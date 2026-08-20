@@ -91,10 +91,14 @@ mod tests {
         assert_eq!(REQUIRED_SURFACES.len(), 49, "契约方法计数（48+recovery.openLogs）");
     }
 
+    /// check-agent-update 需求变更锚点：菜单保留「检查 dsh 更新…」，垫片
+    /// 不再本地拦截（此前的 E_CUT_FEATURE 短路已删——Rust 侧 menu_action 走
+    /// npm latest 对比链实现）。E_CUT_FEATURE 不应再出现在垫片（无其他裁撤
+    /// 方法位需要垫片侧守卫；guard:action 通道本就不在垫片面）。
     #[test]
     fn cut_feature_guard_present() {
-        assert!(BRIDGE_SHIM_JS.contains("check-agent-update"), "裁撤的内核更新菜单项需保留方法位");
-        assert!(BRIDGE_SHIM_JS.contains("E_CUT_FEATURE"));
+        assert!(BRIDGE_SHIM_JS.contains("check-agent-update"), "菜单项「检查 dsh 更新…」需保留");
+        assert!(!BRIDGE_SHIM_JS.contains("E_CUT_FEATURE"), "check-agent-update 已实现，垫片裁撤守卫应移除");
     }
 
     #[test]
@@ -203,5 +207,126 @@ mod window_chrome_tests {
     fn window_chrome_no_manual_dblclick_handler() {
         assert!(!BRIDGE_SHIM_JS.contains("'dblclick'"), "双击切换须交给 Tauri 内置脚本，不得自挂监听");
         assert!(!BRIDGE_SHIM_JS.contains("ondblclick"), "同上");
+    }
+
+    /// 沉浸式双主题（对齐 Electron 的适配方式）：条颜色全部消费内核
+    /// --dsw-alias-* 设计变量（内核按 body[data-ds-dark-theme] 运行时切换，
+    /// 变量级联即时跟随）；变量缺失时按 data-dsh-theme 档位兜底（检测
+    /// data-ds-dark-theme → 主题 class/属性 → prefers-color-scheme），
+    /// 切换有 CSS transition 平滑过渡。
+    #[test]
+    fn window_chrome_theme_adaptive() {
+        for marker in [
+            "--dsw-alias-bg-base",     // 内核主题底色变量（像素级跟随）
+            "--dsw-alias-label-primary",
+            "data-ds-dark-theme",      // 内核暗色标记（检测优先级最高）
+            "data-dsh-theme",          // 条上主题档位属性（light/dark 兜底分档）
+            "data-dsh-theme=\"light\"", // 浅色档须有白底兜底（内核 light 值）
+            "prefers-color-scheme",    // 系统偏好兜底 + matchMedia 监听
+            "attributeFilter",         // MutationObserver 观察主题属性变化
+            "transition:background-color .25s",
+        ] {
+            assert!(BRIDGE_SHIM_JS.contains(marker), "主题化缺 {marker}");
+        }
+    }
+
+    /// 鲸鱼图标：内核 favicon.svg 同源矢量（单 path，viewBox 0 0 50 50，
+    /// 首段 M48.8354 是指纹），fill:currentColor 继承标题色 → 随内核主题
+    /// 即时反色；替换旧渐变方块。
+    #[test]
+    fn window_chrome_whale_icon() {
+        assert!(BRIDGE_SHIM_JS.contains("M48.8354"), "鲸鱼 path 缺失（内核 favicon 同源）");
+        assert!(BRIDGE_SHIM_JS.contains("viewBox: '0 0 50 50'"), "鲸鱼 viewBox 缺失");
+        assert!(BRIDGE_SHIM_JS.contains("fill:currentColor"), "鲸鱼须随主题反色");
+        assert!(BRIDGE_SHIM_JS.contains(".dch-whale"), "鲸图样式类缺失");
+        assert!(!BRIDGE_SHIM_JS.contains("linear-gradient(135deg,#4f7cff"), "渐变方块 logo 应被鲸鱼替换");
+    }
+
+    /// 观感对齐 Electron CHROME_CSS：玻璃底（color-mix 半透明 + 模糊饱和）
+    /// + 细边框 + 30x28 圆角按钮 + SVG 线性按钮图形（stroke:currentColor）。
+    #[test]
+    fn window_chrome_electron_visual_alignment() {
+        for marker in [
+            "color-mix(in srgb,",
+            "backdrop-filter:blur(16px) saturate(1.5)",
+            "border-radius:8px",
+            "place-items:center",
+            "stroke:currentColor",
+            "letter-spacing:.2px", // Electron .dch-title 同款
+        ] {
+            assert!(BRIDGE_SHIM_JS.contains(marker), "对齐 Electron 观感缺 {marker}");
+        }
+        // 最大化/还原图标状态切换（□/❐ 的 SVG 等价物）。
+        assert!(BRIDGE_SHIM_JS.contains("data-maximized"), "缺最大化状态图标切换");
+    }
+
+    /// ⋯ 下拉菜单（Electron preload renderMenu 复刻）：⋯ 按钮在 min/max/close
+    /// 左边；菜单含「检查 dsh 更新…」/更新源/三开关/reload/devtools/fullscreen/
+    /// open-browser/open-logs/sponsor/about/quit；**不含「检查客户端更新…」**
+    /// （唯一不展示的更新项；通道在壳侧保留但菜单不露出）。
+    #[test]
+    fn window_chrome_dots_menu_items() {
+        for marker in [
+            "dch-menu-btn",                    // ⋯ 按钮（30x28 同款）
+            "cx: '2.4'",                       // 实心三点图形（Electron GLYPHS.menu 同款）
+            "MENU_ID",                         // 菜单面板 id
+            "menuItemHtml('check-agent-update'", // 保留「检查 dsh 更新…」
+            "检查 dsh 更新",
+            "更新源（点击复制）",
+            "menuItemHtml('toggle-notify'",
+            "menuItemHtml('toggle-close-to-tray'",
+            "menuItemHtml('toggle-balance'",
+            "menuItemHtml('reload'",
+            "menuItemHtml('devtools'",
+            "menuItemHtml('fullscreen'",
+            "menuItemHtml('open-browser'",
+            "menuItemHtml('open-logs'",
+            "menuItemHtml('sponsor'",
+            "☕ 请作者喝咖啡",
+            "sponsorWindow()",                 // sponsor 走赞助窗通道
+            "menuItemHtml('about'",
+            "关于 DSH Desktop",
+            "menuItemHtml('quit'",
+            "' data-act=\"' + act",            // 菜单项统一带 data-act（事件路由键）
+            "menu_action",                     // 动作统一经 menu_action 桥
+        ] {
+            assert!(BRIDGE_SHIM_JS.contains(marker), "⋯ 菜单缺 {marker}");
+        }
+        // 渲染段（renderMenu 函数体）不得出现客户端更新项——全文断言会误伤
+        // menu.action 注释里「为何不展示」的说明文字。
+        let menu_seg = BRIDGE_SHIM_JS
+            .split("function renderMenu()")
+            .nth(1)
+            .and_then(|s| s.split("function closeMenu()").next())
+            .expect("renderMenu 函数段");
+        assert!(!menu_seg.contains("check-client-update"), "客户端更新项不得进菜单");
+        assert!(!menu_seg.contains("检查客户端更新"), "同上（中文文案）");
+    }
+
+    /// ⋯ 菜单交互契约：点击外部 / Escape 关闭；开关类 toggle 后重渲染（菜单
+    /// 保持打开）；agent 更新检查就地回显（检查中…/可更新/已是最新/检查失败）；
+    /// 自愈重注不重复挂 document 监听。
+    #[test]
+    fn window_chrome_dots_menu_interaction() {
+        for marker in [
+            "'Escape'",                     // Escape 关闭
+            "bar.contains(e.target)",       // 点击面板外关闭（面板在条内）
+            "installMenuHooks",             // document 监听一次性安装
+            "menuHooksInstalled",           // 防自愈重注重复累积
+            "renderMenu()",                 // toggle 成功后重渲染（菜单不关）
+            "检查中…",                      // agent 更新检查就地反馈
+            "已是最新",
+            "检查失败",
+            "可更新 v",
+        ] {
+            assert!(BRIDGE_SHIM_JS.contains(marker), "菜单交互缺 {marker}");
+        }
+        // 开关类点击不得关菜单（Electron 同语义：toggle 后留在菜单里看新状态）。
+        let toggle_seg = BRIDGE_SHIM_JS
+            .split("if (act === 'toggle-notify'")
+            .nth(1)
+            .and_then(|s| s.split("if (act === 'check-agent-update'").next())
+            .expect("toggle 分支");
+        assert!(!toggle_seg.contains("closeMenu()"), "toggle 分支应留在菜单重渲染: {toggle_seg}");
     }
 }

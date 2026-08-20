@@ -133,3 +133,9 @@ app 启动
 > Rust 侧不读——便携重定向与冒烟隔离在 Rust 侧是「幽灵变量」。现两侧必须同时
 > 生效，此表即防回归契约。内核目录定位顺序：DSH_TAURI_REPO_ROOT → exe 相对
 > 布局（安装产物优先，防编译机检出遮蔽）→ CARGO_MANIFEST_DIR 兜底。
+>
+> 非数据通道的环境开关不入本表：更新链注入 `DSH_UPDATER_ENDPOINT` /
+> `DSH_UPDATER_PUBKEY`（docs/release-keys.md，未配置 → `E_UPDATER_CONFIG`）；
+> 诊断开关 `DSH_TAURI_DIAG` / `DSH_TAURI_DEVTOOLS` / `DSH_TAURI_POC`
+> （docs/development.md §3）。Electron 线的 `DSH_DESKTOP_USERDATA` 不被
+> Tauri 线消费（数据重定向统一走 `DSH_TAURI_USERDATA`）。

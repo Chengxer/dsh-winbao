@@ -1,5 +1,31 @@
 # Changelog — DSH Desktop（Tauri 版，`tauri/modular` 分支）
 
+## [0.5.0] — 2026-08-19 —— 首个 Tauri 对外测试版
+
+0.1.0 的全部能力（Phase 0-4 实装 + 两轮 Review + 升级适配 + 启动稳定性 +
+NSIS 打包链）之上，本轮聚焦实测缺陷根治与体验收敛：
+
+- **三 bug 根治 / issue 扫荡**：实测驱动的缺陷修复（含内核版本错配
+  （rc.7/rc.8 双形态锚点）、「客户端必须能打开」加固、幽灵环境变量等，
+  详见 0.1.0 各节）+ 本轮新增：
+- **关窗 → 托盘保活（语义变更）**：主窗 ✕ / Alt+F4 / 任务栏关闭 = **隐藏
+  窗口留托盘**（后台常驻，内核继续跑，会话不中断）；托盘「退出」= 真退出
+  （supervisor 杀树 + 单实例锁释放）。实现：`window_control close` 分支与
+  `CloseRequested`（`api.prevent_close()`）统一走 `hide_main_to_tray`
+  （隐藏前保存窗口状态）；renderer 心跳监测对不可见主窗不计失联
+  （既有 `is_visible` 守卫，隐藏页垫片心跳照发、且不可见永不触发自动重载）。
+- **沉浸标题栏**：bridge-shim 注入式标题栏（拖拽/最小化/最大化/关闭，
+  loading/recovery 壳页与浮窗/宠物窗各有专属条不重复注入）。
+- **装回旧目录**：NSIS 安装回 Electron 版同目录布局（注册表定位 +
+  静默卸载保数据 + userData 零迁移直读，详见 0.1.0「升级适配」节）。
+- **GUI 起 console 子进程全线抑制终端窗**（用户实测「启动后到处弹终端」）：
+  `run_sidecar`（每个桥命令都走）、supervisor `run_sidecar_boot`（启动
+  主源）、shell-core 陈锁回收 `tasklist`——全部补 CREATE_NO_WINDOW
+  （explorer 为 GUI 程序无需）。
+- 版本链对齐：`tauri.conf.json` 与 Cargo workspace 统一 0.5.0
+  （安装包产物 `DSH Desktop_0.5.0_x64-setup.exe`；sidecar
+  DSH_TAURI_VERSION 兜底同步 0.5.0-tauri）。
+
 ## [0.1.0] — 2026-08-19
 
 ### Phase 0（契约 + 骨架 + 三 PoC）

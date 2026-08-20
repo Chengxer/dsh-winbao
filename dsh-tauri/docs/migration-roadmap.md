@@ -21,7 +21,7 @@ Rust 壳（7 个单向依赖的 crate）+ Node sidecar（复用 `dsh-desktop/scr
 | `updater.js` 的 overlay 布局 / checkLatest / applyUpdate / rollback / overlayBinPath / overlayVersion | 不移植 |
 | `runUpdateFlow`（2614-2742） | 不移植；菜单 `check-agent-update` 返回 `E_CUT_FEATURE` |
 | 定时触发器（4675-4770 一带） | 不移植 |
-| skipVersion / 更新确认状态（settings） | 键读取时忽略（`shell_core::settings::is_cut_key`） |
+| skipVersion / 更新确认状态（settings） | 键读取时忽略（`shell_core::upgrade::LEGACY_IGNORED_KEYS`，经 `legacy_keys_present` 消费） |
 | overlay 三副本布局（patch-target-resolver） | Tauri 版补丁布局天然两副本（profile fallback + appDir），无 overlay 更新副本 |
 | WSL applyUpdate | 不移植 |
 

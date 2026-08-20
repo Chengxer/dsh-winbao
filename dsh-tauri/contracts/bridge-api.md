@@ -14,7 +14,7 @@
 - 所有请求-响应方法返回 `Promise`；错误拒绝时携带 `{ message }` 形态的 `Error`。
 - 订阅方法（`onMaximizeChange` / `onNotificationJump`）返回**取消订阅函数**。
 
-## 2. 方法总表（48 项）
+## 2. 方法总表（49 项）
 
 ### 2.1 顶层字段与方法
 
@@ -113,7 +113,7 @@
 | 46 | `getState(): Promise<RecoveryState>` | 恢复页状态 | `chrome:recovery-state` → `recovery_state` |
 | 47 | `reload(): Promise<any>` | 重载主窗 | `chrome:recovery-reload` → `recovery_reload` |
 | 48 | `restart(): Promise<any>` | 重启应用 | `chrome:recovery-restart` → `recovery_restart` |
-| — | `openLogs(): Promise<any>` | 打开日志目录 | `chrome:recovery-open-logs` → `recovery_open_logs` |
+| 49 | `openLogs(): Promise<any>` | 打开日志目录 | `chrome:recovery-open-logs` → `recovery_open_logs` |
 
 ## 3. 主进程 → 页面事件（3 项）
 

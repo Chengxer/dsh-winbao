@@ -71,21 +71,33 @@ pub fn create_main_window(
             }
         }
         if let tauri::WindowEvent::CloseRequested { api, .. } = e {
-            // 关闭前保存窗口状态（settings.json windowState）。
-            if let (Some(w), Some(state)) = (handle.get_webview_window("main"), handle.try_state::<crate::AppState>()) {
-                if let (Ok(pos), Ok(size)) = (w.outer_position(), w.inner_size()) {
-                    let maxed = w.is_maximized().unwrap_or(false);
-                    let _ = crate::save_window_state(&state, (pos.x, pos.y, size.width as f64, size.height as f64, maxed));
-                }
+            // 0.5.0 语义：关窗（系统 Alt+F4 / 任务栏关闭 / WM_CLOSE）= 隐藏主窗
+            // 留托盘，后台常驻、内核继续跑；真退出（杀树）走托盘「退出」。
+            // prevent_close 必须显式调：不拦则窗口走默认销毁（0.1.0 为此曾
+            // 在此直接退进程——Review#2 实测默认销毁会留无窗僵尸）。
+            api.prevent_close();
+            if let Some(w) = handle.get_webview_window("main") {
+                hide_main_to_tray(&w);
             }
-            // Tauri 版语义：关闭主窗 = 退出（托盘用于唤起/日志/退出）。
-            // 显式 exit：有托盘时 tauri 默认保活，不显式退会留下无窗僵尸进程
-            // （Review#2 实测：WM_CLOSE 后进程残留）。
-            let _ = api;
-            handle.exit(0);
         }
     });
     Ok(win)
+}
+
+/// 关窗→托盘（0.5.0）：保存窗口状态后隐藏主窗。进程与内核继续运行，
+/// 经托盘「显示主窗口」/ 双击图标（第二实例聚焦）唤回。
+/// 唯一真退出入口 = 托盘「退出」（supervisor.shutdown + exit，Job Object 杀树）。
+pub fn hide_main_to_tray(win: &tauri::WebviewWindow) {
+    let app = win.app_handle();
+    // 隐藏前保存窗口状态（settings.json windowState）——此后可能经强杀路径
+    // 退出，CloseRequested 不再有触发机会。
+    if let (Some(w), Some(state)) = (app.get_webview_window("main"), app.try_state::<crate::AppState>()) {
+        if let (Ok(pos), Ok(size)) = (w.outer_position(), w.inner_size()) {
+            let maxed = w.is_maximized().unwrap_or(false);
+            let _ = crate::save_window_state(&state, (pos.x, pos.y, size.width as f64, size.height as f64, maxed));
+        }
+    }
+    let _ = win.hide();
 }
 
 /// 浮窗（分屏）：同会话复用 + 上限 FLOAT_MAX。
@@ -248,7 +260,8 @@ pub fn open_sponsor_window(app: &tauri::AppHandle, qr_alipay: &str, qr_wechat: &
         WebviewUrl::External(parse_url(&data_url)?),
     )
     .title("请作者喝咖啡")
-    .inner_size(460.0, 560.0)
+    // 500x620：二维码 220px（Electron 基准 180px 放大 ~22%，扫码更易）+ 标题/留白。
+    .inner_size(500.0, 620.0)
     .resizable(false)
     .maximizable(false)
     .build()
@@ -264,7 +277,7 @@ pub(crate) fn sponsor_html(alipay: &str, wechat: &str) -> String {
 font-family:"Segoe UI","Microsoft YaHei",sans-serif;display:flex;flex-direction:column;height:100vh;user-select:none}}
 .sub{{font-size:12px;color:#8b9ac4;line-height:18px;padding:10px 14px}}
 .codes{{flex:1;display:flex;gap:16px;justify-content:center;align-items:center}}
-.codes img{{width:180px;height:180px;border-radius:10px;background:#fff;padding:6px}}
+.codes img{{width:220px;height:220px;border-radius:10px;background:#fff;padding:6px}}
 .cap{{text-align:center;font-size:12px;color:#8b9ac4;padding-bottom:6px}}</style></head>
 <body><div class="sub">如果这个工具帮到了你，可以请作者喝杯咖啡 ☕ 支持持续更新。</div>
 <div class="codes">
@@ -334,5 +347,36 @@ mod tests {
         assert!(parse_url("http://127.0.0.1:51731/").is_ok());
         assert!(parse_url("not a url").is_err());
         // scheme 不设限（围栏在 on_navigation 层）；只测形态拒绝。
+    }
+
+    /// 主窗 CloseRequested 语义（0.5.0）：拦截默认销毁 → 隐藏留托盘。
+    /// 源码形态断言（WebviewWindow 无法在单测构造），防回退到 exit(0)
+    /// （0.1.0 语义：关窗即退）或漏 prevent_close（无窗僵尸进程）。
+    #[test]
+    fn close_requested_hides_instead_of_exit_shape() {
+        let src = include_str!("windows.rs");
+        let seg = src
+            .split("CloseRequested")
+            .nth(1)
+            .and_then(|s| s.split("/// 浮窗").next())
+            .expect("CloseRequested 处理段");
+        assert!(seg.contains("prevent_close"), "必须拦截默认窗口销毁: {seg}");
+        assert!(seg.contains("hide_main_to_tray"), "关窗 = 隐藏留托盘（非退出）: {seg}");
+        assert!(!seg.contains("exit(0)"), "关窗不得直接退出进程（真退出走托盘）: {seg}");
+    }
+
+    /// hide_main_to_tray 先存状态再隐藏（隐藏后可能经强杀路径退出，
+    /// CloseRequested 不再有触发机会）。
+    #[test]
+    fn hide_main_to_tray_saves_state_before_hide_shape() {
+        let src = include_str!("windows.rs");
+        let seg = src
+            .split("pub fn hide_main_to_tray")
+            .nth(1)
+            .and_then(|s| s.split("// 浮窗").next())
+            .expect("hide_main_to_tray 函数体");
+        let save_pos = seg.find("save_window_state").expect("必须保存窗口状态");
+        let hide_pos = seg.find("win.hide()").expect("必须隐藏窗口");
+        assert!(save_pos < hide_pos, "先存状态后隐藏（强杀路径兜底）: {seg}");
     }
 }
