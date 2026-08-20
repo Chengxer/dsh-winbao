@@ -40,8 +40,11 @@ echo "[stage] 源: $SRC"
 echo "[stage] 目标: $DST"
 
 # 前置校验：缺任何一项，装出来的包必然起不来（fail-fast 优于装完才发现）。
-NODE_BIN="node.exe"
-[ "$(uname -s)" != "Windows_NT" ] && [ "$(uname -s)" != "MINGW64_NT-"* ] && NODE_BIN="node"
+# Windows（含 Git Bash/MINGW/MSYS）用 node.exe，其余用 node
+NODE_BIN="node"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*|Windows*) NODE_BIN="node.exe" ;;
+esac
 for f in package.json "vendor/node/$NODE_BIN" \
          node_modules/@deepseek-ai/dsh/lib/bin.js \
          scripts/lib/companion-profile.js assets/plugins; do
