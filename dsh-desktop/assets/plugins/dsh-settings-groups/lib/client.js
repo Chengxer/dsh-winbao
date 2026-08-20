@@ -205,8 +205,13 @@
   }
 
   // ───────────────────────── 常规页页内折叠（旧行为） ─────────────────────────
-  // 常规设置页结构（官方 dsh-client-ui-settings-general）：
-  //   [data-slot="settings.section"] 内 [data-slot="settings.general.item"]
+  // 常规设置页结构（官方 dsh-client-ui-settings-general，rc.7 与 rc.8 同构）：
+  //   [data-slot="settings.section"]（display:contents 锚点）
+  //     > ._xxx_section（flex column，行排序的真正宿主）
+  //       > [data-slot="settings.general.item"]（display:contents 锚点）× N
+  // 排序宿主取「行的共同父级」而非 section 锚点本身（旧实现假设行是锚点
+  // 直接子级，rc.7 起就隔着官方 section 根，order 从未生效——仅 display
+  // 折叠在扛；现补上 flex order，展开态高级行真正归组到组头之后）。
   function findGeneralSection() {
     var sections = document.querySelectorAll('[data-slot="settings.section"]');
     for (var i = 0; i < sections.length; i++) {
@@ -239,8 +244,8 @@
     if (head && head.parentElement) head.parentElement.removeChild(head);
   }
 
-  function headEl(sectionEl, count, expanded, onToggle) {
-    var existing = sectionEl.querySelector('.' + HEAD_CLASS);
+  function headEl(hostEl, count, expanded, onToggle) {
+    var existing = hostEl.querySelector('.' + HEAD_CLASS);
     if (existing) return existing;
     var head = document.createElement('button');
     head.type = 'button';
@@ -252,7 +257,7 @@
       'background:transparent;color:var(--dsw-alias-label-secondary);font-family:inherit;' +
       'font-size:13px;line-height:20px;text-align:left;';
     head.addEventListener('click', function () { onToggle(); });
-    sectionEl.appendChild(head);
+    hostEl.appendChild(head);
     return head;
   }
 
@@ -269,6 +274,12 @@
       items[i].style.display = '';
       items[i].style.order = '';
     }
+    // 排序/插组头的宿主：行的共同父级（官方 flex section 根）；行直接挂在
+    // section 锚点下的形态（未来 DOM 变化）回落锚点本身。
+    var itemsHost = sectionEl;
+    if (items.length && items[0].parentElement && sectionEl.contains(items[0].parentElement)) {
+      itemsHost = items[0].parentElement;
+    }
     if (parts.advanced.length === 0) {
       removeHead(sectionEl);
       return;
@@ -277,13 +288,13 @@
     for (var k = 0; k < parts.advanced.length; k++) advancedSet[parts.advanced[k]] = true;
     for (var j = 0; j < items.length; j++) {
       if (advancedSet[j]) {
-        if (items[j].parentElement === sectionEl) items[j].style.order = '2';
+        if (items[j].parentElement === itemsHost) items[j].style.order = '2';
         if (!cfg.expanded) items[j].style.display = 'none';
       } else {
-        if (items[j].parentElement === sectionEl) items[j].style.order = '0';
+        if (items[j].parentElement === itemsHost) items[j].style.order = '0';
       }
     }
-    var head = headEl(sectionEl, parts.advanced.length, cfg.expanded, function () {
+    var head = headEl(itemsHost, parts.advanced.length, cfg.expanded, function () {
       cfg.expanded = !cfg.expanded;
       try { localStorage.setItem(window.__dshSettingsGroupsCore.STORAGE_KEY, window.__dshSettingsGroupsCore.serialize(cfg)); } catch (e) {}
       applySection(sectionEl, cfg, keywords);
@@ -314,10 +325,14 @@
     return parts.join('\u0001');
   }
 
+  // 指纹：行标题序列 + 组头存在位（React 重渲染整棵 section 子树抹掉组头时
+  // 标题不变，靠存在位翻转触发重放——组头现已插进官方 flex section 根内部，
+  // 与侧边栏 navList 组头同一套自愈机制）。
   function sectionFingerprintOf(sectionEl) {
     var items = sectionEl.querySelectorAll('[data-slot="settings.general.item"]');
     var parts = [];
     for (var i = 0; i < items.length; i++) parts.push(itemTitleOf(items[i]));
+    parts.push('|heads|' + (sectionEl.querySelector('.' + HEAD_CLASS) ? '1' : '0'));
     return parts.join('\u0001');
   }
 
