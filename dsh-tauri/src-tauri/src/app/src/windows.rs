@@ -258,8 +258,14 @@ pub fn open_sponsor_window(app: &tauri::AppHandle, qr_alipay: &str, qr_wechat: &
         let _ = existing.set_focus();
         return Ok(serde_json::json!({ "ok": true, "reused": true }));
     }
-    let html_path = write_sponsor_files(&std::env::temp_dir().join("dsh-sponsor"), qr_alipay, qr_wechat)?;
-    // Windows 路径 → file URL（反斜杠转正；空格/非 ASCII 由 Url 解析器百分号编码）。
+    // 方案：HTML 写 TEMP 文件（含内联 data URI 图片）→ file:// 加载。
+    // 不用相对路径图片（WebView2 file:// 安全策略可能拦跨文件引用）；
+    // 不用 data URL 导航整页（URL 长度限制）——组合两者优势。
+    let html = sponsor_html(qr_alipay, qr_wechat); // 内联 data URI 版
+    let dir = std::env::temp_dir().join("dsh-sponsor");
+    std::fs::create_dir_all(&dir).map_err(|e| BridgeError::internal(format!("赞助目录: {e}")))?;
+    let html_path = dir.join("sponsor.html");
+    std::fs::write(&html_path, &html).map_err(|e| BridgeError::internal(format!("赞助页写入: {e}")))?;
     let file_url = format!("file:///{}", html_path.to_string_lossy().replace('\\', "/"));
     let win = tauri::webview::WebviewWindowBuilder::new(
         app,
@@ -267,24 +273,16 @@ pub fn open_sponsor_window(app: &tauri::AppHandle, qr_alipay: &str, qr_wechat: &
         WebviewUrl::External(parse_url(&file_url)?),
     )
     .title("请作者喝咖啡")
-    // 500x620：二维码 220px（Electron 基准 180px 放大 ~22%，扫码更易）+ 标题/留白。
     .inner_size(500.0, 620.0)
     .resizable(false)
     .maximizable(false)
     .closable(true)
-    .decorations(true) // 原生标题栏（含 X 关闭钮），用户可正常关掉
+    .decorations(true) // 原生标题栏（含 X 关闭钮）
     .build()
     .map_err(|e| BridgeError::internal(format!("赞助窗创建: {e}")))?;
-    // 关闭语义：显式接管 CloseRequested——prevent_close 后 destroy() 真销毁，
-    // 绝不走主窗 hide-to-tray（0.5.0「关不掉」回归锚点）。用 destroy 而非
-    // close：destroy 不再触发 CloseRequested，无递归风险。
-    let sponsor = win.clone();
-    win.on_window_event(move |e| {
-        if let tauri::WindowEvent::CloseRequested { api, .. } = e {
-            api.prevent_close();
-            let _ = sponsor.destroy();
-        }
-    });
+    // 关闭：不加自定义 on_window_event——主窗的 hide-to-tray 只挂在主窗，
+    // 赞助窗的默认关闭行为就是 destroy（此前在 CloseRequested 回调里
+    // destroy() 导致 UI 线程死锁——用户实测「关闭卡死」根因）。
     let _ = win.show();
     Ok(serde_json::json!({ "ok": true }))
 }
@@ -293,6 +291,7 @@ pub fn open_sponsor_window(app: &tauri::AppHandle, qr_alipay: &str, qr_wechat: &
 /// sponsor-alipay.jpg / sponsor-wechat.png / sponsor.html（图片引同目录
 /// 相对路径）。返回 HTML 文件路径。独立成函数供单测直验落盘产物
 /// （WebviewWindow 无法在单测构造）。
+#[cfg(test)]
 fn write_sponsor_files(
     dir: &std::path::Path,
     qr_alipay: &str,
@@ -321,6 +320,7 @@ fn write_sponsor_files(
 /// 文件引用版赞助页（%TEMP%\dsh-sponsor\sponsor.html）：图片固定引同目录
 /// 相对路径（./sponsor-alipay.jpg 等），不内联 data URI（WebView2 大 data
 /// URI 渲染不稳定）。无插值，纯静态字符串。
+#[cfg(test)]
 pub(crate) fn sponsor_html_file() -> String {
     r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>请作者喝咖啡</title>
 <style>*{box-sizing:border-box;margin:0}body{background:#0b1220;color:#e6ecff;
@@ -337,10 +337,9 @@ font-family:"Segoe UI","Microsoft YaHei",sans-serif;display:flex;flex-direction:
         .to_string()
 }
 
-/// 内联 data URI 版赞助页（旧渲染模式，仅存续于测试契约——commands.rs
-/// sponsor_and_qr_helpers 断言此形态；生产路径已全面改走文件版
-/// sponsor_html_file，防 WebView2 大 data URI 无图）。
-#[cfg(test)]
+/// 内联 data URI 版赞助页：写 TEMP 文件后 file:// 加载——data URI 在
+/// file:// 页面上下文中渲染无 WebView2 导航限制（此前直接 data URL 导航
+/// 整页才是无图根因），这是 v0.5.0 终方案。
 pub(crate) fn sponsor_html(alipay: &str, wechat: &str) -> String {
     format!(
         r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>请作者喝咖啡</title>
