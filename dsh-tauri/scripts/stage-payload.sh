@@ -63,5 +63,39 @@ rc "$SRC/vendor/npm" "$DST/vendor/npm" //MIR //R:2 //W:1
 rc "$SRC/node_modules" "$DST/node_modules" //MIR //R:2 //W:1 \
    //XD electron electron-builder electron-winstaller
 
+# ---- rc7 客户端包 vendor（用户实测「插件全灭+侧边栏消失」的根因）----
+# 机制：rc8 内核把 client-web 系溶入 minified dist（kernel 自身 OK），但伴随
+# 插件 client.js 仍 require("@deepseek-ai/dsh-client-web-react" /
+# "dsh-client-ui-primitives")——client-modules loader 找不到 module table 种子
+# 时走 package factory 路径，需要真实包在 node_modules。Electron 0.4.1 正是
+# 带着 rc7 残留包发版才正常（实测 dev 检出/payload 缺它们 → 全部插件加载
+# 失败）。源：本机 0.4.1 构建产物 node_modules（与发版字节一致的已验证闭包），
+# 补齐其中 payload 缺失的所有顶层包（闭包自维护，无需手工枚举传递依赖）。
+VENDOR_SRC="$REPO_ROOT/dsh-desktop/dist/win-unpacked/resources/app/node_modules"
+if [ -d "$VENDOR_SRC" ]; then
+  vendored=0
+  for d in "$VENDOR_SRC"/*/ "$VENDOR_SRC"/@*/*/; do
+    [ -d "$d" ] || continue
+    base="$(basename "$d")"
+    parent="$(basename "$(dirname "$d")")"
+    if [ "$parent" = node_modules ]; then rel="$base"; else rel="$parent/$base"; fi
+    case "$rel" in .bin|*.json) continue ;; esac
+    if [ ! -d "$DST/node_modules/$rel" ]; then
+      # robocopy 成功码为 1-7（≠0），set -e 下裸调会被误杀——同 rc() 护栏。
+      set +e
+      robocopy "$d" "$DST/node_modules/$rel" //MIR //R:1 //W:1 > /dev/null
+      rcv=$?
+      set -e
+      [ $rcv -lt 8 ] || { echo "[stage] vendor 失败($rcv): $rel" >&2; exit 1; }
+      vendored=$((vendored+1))
+    fi
+  done
+  echo "[stage] vendor rc7 客户端闭包：补 $vendored 个缺失包（源 = 0.4.1 构建产物）"
+else
+  echo "[stage] ⚠ 缺 0.4.1 构建产物（$VENDOR_SRC）——插件客户端包将缺失，页面插件会加载失败！" >&2
+  echo "[stage]   请先在 dsh-desktop 构建过 0.4.1（或恢复 dist/win-unpacked）。" >&2
+  exit 1
+fi
+
 echo "[stage] 完成。体积统计："
 du -sm "$DST" "$DST/node_modules" "$DST/vendor" "$DST/assets" 2>/dev/null

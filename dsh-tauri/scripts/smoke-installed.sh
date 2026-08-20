@@ -16,7 +16,12 @@
 # 判定（避免本机正式版 node.exe 污染）：启动前后 LISTENING 端口 PID 差集
 # ≥2（preview-server + 内核）且隔离 profile 建立；杀壳后差集端口归零
 # （Job Object 收割验证）。
-# 用法：bash dsh-tauri/scripts/smoke-installed.sh   （构建完成后执行）
+# **插件加载断言**（用户实测「插件全灭+侧边栏消失」曾是冒烟盲区）：内核
+# stderr 经 supervisor 转发到 app.log（"[supervisor] web| …"），出现
+# "Failed to load plugins" / "missed the module table" 即 FAIL。
+# **真实 profile 模式**：REAL_PROFILE=1 时先把本机真实 ~/.dsh 镜像到隔离
+# home 再跑——复现用户实装数据形态（旧 profile/旧插件副本），仍是零接触。
+# 用法：bash dsh-tauri/scripts/smoke-installed.sh [REAL_PROFILE=1]
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -39,6 +44,13 @@ done
 
 PRE_PIDS=$(listening_pids)
 
+# 真实 profile 模式：镜像本机 ~/.dsh（只读源 → 隔离 home；写发生在副本上）。
+if [ "${REAL_PROFILE:-0}" = "1" ]; then
+  echo "[smoke] REAL_PROFILE=1：镜像真实 ~/.dsh → 隔离 home（写零接触）"
+  robocopy "$(cygpath -u "$USERPROFILE")/.dsh" "$SMOKE/home" //MIR //R:1 //W:1 > /dev/null
+  rc=$?; [ $rc -lt 8 ] || { echo "[smoke] 真实 home 镜像失败($rc)"; exit 1; }
+fi
+
 echo "[smoke] 启动（DSH_HOME/DSH_TAURI_USERDATA 全隔离），日志 → $SMOKE/app.log"
 DSH_HOME="$(cygpath -w "$SMOKE/home")" \
 DSH_TAURI_USERDATA="$(cygpath -w "$SMOKE/ud")" \
@@ -58,6 +70,16 @@ done
 echo "[smoke] --- 隔离 home 树 ---"; find "$SMOKE/home" -maxdepth 3 | head -8
 echo "[smoke] --- 隔离 userData 树 ---"; find "$SMOKE/ud" -maxdepth 2 | head -8
 echo "[smoke] --- app.log 尾部 ---"; tail -6 "$SMOKE/app.log" 2>/dev/null
+
+# 插件加载断言：内核转发行里出现任一致命串即 FAIL（曾经的冒烟盲区）。
+if grep -q "Failed to load plugins\|missed the module table" "$SMOKE/app.log" 2>/dev/null; then
+  echo "[smoke] ✗ 检出插件加载失败："
+  grep -m 4 "Failed to load plugins\|missed the module table\|web|" "$SMOKE/app.log" | head -6
+  taskkill //IM "dsh-tauri-app.exe" //F //T > /dev/null 2>&1
+  echo "[smoke] === FAIL（插件加载错误）==="
+  exit 1
+fi
+echo "[smoke] ✓ 插件加载零致命错误"
 
 echo "[smoke] 收尾：杀壳（Job Object 预期同步收割内核树）"
 taskkill //IM "dsh-tauri-app.exe" //F //T > /dev/null 2>&1

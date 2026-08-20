@@ -42,6 +42,10 @@ pub fn create_main_window(
     .title("DSH Desktop")
     .min_inner_size(980.0, 600.0)
     .decorations(false)
+    // 显式声明（用户实测「不能调整窗口大小」）：undecorated 窗口默认应可
+    // 拖边缩放，显式置 true 防构建配置漂移；与 Electron frame:false +
+    // resizable:true 行为对齐。
+    .resizable(true)
     .initialization_script(BRIDGE_SHIM_JS)
     .on_navigation(|url| {
         // 导航围栏：仅 127.0.0.1（内核/内嵌页）与 tauri 内部协议。
