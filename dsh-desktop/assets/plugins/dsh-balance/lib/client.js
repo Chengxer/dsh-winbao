@@ -103,23 +103,36 @@ window.__ModuleLoader__.load({
 		// 本页面生命周期内是否已收到过余额推送（模块级）：已收到则后续挂载
 		// 不再触发强制刷新（会话切换零额外 HTTP），数据由事件通道持续更新。
 		let bridgePushedOnce = false;
+		// 桥在场但事件迟迟不来（Tauri 版余额数据链 Phase 3 前未实装——壳只
+		// 探活内核、无人投递 dsh-balance-changed）的降级时限：超时后视同
+		// 「无桌面壳」的浏览器模式（本轮费用按内置价目，余额区不渲染），
+		// 绝不让整个 dock 因 {loading:true} 永挂而消失。
+		const BRIDGE_PUSH_TIMEOUT_MS = 4000;
 
 		/** 订阅桌面壳推送的余额数据（首次挂载触发一次主动刷新，数据只走事件通道）。 */
 		function useBalanceData() {
 			const hasBridge = typeof window !== "undefined" && window.dshDesktop && typeof window.dshDesktop.refreshBalance === "function";
-			const [data, setData] = react.useState(() => hasBridge ? { loading: true } : null);
+			const [data, setData] = react.useState(() => hasBridge && !bridgePushedOnce ? { loading: true } : null);
 			react.useEffect(() => {
 				let alive = true;
 				const apply = (next) => { if (alive && next) { bridgePushedOnce = true; setData(next); } };
 				const handler = (event) => apply(event.detail);
 				window.addEventListener("dsh-balance-changed", handler);
 				const bridge = window.dshDesktop;
+				let timer = null;
 				if (bridge && typeof bridge.refreshBalance === "function") {
 					// 只触发刷新，不消费返回值（处理器按单一投递契约不返回数据）。
 					if (!bridgePushedOnce) bridge.refreshBalance().catch(() => {});
+					// 超时降级：时限内无任何推送 → 桥的事件链未实装（或网络久未
+					// 回包），转浏览器模式兜底；之后真实事件到达时 apply 仍会接管
+					// （loading=false 不阻断后续 setData）。
+					timer = setTimeout(() => {
+						if (alive && !bridgePushedOnce) setData(null);
+					}, BRIDGE_PUSH_TIMEOUT_MS);
 				}
 				return () => {
 					alive = false;
+					if (timer) clearTimeout(timer);
 					window.removeEventListener("dsh-balance-changed", handler);
 				};
 			}, []);
