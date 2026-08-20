@@ -30,15 +30,3 @@ jobs:
         run: npm test
       - name: 余额链路验证（逻辑级 dock）
         run: node scripts/test/verify-balance-dock.cjs
-      - name: 余额链路验证（真实 Electron 渲染层，#106）
-        run: |
-          # CI runner 无 GPU + npm ci 不触发 electron 二进制下载，需手动安装
-          node node_modules/electron/install.js
-          node scripts/test/verify-balance-renderer.cjs
-      - name: 上传余额验证诊断（仅失败时）
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: balance-verify-diag
-          path: dsh-desktop/.ci-diag
-          if-no-files-found: ignore

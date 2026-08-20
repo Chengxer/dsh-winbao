@@ -26,9 +26,8 @@ name: Release Build
 # 进制），vendor/node 本地复制；打包为 AppImage 单文件，架构用 file -b
 # 校验 ELF "x86-64"。
 on:
-  push:
-    tags:
-      - 'v*'
+  # Electron 发布流水线已退役（架构迁移 Tauri）——推 v* tag 不再自动构建 Electron 包。
+  # 手动触发入口保留但所有 job 已 if: false 短路。Tauri 发布流水线后续另建。
   workflow_dispatch:
     inputs:
       tag:
@@ -56,6 +55,7 @@ jobs:
     name: build-x64
     # 手动触发时按输入裁剪；推 tag 恒为双架构。
     if: >-
+      false && # Electron 发布流水线已退役（Tauri 迁移）——勿启用，Tauri 流水线另建
       github.event_name == 'push' ||
       inputs.arch == 'both' ||
       inputs.arch == 'x64'
@@ -287,6 +287,7 @@ jobs:
   build-arm64:
     name: build-arm64
     if: >-
+      false && # Electron 发布流水线已退役（Tauri 迁移）——勿启用，Tauri 流水线另建
       github.event_name == 'push' ||
       inputs.arch == 'both' ||
       inputs.arch == 'arm64'
@@ -532,6 +533,7 @@ jobs:
     name: build-linux-x64
     # 手动触发时按输入裁剪；推 tag 恒构建 Linux x64。
     if: >-
+      false && # Electron 发布流水线已退役（Tauri 迁移）——勿启用，Tauri 流水线另建
       github.event_name == 'push' ||
       inputs.linux == 'yes'
     runs-on: ubuntu-latest
@@ -760,6 +762,7 @@ jobs:
   build-mac-x64:
     name: build-mac-x64
     if: >-
+      false && # Electron 发布流水线已退役（Tauri 迁移）——勿启用，Tauri 流水线另建
       github.event_name == 'push' ||
       inputs.mac == 'both' ||
       inputs.mac == 'x64'
@@ -946,6 +949,7 @@ jobs:
   build-mac-arm64:
     name: build-mac-arm64
     if: >-
+      false && # Electron 发布流水线已退役（Tauri 迁移）——勿启用，Tauri 流水线另建
       github.event_name == 'push' ||
       inputs.mac == 'both' ||
       inputs.mac == 'arm64'

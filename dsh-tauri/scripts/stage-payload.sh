@@ -10,7 +10,7 @@
 #
 # 产出布局（resources 映射 → <安装根>/resources/dsh-desktop/，
 # 与 lib.rs find_repo_root 的 exe-walk resources/ 子布局回退一致）：
-#   dsh-desktop/{package.json, main.js, scripts/, assets/,
+#   dsh-desktop/{package.json, 根级 *.js（boot 链脚本）, scripts/, assets/,
 #                vendor/node/node.exe, vendor/npm/, node_modules/<生产依赖>}
 #
 # 用法：bash dsh-tauri/scripts/stage-payload.sh   （在仓库任意位置均可）
@@ -44,10 +44,11 @@ rc() { # rc <src> <dst> [额外参数...]
   if [ "$out" -ge 8 ]; then echo "[stage] robocopy 失败 ($out): $1" >&2; exit "$out"; fi
 }
 
-# ---- 根文件：全部根级 *.js + package.json（对齐 electron-builder files 白名单
-#      形态；scripts/integration 等经 require('../../profile-manifest') 直引根级
-#      脚本——缺一件 boot 链即断，实测曾漏 profile-manifest.js 导致安装包首启
-#      全灭）。package-lock.json 不带（payload 不做 npm install）。----
+# ---- 根文件：全部根级 *.js + package.json（历史对齐 electron-builder files
+#      白名单形态，Electron 壳退役后仅剩 boot 链脚本；scripts/ 等经
+#      require('../../profile-manifest') 直引根级脚本——缺一件 boot 链即断，
+#      实测曾漏 profile-manifest.js 导致安装包首启全灭）。package-lock.json
+#      不带（payload 不做 npm install）。----
 rc "$SRC" "$DST" '*.js' package.json
 
 # ---- scripts / assets：全量镜像 ----
