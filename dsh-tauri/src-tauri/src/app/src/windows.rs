@@ -293,6 +293,8 @@ pub fn open_sponsor_window(app: &tauri::AppHandle, qr_alipay: &str, qr_wechat: &
     .inner_size(500.0, 620.0)
     .resizable(false)
     .maximizable(false)
+    .closable(true)
+    .decorations(true) // 原生标题栏（含 X 关闭钮），用户可正常关掉
     .build()
     .map_err(|e| BridgeError::internal(format!("赞助窗创建: {e}")))?;
     let _ = win.show();
