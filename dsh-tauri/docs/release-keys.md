@@ -38,7 +38,25 @@ cargo tauri signer generate -w dsh-updater.key
 
 ## 3. CI 发版流程（GitHub Actions）
 
-1. tag → build（`tauri build`，externalBin/resources 见 tauri.conf.json）；
+0. **payload 前置**（内核资源暂存，安装包内 `<安装根>/resources/dsh-desktop/`）：
+
+   ```bash
+   bash dsh-tauri/scripts/stage-payload.sh
+   # 从 dsh-desktop/ 按「Electron extraResources + 生产依赖」口径组装到
+   # dsh-tauri/package-payload/dsh-desktop/（排除 dist/、devDeps electron 三件、
+   # unix node 二进制；约 500MB）。缺内核必需件时 fail-fast。
+   ```
+
+1. tag → build：
+
+   ```bash
+   # tauri-cli 经 npx（免 cargo install 长编译）；cargo 需在 PATH
+   npx --yes @tauri-apps/cli build \
+     --config src-tauri/src/app/tauri.conf.json \
+     --target x86_64-pc-windows-msvc
+   # 产物：src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+   # （targets=["nsis"]；installMode=currentUser + installerHooks 保数据升级链）
+   ```
 2. `cargo tauri signer sign` 各平台产物 → `.sig`；
 3. 组装 `latest.json`（含 x86_64-pc-windows-msvc 条目）→ Release 上传产物+签名+manifest；
 4. Gitee 镜像：同步产物；updater 单 endpoint 以 GitHub 为主源

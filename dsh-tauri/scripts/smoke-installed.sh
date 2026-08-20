@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# smoke-installed.sh —— 安装布局冒烟（不跑真安装器，不碰真实用户数据）
+# ==========================================================================
+# 为什么不跑 NSIS 安装器：installerHooks 的 PREINSTALL 会检测并【静默卸载】
+# 本机真实 Electron 版 DSH Desktop（保数据但卸应用）——冒烟阶段绝不允许。
+# 改为手工拼出与安装器完全一致的目录布局，再以重定向环境运行：
+#
+#   $SMOKE/
+#     dsh-tauri-app.exe           ← release 产物（bin 名；exe-walk 不看名）
+#     resources/dsh-desktop/      ← package-payload（内核）
+#     resources/sidecar/  ui/     ← 同 resources 映射
+#
+# 环境隔离：DSH_HOME / DSH_TAURI_USERDATA 指向 $SMOKE 下临时目录
+# （Rust 与 Node 两侧同口径，见 shell-core paths.rs 生产覆盖通道）。
+#
+# 判定（避免本机正式版 node.exe 污染）：启动前后 LISTENING 端口 PID 差集
+# ≥2（preview-server + 内核）且隔离 profile 建立；杀壳后差集端口归零
+# （Job Object 收割验证）。
+# 用法：bash dsh-tauri/scripts/smoke-installed.sh   （构建完成后执行）
+set -u
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+TARGET_DIR="$REPO_ROOT/dsh-tauri/src-tauri/target/x86_64-pc-windows-msvc/release"
+EXE="$TARGET_DIR/dsh-tauri-app.exe"
+SMOKE="${SMOKE_DIR:-/tmp/dsh-tauri-smoke}"
+
+listening_pids() { netstat -ano 2>/dev/null | grep -i LISTENING | awk '{print $NF}' | sort -u; }
+
+[ -f "$EXE" ] || { echo "[smoke] 缺 release exe: $EXE"; exit 1; }
+
+echo "[smoke] 布局组装: $SMOKE"
+rm -rf "$SMOKE"; mkdir -p "$SMOKE/resources" "$SMOKE/home" "$SMOKE/ud"
+cp -f "$EXE" "$SMOKE/"
+for pair in "package-payload/dsh-desktop:dsh-desktop" "sidecar:sidecar" "ui:ui"; do
+  src="${pair%%:*}"; dst="${pair##*:}"
+  robocopy "$REPO_ROOT/dsh-tauri/$src" "$SMOKE/resources/$dst" //MIR //R:1 //W:1 > /dev/null
+  rc=$?; [ $rc -lt 8 ] || { echo "[smoke] robocopy 失败($rc): $src"; exit 1; }
+done
+
+PRE_PIDS=$(listening_pids)
+
+echo "[smoke] 启动（DSH_HOME/DSH_TAURI_USERDATA 全隔离），日志 → $SMOKE/app.log"
+DSH_HOME="$(cygpath -w "$SMOKE/home")" \
+DSH_TAURI_USERDATA="$(cygpath -w "$SMOKE/ud")" \
+  "$(cygpath -w "$SMOKE/dsh-tauri-app.exe")" > "$SMOKE/app.log" 2>&1 &
+
+ok=""
+for i in $(seq 1 36); do
+  sleep 5
+  NEW=$(listening_pids | comm -13 <(echo "$PRE_PIDS") - | grep -c . )
+  if tasklist //FI "IMAGENAME eq dsh-tauri-app.exe" 2>/dev/null | grep -q dsh-tauri-app.exe \
+     && [ "${NEW:-0}" -ge 2 ] \
+     && [ -f "$SMOKE/home/profiles/web/cordis.patch.yml" ]; then
+    ok=1; echo "[smoke] ✓ 第 $((i*5))s：新增监听者=${NEW}（preview+内核）+ 隔离 profile 建立"; break
+  fi
+done
+
+echo "[smoke] --- 隔离 home 树 ---"; find "$SMOKE/home" -maxdepth 3 | head -8
+echo "[smoke] --- 隔离 userData 树 ---"; find "$SMOKE/ud" -maxdepth 2 | head -8
+echo "[smoke] --- app.log 尾部 ---"; tail -6 "$SMOKE/app.log" 2>/dev/null
+
+echo "[smoke] 收尾：杀壳（Job Object 预期同步收割内核树）"
+taskkill //IM "dsh-tauri-app.exe" //F //T > /dev/null 2>&1
+sleep 3
+NEW_AFTER=$(listening_pids | comm -13 <(echo "$PRE_PIDS") - | grep -c . )
+echo "[smoke] 杀壳后新增监听者残留: ${NEW_AFTER}（预期 0）"
+
+if [ -n "$ok" ] && [ "${NEW_AFTER:-1}" -eq 0 ]; then
+  echo "[smoke] === PASS ==="
+else
+  echo "[smoke] === FAIL（boot=$ok 残留监听=${NEW_AFTER:-?}）==="
+  exit 1
+fi

@@ -134,6 +134,41 @@
   format_unix_secs 已知时间戳 3 断言、panic_payload_str 三形态——
   workspace **108/0 零警告**（build+test 双模式）。
 
+### win-x64 安装包落地（NSIS）+ 安装态三缺陷修复（实测驱动）
+- **打包链**：`scripts/stage-payload.sh`（内核 payload 暂存，排除 dist/
+  devDeps electron 三件/unix node，约 500MB）→ resources 三映射
+  （sidecar/ui/dsh-desktop → `<安装根>/resources/`）→ `npx @tauri-apps/cli
+  build`（targets=["nsis"]，currentUser + 保数据 installerHooks）→
+  `DSH Desktop_0.1.0_x64-setup.exe`（LZMA ~79MiB）。图标与 Electron 版
+  build/icon.ico 逐字节一致（md5 相同）。
+- **NSIS 钩子语法修正**：`${If} ${ProcessExists}` 是臆造宏（模板无此定义，
+  makensis 报 _If 参数数错）→ 改用模板同款 `nsis_tauri_utils::FindProcess`
+  + LogicLib 数字比较；本版 exe 的运行检测交给模板自带
+  CheckIfAppIsRunning（紧随钩子执行）。
+- **sidecar_cli 双布局解析**：曾只认开发检出 `<repo>/dsh-tauri/sidecar/`，
+  安装布局（`resources/sidecar/`）下 node 秒退 Cannot find module → 瀑布
+  终态恢复页且全程零 stderr（最难排查的静默故障）。现 dev/installed 两
+  布局自动择一；run_sidecar_boot 失败路径补 eprintln 落痕。
+- **幽灵环境变量修复（shell-core paths）**：DSH_HOME /
+  DSH_TAURI_USERDATA 此前只有 Node 侧（sidecar）生效，Rust 侧
+  DshPaths::resolve 根本不读——**便携版 userData 重定向在 Rust 侧从未
+  生效**（冒烟实测：隔离 ud 为空、Rust 仍读真实 %APPDATA%）。现与
+  sidecar resolveHome/resolveUserData 同口径：根目录直接替换；测试
+  ENV_LOCK 串行化（并行用例互见实测）。
+- **payload 根级脚本缺失修复**：暂存曾只带 package.json/main.js，而
+  scripts/integration 经 `require('../../profile-manifest')` 直引根级
+  运行时脚本（electron-builder files 白名单那批）——缺一件 boot 链即断。
+  现全量 `*.js` + package.json。
+- **find_repo_root 顺序修正**：exe 相对布局优先（编译机=测试机场景曾会
+  用仓库检出遮蔽安装目录，实装验证失真）；CARGO_MANIFEST_DIR 降为兜底。
+- **冒烟脚本** `scripts/smoke-installed.sh`：手拼安装布局（绝不跑真安装
+  器——PREINSTALL 会静默卸载本机真实 Electron 版）、环境全隔离、
+  LISTENING 端口 PID 差集判定（防本机正式版 node.exe 污染）、杀壳后
+  差集归零验证 Job Object 收割。
+- 全量验证：workspace cargo test **109/0 零警告**（新增生产覆盖通道
+  用例）；冒烟 PASS 判据 = 隔离 profile 建立 + preview+内核双监听 + 杀壳
+  零残留。
+
 ### 已知限制（后续迭代）
 - backup-export 2MB 上限为上游 desktop-backup.js 原生行为（与 Electron 版一致）
 - image_paste_save 返回 E_NOT_IMPLEMENTED（剪贴板位图）

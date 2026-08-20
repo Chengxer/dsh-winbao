@@ -10,8 +10,15 @@
 //! | 隔离区 | `%APPDATA%/dsh-desktop/plugin-quarantine/` |
 //! | 粘贴临时 | `%TEMP%/dsh-paste/` |
 //!
-//! 测试可用环境变量覆盖（`DSH_TEST_HOME` / `DSH_TEST_APPDATA` / `DSH_TEST_TMP`），
-//! 生产代码不读这些变量。
+//! 覆盖通道两套：
+//! - **生产覆盖**（sidecar cli.js 的 resolveHome/resolveUserData 同口径，
+//!   便携版 userData 重定向与安装布局冒烟共用）：
+//!   `DSH_HOME`（dsh home 根，直接替换）、`DSH_TAURI_USERDATA`（壳 AppData
+//!   根，直接替换）。两侧必须同时生效——只有 Node 侧生效时，便携重定向/
+//!   冒烟隔离在 Rust 侧是「幽灵变量」（曾实测：隔离 ud 为空而 Rust 侧仍读
+//!   到真实 %APPDATA% 的 window-state.json）。
+//! - 测试覆盖：`DSH_TEST_HOME` / `DSH_TEST_APPDATA` / `DSH_TEST_TMP`
+//!   （优先级最高）。
 
 use std::env;
 use std::path::PathBuf;
@@ -50,18 +57,30 @@ impl DshPaths {
         let test_appdata = env::var_os("DSH_TEST_APPDATA");
         let test_tmp = env::var_os("DSH_TEST_TMP");
         let home_dir = test_home
+            .clone()
             .or_else(|| home("USERPROFILE").or_else(|| home("HOME")))
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
         let appdata_dir = test_appdata
+            .clone()
             .or_else(|| appdata("APPDATA"))
             .unwrap_or_else(|| home("USERPROFILE").unwrap_or_default());
         let tmp_dir = test_tmp
             .or_else(|| tmp("TEMP").or_else(|| tmp("TMP")))
             .unwrap_or_else(|| tmp("TEMP").unwrap_or_default());
 
-        let dsh_home = home_dir.join(".dsh");
-        let app_data = PathBuf::from(appdata_dir).join("dsh-desktop");
+        // 生产覆盖通道（sidecar resolveHome/resolveUserData 逐字对齐）：
+        // DSH_HOME / DSH_TAURI_USERDATA 都是「根目录直接替换」——DSH_HOME 即
+        // ~/.dsh 等价物（sidecar：home/profiles/web），DSH_TAURI_USERDATA 即
+        // %APPDATA%/dsh-desktop 等价物；测试三件套优先级更高。
+        let dsh_home = test_home
+            .or_else(|| env::var_os("DSH_HOME"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home_dir.join(".dsh"));
+        let app_data = test_appdata
+            .or_else(|| env::var_os("DSH_TAURI_USERDATA"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(appdata_dir).join("dsh-desktop"));
         Self {
             settings: app_data.join("settings.json"),
             logs: app_data.join("logs"),
@@ -78,6 +97,11 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
 
+    /// 环境变量互斥：resolve_with 读进程环境（DSH_HOME / DSH_TAURI_USERDATA
+    /// 生产覆盖通道），注入式用例与 env 用例必须串行，否则并发互见（实测
+    /// windows_layout 用例读到 env 用例设置的 X:\smoke\home）。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn paths(home: &str, appdata: &str, tmp: &str) -> DshPaths {
         let (h, a, t) = (home.to_string(), appdata.to_string(), tmp.to_string());
         DshPaths::resolve_with(
@@ -89,6 +113,7 @@ mod tests {
 
     #[test]
     fn windows_layout_matches_electron() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let p = paths(r"C:\Users\u", r"C:\Users\u\AppData\Roaming", r"C:\Users\u\AppData\Local\Temp");
         assert_eq!(p.dsh_home, PathBuf::from(r"C:\Users\u\.dsh"));
         assert_eq!(p.settings, PathBuf::from(r"C:\Users\u\AppData\Roaming\dsh-desktop\settings.json"));
@@ -99,8 +124,28 @@ mod tests {
 
     #[test]
     fn app_data_root_exposed() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let p = paths("/home/u", "/home/u/.config", "/tmp");
         assert_eq!(p.app_data, PathBuf::from("/home/u/.config/dsh-desktop"));
         assert!(p.settings.starts_with(&p.app_data));
+    }
+
+    /// 生产覆盖通道（DSH_HOME / DSH_TAURI_USERDATA）：直接替换根目录，
+    /// 不再拼 .dsh / dsh-desktop——与 sidecar resolveHome/resolveUserData 同口径。
+    /// 本 crate 测试二进制内仅此用例读写环境变量（其余用注入式），无并行互见。
+    #[test]
+    fn prod_override_channels_replace_roots_directly() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("DSH_TEST_HOME");
+        std::env::remove_var("DSH_TEST_APPDATA");
+        std::env::remove_var("DSH_TEST_TMP");
+        std::env::set_var("DSH_HOME", r"X:\smoke\home");
+        std::env::set_var("DSH_TAURI_USERDATA", r"X:\smoke\ud");
+        let p = DshPaths::resolve();
+        std::env::remove_var("DSH_HOME");
+        std::env::remove_var("DSH_TAURI_USERDATA");
+        assert_eq!(p.dsh_home, PathBuf::from(r"X:\smoke\home"), "DSH_HOME 即 .dsh 根（sidecar 同口径），不再拼 .dsh");
+        assert_eq!(p.app_data, PathBuf::from(r"X:\smoke\ud"), "DSH_TAURI_USERDATA 即壳 AppData 根，不再拼 dsh-desktop");
+        assert_eq!(p.settings, PathBuf::from(r"X:\smoke\ud\settings.json"));
     }
 }

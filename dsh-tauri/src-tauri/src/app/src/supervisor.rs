@@ -73,8 +73,20 @@ struct Inner {
 impl Supervisor {
     pub fn new(repo_root: &std::path::Path) -> Self {
         let app_dir = repo_root.join("dsh-desktop");
+        // sidecar cli 双布局解析：开发检出在 <repo>/dsh-tauri/sidecar/，
+        // 安装产物在 <安装根>/resources/sidecar/（repo_root 即 resources）。
+        // 曾实测：只认开发布局时安装包首启 node 秒退「Cannot find module」，
+        // 瀑布终态恢复页且全程零 stderr——最难排查的一类静默故障。
+        let sidecar_cli = {
+            let dev = repo_root.join("dsh-tauri").join("sidecar").join("cli.js");
+            if dev.exists() {
+                dev
+            } else {
+                repo_root.join("sidecar").join("cli.js")
+            }
+        };
         Self {
-            sidecar_cli: repo_root.join("dsh-tauri").join("sidecar").join("cli.js"),
+            sidecar_cli,
             node_exe: app_dir.join("vendor").join("node").join("node.exe"),
             bin_js: app_dir.join("node_modules").join("@deepseek-ai").join("dsh").join("lib").join("bin.js"),
             kernel_version: read_kernel_version(&app_dir),
@@ -338,9 +350,15 @@ impl Supervisor {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .map_err(|e| format!("sidecar spawn: {e}"))?;
+            .map_err(|e| {
+                let msg = format!("sidecar spawn 失败（node: {} cli: {}）: {e}", self.node_exe.display(), self.sidecar_cli.display());
+                eprintln!("[boot] {msg}");
+                msg
+            })?;
         if !out.status.success() {
-            return Err(format!("sidecar boot 退出码 {:?}: {}", out.status.code(), String::from_utf8_lossy(&out.stderr).lines().take(6).collect::<Vec<_>>().join(" | ")));
+            let msg = format!("sidecar boot 退出码 {:?}: {}", out.status.code(), String::from_utf8_lossy(&out.stderr).lines().take(6).collect::<Vec<_>>().join(" | "));
+            eprintln!("[boot] {msg}");
+            return Err(msg);
         }
         // stdout：末行 JSON {ok,totalMs,steps[]}
         let stdout = String::from_utf8_lossy(&out.stdout);

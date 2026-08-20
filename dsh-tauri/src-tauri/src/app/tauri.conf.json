@@ -21,11 +21,12 @@
   },
   "bundle": {
     "active": true,
-    "targets": [],
+    "targets": ["nsis"],
     "icon": ["icons/icon.ico"],
     "resources": {
       "../../../sidecar/": "sidecar/",
-      "../../../ui/": "ui/"
+      "../../../ui/": "ui/",
+      "../../../package-payload/dsh-desktop/": "dsh-desktop/"
     },
     "externalBin": [],
     "windows": {

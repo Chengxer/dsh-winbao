@@ -291,6 +291,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         loading_url.clone()
     };
+    #[allow(unused_variables)]
     let main_win = windows::create_main_window(app.handle(), &initial_url, saved)?;
     // 诊断开关：DSH_TAURI_DEVTOOLS=1 打开 DevTools（debug build）。
     if std::env::var("DSH_TAURI_DEVTOOLS").ok().as_deref() == Some("1") {
@@ -431,19 +432,23 @@ fn find_repo_root() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
         return Err(format!("DSH_TAURI_REPO_ROOT={root} 不含 dsh-desktop/vendor/node").into());
     }
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for _ in 0..6 {
-        candidates.push(dir.clone());
-        if !dir.pop() {
-            break;
-        }
-    }
+    // exe 相对布局优先：安装产物必须用自己的 payload——编译机路径若排在
+    // 前面，「编译机=测试机」场景会用仓库检出遮蔽安装目录，实装验证失真。
+    // 开发态不受影响：target/debug 本就在仓库内，向上走必然命中仓库根。
     if let Ok(exe) = std::env::current_exe() {
         let mut cur = exe.parent().map(|p| p.to_path_buf());
         while let Some(d) = cur {
             candidates.push(d.join("resources"));
             candidates.push(d.clone());
             cur = d.parent().map(|p| p.to_path_buf());
+        }
+    }
+    // 开发态兜底：CARGO_MANIFEST_DIR（编译机绝对路径）向上。
+    let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for _ in 0..6 {
+        candidates.push(dir.clone());
+        if !dir.pop() {
+            break;
         }
     }
     locate_repo_root(&candidates)

@@ -15,21 +15,27 @@
 ;   - 若卸载器定位失败：跳过卸载直接安装（两版本可共存，数据仍不受影响）
 
 !macro NSIS_HOOK_PREINSTALL
-  ; ---- 1) 进程占用检测（Electron 版进程名 dsh-desktop.exe / 本版 DSH Desktop.exe）----
-  TryClose:
-  ${If} ${ProcessExists} "dsh-desktop.exe"
-  ${OrIf} ${ProcessExists} "DSH Desktop.exe"
-    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION \
-      "检测到 DSH Desktop 正在运行。$\n$\n请先完全退出（托盘右键 → 退出），然后点击「重试」继续升级。$\n选择「取消」将中止安装（不会做任何更改）。" \
-      IDRETRY TryClose IDCANCEL AbortInstall
-    Goto AbortInstall
-  ${EndIf}
-  Goto DoneProc
+  ; ---- 1) 旧版（Electron）进程占用检测 ----
+  ; 用模板同款 nsis_tauri_utils 插件（LogicLib 数字比较；FindProcess 查全会话，
+  ; 旧版可能 perMachine 安装）。不杀进程——Electron 内核持有会话数据写入，
+  ; 强杀有数据风险，让用户手动退出。
+  ; 本版 exe（DSH Desktop.exe）的运行检测由模板紧随本钩子的
+  ; CheckIfAppIsRunning 处理（含静默杀 + 重试 UI），无需重复。
+  TryCloseLegacy:
+    nsis_tauri_utils::FindProcess "dsh-desktop.exe"
+    Pop $R0
+    ${If} $R0 = 0
+      MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION \
+        "检测到旧版 DSH Desktop（Electron）正在运行。$\n$\n请先完全退出（托盘右键 → 退出），然后点击「重试」继续升级。$\n选择「取消」将中止安装（不会做任何更改）。" \
+        IDRETRY TryCloseLegacy IDCANCEL AbortInstallLegacy
+      Goto AbortInstallLegacy
+    ${EndIf}
+    Goto DoneProcLegacy
 
-  AbortInstall:
+  AbortInstallLegacy:
     Abort
 
-  DoneProc:
+  DoneProcLegacy:
 
   ; ---- 2) 定位旧版（Electron NSIS）卸载注册表项 ----
   ; electron-builder perUser 安装：HKCU Uninstall 键（GUID 或 appId 命名）；
