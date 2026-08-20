@@ -56,6 +56,10 @@ function resolveUserData() {
   return path.join(appdata, 'dsh-desktop');
 }
 
+function mods_node(appDir) {
+  return path.join(appDir, 'vendor', 'node', 'node.exe');
+}
+
 const log = (msg) => process.stderr.write('[sidecar] ' + msg + '\n');
 
 function emit(value) {
@@ -719,6 +723,77 @@ async function main() {
         const home = c.home;
         const result = c.mods.desktopBackup.restoreBackup(backup, { profileDir: path.join(home, 'profiles', 'web'), homeDir: home }, fs, path);
         return emit(result);
+      }
+      case 'koffi-preflight': {
+        const c = ctx();
+        // Electron 版 runKoffiPreflight 语义：vendor node 跑 scripts/koffi-preflight.cjs
+        // 冒烟（0 = 通过）。缓存策略由 Rust 侧 settings 负责（本子命令纯探测）。
+        const { execFileSync } = require('node:child_process');
+        const script = path.join(c.appDir, 'scripts', 'koffi-preflight.cjs');
+        if (!fs.existsSync(script)) return emit({ ok: true, skipped: 'no-script' });
+        try {
+          execFileSync(mods_node(c.appDir), [script], { timeout: 20000, windowsHide: true, stdio: 'ignore' });
+          return emit({ ok: true });
+        } catch { return emit({ ok: false }); }
+      }
+      case 'picker-overlay': {
+        const c = ctx();
+        // Electron 版 enablePickerBrowseOverlay 语义：koffi 预检失败时写降级 overlay
+        //（禁用 native 目录选择器，换 browse 后端）。内容与 main.js 逐行一致。
+        const ud = resolveUserData();
+        fs.mkdirSync(ud, { recursive: true });
+        const file = path.join(ud, 'picker-browse.overlay.yml');
+        const content = [
+          '# DSH-DESKTOP-AUTO: picker browse fallback',
+          '# koffi 预检未通过：禁用 native 目录选择器，改用浏览器内 browse 选择器。',
+          '- id: directory-picker',
+          '  disabled: true',
+          '- insert:',
+          '    - id: directory-picker-browse',
+          "      name: '@deepseek-ai/dsh-host-directory-picker-browse'",
+          '    - id: directory-picker-browse-client',
+          "      name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'",
+          '',
+        ].join('\n');
+        try { fs.writeFileSync(file, content); return emit({ ok: true, path: file }); }
+        catch (err) { return emit({ ok: false, error: String(err && err.message || err) }); }
+      }
+      case 'safe-overlay': {
+        const c = ctx();
+        // Electron 版安全启动链（ensureSafeBootOverlay + parseFailedLoaderIds）：
+        // 解析 dsh-web.log 尾部失败 loader id → 生成/合并禁用 overlay（幂等）。
+        const ud = resolveUserData();
+        const logFile = path.join(ud, 'logs', 'dsh-web.log');
+        let tail = '';
+        try {
+          const stat = fs.statSync(logFile);
+          const fd = fs.openSync(logFile, 'r');
+          const len = Math.min(stat.size, 256 * 1024);
+          const buf = Buffer.alloc(len);
+          fs.readSync(fd, buf, 0, len, stat.size - len);
+          fs.closeSync(fd);
+          tail = buf.toString('utf8');
+        } catch {}
+        let ids = [];
+        try { ids = c.mods.profilePatchHeal.parseFailedLoaderIds(tail) || []; } catch {}
+        const file = path.join(ud, 'safe-boot.overlay.yml');
+        const existing = new Set();
+        try {
+          const text = fs.readFileSync(file, 'utf8');
+          const re = /(?:^|\n)\s*-\s*id:\s*([A-Za-z0-9_-]+)/g;
+          let m; while ((m = re.exec(text)) !== null) existing.add(m[1]);
+        } catch {}
+        const merged = [...new Set([...existing, ...ids])];
+        if (merged.length === 0) return emit({ ok: true, path: file, ids: [], note: 'no-failures' });
+        const NL = String.fromCharCode(10);
+        const content = [
+          '# DSH Desktop 安全启动 overlay（自动生成）：以下插件启动失败，已被自动禁用。',
+          '# 修复插件后可删除本文件恢复。',
+          ...merged.map((id) => '- id: ' + id + NL + '  disabled: true'),
+          '',
+        ].join(NL);
+        try { fs.writeFileSync(file, content); return emit({ ok: true, path: file, ids: merged }); }
+        catch (err) { return emit({ ok: false, error: String(err && err.message || err) }); }
       }
       case 'balance-refresh': {
         // 余额探测：GET <base>/api/... 不可靠（需登录态）——真实实现在 Rust 侧

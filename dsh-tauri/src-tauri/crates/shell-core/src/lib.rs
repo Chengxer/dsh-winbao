@@ -14,6 +14,7 @@
 //! - [`single_instance`] —— 单实例锁（Phase 0 为锁文件占位，Phase 1 换 OS 命名互斥体）
 
 pub mod paths;
+pub mod upgrade;
 pub mod run_state;
 pub mod settings;
 pub mod single_instance;
@@ -22,3 +23,4 @@ pub use paths::DshPaths;
 pub use run_state::RunState;
 pub use settings::SettingsStore;
 pub use single_instance::SingleInstanceGuard;
+pub use upgrade::WindowState;

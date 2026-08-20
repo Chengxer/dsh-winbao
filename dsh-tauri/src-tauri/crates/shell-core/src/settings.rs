@@ -23,6 +23,10 @@ impl std::fmt::Display for SettingsError {
 }
 impl std::error::Error for SettingsError {}
 
+/// 全局写互斥：同进程内多 Store 实例（supervisor 写 lastWebPort、窗口关闭写
+/// 其他键等）的读-改-写串行化，防丢更新（升级 review 优化项）。
+static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl SettingsStore {
     /// 指向给定 settings.json 路径的存储。
     pub fn new(path: impl Into<PathBuf>) -> Self {
@@ -68,8 +72,9 @@ impl SettingsStore {
         Ok(self.load()?.remove(key))
     }
 
-    /// 写单个键（读-改-写，非并发安全——Phase 1 由 WriteGate 跨进程锁补齐）。
+    /// 写单个键（读-改-写经全局写锁串行化，进程内防丢更新）。
     pub fn set(&self, key: &str, value: serde_json::Value) -> Result<(), SettingsError> {
+        let _g = WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let mut map = self.load()?;
         map.insert(key.to_string(), value);
         self.save(&map)

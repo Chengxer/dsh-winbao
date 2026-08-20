@@ -159,3 +159,60 @@ test('未知插件卸载：ok:false 而非崩溃', { skip: !HAVE_DEPS }, (t) => 
   assert.strictEqual(r.json.ok, false);
   assert.match(String(r.json.error), /未知插件/);
 });
+
+// ===========================================================================
+// 升级适配子命令（koffi 预检 / picker 降级 overlay / safe-boot overlay）
+// ===========================================================================
+
+test('koffi-preflight：返回布尔探测结果（本机应通过）', { skip: !HAVE_DEPS }, () => {
+  const r = cli(['koffi-preflight']);
+  assert.strictEqual(r.code, 0);
+  assert.strictEqual(typeof r.json.ok, 'boolean', JSON.stringify(r.json));
+});
+
+test('picker-overlay：内容与 Electron 版逐行一致', { skip: !HAVE_DEPS }, (t) => {
+  const sb = sandbox(t.name);
+  t.after(() => fs.rmSync(sb.dir, { recursive: true, force: true }));
+  const r = cli(['picker-overlay'], { env: sb.env });
+  assert.strictEqual(r.json.ok, true, JSON.stringify(r.json));
+  const text = fs.readFileSync(r.json.path, 'utf8');
+  // Electron main.js enablePickerBrowseOverlay 的关键行逐条断言。
+  assert.ok(text.includes('# DSH-DESKTOP-AUTO: picker browse fallback'), '标记行');
+  assert.ok(text.includes('- id: directory-picker\n  disabled: true'), '禁用 native 选择器');
+  assert.ok(text.includes("@deepseek-ai/dsh-host-directory-picker-browse"), 'browse 后端包名');
+  assert.ok(text.includes('@deepseek-ai/dsh-client-ui-directory-picker-browse'), 'browse client 包名');
+});
+
+test('safe-overlay：解析失败日志 → 禁用 overlay（幂等合并）', { skip: !HAVE_DEPS }, (t) => {
+  const sb = sandbox(t.name);
+  t.after(() => fs.rmSync(sb.dir, { recursive: true, force: true }));
+  // 模拟 dsh-web.log 尾部（Electron parseFailedLoaderIds 的三种形态样本）。
+  const logs = path.join(sb.dir, 'ud', 'logs'); // sandbox 的 DSH_TAURI_USERDATA = sb.dir/ud
+  fs.mkdirSync(logs, { recursive: true });
+  fs.writeFileSync(path.join(logs, 'dsh-web.log'), [
+    'boot: ok',
+    'duplicate loader entry id: bad-plugin-x',
+    'failed to apply loader entry broken_y (some stack)',
+    'profile bundle "ghost-bundle" declares no dsh.bundle',
+    'dsh web: http://127.0.0.1:1',
+  ].join('\n'));
+  const r = cli(['safe-overlay'], { env: sb.env });
+  assert.strictEqual(r.json.ok, true, JSON.stringify(r.json));
+  assert.ok(r.json.ids.includes('bad-plugin-x'), `ids: ${JSON.stringify(r.json.ids)}`);
+  assert.ok(r.json.ids.includes('ghost-bundle'), 'bundle 形态也应命中');
+  const text = fs.readFileSync(r.json.path, 'utf8');
+  assert.ok(text.includes('- id: bad-plugin-x\n  disabled: true'), 'overlay 禁用条目');
+  // 幂等：再跑一次不重复。
+  const r2 = cli(['safe-overlay'], { env: sb.env });
+  const dup = (fs.readFileSync(r2.json.path, 'utf8').match(/bad-plugin-x/g) || []).length;
+  assert.strictEqual(dup, 1, '重复执行不得重复登记');
+});
+
+test('safe-overlay：无失败日志 → 不生成禁用条目', { skip: !HAVE_DEPS }, (t) => {
+  const sb = sandbox(t.name);
+  t.after(() => fs.rmSync(sb.dir, { recursive: true, force: true }));
+  const r = cli(['safe-overlay'], { env: sb.env });
+  assert.strictEqual(r.json.ok, true);
+  assert.deepStrictEqual(r.json.ids, [], '干净日志应返回空名单');
+  assert.strictEqual(fs.existsSync(path.join(sb.dir, 'safe-boot.overlay.yml')), false, '不应生成文件');
+});

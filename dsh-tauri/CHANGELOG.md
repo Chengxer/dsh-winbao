@@ -57,6 +57,20 @@
 - 端到端：loading → boot（3.2s）→ 内核（5.6s 就绪）→ 换页真实 Web UI（截图确认）
 - 端口稳定化实测：两轮启动同端口 63283（localStorage 偏好不丢）
 
+### 升级适配（Electron → Tauri 无痛升级，docs/upgrade-guide.md）
+- **零迁移设计**：全部用户数据同路径同 schema 直读（~/.dsh / settings.json /
+  window-state.json / logs / 便携版 data/），无 copy/convert 步骤
+- window-state.json 双向兼容（Tauri 保存也写 Electron schema——回退不丢窗口位置）
+- 裁撤键（kernelUpdate/客户端更新键）识别后忽略、绝不删除（可安全回退）
+- NSIS 升级链：进程占用检测 + 旧版注册表定位 + 静默卸载保数据
+  （/S /KEEP_APP_DATA --updated）+ appId/快捷方式对齐
+- 运行时对齐：koffi 预检 + picker 降级 overlay + safe-boot 坏插件禁用 overlay
+  全部经 sidecar 复用 Electron 逻辑并注入内核 --patch
+- 便携版 PORTABLE_EXECUTABLE_DIR → data/ 重定向；首启迁移报告（只读）
+- shell-core upgrade.rs（数据契约表）+ 4 单测；升级场景测试 ×3（旧窗口状态
+  verbatim 恢复 / 裁撤键不删 / roundtrip）+ sidecar 4 测试（koffi/picker 逐行
+  一致/safe-overlay 幂等）；端到端实测首启报告双行输出
+
 ### 已知限制（后续迭代）
 - backup-export 2MB 上限为上游 desktop-backup.js 原生行为（与 Electron 版一致）
 - image_paste_save 返回 E_NOT_IMPLEMENTED（剪贴板位图）

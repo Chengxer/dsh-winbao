@@ -3,8 +3,8 @@
 > 分支 `tauri/modular`（自 main 切出）。Electron 线（`dsh-desktop/`）零改动，
 > main / kernel/dsh-rc8 照常演进；回退 = 弃分支。
 >
-> **状态（2026-08-19）：Phase 0-4 已全量实装并通过两遍 review**（功能/契约对照 +
-> 安全/边界/并发）。证据链与已知限制见 `../CHANGELOG.md`。
+> **状态（2026-08-19）：Phase 0-4 已全量实装并通过两遍 review + 功能测试补强 +
+> Electron→Tauri 无痛升级适配**（docs/upgrade-guide.md）。证据链见 `../CHANGELOG.md`。
 
 ## 总架构（一句话）
 

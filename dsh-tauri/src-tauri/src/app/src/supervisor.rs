@@ -55,6 +55,8 @@ struct Inner {
     last_error: Option<String>,
     crash: CrashLoopDetector,
     crash_count: usize,
+    /// 注入内核的 --patch overlay 列表（picker 降级 / safe-boot 禁用）。
+    overlays: Vec<std::path::PathBuf>,
     /// restart_service 的代际号：旧世代的异步任务看到代际变了就自杀。
     generation: u64,
     stopping: bool,
@@ -77,6 +79,7 @@ impl Supervisor {
                 last_error: None,
                 crash: CrashLoopDetector::new(),
                 crash_count: 0,
+                overlays: Vec::new(),
                 generation: 0,
                 stopping: false,
             })),
@@ -125,6 +128,8 @@ impl Supervisor {
             if this.inner.lock().unwrap().generation != gen || this.inner.lock().unwrap().stopping {
                 return;
             }
+            // ---- [1.5] koffi 预检 → 目录选择器降级 overlay（Electron 对齐，升级适配）----
+            this.run_koffi_preflight();
             // ---- [2] 端口 ----
             let port = match choose_stable_port(preferred_port) {
                 Some(p) => p,
@@ -177,9 +182,90 @@ impl Supervisor {
         Ok(())
     }
 
+    /// koffi 预检：失败时启用 picker-browse 降级 overlay（Electron runKoffiPreflight
+    /// + enablePickerBrowseOverlay 的合并语义；缓存简化为 settings 布尔——每次
+    /// 冒烟 ~100ms 级，签名级缓存随出包验证再评估）。
+    fn run_koffi_preflight(&self) {
+        let settings = shell_core::SettingsStore::new(shell_core::DshPaths::resolve().settings);
+        let cached = settings.get("koffiPreflightOk").ok().flatten().and_then(|v| v.as_bool());
+        let ok = match cached {
+            Some(true) => true,
+            _ => {
+                let out = std::process::Command::new(&self.node_exe)
+                    .arg(&self.sidecar_cli)
+                    .arg("koffi-preflight")
+                    .arg("--app-dir")
+                    .arg(&self.app_dir)
+                    .creation_flags_win()
+                    .output();
+                let ok = matches!(out, Ok(o) if o.status.success()
+                    && String::from_utf8_lossy(&o.stdout).trim_end().ends_with("{\"ok\":true}"));
+                if ok {
+                    let _ = settings.set("koffiPreflightOk", serde_json::json!(true));
+                }
+                ok
+            }
+        };
+        if !ok {
+            let out = std::process::Command::new(&self.node_exe)
+                .arg(&self.sidecar_cli)
+                .arg("picker-overlay")
+                .arg("--app-dir")
+                .arg(&self.app_dir)
+                .creation_flags_win()
+                .output();
+            if let Ok(o) = out {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                if let Some(line) = stdout.trim_end().lines().last() {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                        if let Some(p) = v.get("path").and_then(|p| p.as_str()) {
+                            log_line("koffi 预检未过，启用目录选择器降级 overlay");
+                            let mut g = self.inner.lock().unwrap();
+                            let path = std::path::PathBuf::from(p);
+                            if !g.overlays.contains(&path) {
+                                g.overlays.push(path);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            log_line("koffi 预检通过");
+        }
+    }
+
+    /// 刷新 safe-boot overlay（崩溃自动重启前）：解析 dsh-web.log 失败插件 → 禁用。
+    fn refresh_safe_overlay(&self) -> bool {
+        let out = std::process::Command::new(&self.node_exe)
+            .arg(&self.sidecar_cli)
+            .arg("safe-overlay")
+            .arg("--app-dir")
+            .arg(&self.app_dir)
+            .creation_flags_win()
+            .output();
+        let Ok(o) = out else { return false };
+        let stdout = String::from_utf8_lossy(&o.stdout);
+        let Some(line) = stdout.trim_end().lines().last() else { return false };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { return false };
+        let ids = v.get("ids").and_then(|i| i.as_array()).map(|a| a.len()).unwrap_or(0);
+        if ids == 0 {
+            return false;
+        }
+        if let Some(p) = v.get("path").and_then(|p| p.as_str()) {
+            log_line(&format!("安全启动 overlay：禁用 {ids} 个失败插件"));
+            let mut g = self.inner.lock().unwrap();
+            let path = std::path::PathBuf::from(p);
+            if !g.overlays.contains(&path) {
+                g.overlays.push(path);
+            }
+        }
+        true
+    }
+
     /// spawn 内核进程 + 就绪行监视线程。
     fn spawn_kernel(self: Arc<Self>, port: u16, tx: &Sender<SupervisorEvent>) -> Result<(), String> {
-        let spec = SpawnSpec::new(&self.node_exe, &self.bin_js, &self.kernel_version, port, &[]);
+        let overlays = self.inner.lock().unwrap().overlays.clone();
+        let spec = SpawnSpec::new(&self.node_exe, &self.bin_js, &self.kernel_version, port, &overlays);
         let mut cmd = Command::new(&spec.node_exe);
         cmd.args(&spec.node_args).arg(&spec.bin_js).args(&spec.web_args);
         // 环境白名单 + 监管标识（main.js childEnv 语义）。
@@ -290,6 +376,7 @@ impl Supervisor {
                         return;
                     }
                     drop(g);
+                    this.refresh_safe_overlay();
                     if let Some(p) = port {
                         if Arc::clone(&this).spawn_kernel(p, &tx2).is_err() {
                             this.enter_recovery_tx(&tx2, "自动重启失败");
