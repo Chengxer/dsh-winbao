@@ -138,6 +138,20 @@ bash dsh-tauri/scripts/smoke-installed.sh
 
 v0.5.0 架构迁移后，Electron 时代的云端发布流水线（推 `v*` tag 自动构建三平台 Electron 包）已随架构退役。当前发布方式：本地打包（见上）+ 安装态冒烟通过后手动上传 Release；Tauri 的 GitHub Actions 云端流水线在规划中。
 
+### 📦 Tauri 架构可导出的安装包形式
+
+由 `tauri.conf.json` 的 `bundle.targets` 决定，按需增删即可扩展产物形式：
+
+| 平台 | 安装包形式 | 状态 |
+| --- | --- | --- |
+| Windows x64 | **NSIS 安装包**（`*-setup.exe`）——LZMA 压缩实测 ~79 MiB；`currentUser` 模式免管理员安装；WebView2 引导器内嵌，离线机器也能装 | ✅ 已实装，过安装态冒烟 |
+| Windows arm64 | NSIS 安装包（`--target aarch64-pc-windows-msvc` 交叉构建） | 🔜 Tauri 原生支持，待实测 |
+| Windows | MSI（WiX 工具链，`targets` 加 `"msi"`） | 🔜 Tauri 原生支持，待开启 |
+| macOS（Intel / Apple Silicon） | `.app` / `.dmg` 磁盘映像 | 🔜 需扩展 payload 的 unix node 侧 |
+| Linux | `.AppImage`（单文件绿色）/ `.deb` / `.rpm` | 🔜 Tauri 原生支持，按需开启 |
+
+> 便携版（免安装、可放 U 盘）不是 Tauri 内置 target——Tauri 版以 NSIS `currentUser` 安装为默认形态，独立便携包规划中以后续版本提供。
+
 ## 🧩 内置插件生态
 
 随安装包分发（完整第三方组件清单见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)）：

@@ -138,6 +138,20 @@ See the [development manual §6](dsh-tauri/docs/development.md) for the full flo
 
 After the v0.5.0 architecture migration, the Electron-era cloud release pipeline (auto-building three-platform Electron packages on `v*` tags) was retired along with the architecture. Current release flow: local packaging (see above) + installed-layout smoke test, then manual upload to Releases; a Tauri GitHub Actions pipeline is on the roadmap.
 
+### 📦 Installer formats the Tauri architecture can export
+
+Controlled by `bundle.targets` in `tauri.conf.json` — add or remove entries to extend the output formats:
+
+| Platform | Format | Status |
+| --- | --- | --- |
+| Windows x64 | **NSIS installer** (`*-setup.exe`) — LZMA-compressed, ~79 MiB measured; `currentUser` mode needs no admin rights; WebView2 bootstrapper embedded so offline machines can install too | ✅ Implemented, passes installed-layout smoke test |
+| Windows arm64 | NSIS installer (cross-build with `--target aarch64-pc-windows-msvc`) | 🔜 Natively supported by Tauri, not yet validated |
+| Windows | MSI (WiX toolchain, add `"msi"` to `targets`) | 🔜 Natively supported by Tauri, not yet enabled |
+| macOS (Intel / Apple Silicon) | `.app` / `.dmg` disk images | 🔜 Requires extending the payload's unix node side |
+| Linux | `.AppImage` (single-file portable) / `.deb` / `.rpm` | 🔜 Natively supported by Tauri, enable on demand |
+
+> A no-install portable build is not a built-in Tauri target — the Tauri line defaults to the NSIS `currentUser` installer, and a standalone portable package is planned for a later release.
+
 ## 🧩 Bundled Plugin Ecosystem
 
 Shipped with the installer (full third-party inventory: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)):
