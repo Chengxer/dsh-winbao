@@ -117,13 +117,15 @@
         DetailPrint "静默卸载旧 Tauri 安装：$R1"
         ExecWait '"$R1" /S' $R0
       LaeWait:
+        # 完成信号=注册表键消失（非文件——NSIS 静默不自删原文件，用户实测卡 60s×2台根因）。上限 15s。
         StrCpy $R4 0
       LaePoll:
-        IfFileExists "$R1" LaePollNext LaePollDone
+        ReadRegStr $R6 ${ROOT} "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R5" "DisplayName"
+        StrCmp $R6 "" LaePollDone LaePollNext
       LaePollNext:
         Sleep 500
         IntOp $R4 $R4 + 1
-        IntCmp $R4 120 LaePollDone LaePoll
+        IntCmp $R4 30 LaePollDone LaePoll
       LaePollDone:
       Push "1"
       Goto LaeDone
