@@ -21,11 +21,28 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SRC="$REPO_ROOT/dsh-desktop"
 DST="$REPO_ROOT/dsh-tauri/package-payload/dsh-desktop"
 
+# 跨平台目录镜像：Windows 用 robocopy（原子/mtime 保真），Linux/macOS
+# 用 rm -rf + cp -a（CI 环境；robocopy 不存在时自动回退）。
+mirror_dir() {
+  local src="$1" dst="$2"
+  if command -v robocopy >/dev/null 2>&1; then
+    robocopy "$src" "$dst" //MIR //R:2 //W:1 > /dev/null
+    local rc=$?
+    [ $rc -lt 8 ] || { echo "[stage] robocopy 失败($rc): $src" >&2; return 1; }
+  else
+    rm -rf "$dst"
+    mkdir -p "$(dirname "$dst")"
+    cp -a "$src" "$dst"
+  fi
+}
+
 echo "[stage] 源: $SRC"
 echo "[stage] 目标: $DST"
 
 # 前置校验：缺任何一项，装出来的包必然起不来（fail-fast 优于装完才发现）。
-for f in package.json vendor/node/node.exe \
+NODE_BIN="node.exe"
+[ "$(uname -s)" != "Windows_NT" ] && [ "$(uname -s)" != "MINGW64_NT-"* ] && NODE_BIN="node"
+for f in package.json "vendor/node/$NODE_BIN" \
          node_modules/@deepseek-ai/dsh/lib/bin.js \
          scripts/lib/companion-profile.js assets/plugins; do
   if [ ! -e "$SRC/$f" ]; then
@@ -38,30 +55,26 @@ mkdir -p "$DST/vendor/node" "$DST/node_modules"
 
 # robocopy 退出码 0-7 全部是成功（1=有复制 2=有额外 3=1+2 …），≥8 才是失败。
 # 注：Git Bash 下 flag 需写 //MIR 形式（MSYS 会把 /MIR 当路径转换）。
-rc() { # rc <src> <dst> [额外参数...]
-  local out
-  set +e; robocopy "$1" "$2" "${@:3}" > /dev/null; out=$?; set -e
-  if [ "$out" -ge 8 ]; then echo "[stage] robocopy 失败 ($out): $1" >&2; exit "$out"; fi
-}
+rc() { mirror_dir "$1" "$2"; }
 
 # ---- 根文件：全部根级 *.js + package.json（历史对齐 electron-builder files
 #      白名单形态，Electron 壳退役后仅剩 boot 链脚本；scripts/ 等经
 #      require('../../profile-manifest') 直引根级脚本——缺一件 boot 链即断，
 #      实测曾漏 profile-manifest.js 导致安装包首启全灭）。package-lock.json
 #      不带（payload 不做 npm install）。----
-rc "$SRC" "$DST" '*.js' package.json
+mirror_dir "$SRC" "$DST"
 
 # ---- scripts / assets：全量镜像 ----
-rc "$SRC/scripts" "$DST/scripts" //MIR //R:2 //W:1
-rc "$SRC/assets"  "$DST/assets"  //MIR //R:2 //W:1
+mirror_dir "$SRC/scripts" "$DST/scripts"
+mirror_dir "$SRC/assets" "$DST/assets"
 
 # ---- vendor：node.exe（win）+ npm 全量（插件安装/更新链用到）----
 cp -f "$SRC/vendor/node/node.exe" "$DST/vendor/node/node.exe"
-rc "$SRC/vendor/npm" "$DST/vendor/npm" //MIR //R:2 //W:1
+mirror_dir "$SRC/vendor/npm" "$DST/vendor/npm"
 
 # ---- node_modules：生产依赖全量（排除 devDeps 三件；/XD 按目录名精确匹配，
 #      electron-to-chromium 等兄弟名不受影响）----
-rc "$SRC/node_modules" "$DST/node_modules" //MIR //R:2 //W:1 \
+mirror_dir "$SRC/node_modules" "$DST/node_modules" \
    //XD electron electron-builder electron-winstaller
 
 # ---- rc7 客户端包 vendor（历史层：内核侧 fallback farm 兜底）----
@@ -81,7 +94,7 @@ if [ -d "$VENDOR_SRC" ]; then
     if [ ! -d "$DST/node_modules/$rel" ]; then
       # robocopy 成功码为 1-7（≠0），set -e 下裸调会被误杀——同 rc() 护栏。
       set +e
-      robocopy "$d" "$DST/node_modules/$rel" //MIR //R:1 //W:1 > /dev/null
+      mirror_dir "$d" "$DST/node_modules/$rel"
       rcv=$?
       set -e
       [ $rcv -lt 8 ] || { echo "[stage] vendor 失败($rcv): $rel" >&2; exit 1; }
