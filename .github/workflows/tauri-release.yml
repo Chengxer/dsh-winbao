@@ -134,7 +134,22 @@ jobs:
         shell: bash
 
       - name: Build installer
-        run: cd dsh-tauri && npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --target x86_64-pc-windows-msvc
+        run: |
+          cd dsh-tauri
+          echo "=== Verifying prerequisites ==="
+          ls -la src-tauri/src/app/tauri.conf.json
+          ls -la src-tauri/src/app/icons/icon.ico
+          ls -la src-tauri/src/app/nsis/installerHooks.nsh
+          ls -la ui/index.html
+          ls package-payload/dsh-desktop/package.json
+          echo "=== Building ==="
+          npx --yes @tauri-apps/cli@latest build             --config src-tauri/src/app/tauri.conf.json             --target x86_64-pc-windows-msvc             --verbose 2>&1 || {
+            echo "=== BUILD FAILED ==="
+            echo "=== Checking cargo build separately ==="
+            cd src-tauri && cargo build --release --target x86_64-pc-windows-msvc -p dsh-tauri-app 2>&1 | tail -10
+            echo "=== Exe exists: $(ls target/x86_64-pc-windows-msvc/release/dsh-tauri-app.exe 2>/dev/null) ==="
+            exit 1
+          }
         shell: bash
 
       - name: Upload artifact
