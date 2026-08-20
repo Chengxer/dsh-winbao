@@ -3,7 +3,7 @@
 //! 参数对齐 Electron 版（main.js createFloatWindow/createPetWindow/createSponsorWindow）：
 //! - 浮窗 900×640（min 480×360），同会话复用、上限 4 个；
 //! - 宠物窗 160×160 透明置顶、跳过任务栏、不可调尺寸、位置记忆；
-//! - 赞助窗原生边框小窗内嵌静态 HTML（二维码 base64）。
+//! - 赞助窗原生边框小窗加载 %TEMP% 静态页（file:// 直载，不走 preview-server）。
 //!
 //! 所有窗都注入 bridge 垫片（initialization_script 对每次导航生效）；
 //! 浮窗/宠物窗追加模式注入脚本（`__DSH_FLOAT__` / `__DSH_PET__`，契约 bridge-api.md §5）。
@@ -62,7 +62,7 @@ pub fn create_main_window(
     }
     let win = b.build()?;
     let handle = app.clone();
-    let _g = win.on_window_event(move |e| {
+    win.on_window_event(move |e| {
         if matches!(e, tauri::WindowEvent::Resized(_)) {
             if let Some(w) = handle.get_webview_window("main") {
                 if let Ok(max) = w.is_maximized() {
@@ -242,51 +242,29 @@ const PET_MODE_SCRIPT: &str = r#"
 })();
 "#;
 
-/// 赞助小窗：原生边框 + 内嵌静态 HTML（两码 base64）。
+/// 赞助小窗：原生边框 + 独立静态页（%TEMP%\dsh-sponsor\，file:// 直载）。
+///
+/// v0.5.0 用户实测「无图 + 关不掉」根治，弃用两条旧链路：
+/// - 内联 data URI（~67KB/张）：WebView2 对大 data URI 的 img src 渲染不稳定；
+/// - preview-server：URL 前缀推导（loading.html 替换）+ 静态文件命中 + 端口
+///   存活，多层依赖任一断裂即无图；且 preview-server 启动失败降级时
+///   loading_url 是 data:，前缀推导直接产出坏 URL。
+///
+/// 现方案：解码 base64 写独立图片文件 + HTML 引同目录相对路径，`file://`
+/// 协议直载——WebView2 对顶层 file:// 导航无限制，与一切本地服务解耦。
 pub fn open_sponsor_window(app: &tauri::AppHandle, qr_alipay: &str, qr_wechat: &str) -> Result<serde_json::Value, BridgeError> {
     if let Some(existing) = app.get_webview_window("sponsor") {
         let _ = existing.show();
         let _ = existing.set_focus();
         return Ok(serde_json::json!({ "ok": true, "reused": true }));
     }
-    // 彻底修（用户实测「弹窗无图」）：内联 data URI ~67KB/张在 WebView2
-    // img src 渲染不稳定——图片也走 preview-server 静态文件，HTML 只引
-    // 相对 URL（与 loading/recovery 同源同链路）。
-    let sponsor_url = {
-        let state = app.state::<crate::AppState>();
-        let base = state.loading_url.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let dir = std::env::temp_dir().join(format!("dsh-tauri-pages-{}", std::process::id()));
-        if !base.is_empty() {
-            let prefix = base.replace("loading.html", "");
-            // 图片写为独立文件（从 data URI 剥 base64 还原二进制）。
-            let extract = |data_uri: &str, file: &str| -> String {
-                if let Some(pos) = data_uri.find("base64,") {
-                    let b64 = &data_uri[pos + 7..];
-                    // 解码 base64 写二进制。
-                    if let Some(bytes) = crate::commands::b64_decode(b64) {
-                        let _ = std::fs::write(dir.join(file), &bytes);
-                        return file.to_string();
-                    }
-                }
-                String::new()
-            };
-            let alipay_file = extract(qr_alipay, "sponsor-alipay.jpg");
-            let wechat_file = extract(qr_wechat, "sponsor-wechat.png");
-            let html = sponsor_html_file(&alipay_file, &wechat_file);
-            let _ = std::fs::write(dir.join("sponsor.html"), &html);
-            format!("{prefix}sponsor.html")
-        } else {
-            // 兜底：写 TEMP 文件走 file:// 协议（含内联 data URI）。
-            let html = sponsor_html(qr_alipay, qr_wechat);
-            let file = std::env::temp_dir().join("dsh-sponsor.html");
-            std::fs::write(&file, &html).map_err(|e| BridgeError::internal(format!("赞助页写入: {e}")))?;
-            format!("file:///{}", file.to_string_lossy().replace('\\', "/"))
-        }
-    };
+    let html_path = write_sponsor_files(&std::env::temp_dir().join("dsh-sponsor"), qr_alipay, qr_wechat)?;
+    // Windows 路径 → file URL（反斜杠转正；空格/非 ASCII 由 Url 解析器百分号编码）。
+    let file_url = format!("file:///{}", html_path.to_string_lossy().replace('\\', "/"));
     let win = tauri::webview::WebviewWindowBuilder::new(
         app,
         "sponsor",
-        WebviewUrl::External(parse_url(&sponsor_url)?),
+        WebviewUrl::External(parse_url(&file_url)?),
     )
     .title("请作者喝咖啡")
     // 500x620：二维码 220px（Electron 基准 180px 放大 ~22%，扫码更易）+ 标题/留白。
@@ -297,28 +275,72 @@ pub fn open_sponsor_window(app: &tauri::AppHandle, qr_alipay: &str, qr_wechat: &
     .decorations(true) // 原生标题栏（含 X 关闭钮），用户可正常关掉
     .build()
     .map_err(|e| BridgeError::internal(format!("赞助窗创建: {e}")))?;
+    // 关闭语义：显式接管 CloseRequested——prevent_close 后 destroy() 真销毁，
+    // 绝不走主窗 hide-to-tray（0.5.0「关不掉」回归锚点）。用 destroy 而非
+    // close：destroy 不再触发 CloseRequested，无递归风险。
+    let sponsor = win.clone();
+    win.on_window_event(move |e| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = e {
+            api.prevent_close();
+            let _ = sponsor.destroy();
+        }
+    });
     let _ = win.show();
     Ok(serde_json::json!({ "ok": true }))
 }
 
-/// 文件引用版赞助页（图片走 preview-server 静态文件，非内联 data URI）。
-pub(crate) fn sponsor_html_file(alipay: &str, wechat: &str) -> String {
-    format!(
-        r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>请作者喝咖啡</title>
-<style>*{{box-sizing:border-box;margin:0}}body{{background:#0b1220;color:#e6ecff;
-font-family:"Segoe UI","Microsoft YaHei",sans-serif;display:flex;flex-direction:column;height:100vh;user-select:none}}
-.sub{{font-size:12px;color:#8b9ac4;line-height:18px;padding:10px 14px}}
-.codes{{flex:1;display:flex;gap:16px;justify-content:center;align-items:center}}
-.codes img{{width:220px;height:220px;border-radius:10px;background:#fff;padding:6px}}
-.cap{{text-align:center;font-size:12px;color:#8b9ac4;padding-bottom:6px}}</style></head>
-<body><div class="sub">如果这个工具帮到了你，可以请作者喝杯咖啡 ☕ 支持持续更新。</div>
-<div class="codes">
-<div><img src="{alipay}" alt="支付宝"><div class="cap">支付宝</div></div>
-<div><img src="{wechat}" alt="微信"><div class="cap">微信</div></div>
-</div></body></html>"#
-    )
+/// 落盘赞助页三件套到指定目录（%TEMP%\dsh-sponsor\）：
+/// sponsor-alipay.jpg / sponsor-wechat.png / sponsor.html（图片引同目录
+/// 相对路径）。返回 HTML 文件路径。独立成函数供单测直验落盘产物
+/// （WebviewWindow 无法在单测构造）。
+fn write_sponsor_files(
+    dir: &std::path::Path,
+    qr_alipay: &str,
+    qr_wechat: &str,
+) -> Result<std::path::PathBuf, BridgeError> {
+    std::fs::create_dir_all(dir).map_err(|e| BridgeError::internal(format!("赞助目录创建: {e}")))?;
+    // data URI → 二进制文件。b64_decode 返回 Option：None = 解码失败，
+    // 必须报错（旧版此处静默吞错 → 空图文件名 → 无图窗口）。
+    let extract = |data_uri: &str, file: &str| -> Result<(), BridgeError> {
+        let pos = data_uri
+            .find("base64,")
+            .ok_or_else(|| BridgeError::internal(format!("赞助码数据缺失（{file}）")))?;
+        let bytes = crate::commands::b64_decode(&data_uri[pos + 7..])
+            .ok_or_else(|| BridgeError::internal(format!("赞助码 base64 解码失败（{file}）")))?;
+        std::fs::write(dir.join(file), &bytes)
+            .map_err(|e| BridgeError::internal(format!("赞助码写入失败（{file}）: {e}")))
+    };
+    extract(qr_alipay, "sponsor-alipay.jpg")?;
+    extract(qr_wechat, "sponsor-wechat.png")?;
+    let html_path = dir.join("sponsor.html");
+    std::fs::write(&html_path, sponsor_html_file())
+        .map_err(|e| BridgeError::internal(format!("赞助页写入: {e}")))?;
+    Ok(html_path)
 }
 
+/// 文件引用版赞助页（%TEMP%\dsh-sponsor\sponsor.html）：图片固定引同目录
+/// 相对路径（./sponsor-alipay.jpg 等），不内联 data URI（WebView2 大 data
+/// URI 渲染不稳定）。无插值，纯静态字符串。
+pub(crate) fn sponsor_html_file() -> String {
+    r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>请作者喝咖啡</title>
+<style>*{box-sizing:border-box;margin:0}body{background:#0b1220;color:#e6ecff;
+font-family:"Segoe UI","Microsoft YaHei",sans-serif;display:flex;flex-direction:column;height:100vh;user-select:none}
+.sub{font-size:12px;color:#8b9ac4;line-height:18px;padding:10px 14px}
+.codes{flex:1;display:flex;gap:16px;justify-content:center;align-items:center}
+.codes img{width:220px;height:220px;border-radius:10px;background:#fff;padding:6px}
+.cap{text-align:center;font-size:12px;color:#8b9ac4;padding-bottom:6px}</style></head>
+<body><div class="sub">如果这个工具帮到了你，可以请作者喝杯咖啡 ☕ 支持持续更新。</div>
+<div class="codes">
+<div><img src="./sponsor-alipay.jpg" alt="支付宝"><div class="cap">支付宝</div></div>
+<div><img src="./sponsor-wechat.png" alt="微信"><div class="cap">微信</div></div>
+</div></body></html>"#
+        .to_string()
+}
+
+/// 内联 data URI 版赞助页（旧渲染模式，仅存续于测试契约——commands.rs
+/// sponsor_and_qr_helpers 断言此形态；生产路径已全面改走文件版
+/// sponsor_html_file，防 WebView2 大 data URI 无图）。
+#[cfg(test)]
 pub(crate) fn sponsor_html(alipay: &str, wechat: &str) -> String {
     format!(
         r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>请作者喝咖啡</title>
@@ -408,5 +430,60 @@ mod tests {
         let save_pos = seg.find("save_window_state").expect("必须保存窗口状态");
         let hide_pos = seg.find("win.hide()").expect("必须隐藏窗口");
         assert!(save_pos < hide_pos, "先存状态后隐藏（强杀路径兜底）: {seg}");
+    }
+
+    /// 赞助窗 0.5.0「无图 + 关不掉」根治的形态锚点：必须 file:// 直载
+    /// %TEMP%\dsh-sponsor\（不走 preview-server 前缀推导），必须有原生
+    /// 标题栏 + 可关闭，CloseRequested 必须真销毁（不走 hide-to-tray）。
+    #[test]
+    fn sponsor_window_file_url_closable_shape() {
+        let src = include_str!("windows.rs");
+        let seg = src
+            .split("pub fn open_sponsor_window")
+            .nth(1)
+            .and_then(|s| s.split("fn write_sponsor_files").next())
+            .expect("open_sponsor_window 函数体");
+        assert!(seg.contains("dsh-sponsor"), "必须落盘 %TEMP%\\dsh-sponsor: {seg}");
+        assert!(seg.contains("file:///"), "必须 file:// 直载（脱离 preview-server）: {seg}");
+        assert!(seg.contains("decorations(true)"), "原生标题栏（X 关闭钮）: {seg}");
+        assert!(seg.contains("closable(true)"), "窗口必须可关闭: {seg}");
+        let close_seg = seg
+            .split("CloseRequested")
+            .nth(1)
+            .and_then(|s| s.split("let _ = win.show()").next())
+            .expect("赞助窗 CloseRequested 处理段");
+        assert!(close_seg.contains("destroy()"), "CloseRequested 直接销毁窗口: {close_seg}");
+        assert!(!close_seg.contains("hide_main_to_tray"), "赞助窗不得隐藏留托盘: {close_seg}");
+    }
+
+    /// 落盘产物直验（等价手动 `ls %TEMP%\dsh-sponsor\`）：三件套齐全、
+    /// 图片是解码后的原始二进制（非 base64 文本）、HTML 引同目录相对路径。
+    #[test]
+    fn sponsor_files_written_decode_and_relative_refs() {
+        let dir = std::env::temp_dir().join(format!("dsh-sponsor-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // /9j/4AAQ → ff d8 ff e0 00 10（JPEG SOI+JFIF 头）；aGVsbG8= → "hello"。
+        let alipay_uri = "data:image/jpeg;base64,/9j/4AAQ";
+        let wechat_uri = "data:image/png;base64,aGVsbG8=";
+        let html_path = write_sponsor_files(&dir, alipay_uri, wechat_uri).unwrap();
+        assert_eq!(html_path, dir.join("sponsor.html"));
+        for f in ["sponsor-alipay.jpg", "sponsor-wechat.png", "sponsor.html"] {
+            assert!(dir.join(f).is_file(), "落盘缺文件: {f}");
+        }
+        assert_eq!(
+            std::fs::read(dir.join("sponsor-alipay.jpg")).unwrap(),
+            vec![0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10],
+            "base64 必须解码为原始二进制"
+        );
+        assert_eq!(std::fs::read(dir.join("sponsor-wechat.png")).unwrap(), b"hello".to_vec());
+        let html = std::fs::read_to_string(&html_path).unwrap();
+        assert!(html.contains("./sponsor-alipay.jpg"), "相对引用支付宝码: {html}");
+        assert!(html.contains("./sponsor-wechat.png"), "相对引用微信码: {html}");
+        assert!(!html.contains("data:image"), "不得内联 data URI: {html}");
+        let _ = std::fs::remove_dir_all(&dir);
+        // 坏 data URI 必须报错（旧版静默吞错 → 空 src → 无图）。
+        assert!(write_sponsor_files(&dir, "", "").is_err(), "缺 base64 段应报错");
+        assert!(write_sponsor_files(&dir, "data:image/jpeg;base64,!!!", "data:image/png;base64,aGVsbG8=").is_err(), "非法 base64 应报错");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
