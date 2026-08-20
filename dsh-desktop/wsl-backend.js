@@ -72,14 +72,21 @@ const internals = {
 
 /** 同步执行一条 WSL 命令（探活/读文件用；长命令请用 runWsl）。 */
 internals.runWslSync = function runWslSync(cmd, timeoutMs = 60000) {
+  // 不传 encoding：拿原始 Buffer（wsl.exe 自身错误消息可能是无 BOM UTF-16LE，
+  // 按 decodeWslText 统一校正；成功路径的 WSL 内 Linux 输出为 UTF-8）。
   const res = internals.spawnSync(WSL_EXE, ['-d', state.distro, '-e', 'sh', '-lc', cmd], {
-    encoding: 'utf8',
     windowsHide: true,
     timeout: timeoutMs,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  if (res.error) return { ok: false, code: -1, stdout: '', stderr: String(res.error.message || res.error) };
-  return { ok: res.status === 0, code: res.status, stdout: res.stdout || '', stderr: res.stderr || '' };
+  if (res.error) {
+    return {
+      ok: false, code: -1,
+      stdout: decodeWslText(res.stdout), // 超时等场景下仍可能已收集到部分输出
+      stderr: decodeWslText(res.stderr) + String(res.error.message || res.error),
+    };
+  }
+  return { ok: res.status === 0, code: res.status, stdout: decodeWslText(res.stdout), stderr: decodeWslText(res.stderr) };
 };
 
 /** 异步执行一条 WSL 命令，收集输出；onLine 可选地收到每行 stdout（进度日志）。
@@ -92,46 +99,82 @@ internals.runWsl = function runWsl(cmd, { timeoutMs = 20 * 60 * 1000, onLine } =
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    let out = '';
-    let err = '';
+    // 收集原始 Buffer，exit 时统一解码：多字节字符跨 chunk 边界时流式
+    // toString 会产生替换符；wsl.exe 自身的错误消息（如「WSL2 未能启动」）
+    // 是无 BOM UTF-16LE 且写在 stdout，按 utf8 流式解码即乱码（issue #126）。
+    const outChunks = [];
+    const errChunks = [];
     let killed = false;
     const timer = setTimeout(() => {
       killed = true;
       try { child.kill(); } catch {}
     }, timeoutMs);
     child.stdout.on('data', (c) => {
-      const text = c.toString('utf8');
-      out += text;
+      outChunks.push(c);
       if (onLine) {
-        for (const line of text.split(/\r?\n/)) {
+        for (const line of c.toString('utf8').split(/\r?\n/)) {
           if (line.trim()) { try { onLine(line); } catch {} }
         }
       }
     });
-    child.stderr.on('data', (c) => { err += c.toString('utf8'); });
+    child.stderr.on('data', (c) => { errChunks.push(c); });
     child.on('error', (e) => {
       clearTimeout(timer);
-      resolve({ ok: false, code: -1, timedOut: false, stdout: out, stderr: err, error: String(e.message || e) });
+      resolve({
+        ok: false, code: -1, timedOut: false,
+        stdout: decodeWslText(Buffer.concat(outChunks)),
+        stderr: decodeWslText(Buffer.concat(errChunks)) + String(e.message || e),
+        error: String(e.message || e),
+      });
     });
     child.on('exit', (code) => {
       clearTimeout(timer);
-      resolve({ ok: !killed && code === 0, code, timedOut: killed, stdout: out, stderr: err });
+      resolve({
+        ok: !killed && code === 0, code, timedOut: killed,
+        stdout: decodeWslText(Buffer.concat(outChunks)),
+        stderr: decodeWslText(Buffer.concat(errChunks)),
+      });
     });
   });
 };
 
 /**
- * 解码 `wsl.exe -l -q` 输出。真实输出是 UTF-16LE（带 BOM）；个别环境（未
- * 安装任何发行版 / wsl.exe 不可用）会输出按当前 ANSI 代码页（中文系统
- * GBK）编码的帮助文本且无 BOM——旧实现把无 BOM 输出也硬按 UTF-16LE 解码，
- * 得到乱码「发行版名」，configure 拿着乱码名继续执行后续命令全部失败，
- * 且「未检测到 WSL 发行版」的正确提示永远走不到。
- * @param {Buffer} buf wsl.exe stdout
- * @returns {string} 解码后的文本（可能含乱码，由 parseWslDistroList 判定）
+ * 判定「无 BOM 的 UTF-16LE」字节流（issue #126）：Store 版 / 新版 wsl.exe 在
+ * 管道输出 `wsl -l -q` 时不带 BOM（实测首字节直接是首字符，如 `55 00 62 00`）。
+ * ASCII/GBK/UTF-8 文本不含 NUL 字节，而 UTF-16LE 的 ASCII 字符高字节恒为 0
+ * 且行尾 \r\n 贡献奇数位 NUL——奇数位 NUL 明显多于偶数位即是强信号。
+ * @param {Buffer} buf
+ * @returns {boolean}
  */
-function decodeWslListOutput(buf) {
+function looksLikeUtf16leNoBom(buf) {
+  if (buf.length < 4 || buf.length % 2 !== 0) return false;
+  let odd = 0;
+  let even = 0;
+  for (let i = 0; i < buf.length; i += 2) {
+    if (buf[i] === 0) even++;
+    if (buf[i + 1] === 0) odd++;
+  }
+  return odd >= 2 && odd > even * 4;
+}
+
+/**
+ * 解码 wsl.exe 输出（stdout/stderr 通用）。输出形态有三种（真实环境实测）：
+ *   · UTF-16LE 带 BOM（FF FE 开头，旧版内置 wsl.exe）；
+ *   · UTF-16LE 无 BOM（Store 版 / 新版 wsl.exe，issue #126：`wsl -l -q` 清单
+ *     与 wsl.exe 自身错误消息——如「WSL2 未能启动」——均为此形态。旧实现
+ *     只认 BOM，无 BOM 时按 utf8 兜底：清单被解出 `d\x00o\x00c\x00k\x00…`
+ *     之类的「发行版名」当 `-d` 参数传给 spawn，Node 以 "The argument
+ *     'args[1]' must be a string without null bytes" 拒绝；错误消息则解出
+ *     乱码直接展示给用户）；
+ *   · WSL 内 Linux 程序输出 / ANSI 代码页帮助文本（UTF-8 / 中文系统 GBK）：
+ *     均不含 NUL 字节，启发式不会命中，安全走 utf8 路径。
+ * @param {Buffer} buf wsl.exe stdout/stderr 原始字节
+ * @returns {string} 解码后的文本（可能含乱码，由调用方判定）
+ */
+function decodeWslText(buf) {
   if (!buf || buf.length === 0) return '';
   if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return buf.subarray(2).toString('utf16le');
+  if (looksLikeUtf16leNoBom(buf)) return buf.toString('utf16le');
   return buf.toString('utf8');
 }
 
@@ -143,13 +186,20 @@ const WSL_USAGE_TEXT_RE = /(^|\n)\s*(Usage:|用法:|Copyright|版权所有)/i;
  *   · 含用法/版权特征行（未安装任何发行版）→ 空列表；
  *   · 空输出/仅空白 → 空列表；
  *   · 其余按行拆分、去首尾空白、去 BOM、过滤空行（发行版名允许含空格）。
+ * 防御（issue #126）：任何解码策略的残余失误都不允许把含 NUL/控制字符的
+ * 「名字」放进列表——这类名字一旦被当作 `-d <distro>` 参数传给 spawn，
+ * Node 会直接抛 "string without null bytes" 且报错完全不可读。ASCII 名字
+ * 在 UTF-16LE 被误按单字节解码的形态（`U\x00b\x00…`）剥 NUL 后即可自愈。
  * @param {string} text decodeWslListOutput 的输出
  * @returns {string[]}
  */
 function parseWslDistroList(text) {
   const raw = String(text || '').replace(/^\uFEFF/, '');
   if (WSL_USAGE_TEXT_RE.test(raw)) return [];
-  return raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  return raw
+    .split(/\r?\n/)
+    .map((s) => s.replace(/\u0000/g, '').trim())
+    .filter((s) => s !== '' && !/[\u0000-\u001f\u007f]/.test(s));
 }
 
 /** `wsl.exe -l -q`（异步）：解码 + 解析；wsl.exe 缺失/失败返回空列表。 */
@@ -166,7 +216,7 @@ internals.wslListDistrosAsync = function wslListDistrosAsync() {
     child.on('exit', (code) => {
       clearTimeout(timer);
       if (code !== 0) return done([]);
-      done(parseWslDistroList(decodeWslListOutput(Buffer.concat(chunks))));
+      done(parseWslDistroList(decodeWslText(Buffer.concat(chunks))));
     });
   });
 };
@@ -210,7 +260,12 @@ async function configureAsync(opts = {}) {
     if (distros.length === 0) {
       fail('未检测到 WSL 发行版。请确认已安装 WSL（wsl --install），或通过设置 wslDistro 指定发行版名。');
     }
-    state.distro = distros[0];
+    // Docker Desktop 的辅助发行版（docker-desktop / docker-desktop-data）不含
+    // 交互 shell 与 node，不是可用的托管环境；它们常排在列表首位（issue #126
+    // 用户的机器上即如此），自动选择时跳过（显式配置 wslDistro 不受影响）。
+    // 全是系统发行版时仍取第一个，让后续 node/npm 探活给出可读的错误提示。
+    const SYSTEM_DISTRO_RE = /^docker-desktop(-data)?$/i;
+    state.distro = distros.find((d) => !SYSTEM_DISTRO_RE.test(d)) || distros[0];
   }
   log(`使用 WSL 发行版: ${state.distro}`);
 
@@ -419,8 +474,9 @@ function self() {
     installDirLinux, uncHome, distroName,
     ensureInstalled, applyUpdate, rollback, hasPrevious, activeVersion, activeVersionAsync,
     spawnServer, stop,
-    // 纯函数（单测）：wsl.exe 列表输出解码/解析。
-    decodeWslListOutput, parseWslDistroList,
+    // 纯函数（单测）：wsl.exe 输出解码/解析。decodeWslListOutput 为历史名
+    // （等价 decodeWslText），保留导出以免既有调用方/测试破裂。
+    decodeWslListOutput: decodeWslText, decodeWslText, parseWslDistroList,
     // 原语（单测注入桩替身用；产品代码不消费）。
     _internals: internals,
   };

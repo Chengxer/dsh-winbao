@@ -135,6 +135,9 @@ window.__ModuleLoader__.load({
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(payload),
+          // 3s 超时：后端假死（端口通、HTTP 永不响应）时不能让弹窗关闭/
+          // 提交重放永久挂起（issue #127「弹窗关不掉」根因之一）。
+          signal: AbortSignal.timeout(3000),
         });
         return { ok: res.ok, status: res.status, body: await res.json().catch(() => null) };
       } catch (error) {
@@ -144,20 +147,24 @@ window.__ModuleLoader__.load({
     //#endregion
 
     //#region interception decision
+    // 决策即快照（issue #130）：返回 null=放行；返回 state 对象=拦截并携带
+    // 决策时的状态快照——杜绝「shouldIntercept 判定拦截（事件已被吞）→
+    // showInterceptPopup 二次读 lastState 时轮询失败置 null → return」的
+    // 竞态（表现为事件被吞、弹窗不弹、消息发不出去）。
     function shouldIntercept(text) {
       const s = lastState;
-      if (s === null || typeof s !== "object") return false;
-      if (s.enabled !== true) return false;
-      if (s.remindedToday === true || localRemindedToday) return false;
+      if (s === null || typeof s !== "object") return null;
+      if (s.enabled !== true) return null;
+      if (s.remindedToday === true || localRemindedToday) return null;
       const kind = s.modelKind;
-      if (kind !== "flash" && kind !== "pro" && kind !== "deepseek-other") return false;
-      if (text === undefined || typeof text !== "string" || text.trim() === "") return false;
-      if (Date.now() < suppressUntil) return false;
-      if (intercepting) return false;
-      if (modalEl !== null) return false; // 已有弹窗时不重复拦截
+      if (kind !== "flash" && kind !== "pro" && kind !== "deepseek-other") return null;
+      if (text === undefined || typeof text !== "string" || text.trim() === "") return null;
+      if (Date.now() < suppressUntil) return null;
+      if (intercepting) return null;
+      if (modalEl !== null) return null; // 已有弹窗时不重复拦截
       const bj = beijingParts(new Date());
-      if (!isPeak(bj.minutes, s.peakWindows)) return false;
-      return true;
+      if (!isPeak(bj.minutes, s.peakWindows)) return null;
+      return s;
     }
     //#endregion
 
@@ -419,26 +426,47 @@ window.__ModuleLoader__.load({
       }
     }
     async function closePopup(allowDismiss) {
-      if (allowDismiss) await maybeDismissToday();
+      // 「关闭弹窗」这个 UI 承诺不依赖后端健康：先摘弹窗再走网络（issue #127）。
+      // dismiss 是幂等状态同步，失败静默——下次轮询/弹窗还能再点，无损失。
+      const dismiss = allowDismiss && shouldDismissToday(); // hideModal 前读 checkbox（弹窗摘除后读不到）
       hideModal();
+      if (dismiss) {
+        const r = await postJson("/ds-offpeak/dismiss", { forToday: true });
+        if (r.ok) {
+          localRemindedToday = true;
+          if (lastState !== null && typeof lastState === "object") lastState.remindedToday = true;
+        }
+      }
     }
 
-    /** 继续执行：重新派发被拦截的提交事件，走 composer 原生提交路径。 */
+    /** 继续执行：立即关弹窗 + 立即重放提交；ack/dismiss 全部后台化（issue #127/#130）。 */
     async function continueSend(opts) {
       suppressUntil = Date.now() + 8000;
-      // 顺手 ack 掉可能存在的服务端兜底提醒，避免轮询重复弹窗。
+      const dismiss = shouldDismissToday(); // hideModal 前读 checkbox
+      // 顺手 ack 掉可能存在的服务端兜底提醒，避免轮询重复弹窗（快照防竞态）。
       const s = lastState;
-      if (s !== null && s.reminder !== null && s.reminder.nonce !== undefined) {
-        await postJson("/ds-offpeak/ack", { nonce: s.reminder.nonce });
-        if (s.reminder.nonce === shownNonce) shownNonce = null;
+      const ackNonce = (s !== null && s !== null && s.reminder !== null && s.reminder.nonce !== undefined)
+        ? s.reminder.nonce
+        : null;
+      hideModal(); // 任何网络操作之前——后端假死也不许卡住用户
+      if (ackNonce !== null) {
+        void postJson("/ds-offpeak/ack", { nonce: ackNonce }).then((r) => {
+          if (r.ok && ackNonce === shownNonce) shownNonce = null;
+        }).catch(() => { /* 幂等，静默 */ });
       }
-      await maybeDismissToday();
-      hideModal();
+      if (dismiss) {
+        void postJson("/ds-offpeak/dismiss", { forToday: true }).then((r) => {
+          if (r.ok) {
+            localRemindedToday = true;
+            if (lastState !== null && typeof lastState === "object") lastState.remindedToday = true;
+          }
+        }).catch(() => { /* 幂等，静默 */ });
+      }
       intercepting = true;
       try {
         if (opts.gesture === "enter" && opts.target instanceof HTMLTextAreaElement) {
           opts.target.dispatchEvent(new KeyboardEvent("keydown", {
-            key: "Enter", code: "Enter", bubbles: true, cancelable: true,
+            key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true,
           }));
         } else {
           const btn = document.querySelector('button[aria-label="发送消息"], button[aria-label="Send message"]');
@@ -447,6 +475,24 @@ window.__ModuleLoader__.load({
       } finally {
         intercepting = false;
       }
+      // 合成事件重放兜底（isTrusted=false 可能被 composer 忽略——issue #130）：
+      // 800ms 后输入框仍是原文且可编辑，提示用户再按一次。
+      setTimeout(() => {
+        try {
+          const ta = opts.target;
+          if (opts.gesture === "enter" && ta instanceof HTMLTextAreaElement
+              && ta.value === opts.text && !ta.disabled && !ta.readOnly && modalEl === null) {
+            const tip = el("div", "dspg_toast", "未触发发送，请再按一次 Enter");
+            tip.style.position = "fixed";
+            tip.style.bottom = "18px";
+            tip.style.left = "50%";
+            tip.style.transform = "translateX(-50%)";
+            tip.style.zIndex = "100000";
+            document.body.append(tip);
+            setTimeout(() => tip.remove(), 3000);
+          }
+        } catch { /* noop */ }
+      }, 800);
     }
 
     /** 定时执行：登记到服务端并清空输入框草稿。 */
@@ -522,9 +568,8 @@ window.__ModuleLoader__.load({
       disposeModal = () => { /* noop */ };
     }
 
-    /** 拦截式弹窗：消息尚未发送。 */
-    function showInterceptPopup(ta, text, gesture) {
-      const state = lastState;
+    /** 拦截式弹窗：消息尚未发送。state 由 shouldIntercept 决策时快照传入。 */
+    function showInterceptPopup(ta, text, gesture, state) {
       if (state === null) return;
       const opts = {
         intercept: true,
@@ -572,10 +617,11 @@ window.__ModuleLoader__.load({
         if (!(ta instanceof HTMLTextAreaElement)) return;
         if (ta.closest("[data-composer-card]") === null) return;
         if (ta.readOnly || ta.disabled) return;
-        if (!shouldIntercept(ta.value)) return;
+        const snap = shouldIntercept(ta.value);
+        if (snap === null) return;
         e.preventDefault();
         e.stopImmediatePropagation();
-        showInterceptPopup(ta, ta.value, "enter");
+        showInterceptPopup(ta, ta.value, "enter", snap);
       };
       const onClick = (e) => {
         const t = e.target;
@@ -586,10 +632,11 @@ window.__ModuleLoader__.load({
         if (card === null) return;
         const ta = card.querySelector("textarea");
         if (ta === null || ta.readOnly || ta.disabled) return;
-        if (!shouldIntercept(ta.value)) return;
+        const snap = shouldIntercept(ta.value);
+        if (snap === null) return;
         e.preventDefault();
         e.stopImmediatePropagation();
-        showInterceptPopup(ta, ta.value, "click");
+        showInterceptPopup(ta, ta.value, "click", snap);
       };
       document.addEventListener("keydown", onKeydown, { capture: true });
       document.addEventListener("click", onClick, { capture: true });

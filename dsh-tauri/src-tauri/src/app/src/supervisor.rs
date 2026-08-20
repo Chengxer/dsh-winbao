@@ -38,6 +38,9 @@ pub enum SupervisorEvent {
     CrashLoop { crashes: usize },
     /// 探活失败计数变化（诊断用）。
     ProbeFailed { consecutive: usize },
+    /// 内核假死可疑：TCP 可连但 HTTP 连续无响应（#122/#129——crash-shield
+    /// 吞异常保进程活着，纯 TCP 探测恒过，事件循环卡死不可见）。
+    ZombieSuspect { consecutive: usize },
     /// 状态迁移。
     StateChanged(RunState),
 }
@@ -586,11 +589,33 @@ impl Supervisor {
     }
 
     /// 探活循环：TCP connect + 就绪超时。
+    /// HTTP 应用层探活：读到任何响应字节（含 404/401——内核对 / 至少回
+    /// index/错误页）即证明事件循环在转。TCP 握手由 OS 协议栈完成，进程
+    /// 假死时也恒成功——必须发请求读响应才能区分（issue #122/#129）。
+    fn http_alive(port: u16) -> bool {
+        use std::io::{Read, Write};
+        let Ok(addr) = format!("127.0.0.1:{port}").parse() else { return false };
+        let Ok(mut s) = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)) else {
+            return false;
+        };
+        let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
+        let _ = s.set_write_timeout(Some(Duration::from_secs(3)));
+        if s.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").is_err() {
+            return false;
+        }
+        let mut buf = [0u8; 16];
+        matches!(s.read(&mut buf), Ok(n) if n > 0)
+    }
+
     fn probe_loop(self: &Arc<Self>, port: u16, tx: Sender<SupervisorEvent>, gen: u64) {
         let this = Arc::clone(self);
         std::thread::spawn(move || {
-            // 瀑布已同步等到就绪，这里只管「就绪后失联」（连续 3 次 TCP 失联 → 按退出处理）。
+            // 就绪后失联分两形态（#122 假死定性）：
+            //   a) TCP 连不上（进程死/端口死）→ 连续 3 次按退出处理（原语义）；
+            //   b) TCP 通但 HTTP 连续无响应 → 假死，连续 5 次（~15s）受控重启，
+            //      走 on_kernel_exit 的崩溃环窗口限次（天然防死循环）。
             let mut consecutive = 0usize;
+            let mut zombie = 0usize;
             loop {
                 std::thread::sleep(Duration::from_secs(3));
                 {
@@ -602,15 +627,34 @@ impl Supervisor {
                         return;
                     }
                 }
-                let ok = std::net::TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().unwrap(), Duration::from_secs(2)).is_ok();
-                if ok {
+                let tcp_ok = std::net::TcpStream::connect_timeout(
+                    &format!("127.0.0.1:{port}").parse().unwrap(),
+                    Duration::from_secs(2),
+                )
+                .is_ok();
+                if tcp_ok && Self::http_alive(port) {
                     consecutive = 0;
+                    zombie = 0;
                     continue;
                 }
-                consecutive += 1;
-                let _ = tx.send(SupervisorEvent::ProbeFailed { consecutive });
-                if consecutive >= 3 {
-                    // 端口连续失联但进程可能还活着：杀掉按退出处理。
+                if !tcp_ok {
+                    zombie = 0;
+                    consecutive += 1;
+                    let _ = tx.send(SupervisorEvent::ProbeFailed { consecutive });
+                    if consecutive >= 3 {
+                        // 端口连续失联但进程可能还活着：杀掉按退出处理。
+                        this.kill_kernel();
+                        this.on_kernel_exit(None, &tx);
+                        return;
+                    }
+                    continue;
+                }
+                // TCP 通、HTTP 无响应：假死形态。
+                zombie += 1;
+                let _ = tx.send(SupervisorEvent::ZombieSuspect { consecutive: zombie });
+                log_line(&format!("内核假死可疑（端口通、HTTP 无响应）×{zombie}"));
+                if zombie >= 5 {
+                    log_line("内核假死判定成立（连续 15s HTTP 无响应），受控重启");
                     this.kill_kernel();
                     this.on_kernel_exit(None, &tx);
                     return;

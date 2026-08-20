@@ -401,6 +401,10 @@ fn route_one_event(app: &tauri::AppHandle, ev: SupervisorEvent) {
             SupervisorEvent::ProbeFailed { consecutive } => {
                 eprintln!("[route] 探活失败 ×{consecutive}");
             }
+            SupervisorEvent::ZombieSuspect { consecutive } => {
+                // 假死形态（#122/#129）：TCP 通、HTTP 无响应——日志可区分于崩溃重启。
+                eprintln!("[route] 内核假死可疑 ×{consecutive}（端口通、HTTP 无响应）");
+            }
             SupervisorEvent::StateChanged(_) => {}
         }
 }

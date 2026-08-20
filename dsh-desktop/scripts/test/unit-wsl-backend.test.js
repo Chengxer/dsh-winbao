@@ -12,9 +12,11 @@ const fs = require('node:fs');
 
 const wsl = require('../../wsl-backend');
 
-// 桩替身：按命令内容返回预置结果。
+// 桩替身：按命令内容返回预置结果。首次替换前保留原始实现（_origRunWsl），
+// 供 runWsl 真实现的直测用（runWsl 内部经 internals.spawn 拉起，桩替换 spawn 即可拦截）。
 function stubPrimitives({ distros = ['Ubuntu'], home = '/home/tester', node = 'v22.14.0', npm = '10.9.2', agentPkg = { version: '0.1.0-rc.6' } } = {}) {
   const calls = [];
+  if (!wsl._internals._origRunWsl) wsl._internals._origRunWsl = wsl._internals.runWsl;
   wsl._internals.wslListDistrosAsync = async () => [...distros];
   wsl._internals.runWsl = async (cmd) => {
     calls.push(cmd);
@@ -40,6 +42,37 @@ test('decodeWslListOutput: BOM UTF-16LE 与无 BOM UTF-8 两种形态', () => {
   assert.equal(wsl.decodeWslListOutput(plain), 'Ubuntu\nDocker Desktop\n');
   assert.equal(wsl.decodeWslListOutput(Buffer.alloc(0)), '');
   assert.equal(wsl.decodeWslListOutput(null), '');
+});
+
+test('decodeWslListOutput: 无 BOM 的 UTF-16LE（issue #126，Store 版 wsl.exe 实测形态）', () => {
+  // 本机实测：新版 wsl.exe 经管道输出 `wsl -l -q` 不带 BOM，首字节直接是
+  // 首字符（55 00 62 00 …）。旧实现按 utf8 兜底解码得到 `U\x00b\x00…`，
+  // 被当作发行版名传给 spawn 后触发 "string without null bytes"。
+  const noBom = Buffer.from('docker-desktop\r\nUbuntu-24.04\r\n', 'utf16le');
+  assert.equal(noBom[0], 0x64, '前置：该形态确实无 BOM');
+  assert.equal(wsl.decodeWslListOutput(noBom), 'docker-desktop\r\nUbuntu-24.04\r\n');
+  // 单行 + 尾部 \r\n 的最小形态也必须命中（奇数位 NUL 来自高字节与 \r\n）
+  assert.equal(wsl.decodeWslListOutput(Buffer.from('Ubuntu-24.04\r\n', 'utf16le')), 'Ubuntu-24.04\r\n');
+  // GBK 帮助文本（双字节均非 0，无 NUL）不得被误判为 UTF-16LE：
+  // 「用法: wsl.exe」的 GBK 字节流应走 utf8 路径（长度近乎保留），而非被折半。
+  const gbk = Buffer.from([0xd3, 0xc3, 0xb7, 0xa8, 0x3a, 0x20, 0x77, 0x73, 0x6c]);
+  assert.ok(wsl.decodeWslListOutput(gbk).length > gbk.length / 2,
+    'GBK 字节流不应被当 UTF-16LE 折半重解码');
+  // 纯 ASCII 单字节流（无 NUL）也不得误判
+  const ascii = Buffer.from('Ubuntu\n', 'utf8');
+  assert.equal(wsl.decodeWslListOutput(ascii), 'Ubuntu\n');
+});
+
+test('parseWslDistroList: 含 NUL 的误解码残迹必须剥除/丢弃（issue #126 防御）', () => {
+  // UTF-16LE 被误按单字节解码的 ASCII 名字：剥 NUL 后自愈为正常名字
+  const utf16Bytes = Buffer.from('docker-desktop\r\nUbuntu\r\n', 'utf16le').toString('utf8');
+  assert.deepEqual(wsl.parseWslDistroList(utf16Bytes), ['docker-desktop', 'Ubuntu']);
+  // issue 截图里的确切形态：'d\x00o\x00c\x00k\x00…\r\x00'
+  const mangled = Buffer.from('docker-desktop\r', 'utf16le').toString('utf8');
+  assert.deepEqual(wsl.parseWslDistroList(mangled), ['docker-desktop']);
+  // 其它控制字符行（非 \r\n，例如解码垃圾）直接丢弃，绝不进入发行版列表
+  assert.deepEqual(wsl.parseWslDistroList('Ubuntu\n\x01\x02bad\nDebian\n'), ['Ubuntu', 'Debian']);
+  assert.deepEqual(wsl.parseWslDistroList('\x00\x00\x00'), []);
 });
 
 test('parseWslDistroList: 正常清单/帮助文本/空输出', () => {
@@ -69,6 +102,21 @@ test('configureAsync: 指定发行版与 ~ 前缀安装目录', async () => {
   await wsl.configureAsync({ distro: 'Debian', installDir: '~/dsx' });
   assert.equal(wsl.distroName(), 'Debian');
   assert.equal(wsl.installDirLinux(), '/home/tester/dsx');
+});
+
+test('configureAsync: 自动选择跳过 docker-desktop 系统发行版（issue #126）', async () => {
+  // docker-desktop 常排列表首位且无交互 shell/node，自动选择时必须跳过
+  stubPrimitives({ distros: ['docker-desktop', 'docker-desktop-data', 'Ubuntu'] });
+  await wsl.configureAsync({});
+  assert.equal(wsl.distroName(), 'Ubuntu');
+  // 显式配置不被跳过拦（用户明确指定就尊重）
+  stubPrimitives({ distros: ['Ubuntu'] });
+  await wsl.configureAsync({ distro: 'docker-desktop' });
+  assert.equal(wsl.distroName(), 'docker-desktop');
+  // 全是系统发行版时仍取第一个兜底（后续 node/npm 探活给出可读错误，而非崩溃）
+  stubPrimitives({ distros: ['docker-desktop'] });
+  await wsl.configureAsync({});
+  assert.equal(wsl.distroName(), 'docker-desktop');
 });
 
 test('configureAsync: 无发行版 → 抛「未检测到」且状态复位', async () => {
@@ -121,6 +169,69 @@ test('installAgent: 版本号白名单拒绝 shell 注入（经 applyUpdate 公�
   // 合法形态（含 npm dist-tag 与 rc 预发布）必须放行
   await assert.doesNotReject(() => wsl.applyUpdate('0.1.0-rc.7'));
   await assert.doesNotReject(() => wsl.applyUpdate('latest'));
+});
+
+test('runWsl: wsl.exe 自身错误消息为无 BOM UTF-16LE 且写在 stdout（issue #126）', async () => {
+  // 本机实测：WSL2 VM 启动失败时 wsl.exe exit=-1、stderr 为空，中文错误
+  // 消息按无 BOM UTF-16LE 写到 stdout。旧实现按 utf8 流式解码得到乱码，
+  // 被 fail() 拼进「无法解析 WSL 用户主目录: …」展示给用户。
+  stubPrimitives();
+  await wsl.configureAsync({ distro: 'Ubuntu' });
+  const origSpawn = wsl._internals.spawn;
+  const fakeChild = {
+    killed: false,
+    kill() {},
+    stdout: { on(ev, fn) { if (ev === 'data') this._fn = fn; }, emit(c) { this._fn && this._fn(c); } },
+    stderr: { on(ev, fn) { if (ev === 'data') this._fn = fn; }, emit(c) { this._fn && this._fn(c); } },
+    exit(code) { this._exit && this._exit(code); },
+    on(ev, fn) { if (ev === 'exit') this._exit = fn; },
+  };
+  wsl._internals.spawn = () => {
+    process.nextTick(() => {
+      fakeChild.stdout.emit(Buffer.from('WSL2 未能启动此发行版。\r\n请启用虚拟机平台功能。\r\n', 'utf16le'));
+      fakeChild.exit(-1);
+    });
+    return fakeChild;
+  };
+  try {
+    const res = await wsl._internals._origRunWsl('printf %s "$HOME"', { timeoutMs: 5000 });
+    assert.equal(res.ok, false);
+    assert.equal(res.code, -1);
+    assert.ok(res.stdout.includes('WSL2 未能启动此发行版'),
+      'UTF-16LE 错误消息必须被校正为可读中文，实际: ' + JSON.stringify(res.stdout));
+    assert.ok(!res.stdout.includes('\u0000'), '不得残留 NUL 字节');
+  } finally {
+    wsl._internals.spawn = origSpawn;
+  }
+});
+
+test('runWsl: 正常 Linux UTF-8 输出不受启发式影响', async () => {
+  stubPrimitives();
+  await wsl.configureAsync({ distro: 'Ubuntu' });
+  const origSpawn = wsl._internals.spawn;
+  const fakeChild = {
+    killed: false,
+    kill() {},
+    stdout: { on(ev, fn) { if (ev === 'data') this._fn = fn; }, emit(c) { this._fn && this._fn(c); } },
+    stderr: { on(ev, fn) { if (ev === 'data') this._fn = fn; }, emit(c) { this._fn && this._fn(c); } },
+    exit(code) { this._exit && this._exit(code); },
+    on(ev, fn) { if (ev === 'exit') this._exit = fn; },
+  };
+  wsl._internals.spawn = () => {
+    process.nextTick(() => {
+      fakeChild.stdout.emit(Buffer.from('/home/t', 'utf8')); // 多字节跨 chunk
+      fakeChild.stdout.emit(Buffer.from('ester\n', 'utf8'));
+      fakeChild.exit(0);
+    });
+    return fakeChild;
+  };
+  try {
+    const res = await wsl._internals._origRunWsl('printf %s "$HOME"', { timeoutMs: 5000 });
+    assert.equal(res.ok, true);
+    assert.equal(res.stdout, '/home/tester\n', 'UTF-8 输出按原样解码且跨 chunk 字符完整');
+  } finally {
+    wsl._internals.spawn = origSpawn;
+  }
 });
 
 test('rollback/hasPrevious/stop: 桩替换后行为契约', async () => {
