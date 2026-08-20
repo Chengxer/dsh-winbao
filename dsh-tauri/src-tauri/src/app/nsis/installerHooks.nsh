@@ -49,6 +49,13 @@
     StrCmp $R6 "DSH Desktop" 0 LegacyScan_next_${ROOT}_${UID}
       Push $R5
       Call LegacyHandleEntry${ROOT}
+      Pop $R6
+      StrCmp $R6 "1" 0 LegacyScan_norescan_${ROOT}_${UID}
+        ; V4 walkthrough #5 (HIGH): purge deletes keys during enumeration which
+        ; shifts subsequent indices (skips keys ~50% in dual-key case). Any key
+        ; handled (uninstall/removed) restarts enumeration from index 0.
+        StrCpy $R4 -1
+      LegacyScan_norescan_${ROOT}_${UID}:
     LegacyScan_next_${ROOT}_${UID}:
       IntOp $R4 $R4 + 1
       Goto LegacyScan_loop_${ROOT}_${UID}
@@ -61,7 +68,7 @@
 ; 共享键处理逻辑（在壳函数内展开）：
 ;   输入 $R1=卸载器路径（已去引号）  $R2=InstallLocation（已去引号）
 ;         $R9=模式   输出：choose → $R8（活体 Electron 目录，首个胜出）
-!macro LegacyActOnEntry
+!macro LegacyActOnEntry ROOT
   ; 目录候选：InstallLocation 优先，空则卸载器父目录
   StrCpy $R3 "$R2"
   ${If} $R3 == ""
@@ -73,7 +80,8 @@
     ${If} "$R3" != ""
       IfFileExists "$R3\DSH Desktop.exe" LaeLive 0
       IfFileExists "$R3\dsh-desktop.exe" LaeLive 0
-      IfFileExists "$R3\Uninstall DSH Desktop.exe" LaeLive LaeNoLive
+      IfFileExists "$R3\Uninstall DSH Desktop.exe" LaeLive 0
+      IfFileExists "$R3\Uninstall_DSH_Desktop.exe" LaeLive LaeNoLive
       LaeLive:
         ${If} $R8 == ""
           StrCpy $R8 "$R3"
@@ -81,13 +89,26 @@
         ${EndIf}
       LaeNoLive:
     ${EndIf}
+    Push ""
+    Goto LaeDone
   ${Else}
-    ; purge：卸载器文件存在才执行。Tauri 模板卸载器固定名 uninstall.exe
-    ; （取末 13 字符比对分流）；其余按 Electron 卸载器（保数据参数）。
+    ; purge：键键都清。V4 walkthrough fixes:
+    ;  #3 stale key without uninstaller file -> DeleteRegKey directly.
+    ;  #11 currentUser no elevation: HKLM machine-wide old version uninstaller
+    ;     may pop UAC and hang ExecWait -> only clear the key, never run it.
+    ;  #7 poll cap 30->120 (60s) for slow machines deleting 543MB node_modules.
+    ;  #6 case variants for Tauri uninstaller name (StrCmp is case-sensitive).
     ${If} "$R1" != ""
     ${AndIf} ${FileExists} "$R1"
+      !if "${ROOT}" == "HKLM"
+        DetailPrint "HKLM 机装旧版（键 $R5）：跳过卸载器（避免 UAC 挂死），仅清键"
+        DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R5"
+        Push "1"
+        Goto LaeDone
+      !else
       StrCpy $R6 "$R1" "" -13
-      StrCmp $R6 "uninstall.exe" LaeTauri LaeElectron
+      StrCmp $R6 "uninstall.exe" LaeTauri
+      StrCmp $R6 "Uninstall.exe" LaeTauri LaeElectron
       LaeElectron:
         DetailPrint "静默卸载旧版（保数据）：$R1"
         ExecWait '"$R1" /S /KEEP_APP_DATA --updated' $R0
@@ -102,10 +123,20 @@
       LaePollNext:
         Sleep 500
         IntOp $R4 $R4 + 1
-        IntCmp $R4 30 LaePollDone LaePoll
+        IntCmp $R4 120 LaePollDone LaePoll
       LaePollDone:
+      Push "1"
+      Goto LaeDone
+      !endif
+    ${Else}
+      DetailPrint "陈旧键（无卸载器文件）清除：$R5"
+      DeleteRegKey ${ROOT} "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R5"
+      Push "1"
+      Goto LaeDone
     ${EndIf}
   ${EndIf}
+  Push ""
+  LaeDone:
 !macroend
 
 
@@ -169,7 +200,7 @@ Function LegacyHandleEntryHKCU
   Push $R2
   Call LegacyStripQuotes
   Pop $R2
-  !insertmacro LegacyActOnEntry
+  !insertmacro LegacyActOnEntry HKCU
   Pop $R7
   Pop $R6
   Pop $R4
@@ -197,7 +228,7 @@ Function LegacyHandleEntryHKLM
   Push $R2
   Call LegacyStripQuotes
   Pop $R2
-  !insertmacro LegacyActOnEntry
+  !insertmacro LegacyActOnEntry HKLM
   Pop $R7
   Pop $R6
   Pop $R4
