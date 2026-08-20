@@ -118,7 +118,7 @@ echo "[smoke] --- 隔离 userData 树 ---"; find "$SMOKE/ud" -maxdepth 2 | head 
 echo "[smoke] --- app.log 尾部 ---"; tail -6 "$SMOKE/app.log" 2>/dev/null
 
 # 插件加载断言：内核转发行里出现任一致命串即 FAIL（曾经的冒烟盲区）。
-if grep -q "Failed to load plugins\|missed the module table\|invalid plugin\|entry crashed\|slot entry" "$SMOKE/app.log" 2>/dev/null; then
+if grep -q "Failed to load plugins\|missed the module table\|invalid plugin\|entry crashed\|slot entry\|did not activate\|failed to mount" "$SMOKE/app.log" 2>/dev/null; then
   echo "[smoke] ✗ 检出插件加载失败："
   grep -m 4 "Failed to load plugins\|missed the module table\|web|" "$SMOKE/app.log" | head -6
   taskkill //IM "dsh-tauri-app.exe" //F //T > /dev/null 2>&1
