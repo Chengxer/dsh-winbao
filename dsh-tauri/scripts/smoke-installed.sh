@@ -101,6 +101,8 @@ echo "[smoke] 启动（DSH_HOME/DSH_TAURI_USERDATA 全隔离），日志 → $SM
 DSH_HOME="$(cygpath -w "$SMOKE/home")" \
 DSH_TAURI_USERDATA="$(cygpath -w "$SMOKE/ud")" \
   "$(cygpath -w "$SMOKE/dsh-tauri-app.exe")" > "$SMOKE/app.log" 2>&1 &
+SHELL_PID=$!
+echo "$SHELL_PID" > "$SMOKE/shell.pid"
 
 ok=""
 for i in $(seq 1 36); do
@@ -150,6 +152,10 @@ else
 fi
 
 echo "[smoke] 收尾：杀壳（Job Object 预期同步收割内核树）"
+# T4 反馈：优先按记录 PID 杀（//IM 全杀同名进程会误伤共享机上的用户实例）。
+if [ -f "$SMOKE/shell.pid" ]; then
+  taskkill //PID "$(cat "$SMOKE/shell.pid")" //T //F > /dev/null 2>&1
+fi
 taskkill //IM "dsh-tauri-app.exe" //F //T > /dev/null 2>&1
 sleep 3
 NEW_AFTER=$(listening_pids | comm -13 <(echo "$PRE_PIDS") - | grep -c . )

@@ -783,7 +783,13 @@ fn now_ms() -> u64 {
 }
 
 fn log_line(msg: &str) {
-    println!("[supervisor] {msg}");
+    // T4 反馈：无时间戳时恢复耗时只能外部计时——补 HH:MM:SS 前缀。
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (h, m, sec) = ((secs / 3600) % 24, (secs / 60) % 60, secs % 60);
+    println!("[supervisor {h:02}:{m:02}:{sec:02}] {msg}");
 }
 
 #[cfg(windows)]
