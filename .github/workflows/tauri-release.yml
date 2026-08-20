@@ -73,21 +73,29 @@ jobs:
 
       - name: Download rc7 client packages (for compat)
         run: |
-          $dest = "dsh-desktop\dist\win-unpacked\resources\app\node_modules\@deepseek-ai"
-          mkdir -Force $dest | Out-Null
-          $pkgs = @('dsh-client-web-react','dsh-client-ui-primitives','dsh-client-ui-slots','dsh-client-schema-form','dsh-client-ui-attachment','dsh-client-ui-renderer')
+          cd dsh-desktop
+          $pkgs = @(
+            '@deepseek-ai/dsh-client-web-react',
+            '@deepseek-ai/dsh-client-schema-form',
+            '@deepseek-ai/dsh-client-ui-primitives',
+            '@deepseek-ai/dsh-client-ui-slots',
+            '@deepseek-ai/dsh-client-ui-attachment',
+            '@deepseek-ai/dsh-client-ui-renderer'
+          )
+          $dest = "dist\win-unpacked\resources\app\node_modules\@deepseek-ai"
           foreach ($pkg in $pkgs) {
-            $tmp = "$env:TEMP\pkg-$pkg"
+            Write-Host "Downloading $pkg@0.1.0-rc.7 ..."
+            $tgz = npm pack "$pkg@0.1.0-rc.7" 2>&1 | Select-Object -Last 1
+            if (-not (Test-Path $tgz)) { Write-Host "WARN: $pkg not found, skipping"; continue }
+            $name = $pkg.Split('/')[-1]
+            $tmp = "$env:TEMP\pkg-$name"
             mkdir -Force $tmp | Out-Null
-            $url = "https://registry.npmmirror.com/@deepseek-ai/$pkg/-/$pkg-0.1.0-rc.7.tgz"
-            try { Invoke-WebRequest -Uri $url -OutFile "$tmp\pkg.tgz" } catch {
-              $url = "https://registry.npmjs.org/@deepseek-ai/$pkg/-/$pkg-0.1.0-rc.7.tgz"
-              Invoke-WebRequest -Uri $url -OutFile "$tmp\pkg.tgz"
-            }
-            tar -xzf "$tmp\pkg.tgz" -C $tmp
-            mkdir -Force "$dest\$pkg" | Out-Null
-            Copy-Item "$tmp\package\*" "$dest\$pkg\" -Recurse -Force
+            tar -xzf $tgz -C $tmp
+            mkdir -Force "$dest\$name" | Out-Null
+            Copy-Item "$tmp\package\*" "$dest\$name\" -Recurse -Force
+            Remove-Item $tgz -Force
           }
+          Write-Host "rc7 packages ready"
         shell: pwsh
 
       - name: Stage payload
@@ -151,16 +159,21 @@ jobs:
 
       - name: Download rc7 client packages
         run: |
-          dest="dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai"
+          cd dsh-desktop
+          dest="dist/win-unpacked/resources/app/node_modules/@deepseek-ai"
           mkdir -p "$dest"
-          for pkg in dsh-client-web-react dsh-client-ui-primitives dsh-client-ui-slots dsh-client-schema-form dsh-client-ui-attachment dsh-client-ui-renderer; do
+          for pkg in dsh-client-web-react dsh-client-schema-form dsh-client-ui-primitives dsh-client-ui-slots dsh-client-ui-attachment dsh-client-ui-renderer; do
+            full="@deepseek-ai/$pkg"
+            echo "Downloading $full@0.1.0-rc.7 ..."
+            tgz=$(npm pack "$full@0.1.0-rc.7" 2>&1 | tail -1)
+            if [ ! -f "$tgz" ]; then echo "WARN: $full not found, skipping"; continue; fi
             tmp=$(mktemp -d)
-            curl -sL "https://registry.npmmirror.com/@deepseek-ai/$pkg/-/$pkg-0.1.0-rc.7.tgz" -o "$tmp/pkg.tgz" || \
-            curl -sL "https://registry.npmjs.org/@deepseek-ai/$pkg/-/$pkg-0.1.0-rc.7.tgz" -o "$tmp/pkg.tgz"
-            tar -xzf "$tmp/pkg.tgz" -C "$tmp"
+            tar -xzf "$tgz" -C "$tmp"
             mkdir -p "$dest/$pkg"
             cp -r "$tmp/package/"* "$dest/$pkg/"
+            rm -f "$tgz"
           done
+          echo "rc7 packages ready"
 
       - name: Stage payload
         run: bash dsh-tauri/scripts/stage-payload.sh
@@ -214,16 +227,21 @@ jobs:
 
       - name: Download rc7 client packages
         run: |
-          dest="dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai"
+          cd dsh-desktop
+          dest="dist/win-unpacked/resources/app/node_modules/@deepseek-ai"
           mkdir -p "$dest"
-          for pkg in dsh-client-web-react dsh-client-ui-primitives dsh-client-ui-slots dsh-client-schema-form dsh-client-ui-attachment dsh-client-ui-renderer; do
+          for pkg in dsh-client-web-react dsh-client-schema-form dsh-client-ui-primitives dsh-client-ui-slots dsh-client-ui-attachment dsh-client-ui-renderer; do
+            full="@deepseek-ai/$pkg"
+            echo "Downloading $full@0.1.0-rc.7 ..."
+            tgz=$(npm pack "$full@0.1.0-rc.7" 2>&1 | tail -1)
+            if [ ! -f "$tgz" ]; then echo "WARN: $full not found, skipping"; continue; fi
             tmp=$(mktemp -d)
-            curl -sL "https://registry.npmmirror.com/@deepseek-ai/$pkg/-/$pkg-0.1.0-rc.7.tgz" -o "$tmp/pkg.tgz" || \
-            curl -sL "https://registry.npmjs.org/@deepseek-ai/$pkg/-/$pkg-0.1.0-rc.7.tgz" -o "$tmp/pkg.tgz"
-            tar -xzf "$tmp/pkg.tgz" -C "$tmp"
+            tar -xzf "$tgz" -C "$tmp"
             mkdir -p "$dest/$pkg"
             cp -r "$tmp/package/"* "$dest/$pkg/"
+            rm -f "$tgz"
           done
+          echo "rc7 packages ready"
 
       - name: Stage payload
         run: bash dsh-tauri/scripts/stage-payload.sh
