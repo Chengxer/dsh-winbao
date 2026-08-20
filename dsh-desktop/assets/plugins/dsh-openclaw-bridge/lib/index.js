@@ -107,7 +107,9 @@ const TURN_TIMEOUT_MS = 10 * 60 * 1000;
 const POLL_MS = 100;
 
 // ---- 鉴权 token（设置 > 环境变量 > 自动生成并持久化） ----
-const BRIDGE_HOME = join(homedir(), ".dsh", "openclaw-bridge");
+// 跟随 DSH_HOME（与内核/其余插件同口径）：隔离部署/多实例/测试镜像时
+// workspace 不落真实用户目录（真实场景测试 T1 抓到打印真实路径）。
+const BRIDGE_HOME = join(process.env.DSH_HOME || join(homedir(), ".dsh"), "openclaw-bridge");
 let bridgeToken = String(process.env.OPENCLAW_BRIDGE_TOKEN || "").trim();
 if (!bridgeToken) {
   const tokenFile = join(BRIDGE_HOME, "token.txt");

@@ -67,6 +67,26 @@ if [ "${REAL_PROFILE:-0}" = "1" ]; then
     case "$name" in .bin|*.json) continue ;; esac
     if [ -e "$FARM/$name" ]; then rm -rf "$FARM/$name"; robocopy "$d" "$FARM/$name" //MIR //R:1 //W:1 > /dev/null; repointed=$((repointed+1)); fi
   done
+  # 原生模块兜底（T1 实测：farm 缺 koffi/sharp/@img/node-pty 时
+  # attachment/subprocess/sandbox 条目隔离失败——补进 farm 使命中
+  # 「健康机器」形态；真实机上这是内核 farm-heal 的覆盖面问题，双线同症）。
+  for nat in koffi sharp @img node-pty; do
+    src="$PLNM/$nat"
+    [ -d "$src" ] || continue
+    if [ "$nat" = "@img" ]; then
+      mkdir -p "$FARM/@img"
+      for sub in "$src"/*/; do
+        [ -d "$sub" ] || continue
+        rm -rf "$FARM/@img/$(basename "$sub")"
+        robocopy "$sub" "$FARM/@img/$(basename "$sub")" //MIR //R:1 //W:1 > /dev/null
+        repointed=$((repointed+1))
+      done
+    else
+      rm -rf "$FARM/$nat"
+      robocopy "$src" "$FARM/$nat" //MIR //R:1 //W:1 > /dev/null
+      repointed=$((repointed+1))
+    fi
+  done
   echo "[smoke] 前端/原生包 fallback 已重指 $repointed 项到冒烟 payload"
   else
     echo "[smoke] SMOKE_KEEP_FARM=1：farm 保持用户原样（保真态）"
@@ -106,6 +126,28 @@ if grep -q "Failed to load plugins\|missed the module table\|invalid plugin" "$S
   exit 1
 fi
 echo "[smoke] ✓ 插件加载零致命错误"
+
+# ---- 深检：page-error 全量溯源 + 内核端点抽检 + 轻压测（内核存活时进行） ----
+echo "[smoke] --- page-error 全量（溯源 failed-to-fetch 类） ---"
+grep "\[page-error" "$SMOKE/app.log" 2>/dev/null | sort | uniq -c | head -8
+PE_N=$(grep -c "\[page-error" "$SMOKE/app.log" 2>/dev/null || echo 0)
+echo "  page-error 总数：${PE_N}"
+KPORT=$(grep -o "dsh web: http://127.0.0.1:[0-9]*" "$SMOKE/app.log" | grep -o '[0-9]*$' | head -1)
+if [ -n "$KPORT" ] && curl -s -o /dev/null -m 2 "http://127.0.0.1:$KPORT/"; then
+  echo "[smoke] --- 内核端点抽检（port=$KPORT） ---"
+  for ep in "/" "/ds-offpeak/state"; do
+    printf "  GET %-18s → " "$ep"
+    curl -s -o /dev/null -m 3 -w "%{http_code} %{time_total}s
+" "http://127.0.0.1:$KPORT$ep"
+  done
+  echo "[smoke] --- 轻压测（20 并发 GET /） ---"
+  for i in $(seq 1 20); do curl -s -o /dev/null -m 5 -w "%{http_code}
+" "http://127.0.0.1:$KPORT/" & done > "$SMOKE/stress.txt"
+  wait
+  echo "  200 应答：$(grep -c '^200$' "$SMOKE/stress.txt")/20"
+else
+  echo "[smoke] （内核端口未就绪或已收尾，跳过端点抽检）"
+fi
 
 echo "[smoke] 收尾：杀壳（Job Object 预期同步收割内核树）"
 taskkill //IM "dsh-tauri-app.exe" //F //T > /dev/null 2>&1
