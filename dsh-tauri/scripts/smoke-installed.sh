@@ -47,8 +47,21 @@ PRE_PIDS=$(listening_pids)
 # 真实 profile 模式：镜像本机 ~/.dsh（只读源 → 隔离 home；写发生在副本上）。
 if [ "${REAL_PROFILE:-0}" = "1" ]; then
   echo "[smoke] REAL_PROFILE=1：镜像真实 ~/.dsh → 隔离 home（写零接触）"
-  robocopy "$(cygpath -u "$USERPROFILE")/.dsh" "$SMOKE/home" //MIR //R:1 //W:1 > /dev/null
-  rc=$?; [ $rc -lt 8 ] || { echo "[smoke] 真实 home 镜像失败($rc)"; exit 1; }
+  # 镜像经 PowerShell 调 robocopy：Git Bash 直调对个别 junction 目标有
+  # 编码伪影（实测同参数 bash rc=9 / powershell rc=1）。撞上用户实例写入
+  # 时重试一次。
+  SRC_W=$(cygpath -w "$USERPROFILE/.dsh"); DST_W=$(cygpath -w "$SMOKE/home")
+  run_mirror() {
+    powershell -Command "robocopy '$SRC_W' '$DST_W' /MIR /R:2 /W:2 /NP /NFL /NDL" > /dev/null 2>&1
+    return $?
+  }
+  run_mirror; rc=$?
+  if [ $rc -ge 8 ]; then
+    echo "[smoke] 镜像首次失败($rc)，重试一次"
+    sleep 2
+    run_mirror; rc=$?
+  fi
+  [ $rc -lt 8 ] || { echo "[smoke] 真实 home 镜像失败($rc)"; exit 1; }
   # home fallback farm 的 junction 指向用户旧安装——全量重指到冒烟 payload
   # （模拟真实机上 healProfilesModuleFallback 对新安装的自动重指）。只重指
   # 部分曾致 koffi/sharp 等原生包解析到旧安装而产生伪失败。

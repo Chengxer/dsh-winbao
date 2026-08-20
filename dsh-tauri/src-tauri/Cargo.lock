@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "bridge"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "serde",
 ]
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "dsh-tauri-app"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "bridge",
  "fence",
@@ -1022,7 +1022,7 @@ dependencies = [
 
 [[package]]
 name = "fence"
-version = "0.1.0"
+version = "0.5.0"
 
 [[package]]
 name = "field-offset"
@@ -1999,7 +1999,7 @@ dependencies = [
 
 [[package]]
 name = "kernel-process"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "windows-sys 0.59.0",
 ]
@@ -2702,7 +2702,7 @@ dependencies = [
 
 [[package]]
 name = "poc-sidecar-spawn"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "kernel-process",
 ]
@@ -2768,7 +2768,7 @@ checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
 
 [[package]]
 name = "preview-server"
-version = "0.1.0"
+version = "0.5.0"
 
 [[package]]
 name = "proc-macro-crate"
@@ -3414,7 +3414,7 @@ dependencies = [
 
 [[package]]
 name = "session-watcher"
-version = "0.1.0"
+version = "0.5.0"
 
 [[package]]
 name = "sha2"
@@ -3429,7 +3429,7 @@ dependencies = [
 
 [[package]]
 name = "shell-core"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3443,7 +3443,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sidecar-orchestrator"
-version = "0.1.0"
+version = "0.5.0"
 
 [[package]]
 name = "signal-hook-registry"

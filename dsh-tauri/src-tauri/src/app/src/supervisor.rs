@@ -276,6 +276,18 @@ impl Supervisor {
             g.pending_good = snap;
         }
         self.set_state(RunState::Ready);
+        // HTTP 热探（用户实测「Failed to fetch 闪现」根治）：ready 行只表示
+        // 内核进程打出就绪日志，HTTP 监听可能有 ~100ms 窗口尚未接受请求——
+        // 换页前先确认 HTTP 层真正可响应，消除页面首次 API 调的闪败。
+        for i in 0..50 {
+            if Self::http_alive(port) {
+                break;
+            }
+            if i == 49 {
+                log_line("HTTP 热探超时（5s），换页继续（可能首次闪败）");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
         let _ = tx.send(SupervisorEvent::KernelReady { url, port });
         let this = Arc::clone(self);
         std::thread::spawn(move || {

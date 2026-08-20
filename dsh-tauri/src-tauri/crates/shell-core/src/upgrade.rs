@@ -12,7 +12,8 @@
 //!
 //! ## 便携版检测（对齐 main.js:5317）
 //! `PORTABLE_EXECUTABLE_DIR`（portable 运行时注入）存在 → userData = `<该目录>/data`。
-//! 开发/测试覆盖：`DSH_DESKTOP_USERDATA`（优先级最高，仅未打包时）。
+//! 开发/冒烟重定向统一走 `DSH_TAURI_USERDATA`（data-flow.md §5.1 覆盖通道表；
+//! Electron 线的 `DSH_DESKTOP_USERDATA` 不在本线消费，同名 helper 已随清偿移除）。
 
 use std::path::PathBuf;
 
@@ -42,11 +43,6 @@ pub fn legacy_keys_present(map: &serde_json::Map<String, serde_json::Value>) -> 
 /// 返回 Some(portable_data_dir) 表示应把 userData 整体重定向到该目录。
 pub fn portable_user_data_dir() -> Option<PathBuf> {
     std::env::var_os("PORTABLE_EXECUTABLE_DIR").map(|d| PathBuf::from(d).join("data"))
-}
-
-/// 开发/测试覆盖（Electron 同名环境变量；优先级高于便携检测）。
-pub fn dev_user_data_dir() -> Option<PathBuf> {
-    std::env::var_os("DSH_DESKTOP_USERDATA").map(PathBuf::from)
 }
 
 /// Electron 版窗口状态文件（window-state.json，**不是** settings.json）。

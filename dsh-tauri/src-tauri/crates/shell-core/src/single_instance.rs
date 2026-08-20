@@ -25,6 +25,11 @@ impl SingleInstanceGuard {
     /// - `Err(())`：已有实例在跑，**或锁文件为强杀残留**——残留判定：读文件内
     ///   pid，进程已不存在则视为陈锁，删除后重试一次（Windows 命名互斥体在
     ///   Phase 1 换上后此歧义彻底消失；锁文件实现保留为兜底与测试基线）。
+    ///
+    /// `Err(())`（而非自定义错误类型）是刻意的最小信号面：失败原因是二元的
+    /// （拿到/没拿到），消费方（装配根 lib.rs）只做 `is_err` 分支——改签名属
+    /// 跨 crate 破坏性变更，不值得。
+    #[allow(clippy::result_unit_err)]
     pub fn acquire(path: impl Into<PathBuf>) -> Result<Self, ()> {
         let path = path.into();
         if let Some(parent) = path.parent() {
@@ -66,17 +71,24 @@ impl Drop for SingleInstanceGuard {
 fn stale_lock(path: &std::path::Path) -> bool {
     let Ok(raw) = fs::read_to_string(path) else { return true };
     let Ok(pid) = raw.trim().parse::<u32>() else { return true };
-    pid_alive(pid) == false
+    !pid_alive(pid)
 }
 
 #[cfg(windows)]
 fn pid_alive(pid: u32) -> bool {
     // tasklist 过滤 PID（无 wmic 依赖的现代 Windows 兜底）。
-    std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}")])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-        .unwrap_or(true) // 查询失败按存活处理（保守：不删活锁）
+    // CREATE_NO_WINDOW：GUI 进程起 console 程序必须抑制终端窗（陈锁回收
+    // 在启动路径触发，无旗则闪终端——0.5.0 修复）。
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}")])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+            .unwrap_or(true) // 查询失败按存活处理（保守：不删活锁）
+    }
 }
 
 #[cfg(not(windows))]

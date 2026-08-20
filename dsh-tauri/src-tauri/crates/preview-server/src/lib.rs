@@ -168,7 +168,7 @@ mod tests {
         std::fs::write(dir.join("x.html"), b"<h1>hi</h1>").unwrap();
         let srv = PreviewServer::start(&dir).unwrap();
         let mut resp = TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
-        resp.write_all(format!("GET /x.html HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n").as_bytes()).unwrap();
+        resp.write_all(b"GET /x.html HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
         let mut body = String::new();
         resp.read_to_string(&mut body).unwrap();
         assert!(body.starts_with("HTTP/1.0 200 OK"), "{body}");

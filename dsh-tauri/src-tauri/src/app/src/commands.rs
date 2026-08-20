@@ -677,7 +677,7 @@ fn image_paste_save_impl(payload: &serde_json::Value) -> Result<serde_json::Valu
 }
 
 /// 标准 base64 解码（无依赖实现，容错空白与缺省 padding）。
-fn b64_decode(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn b64_decode(s: &str) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u8> {
         match c {
             b'A'..=b'Z' => Some(c - b'A'),

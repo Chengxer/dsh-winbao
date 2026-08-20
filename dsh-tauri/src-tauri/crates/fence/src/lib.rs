@@ -132,3 +132,40 @@ mod edge_tests {
         assert!(f.ensure(Path::new("relative.txt")).is_err());
     }
 }
+
+#[cfg(test)]
+mod traversal_variant_tests {
+    use super::*;
+
+    fn fence() -> Fence {
+        Fence::new([PathBuf::from(r"C:\Users\u\.dsh\sessions\work")])
+    }
+
+    #[test]
+    fn relative_traversal_and_prefix_escape_rejected() {
+        let f = fence();
+        // 无根相对路径先消解 ..：逃出 root（或没有 root 可依）一律拒绝。
+        assert!(!f.contains(Path::new(r"..\..\secret")));
+        assert!(!f.contains(Path::new(r"work\..\..\escape")));
+        // 前缀近似目录（同前缀字符串但不组件对齐）不得误放行。
+        assert!(!f.contains(Path::new(r"C:\Users\u\.dsh\sessions\work-private\a.md")));
+    }
+
+    #[test]
+    fn root_with_trailing_separator_and_dot_segments_still_inside() {
+        let f = fence();
+        // 根本身带尾分隔符 / 混入 CurDir 组件：清洗后仍是 root 或其子路径。
+        assert!(f.contains(Path::new(r"C:\Users\u\.dsh\sessions\work\")));
+        assert!(f.contains(Path::new(r"C:\Users\u\.dsh\sessions\.\work\.\a.md")));
+    }
+
+    /// 现状钉板：`starts_with` 按组件**字节精确**比较，不做 Windows 大小写
+    /// 折叠——大小写变体目前被拒绝（保守 fail-closed，E_FENCE_ROOT）。若未来
+    /// 按 Windows 语义放宽（大小写不敏感），改此测试须连改契约 error-codes
+    /// §4 的 E_FENCE_ROOT 语义说明。
+    #[test]
+    fn case_variant_currently_rejected_conservatively() {
+        let f = fence();
+        assert!(!f.contains(Path::new(r"c:\users\u\.dsh\sessions\work\a.md")));
+    }
+}

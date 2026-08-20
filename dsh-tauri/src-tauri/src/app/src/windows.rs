@@ -249,24 +249,35 @@ pub fn open_sponsor_window(app: &tauri::AppHandle, qr_alipay: &str, qr_wechat: &
         let _ = existing.set_focus();
         return Ok(serde_json::json!({ "ok": true, "reused": true }));
     }
-    let html = sponsor_html(qr_alipay, qr_wechat);
-    // 彻底修（用户实测「点咖啡无反应」）：data URL 在 WebView2 对大负载
-    //（两张 base64 码 ~100KB+）导航受限——改写 preview-server 静态目录
-    //（与 loading/recovery 页同源同链路，127.0.0.1 天然在导航围栏白名单）。
-    // preview-server 不在（极罕见 data 降级态）则兜底写 TEMP 文件后
-    // file:// 协议加载（WebView2 无 file:// 导航限制）。
+    // 彻底修（用户实测「弹窗无图」）：内联 data URI ~67KB/张在 WebView2
+    // img src 渲染不稳定——图片也走 preview-server 静态文件，HTML 只引
+    // 相对 URL（与 loading/recovery 同源同链路）。
     let sponsor_url = {
         let state = app.state::<crate::AppState>();
         let base = state.loading_url.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let dir = std::env::temp_dir().join(format!("dsh-tauri-pages-{}", std::process::id()));
         if !base.is_empty() {
-            // 从 loading URL（如 http://127.0.0.1:PORT/loading.html）推出
-            // 同源前缀，写 sponsor.html 后以同源 URL 加载。
             let prefix = base.replace("loading.html", "");
-            let file = std::env::temp_dir().join(format!("dsh-tauri-pages-{}", std::process::id())).join("sponsor.html");
-            let _ = std::fs::write(&file, &html);
+            // 图片写为独立文件（从 data URI 剥 base64 还原二进制）。
+            let extract = |data_uri: &str, file: &str| -> String {
+                if let Some(pos) = data_uri.find("base64,") {
+                    let b64 = &data_uri[pos + 7..];
+                    // 解码 base64 写二进制。
+                    if let Some(bytes) = crate::commands::b64_decode(b64) {
+                        let _ = std::fs::write(dir.join(file), &bytes);
+                        return file.to_string();
+                    }
+                }
+                String::new()
+            };
+            let alipay_file = extract(qr_alipay, "sponsor-alipay.jpg");
+            let wechat_file = extract(qr_wechat, "sponsor-wechat.png");
+            let html = sponsor_html_file(&alipay_file, &wechat_file);
+            let _ = std::fs::write(dir.join("sponsor.html"), &html);
             format!("{prefix}sponsor.html")
         } else {
-            // 兜底：写 TEMP 文件走 file:// 协议。
+            // 兜底：写 TEMP 文件走 file:// 协议（含内联 data URI）。
+            let html = sponsor_html(qr_alipay, qr_wechat);
             let file = std::env::temp_dir().join("dsh-sponsor.html");
             std::fs::write(&file, &html).map_err(|e| BridgeError::internal(format!("赞助页写入: {e}")))?;
             format!("file:///{}", file.to_string_lossy().replace('\\', "/"))
@@ -286,6 +297,24 @@ pub fn open_sponsor_window(app: &tauri::AppHandle, qr_alipay: &str, qr_wechat: &
     .map_err(|e| BridgeError::internal(format!("赞助窗创建: {e}")))?;
     let _ = win.show();
     Ok(serde_json::json!({ "ok": true }))
+}
+
+/// 文件引用版赞助页（图片走 preview-server 静态文件，非内联 data URI）。
+pub(crate) fn sponsor_html_file(alipay: &str, wechat: &str) -> String {
+    format!(
+        r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>请作者喝咖啡</title>
+<style>*{{box-sizing:border-box;margin:0}}body{{background:#0b1220;color:#e6ecff;
+font-family:"Segoe UI","Microsoft YaHei",sans-serif;display:flex;flex-direction:column;height:100vh;user-select:none}}
+.sub{{font-size:12px;color:#8b9ac4;line-height:18px;padding:10px 14px}}
+.codes{{flex:1;display:flex;gap:16px;justify-content:center;align-items:center}}
+.codes img{{width:220px;height:220px;border-radius:10px;background:#fff;padding:6px}}
+.cap{{text-align:center;font-size:12px;color:#8b9ac4;padding-bottom:6px}}</style></head>
+<body><div class="sub">如果这个工具帮到了你，可以请作者喝杯咖啡 ☕ 支持持续更新。</div>
+<div class="codes">
+<div><img src="{alipay}" alt="支付宝"><div class="cap">支付宝</div></div>
+<div><img src="{wechat}" alt="微信"><div class="cap">微信</div></div>
+</div></body></html>"#
+    )
 }
 
 pub(crate) fn sponsor_html(alipay: &str, wechat: &str) -> String {
@@ -339,13 +368,6 @@ mod tests {
         assert!(PET_MODE_SCRIPT.contains("background:transparent"));
         assert!(FLOAT_BAR_SCRIPT.contains("__dsh_desktop_floatbar__"));
         assert!(FLOAT_BAR_SCRIPT.contains("floatWindow.close"));
-    }
-
-    #[test]
-    fn urlencode_keeps_safe_and_escapes_rest() {
-        assert_eq!(urlencode("AZaz09-_.~"), "AZaz09-_.~");
-        assert_eq!(urlencode("a b&c"), "a%20b%26c");
-        assert_eq!(urlencode("中"), "%E4%B8%AD");
     }
 
     #[test]

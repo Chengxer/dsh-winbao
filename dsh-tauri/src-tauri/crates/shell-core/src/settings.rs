@@ -96,13 +96,9 @@ impl SettingsStore {
     }
 }
 
-/// 判断某键是否属于已裁撤的内核更新链残留（读取时忽略，写入时剔除）。
-/// 对应 ipc-commands.md §2.4 裁撤表。
-pub fn is_cut_key(key: &str) -> bool {
-    matches!(key, "kernelUpdate" | "agentUpdate")
-        || key.starts_with("kernelUpdate.")
-        || key.starts_with("agentUpdate.")
-}
+// 已裁撤键的识别在 [`crate::upgrade::LEGACY_IGNORED_KEYS`]（legacy_keys_present
+// 消费）——历史上本模块还有一份 is_cut_key 谓词，从未接线且与上述清单重复，
+// 2026-08 清偿移除（migration-roadmap.md D1 的引用同步改指 upgrade）。
 
 #[cfg(test)]
 mod tests {
@@ -146,14 +142,6 @@ mod tests {
         );
         let _ = fs::remove_file(&p);
         let _ = fs::remove_file(&backup);
-    }
-
-    #[test]
-    fn cut_keys_recognized() {
-        assert!(is_cut_key("kernelUpdate"));
-        assert!(is_cut_key("kernelUpdate.skipVersion"));
-        assert!(!is_cut_key("pet"));
-        assert!(!is_cut_key("clientUpdate"));
     }
 
     #[test]

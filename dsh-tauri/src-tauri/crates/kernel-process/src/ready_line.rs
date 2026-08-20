@@ -74,7 +74,7 @@ impl Default for ReadyLineParser {
 fn first_url_token(line: &str) -> Option<String> {
     line.split_whitespace()
         .find(|t| t.starts_with("http://") || t.starts_with("https://"))
-        .map(|t| t.trim_end_matches(|c: char| c == '\r' || c == ',').to_string())
+        .map(|t| t.trim_end_matches(['\r', ',']).to_string())
 }
 
 #[cfg(test)]
@@ -123,5 +123,38 @@ mod tests {
         p.feed(&flood);
         p.feed("dsh web: https://b:3\n");
         assert_eq!(p.url().unwrap(), "https://b:3");
+    }
+
+    // ---- 畸形输入（急修后补强：就绪行是 boot 瀑布的第一道信号面） ----
+
+    #[test]
+    fn prefix_split_across_chunks() {
+        // 前缀本身被 chunk 边界切开："dsh we" | "b: https://x:1\n"。
+        let mut p = ReadyLineParser::new();
+        assert_eq!(p.feed("dsh we"), None);
+        assert_eq!(p.feed("b: https://x:1\n"), Some("https://x:1".into()));
+    }
+
+    #[test]
+    fn first_http_token_wins_and_non_http_ignored() {
+        // 同行多候选：取第一个 http(s) token（对齐 Electron 正则首个命中语义）。
+        let mut p = ReadyLineParser::new();
+        assert_eq!(
+            p.feed("dsh web: ready at http://a:1 backup https://b:2\n"),
+            Some("http://a:1".into())
+        );
+        // 非 http token（ftp/裸主机名）不算就绪 URL：该行作废，继续扫描后续行。
+        let mut q = ReadyLineParser::new();
+        assert_eq!(q.feed("dsh web: ftp://x localhost:9\n"), None);
+        assert_eq!(q.feed("dsh web: https://real:2\n"), Some("https://real:2".into()));
+    }
+
+    #[test]
+    fn unterminated_prefix_line_yields_none() {
+        // 前缀行永不换行（内核半路卡死）：解析器必须保持 None 而非误产出。
+        let mut p = ReadyLineParser::new();
+        assert_eq!(p.feed("dsh web: https://hang"), None);
+        assert_eq!(p.feed(" more noise without newline"), None);
+        assert!(p.url().is_none());
     }
 }
