@@ -141,3 +141,17 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod dialog_polyfill_tests {
+    use super::BRIDGE_SHIM_JS;
+
+    /// WebView2 不弹原生 dialog（用户实测 bug 的次因）：垫片必须 polyfill。
+    #[test]
+    fn native_dialog_polyfill_present() {
+        assert!(BRIDGE_SHIM_JS.contains("window.confirm = function () { return true; }"), "confirm 必须放行（删除确认不再恒取消）");
+        assert!(BRIDGE_SHIM_JS.contains("window.alert = function (msg)"), "alert 转桥上报（消息不丢）");
+        assert!(BRIDGE_SHIM_JS.contains("window.prompt = function () { return null; }"), "prompt 防御性兜底");
+        assert!(BRIDGE_SHIM_JS.contains("__dshDialogPolyfilled"), "幂等守卫");
+    }
+}

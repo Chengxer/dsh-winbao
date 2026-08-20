@@ -213,7 +213,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         loading_url.clone()
     };
-    windows::create_main_window(app.handle(), &initial_url, saved)?;
+    let main_win = windows::create_main_window(app.handle(), &initial_url, saved)?;
+    // 诊断开关：DSH_TAURI_DEVTOOLS=1 打开 DevTools（debug build）。
+    if std::env::var("DSH_TAURI_DEVTOOLS").ok().as_deref() == Some("1") {
+        #[cfg(debug_assertions)]
+        main_win.open_devtools();
+    }
 
     // ---- supervisor（PoC 模式不起内核）----
     let supervisor = Arc::new(Supervisor::new(&find_repo_root()?));
@@ -252,11 +257,20 @@ fn route_events(app: tauri::AppHandle, rx: std::sync::mpsc::Receiver<SupervisorE
                 }
                 let _ = commands::navigate_main(&app, &url);
                 if let Some(w) = app.get_webview_window("main") {
+                    let diag_base = { let u = app.state::<AppState>().loading_url.lock().unwrap().clone(); let mut o = String::new(); if let Some(pos) = u.rfind('/') { o = u[..pos].to_string(); } o };
+                    match w.eval(&format!("window.__DIAG_BASE__={:?}; window.__TAURI_INTERNALS__.invoke('current_session',{{sessionId:'[diag] t0'}}).then(function(){{fetch(window.__DIAG_BASE__+'/__diag/t0-invoke-OK')}},function(err){{fetch(window.__DIAG_BASE__+'/__diag/t0-invoke-REJECT-'+encodeURIComponent(String(err&&err.message||err)))}})", diag_base)) {
+                        Ok(_) => eprintln!("[diag] t0 eval OK"),
+                        Err(e) => eprintln!("[diag] t0 eval ERR: {e}"),
+                    }
+                }
+                if let Some(w) = app.get_webview_window("main") {
                     let _ = w.show();
                     let _ = w.set_focus();
                 }
                 // renderer 心跳监测（Electron RendererRecovery 语义）：页面挂死自动重载。
                 watch_renderer_heartbeat(app.clone());
+                // 诊断探针（DSH_TAURI_DIAG=1）：换页 10s 后抓 dialog/composer/console 状态。
+                inject_diag_probe(app.clone());
             }
             SupervisorEvent::KernelExit { code, .. } => {
                 eprintln!("[route] 内核退出 code={code:?}");
@@ -555,5 +569,78 @@ fn watch_renderer_heartbeat(app: tauri::AppHandle) {
                 stall = 0;
             }
         }
+    });
+}
+
+/// 诊断探针：非侵入读取页面健康度（confirm 返回值 / composer 可用性 /
+/// console 错误），经 page_error 通道回传日志。仅 DSH_TAURI_DIAG=1 启用。
+fn inject_diag_probe(app: tauri::AppHandle) {
+    if std::env::var("DSH_TAURI_DIAG").ok().as_deref() != Some("1") { return; }
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        let Some(win) = app.get_webview_window("main") else { return };
+        let probe = r#"(function(){
+          var BASE=null; try{ BASE=window.__DIAG_BASE__ }catch(e){}
+          function rep(m){
+            try{ fetch(BASE+'/__diag/'+encodeURIComponent(m)) }catch(e){}
+            try{ window.__TAURI_INTERNALS__.invoke('current_session',{sessionId:('[diag] '+m).slice(0,250)}) }catch(e){}
+            try{ window.__TAURI_INTERNALS__.invoke('page_error',{message:'[diag] '+m}) }catch(e){}
+            try{console.log('[diag]',m)}catch(e){}
+          }
+          var r; try{ r = window.confirm('diag') }catch(e){ r = 'THROW:'+e.message }
+          rep('confirm-returns:'+r+' polyfilled='+(window.__dshDialogPolyfilled===true));
+          rep('bridge:'+typeof window.dshDesktop);
+          function probeComposer(tag){
+            try{
+              var tas = document.querySelectorAll('textarea,[contenteditable]');
+              rep(tag+' composer-count:'+tas.length);
+              if (tas.length){ var t=tas[0];
+                rep(tag+' composer:'+t.tagName+' disabled='+(t.disabled===true)+' readOnly='+(t.readOnly===true)+' contentEditable='+t.getAttribute('contenteditable'));
+                try{ t.focus(); rep(tag+' focus-ok active='+(document.activeElement===t)) }catch(e){ rep(tag+' focus-fail:'+e.message) }
+              }
+            }catch(e){ rep(tag+' probe-fail:'+e.message) }
+          }
+          var errs=[];
+          window.addEventListener('error',function(e){ errs.push('ERR:'+(e.message||'?')) });
+          window.addEventListener('unhandledrejection',function(e){ errs.push('REJ:'+((e.reason&&e.reason.message)||e.reason||'?')) });
+          setTimeout(function(){
+            probeComposer('t0');
+            var btns=[];
+            document.querySelectorAll('button').forEach(function(b){ var t=(b.textContent||'').trim(); if(t&&t.length<10) btns.push({t:t,b:b}) });
+            rep('buttons:'+btns.map(function(x){return x.t}).slice(0,25).join('|'));
+            var news=btns.filter(function(x){ return /new|新建|新会话|^\+$/.test(x.t) });
+            if (news.length){ rep('clicking-new-session:'+news[0].t); try{ news[0].b.click() }catch(e){ rep('click-fail:'+e.message) }
+              setTimeout(function(){ probeComposer('after-new'); rep('console-errors:'+errs.slice(0,6).join(' / ')); }, 3000);
+            } else { rep('no-new-session-button-found'); rep('console-errors:'+errs.slice(0,6).join(' / ')); }
+          }, 2500);
+        })()"#;
+
+        // 探针结果写 document.title（无 IPC 依赖的可靠回传通道），Rust 侧回读落日志。
+        // 探针基址注入（fetch 通道）。`probe base eval`
+        if let Some(state) = app.try_state::<AppState>() {
+            let u = state.loading_url.lock().unwrap().clone();
+            if let Some(pos) = u.rfind('/') {
+                let _ = win.eval(&format!("window.__DIAG_BASE__={:?}", &u[..pos]));
+            }
+        }
+        match win.eval(probe) {
+            Ok(_) => eprintln!("[diag] probe eval OK"),
+            Err(e) => eprintln!("[diag] probe eval ERR: {e}"),
+        }
+        let win2 = win.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(6));
+            if let Ok(title) = win2.title() {
+                if title.contains("[diag]") {
+                    for line in title.split("~~") {
+                        if line.contains("[diag]") {
+                            eprintln!("[diag-title] {line}");
+                        }
+                    }
+                } else {
+                    eprintln!("[diag-title] 探针未写入 title（title={title:?}）——页面脚本可能未执行或 DOM 未就绪");
+                }
+            }
+        });
     });
 }

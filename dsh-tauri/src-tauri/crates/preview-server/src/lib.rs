@@ -72,6 +72,13 @@ fn handle(mut stream: TcpStream, root: &Path) {
         let _ = write_response(&mut stream, 405, "text/plain; charset=utf-8", b"method not allowed");
         return;
     }
+    // 诊断端点：远程页探针经 fetch 回传（无 IPC 依赖的可靠通道）。
+    if let Some(payload) = path.strip_prefix("/__diag/") {
+        let msg = percent_decode(payload);
+        eprintln!("[diag-fetch] {msg}");
+        let _ = write_response(&mut stream, 200, "text/plain; charset=utf-8", b"ok");
+        return;
+    }
     let rel = path.trim_start_matches('/');
     let rel = percent_decode(rel);
     // 穿越防御：任何 `..` 组件直接 403（静态只读服务不接受相对回溯）；

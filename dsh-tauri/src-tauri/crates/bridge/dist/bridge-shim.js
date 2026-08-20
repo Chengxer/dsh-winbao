@@ -16,6 +16,24 @@
  */
 (function () {
   if (window.dshDesktop) return; // 幂等（重复注入防御）
+  // ---- WebView2 原生 dialog polyfill ---------------------------------
+  // Tauri/wry (WebView2) 不弹原生 confirm/alert/prompt：confirm 恒 false、
+  // alert/prompt 静默。dsh-session-manager 的删除确认走 window.confirm →
+  // 永远被「取消」＝删不掉会话（用户实测 bug）。桌面壳内用户点击按钮即意图，
+  // confirm 放行 true（服务端另有「运行中会话拒绝删除」保护）；alert 转桥
+  // 上报（消息不丢）；prompt 返回 null（内核 UI 不依赖，防御性兜底）。
+  try {
+    if (!window.__dshDialogPolyfilled) {
+      window.__dshDialogPolyfilled = true;
+      window.confirm = function () { return true; };
+      window.alert = function (msg) {
+        try { window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke('page_error', { message: '[alert] ' + msg }); } catch (e) {}
+        if (window.console) console.warn('[dshDesktop alert]', msg);
+      };
+      window.prompt = function () { return null; };
+    }
+  } catch (e) { /* polyfill 失败不阻断桥 */ }
+
 
   var INTERNALS = window.__TAURI_INTERNALS__ || null;
   var INVOKE = INTERNALS && typeof INTERNALS.invoke === 'function' ? INTERNALS.invoke : null;
