@@ -36,6 +36,7 @@ const { writeFileAtomic } = require('./lib/patch-io');
 const { applyAll } = require('./integration/patch-runner');
 const { getSpecsByCli } = require('./lib/patch-registry');
 const { reconcileProfileBundles, createEntryListYamlParser } = require('./lib/profile-reconcile');
+const { PluginStateStore } = require('./plugin-core/lib/state-store');
 const {
   ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK,
   ensureDisabledPatchEntry, removeLegacyMarketplacePatchLines,
@@ -172,6 +173,16 @@ function syncPlugins(home, dryRun, dshPkgDir) {
   // 插件管理「卸载」标记（removed: true 的顶层条目）：与 main.js 同一语义，
   // 本次同步跳过文件复制与注册，避免 CLI 把用户在桌面端卸载的插件装回。
   const removedIds = removedPluginIdsFromPatch(patch);
+  // 卸载决策双源：patch removed 行 ∪ 家级状态存储（与壳层共用，抗 patch 重置）。
+  let stateStore = null;
+  try {
+    stateStore = new PluginStateStore({ file: path.join(home, 'desktop-plugin-state.json'), log: (m) => log(m), readOnly: dryRun });
+  } catch (err) {
+    log('插件状态存储不可用，卸载决策仅按 patch 行: ' + err.message);
+  }
+  if (stateStore) {
+    for (const id of Object.keys(stateStore.getUninstalled())) removedIds.add(id);
+  }
   // 文件同步 + 过期清理 + bundle 完整性校验（共享实现，文案经 hooks 注入，
   // 与旧版本脚本输出逐字一致）。
   const { bundleNames, missingNames } = syncCompanionFiles({
@@ -199,13 +210,22 @@ function syncPlugins(home, dryRun, dshPkgDir) {
   // 与 main.js 同口径：插件管理「卸载」标记的配套 bundle 从 manifest 移除
   //（removedBundles，避免卸载后仍被装配）；重置恢复排除核心 + 配套（由核心
   // 补齐与配套追加步骤接管，绝不恢复用户已卸载的配套插件）。
-  const removedBundles = COMPANION_PLUGINS.filter((p) => removedIds.has(p.id)).map((p) => p.name);
+  const companionRemoved = COMPANION_PLUGINS.filter((p) => removedIds.has(p.id)).map((p) => p.name);
+  const removedBundles = new Set(companionRemoved);
+  if (stateStore) {
+    const companionNames = new Set(COMPANION_PLUGINS.map((p) => p.name));
+    for (const [id, entry] of Object.entries(stateStore.getUninstalled())) {
+      const name = entry && entry.name;
+      if (name && !companionNames.has(name)) removedBundles.add(name);
+      else if (!name) removedBundles.add(id);
+    }
+  }
   reconcileProfileBundles(profileDir, {
     installAnchorDir: dshPkgDir,
     coreNames: CORE_BUNDLE_NAMES,
     addNames: bundleNames,
     missingNames,
-    removedBundles: new Set(removedBundles),
+    removedBundles,
     excludeFromRecover: new Set([...CORE_BUNDLE_NAMES, ...COMPANION_PLUGINS.map((p) => p.name)]),
     parsePatch: createEntryListYamlParser(),
     dryRun,

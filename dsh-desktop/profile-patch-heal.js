@@ -1,255 +1,49 @@
 'use strict';
 
-// profile cordis.patch.yml 的「重复 loader 条目」识别与自愈核心（纯函数、无
-// electron 依赖，便于 node:test 单测）。
-//
-// 背景（issue #17）：旧版本（如 v0.3.4）的插件安装路径会向 cordis.patch.yml
-// 写入与桌面端配套插件相同的 `- insert: - id: balance` 条目，同一 id 被
-// 注册两次。cordis loader 装配时抛
-//   duplicate loader entry id: balance
-//   或 failed to apply loader entry <hash> (@scope/pkg): list slot ... already
-//   has an entry with id ... at priority 0
-// 且该存量状态无法自愈，用户「进不来主界面」。
-//
-// 语义边界（依据 dsh-app-boot 的 applyEntryPatches 与 cordis.patch.yml 文件头
-// 注释）：patch 顶层数组包含三类条目——insert 注册列表、id 定向 config 覆盖、
-// disabled 禁用。只有 insert 列表内的行是「注册」；config/disabled 覆盖条目
-// 不注册任何东西，`duplicate loader entry id` 只可能来自注册行。因此自愈
-// 只允许删「注册行」，绝不触碰 config/disabled 覆盖条目（用户配置数据）。
-//
-// 这里提供：
-//   · dedupePatchEntries —— 注册行级去重：同一 id 的第二次及以后注册行
-//     （连同其同缩进兄弟行，如 name/config）被移除，保留首次注册；insert
-//     块内部分重复时只删重复行、保留新注册；config/disabled/定向 insert
-//     块永不改动；无重复时零写入；
-//   · dropBlocksByIds —— bundle 迁移自愈：移除命中移除集的注册行（insert
-//     块内行级删除、整块命中时整块删除）；顶层的 name-only 直注册行（旧版
-//     遗留、无 config/disabled）整块移除；config/disabled 覆盖条目原样保留；
-//   · parseFailedLoaderIds —— 识别 loader 失败日志中的三种 id 形态
-//     （旧 hash 形态 / duplicate loader entry id: X 形态 / 括号包名形态）；
-//   · mapPackagesToPatchIds —— 把括号中的包名映射回 patch 条目 id
-//     （供安全启动 overlay 兜底禁用）。
+// ---------------------------------------------------------------------------
+// profile cordis.patch.yml 自愈（兼容层）：
+//   · 文本手术（dedupePatchEntries / dropBlocksByIds）唯一实现已收口到
+//     scripts/plugin-core/lib/patch-surgery.js（统一 id 字符集含点号、EOL 保持）；
+//   · manifest bundles 移除唯一实现已收口到
+//     scripts/plugin-core/lib/manifest-store.js（写锁 + 原子写 + 备份保留）；
+//   · 本文件保留：loader 失败日志解析（parseFailedLoaderIds /
+//     mapPackagesToPatchIds，id 字符集含点号）与只读预检
+//     （findMissingBundleDeclarations / scanBundleContracts）。
+// ---------------------------------------------------------------------------
 
-const idRowRe = /^(\s*)-\s*id:\s*([A-Za-z0-9_-]+)/;
+const { dedupePatchEntries, dropBlocksByIds } = require('./scripts/plugin-core/lib/patch-surgery');
+const { removeBundlesFromProfile: manifestRemoveBundles } = require('./scripts/plugin-core/lib/manifest-store');
 
 /**
- * 把文本切分为顶层条目块。顶层条目 = 行首（列 0）以 `- ` 开头的行，
- * 其后到下一个顶层条目之前的所有行属于该块。块的 insert 属性表示
- * 块首行为 `- insert:`（注册列表块）；其余（`- id: X` 直条目等）为
- * 非注册块。
- * @param {string[]} lines 文件按行切分（已去行尾符）
- * @returns {{begin:number,end:number,lines:string[],insert:boolean}[]}
+ * 把坏 bundle 从 dsh.profile.bundles 移除，但保留 dependencies（纯客户端插件
+ * 仍可能由市场挂载，移出启动层不等于卸载）。
+ * 单一写入方收口：委托 ManifestStore（写锁 + 原子写 + 备份保留），杜绝
+ * 「启动自愈与用户卸载并发写同一 manifest 互相覆盖」的丢更新（I3）。
+ * @param {string} profileDir profile 目录
+ * @param {string[]} names 待移除包名（应已过 @deepseek-ai/* 过滤）
+ * @returns {Promise<string[]>} 实际移除的包名
  */
-function topLevelBlocks(lines) {
-  const starts = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    if (/^-(\s|$)/.test(lines[i])) starts.push(i);
-  }
-  const blocks = [];
-  for (let s = 0; s < starts.length; s += 1) {
-    const begin = starts[s];
-    const end = s + 1 < starts.length ? starts[s + 1] : lines.length;
-    blocks.push({
-      begin,
-      end,
-      lines: lines.slice(begin, end),
-      insert: /^-\s*insert\s*:/.test(lines[begin]),
-    });
-  }
-  return blocks;
-}
-
-/**
- * 输出兜底：若修复后的文本只剩注释/空行（没有任何顶层条目），补一个空
- * 数组 `[]`，保证文件仍是合法的顶层数组（YAML 可解析为 []），避免被
- * 下次启动误判为「解析失败」而重置。
- * @param {string[]} lines 修复后的行集合
- * @returns {string[]} 补兜底后的行集合
- */
-function ensurePatchArray(lines) {
-  if (!lines.some((l) => /^-(\s|$)/.test(l))) lines.push('[]');
-  return lines;
-}
-
-/**
- * 移除「重复注册」的 loader 条目（issue #17 存量自愈）。
- * 只针对 insert 注册块做行级去重：同一 id 的第二次及以后注册行（连同其
- * 同缩进兄弟行）被移除，保留首次注册；insert 块内部分重复时只删重复行、
- * 保留新注册。config 覆盖、disabled 禁用、定向 insert（`- id: X` +
- * `insert:`）等非注册条目永不改动。
- * @param {string} text cordis.patch.yml 原文
- * @returns {{ text: string, removed: string[] }} 修复后的文本与被移除的重复 id；
- *   无重复时返回原文本与空数组（零写入）。
- */
-function dedupePatchEntries(text) {
-  const lines = text.split(/\r?\n/);
-  const blocks = topLevelBlocks(lines);
-  const registered = new Set();
-  const removed = [];
-  const out = [];
-  if (blocks.length > 0 && blocks[0].begin > 0) out.push(...lines.slice(0, blocks[0].begin));
-  for (const block of blocks) {
-    if (!block.insert) {
-      // 非注册块（config 覆盖 / disabled / 定向 insert / 无 id 条目）：
-      // 绝不删除。
-      out.push(...block.lines);
-      continue;
-    }
-    // insert 注册块：行级去重，只删「重复注册」行及其同缩进兄弟行。
-    const kept = [block.lines[0]];
-    let blockDupCount = 0;
-    let i = 1;
-    while (i < block.lines.length) {
-      const m = idRowRe.exec(block.lines[i]);
-      if (!m) {
-        // 非 id 行（name 等兄弟行、嵌套列表值、空行）：跟随其前一行保留。
-        kept.push(block.lines[i]);
-        i += 1;
-        continue;
-      }
-      const id = m[2];
-      if (registered.has(id)) {
-        removed.push(id);
-        blockDupCount += 1;
-        i += 1;
-        // 删除该注册行及其完整子树：缩进大于 id 行的所有后续行都属于本条目
-        // （name/config 及 config 内的嵌套 YAML 列表项——历史实现把 `- a` 这种
-        // 嵌套列表项误判为「下一条目兄弟行」而保留，导致其父键 config: 被删后
-        // 留下孤儿列表行、产出损坏的 cordis.patch.yml）。到缩进 ≤ id 行处停下，
-        // 那是下一条目的开始。
-        const indent = m[1].length;
-        while (i < block.lines.length) {
-          const l = block.lines[i];
-          const li = /^\s*/.exec(l)[0].length;
-          if (l.trim() === '' || li > indent) {
-            i += 1;
-            continue;
-          }
-          break;
-        }
-        continue;
-      }
-      registered.add(id);
-      kept.push(block.lines[i]);
-      i += 1;
-    }
-    // 本块确有重复注册行被删且只剩块头（`- insert:`）→ 丢弃空块；
-    // 无重复的块（含 `- insert: []`）原样保留（保证零写入）。
-    if (blockDupCount > 0 && kept.length === 1) continue;
-    out.push(...kept);
-  }
-  if (removed.length === 0) return { text, removed: [] };
-  return { text: ensurePatchArray(out).join('\n'), removed };
-}
-
-/**
- * 移除「已迁移为 bundle 的插件」在 patch 层残留的旧注册条目（双登记自愈）。
- * 旧版本客户端把某些配套插件当非 bundle 写入 cordis.patch.yml（insert 块）；
- * 插件升级为 bundle（经 dsh.profile.bundles 装配）后，残留注册行会让
- * cordis loader 抛 `duplicate loader entry id: X` 且整树加载失败（更新后
- * 首次启动崩溃的根因）。
- *
- * 处理规则：
- *   · insert 注册块声明的 id 全部命中移除集 → 整块删除；
- *   · insert 注册块内仅部分 id 命中 → 只删除命中的「- id: X」行及其同缩进
- *     兄弟行（name 等），其余注册原样保留 —— 绝不整块误删；
- *   · 顶层的纯注册直条目（除 id 行外只有 name 行，旧版遗留）→ 整块移除；
- *   · config 覆盖 / disabled 禁用 / 携带任意自定义键的覆盖条目是用户配置，
- *     绝不删除；
- *   · 其余内容（注释/空行/非命中条目）原样保留。
- * 无命中时返回原文本（零写入）。
- * @param {string} text cordis.patch.yml 原文
- * @param {string[]} ids 需要从 patch 层移除的 loader id 集合
- * @returns {{ text: string, removed: string[] }} 修复后的文本与被移除的 id
- */
-function dropBlocksByIds(text, ids) {
-  const removal = new Set((ids || []).filter((i) => typeof i === 'string' && i));
-  if (removal.size === 0) return { text, removed: [] };
-  const lines = text.split(/\r?\n/);
-  const blocks = topLevelBlocks(lines);
-  if (blocks.length === 0) return { text, removed: [] };
-  const removed = [];
-  const out = [];
-  if (blocks[0].begin > 0) out.push(...lines.slice(0, blocks[0].begin));
-  for (const block of blocks) {
-    const idRows = block.lines
-      .map((line, idx) => ({ line, idx, m: idRowRe.exec(line) }))
-      .filter((r) => r.m !== null)
-      .map((r) => ({ ...r, id: r.m[2] }));
-    const hitIds = idRows.filter((r) => removal.has(r.id)).map((r) => r.id);
-    if (hitIds.length === 0) {
-      out.push(...block.lines);
-      continue;
-    }
-    if (!block.insert) {
-      // 非 insert 块：仅当是「旧版遗留的纯注册直条目」——除 id 行外只有
-      // name 行（无 config/disabled/insert 等任何其它键）——才允许整块
-      // 移除；其余形态（config 覆盖、disabled 禁用、定向 insert、携带任意
-      // 自定义键的覆盖条目）都是用户配置，绝不删除。
-      const bodyLines = block.lines.slice(1).filter((l) => l.trim() !== '');
-      const nameOnly = bodyLines.length > 0 && bodyLines.every((l) => /^\s*name\s*:/.test(l));
-      if (nameOnly) {
-        removed.push(...hitIds);
-        continue;
-      }
-      out.push(...block.lines);
-      continue;
-    }
-    if (hitIds.length === idRows.length) {
-      // 全部命中：整块删除。
-      removed.push(...hitIds);
-      continue;
-    }
-    // 部分命中：行级删除命中的「- id: X」注册行及其完整子树，保留块内其余注册。
-    // 子树判定：缩进大于 id 行的所有后续行都属于本条目（含 config 内的嵌套
-    // YAML 列表项）；到缩进 ≤ id 行处停下（那是下一条目）。
-    const keep = block.lines.map((line) => ({ line, drop: false }));
-    for (const r of idRows) {
-      if (!removal.has(r.id)) continue;
-      removed.push(r.id);
-      const indent = /^\s*/.exec(r.line)[0].length;
-      keep[r.idx].drop = true;
-      let j = r.idx + 1;
-      while (j < block.lines.length) {
-        const l = block.lines[j];
-        const li = /^\s*/.exec(l)[0].length;
-        if (l.trim() === '' || li > indent) {
-          keep[j].drop = true;
-          j += 1;
-          continue;
-        }
-        break;
-      }
-    }
-    for (const k of keep) if (!k.drop) out.push(k.line);
-  }
-  if (removed.length === 0) return { text, removed: [] };
-  return { text: ensurePatchArray(out).join('\n'), removed };
+function removeBundlesFromProfile(profileDir, names) {
+  return manifestRemoveBundles(profileDir, names);
 }
 
 /**
  * 从 dsh-web.log 尾部识别 loader 失败条目 id。覆盖四种形态：
- *   1. failed to apply loader entry <hash> (@scope/pkg): ...（旧形态，hash 是
- *      条目实例 id，对 overlay 无用但保留兼容）；
- *   2. duplicate loader entry id: X（cordis-plugin-loader 的重复注册 TypeError）；
- *   3. 括号中的包名 @scope/pkg 或非 scope 包名（dsh-better-sidebar / harness-pet
- *      等配套插件都是非 scope，历史正则只认 @scope/ 会漏掉这些条目），交由
- *      mapPackagesToPatchIds 映射回 patch id。旧日志的无关 token "(include)"
- *      统一排除。
- *   4. profile bundle "X" declares no dsh.bundle in its package.json（旧世代
- *      boot 对 bundles 里无 dsh.bundle 声明的包 fail-loud，包名可为裸名或
- *      @scope/pkg，交由调用方做文件系统二次确认后自愈移除）。
+ *   1. failed to apply loader entry <hash> (@scope/pkg): ...（旧形态）
+ *   2. duplicate loader entry id: X
+ *   3. 括号中的包名 @scope/pkg 或非 scope 包名
+ *   4. profile bundle "X" declares no dsh.bundle in its package.json
  * @param {string} text 日志文本
  * @returns {string[]} 去重后的 id/包名 token 列表
  */
 function parseFailedLoaderIds(text) {
   const ids = new Set();
-  const hashRe = /failed to apply loader entry\s+([A-Za-z0-9_-]+)\s*\(/g;
+  const hashRe = /failed to apply loader entry\s+([A-Za-z0-9_.-]+)\s*\(/g;
   let m;
   while ((m = hashRe.exec(text)) !== null) {
     ids.add(m[1]);
   }
-  const dupRe = /duplicate loader entry id:\s*([A-Za-z0-9_-]+)/g;
+  const dupRe = /duplicate loader entry id:\s*([A-Za-z0-9_.-]+)/g;
   while ((m = dupRe.exec(text)) !== null) ids.add(m[1]);
   const pkgRe = /failed to apply loader entry[\s\S]{0,120}?\((@?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?)\)/g;
   while ((m = pkgRe.exec(text)) !== null) ids.add(m[1]);
@@ -261,13 +55,11 @@ function parseFailedLoaderIds(text) {
 
 /**
  * 只读自愈预检：日志含「declares no dsh.bundle」形态时，返回经文件系统二次
- * 确认的坏 bundle 名单（在 dsh.profile.bundles 里、包目录存在但 package.json
- * 缺 dsh.bundle.patch 声明）。绝不含 @deepseek-ai/*（内置官方包）。
- * 纯函数（fs 可注入），便于 node:test 单测。
- * @param {string} profileDir profile 目录（含 package.json 与 node_modules）
+ * 确认的坏 bundle 名单。绝不含 @deepseek-ai/*。
+ * @param {string} profileDir profile 目录
  * @param {string} logText dsh-web.log 尾部文本
  * @param {object} [fs] 文件系统实现（默认 node:fs）
- * @returns {string[]} 需从 bundles 移除的包名列表
+ * @returns {string[]}
  */
 function findMissingBundleDeclarations(profileDir, logText, fs = require('node:fs')) {
   if (!/profile bundle\s+"([^"]+)"\s+declares no dsh\.bundle/.test(logText || '')) return [];
@@ -281,7 +73,6 @@ function findMissingBundleDeclarations(profileDir, logText, fs = require('node:f
   }
   const bundles = (manifest.dsh?.profile?.bundles || []).filter((n) => claimed.includes(n));
   return bundles.filter((n) => {
-    // 二次确认：目录缺失属 cannot-resolve 家族（另一条错误），不在此处置。
     try {
       const pkg = JSON.parse(fs.readFileSync(require('node:path').join(profileDir, 'node_modules', n, 'package.json'), 'utf8'));
       return typeof (pkg.dsh && pkg.dsh.bundle && pkg.dsh.bundle.patch) !== 'string';
@@ -292,15 +83,11 @@ function findMissingBundleDeclarations(profileDir, logText, fs = require('node:f
 }
 
 /**
- * 只读自愈预检（不依赖日志）：直接扫 profile manifest 的 dsh.profile.bundles，
- * 返回经文件系统二次确认的缺声明名单（包目录存在但 package.json 缺
- * dsh.bundle.patch 声明）。与 findMissingBundleDeclarations 的区别：不要求日志
- * 先命中「declares no dsh.bundle」形态——日志轮转/截断/编码异常时仍能发现
- * 坏条目，是更可靠的主路径；日志形态作为兜底保留。绝不收 @deepseek-ai/*。
- * 纯函数（fs 可注入），便于 node:test 单测。
- * @param {string} profileDir profile 目录（含 package.json 与 node_modules）
+ * 只读自愈预检（不依赖日志）：直接扫 manifest bundles，返回经文件系统二次
+ * 确认的缺声明名单。绝不收 @deepseek-ai/*。
+ * @param {string} profileDir profile 目录
  * @param {object} [fs] 文件系统实现（默认 node:fs）
- * @returns {string[]} 需从 bundles 移除的包名列表
+ * @returns {string[]}
  */
 function scanBundleContracts(profileDir, fs = require('node:fs')) {
   const path = require('node:path');
@@ -313,7 +100,6 @@ function scanBundleContracts(profileDir, fs = require('node:fs')) {
   const bundles = (manifest.dsh?.profile?.bundles || []).filter((n) => typeof n === 'string' && n && !n.startsWith('@deepseek-ai/'));
   const missing = [];
   for (const n of bundles) {
-    // 二次确认：目录缺失属 cannot-resolve 家族（另一条错误），不在此处置。
     try {
       const pkg = JSON.parse(fs.readFileSync(path.join(profileDir, 'node_modules', n, 'package.json'), 'utf8'));
       if (typeof (pkg.dsh && pkg.dsh.bundle && pkg.dsh.bundle.patch) !== 'string') missing.push(n);
@@ -325,57 +111,17 @@ function scanBundleContracts(profileDir, fs = require('node:fs')) {
 }
 
 /**
- * 备份 + 原子写回：把坏 bundle 从 dsh.profile.bundles 移除，但保留
- * dependencies（纯客户端插件仍可能由市场挂载，移出启动层不等于卸载）。
- * 无实际变化时零写入。返回实际移除的名单。
- * @param {string} profileDir profile 目录
- * @param {string[]} names 待移除包名（应已过 @deepseek-ai/* 过滤）
- * @param {object} [fs] 文件系统实现（默认 node:fs）
- * @returns {string[]} 实际移除的包名
- */
-function removeBundlesFromProfile(profileDir, names, fs = require('node:fs')) {
-  const path = require('node:path');
-  const wanted = new Set((names || []).filter((n) => typeof n === 'string' && n && !n.startsWith('@deepseek-ai/')));
-  if (wanted.size === 0) return [];
-  const pkgFile = path.join(profileDir, 'package.json');
-  let manifest;
-  try {
-    manifest = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
-  } catch {
-    return [];
-  }
-  const before = manifest.dsh?.profile?.bundles || [];
-  const bundles = before.filter((n) => !wanted.has(n));
-  if (bundles.length === before.length) return [];
-  const backupFile = pkgFile + '.bak-' + Date.now() + '-' + process.pid;
-  const tmpFile = pkgFile + '.dsh-heal-' + process.pid + '-' + Math.random().toString(36).slice(2, 8);
-  fs.copyFileSync(pkgFile, backupFile);
-  manifest.dsh = manifest.dsh || {};
-  manifest.dsh.profile = manifest.dsh.profile || {};
-  manifest.dsh.profile.bundles = bundles;
-  try {
-    fs.writeFileSync(tmpFile, JSON.stringify(manifest, null, 2) + '\n');
-    fs.renameSync(tmpFile, pkgFile);
-  } catch (err) {
-    try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch { /* ignore cleanup failure */ }
-    throw err;
-  }
-  return before.filter((n) => wanted.has(n));
-}
-
-/**
- * 把 loader 日志中的包名（@scope/pkg 或非 scope 包名）映射回 cordis.patch.yml
- * 条目 id。按「- id: X 之后紧邻的 name: '包名'」扫描；一个包名可能对应多个
- * 条目（重复注册场景），全部返回供 overlay 一并禁用。
+ * 把 loader 日志中的包名映射回 patch 条目 id（按「- id: X 之后紧邻的
+ * name: 包名」扫描；一个包名可能对应多个条目，全部返回）。
  * @param {string} patchText cordis.patch.yml 原文
- * @param {string[]} packages 包名列表（可含 @scope/，也可为非 scope 名）
+ * @param {string[]} packages 包名列表
  * @returns {string[]} 匹配到的 patch 条目 id
  */
 function mapPackagesToPatchIds(patchText, packages) {
   const wanted = new Set((packages || []).filter((p) => typeof p === 'string' && p));
   if (wanted.size === 0) return [];
   const ids = [];
-  const entryRe = /(?:^|\n)\s*-\s*id:\s*([A-Za-z0-9_-]+)([\s\S]*?)(?=(?:\n\s*-\s*id:)|\n\s*-\s+(?:insert|id)|\s*$)/g;
+  const entryRe = /(?:^|\n)\s*-\s*id:\s*([A-Za-z0-9_.-]+)([\s\S]*?)(?=(?:\n\s*-\s*id:)|\n\s*-\s+(?:insert|id)|\s*$)/g;
   let m;
   while ((m = entryRe.exec(patchText)) !== null) {
     const id = m[1];

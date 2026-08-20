@@ -55,21 +55,9 @@ const {
   BASH_REL,
   CODE_PRESET_REL,
   ATTACH_LOCAL_REL,
+  LOADER_PKG_REL,
+  APP_BOOT_PKG_REL,
 } = require('./patch-target-resolver');
-
-const {
-  SLOT_KEY_COMPAT_MARKER,
-  SLOT_UNKEYED_COMPAT_MARKER,
-  SLOT_ERROR_ISOLATE_MARKER_V2,
-  IMAGE_SEND_MARKER,
-  VISION_KEY_MARKER,
-  PROFILE_PATCH_GUARD_MARKER,
-  PROFILE_BUNDLE_GUARD_MARKER,
-  PROFILE_BOOT_GUARD_MARKER,
-  SETTINGS_SECTION_MARKER,
-  WORKSPACE_SEARCH_RAIL_MARKER,
-  PLUGIN_INVENTORY_TAB_MARKER,
-} = require('./patch-adapters').markers;
 
 const {
   transformFlashFix,
@@ -90,6 +78,29 @@ const {
   transformPluginInventoryTabMergeFix,
   rootAppliers,
 } = require('./patch-adapters');
+
+const {
+  SLOT_KEY_COMPAT_MARKER,
+  SLOT_UNKEYED_COMPAT_MARKER,
+  SLOT_ERROR_ISOLATE_MARKER_V2,
+  IMAGE_SEND_MARKER,
+  VISION_KEY_MARKER,
+  PROFILE_PATCH_GUARD_MARKER,
+  PROFILE_BUNDLE_GUARD_MARKER,
+  PROFILE_BOOT_GUARD_MARKER,
+  SETTINGS_SECTION_MARKER,
+  WORKSPACE_SEARCH_RAIL_MARKER,
+  PLUGIN_INVENTORY_TAB_MARKER,
+  LOADER_TREE_ISOLATION_MARKER,
+  LOADER_ACTIVATION_ISOLATION_MARKER,
+  FAIL_LOUD_ISOLATION_MARKER,
+} = require('./patch-adapters').markers;
+
+const {
+  transformLoaderTreeIsolation,
+  transformLoaderActivationIsolation,
+  transformFailLoudIsolation,
+} = require('./loader-isolation');
 
 /** 通用「已应用」日志主体（多数运行时补丁沿用）。 */
 const alreadySkip = (file) => '已应用，跳过 ' + file;
@@ -338,7 +349,7 @@ const PATCH_SPECS = [
     kind: 'file',
     layout: 'guard',
     wslLayout: 'guard',
-    pkgRel: path.join('dsh-app-boot', 'lib', 'index.js'),
+    pkgRel: APP_BOOT_PKG_REL,
     transform: transformProfilePatchGuard,
     marker: PROFILE_PATCH_GUARD_MARKER,
     requires: [],
@@ -357,7 +368,7 @@ const PATCH_SPECS = [
     kind: 'file',
     layout: 'guard',
     wslLayout: 'guard',
-    pkgRel: path.join('dsh-app-boot', 'lib', 'index.js'),
+    pkgRel: APP_BOOT_PKG_REL,
     transform: transformProfileBundleAppBoot,
     marker: PROFILE_BUNDLE_GUARD_MARKER,
     requires: [],
@@ -407,6 +418,69 @@ const PATCH_SPECS = [
       prefix: 'settings 注册防护',
       doneLog: (file) => '已注入到 ' + file,
       failLog: (file, err) => 'settings 注册防护失败: ' + err.message,
+    },
+  },
+  // -------------------------------------------------------------------------
+  // loader 自动隔离（单插件失败不拖垮整棵插件树）：loader 失败分支 →
+  // 跳过 + 标记；boot 激活审计 → 跳过 + 标记；installFailLoud 就绪后不 exit。
+  // 受保护核心（dsh-base / dsh-web-app）失败仍 fatal。落盘 quarantine 由壳层
+  // 观察标记后统一执行（见 scripts/plugin-core/lib/quarantine.js）。
+  // -------------------------------------------------------------------------
+  {
+    id: 'loader-tree-isolation',
+    group: 'guard',
+    order: 145,
+    kind: 'file',
+    layout: 'guard',
+    wslLayout: 'guard',
+    pkgRel: LOADER_PKG_REL,
+    transform: transformLoaderTreeIsolation,
+    marker: LOADER_TREE_ISOLATION_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: 'loader 树级自动隔离',
+      doneLog: (file) => '已注入自动隔离到 ' + file,
+      failLog: (file, err) => 'loader 树级自动隔离失败: ' + err.message,
+    },
+  },
+  {
+    id: 'loader-activation-isolation',
+    group: 'guard',
+    order: 146,
+    kind: 'file',
+    layout: 'guard',
+    wslLayout: 'guard',
+    pkgRel: APP_BOOT_PKG_REL,
+    transform: transformLoaderActivationIsolation,
+    marker: LOADER_ACTIVATION_ISOLATION_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: 'loader 激活审计自动隔离',
+      doneLog: (file) => '已注入自动隔离到 ' + file,
+      failLog: (file, err) => 'loader 激活审计自动隔离失败: ' + err.message,
+    },
+  },
+  {
+    id: 'fail-loud-isolation',
+    group: 'guard',
+    order: 147,
+    kind: 'file',
+    layout: 'guard',
+    wslLayout: 'guard',
+    pkgRel: APP_BOOT_PKG_REL,
+    transform: transformFailLoudIsolation,
+    marker: FAIL_LOUD_ISOLATION_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: 'fail-loud 就绪后隔离',
+      doneLog: (file) => '已注入到 ' + file,
+      failLog: (file, err) => 'fail-loud 就绪后隔离失败: ' + err.message,
     },
   },
   {

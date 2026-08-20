@@ -139,33 +139,47 @@ function checkPluginPackage(name, dir, yaml, fs = require('node:fs'), listed = f
     }
     if (dsh.bundle && typeof dsh.bundle === 'object') {
       if (typeof dsh.bundle.patch === 'string') {
-        const patchFile = path.join(dir, dsh.bundle.patch);
-        if (!fs.existsSync(patchFile)) {
-          issues.push({ level: 'error', text: `声明的补丁文件不存在: ${dsh.bundle.patch}` });
+        // 路径越界围栏（与 profile-bundle-heal 的 PATCH_OUTSIDE 同语义）：
+        // 声明路径必须仍落在包目录内，防 `../../x` 越界读取任意本机文件。
+        const patchRel = dsh.bundle.patch;
+        const resolvedPatch = path.resolve(dir, patchRel);
+        const dirRoot = path.resolve(dir) + path.sep;
+        if (!resolvedPatch.startsWith(dirRoot)) {
+          issues.push({ level: 'error', text: `声明的补丁路径越界: ${patchRel}` });
           patchOk = false;
         } else {
-          const parsed = analyzePatch(patchFile, yaml, fs);
-          if (!parsed.parseOk) {
-            issues.push({ level: 'error', text: `补丁解析失败: ${parsed.parseError || '未知错误'}` });
+          const patchFile = resolvedPatch;
+          if (!fs.existsSync(patchFile)) {
+            issues.push({ level: 'error', text: `声明的补丁文件不存在: ${patchRel}` });
             patchOk = false;
           } else {
-            ids.push(...collectRegisteredIds(parsed.entries));
-            for (const dup of parsed.duplicateIds) {
-              issues.push({ level: 'error', text: `补丁内重复的 loader 条目 id「${dup.id}」（${dup.count} 次）` });
+            const parsed = analyzePatch(patchFile, yaml, fs);
+            if (!parsed.parseOk) {
+              issues.push({ level: 'error', text: `补丁解析失败: ${parsed.parseError || '未知错误'}` });
+              patchOk = false;
+            } else {
+              ids.push(...collectRegisteredIds(parsed.entries));
+              for (const dup of parsed.duplicateIds) {
+                issues.push({ level: 'error', text: `补丁内重复的 loader 条目 id「${dup.id}」（${dup.count} 次）` });
+              }
             }
           }
         }
       }
       if (typeof dsh.bundle.client === 'string' && dsh.bundle.client) {
-        if (!fs.existsSync(path.join(dir, dsh.bundle.client))) {
-          issues.push({ level: 'warning', text: `声明的客户端入口不存在: ${dsh.bundle.client}` });
+        const clientFile = path.resolve(dir, dsh.bundle.client);
+        if (!clientFile.startsWith(path.resolve(dir) + path.sep) || !fs.existsSync(clientFile)) {
+          issues.push({ level: 'warning', text: `声明的客户端入口不存在或路径越界: ${dsh.bundle.client}` });
         }
       }
     }
     if (dsh.client && typeof dsh.client === 'object') {
       const clientFile = typeof dsh.client.client === 'string' ? dsh.client.client : null;
-      if (clientFile && !fs.existsSync(path.join(dir, clientFile))) {
-        issues.push({ level: 'warning', text: `声明的客户端入口不存在: ${clientFile}` });
+      if (clientFile) {
+        const resolvedClient = path.resolve(dir, clientFile);
+        if (!resolvedClient.startsWith(path.resolve(dir) + path.sep) || !fs.existsSync(resolvedClient)) {
+          issues.push({ level: 'warning', text: `声明的客户端入口不存在或路径越界: ${clientFile}` });
+        }
       }
     }
   }
@@ -188,10 +202,14 @@ function checkPluginPackage(name, dir, yaml, fs = require('node:fs'), listed = f
   // 声明了 main 但入口文件缺失。对「在启动清单中」的 bundle 这是致命问题：
   // 装配时入口文件缺失会直接导致服务重启失败/Web UI 不可用（issue #65/#76），
   // 必须判为 error 并纳入总结论；未列入清单的包才降级为 warning。
-  if (typeof pkg.main === 'string' && pkg.main && !fs.existsSync(path.join(dir, pkg.main))) {
-    issues.push(listed
-      ? { level: 'error', text: `在启动清单中但 main 入口不存在: ${pkg.main}——装配必然失败，请构建产物或从清单移除该 bundle` }
-      : { level: 'warning', text: `main 入口不存在: ${pkg.main}` });
+  if (typeof pkg.main === 'string' && pkg.main) {
+    const resolvedMain = path.resolve(dir, pkg.main);
+    const mainOk = resolvedMain.startsWith(path.resolve(dir) + path.sep) && fs.existsSync(resolvedMain);
+    if (!mainOk) {
+      issues.push(listed
+        ? { level: 'error', text: `在启动清单中但 main 入口不存在或路径越界: ${pkg.main}——装配必然失败，请构建产物或从清单移除该 bundle` }
+        : { level: 'warning', text: `main 入口不存在或路径越界: ${pkg.main}` });
+    }
   }
   return { name, issues, ids, patchOk };
 }

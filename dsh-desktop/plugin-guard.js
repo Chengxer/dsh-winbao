@@ -6,7 +6,7 @@
 //                                    事故报告（incident）
 //   LX2000WASD/dsh-web-plugin-manager → 安装守卫（安装后验证 + 失败回滚）、
 //                                    健康检查入口
-//   chenw275-wq/dsh-plugin-healthcheck → 静态体检（模块遮蔽 / patch 行 / 高危
+//   chenw2759-wq/dsh-plugin-healthcheck → 静态体检（模块遮蔽 / patch 行 / 高危
 //                                    静态扫描），绝不执行插件代码
 //
 // 与三个独立插件不同，这里跑在 Electron 主进程里：
@@ -22,24 +22,17 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+// 静态高危扫描唯一实现（plugin-core/scan）：体检与更新门禁共用。
+const { scanDir } = require('./scripts/plugin-core/lib/scan');
 
 // 快照覆盖的 profile 配置面：插件树的全部「声明性」状态。
 const GUARD_FILES = ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'cordis.patch.yml'];
 const MAX_SNAPSHOTS = 10;
 
-// ── 静态高危扫描（healthcheck 的 C8 思路）────────────────────────────────
+// ── 静态高危扫描（healthcheck 的 C8 思路，实现收口到 plugin-core/scan）───
 // 只做 readFileSync + 正则，绝不 require/执行插件代码；命中即报告（高危级），
 // 不自动删除。模式面向「装完即失控」的常见木马形态，刻意保守以压低误报。
-const TROJAN_PATTERNS = [
-  { code: 'TROJAN_REMOTE_EXEC', re: /(?:child_process|execSync|spawnSync|exec|spawn)\s*\(\s*['"`](?:curl|wget|powershell|cmd|bash|sh)\b[^'"`]*['"`][\s\S]{0,200}(?:\|\s*(?:sh|bash|iex|Invoke-Expression)|-enc\b)/i },
-  { code: 'TROJAN_DOWNLOAD_EXEC', re: /(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr)\b[\s\S]{0,160}?(?:\|\s*(?:sh|bash|iex|Invoke-Expression)\b|Out-File[\s\S]{0,80}\.(?:ps1|bat|cmd|vbs))/i },
-  { code: 'TROJAN_BASE64_EVAL', re: /(?:eval|Function)\s*\(\s*(?:atob|Buffer\.from\([^)]*,\s*['"]base64['"]\)|window\.atob)\s*\(/i },
-  { code: 'TROJAN_PERSISTENCE', re: /(?:reg(?:\.exe)?\s+add[\s\S]{0,120}(?:Run|RunOnce)|Startup[\\\\/][\w.-]+\.(?:bat|cmd|ps1|vbs|lnk)|schtasks\s+\/create|Register-ScheduledTask)/i },
-  { code: 'TROJAN_EXFIL_ENV', re: /(?:process\.env|os\.env)[\s\S]{0,120}(?:https?:\/\/|fetch\s*\(|XMLHttpRequest|net\.connect|dgram)/i },
-];
-const SCAN_MAX_FILE_BYTES = 2 * 1024 * 1024;   // 单文件扫描上限 2MB
-const SCAN_MAX_TOTAL_BYTES = 32 * 1024 * 1024; // 单包总扫描上限 32MB
-const SCAN_EXTS = /\.(c?js|mjs|cjs|json|yml|yaml|sh|ps1|bat|cmd)$/i;
+// （TROJAN_PATTERNS 与扫描实现见 scripts/plugin-core/lib/scan.js，更新门禁共用。）
 
 function createGuard(opts) {
   const {
@@ -335,47 +328,19 @@ function createGuard(opts) {
   }
 
   function trojanFindings(dir) {
-    const out = [];
     try {
       const builtin = new Set(readJson(path.join(dir, '.dsh-builtin-plugins.json'), { names: [] }).names || []);
       const modulesDir = path.join(dir, 'node_modules');
-      if (!fs.existsSync(modulesDir)) return out;
-      let total = 0;
-      const walk = (d, depth) => {
-        if (depth > 4 || total > SCAN_MAX_TOTAL_BYTES || out.length >= 20) return;
-        let entries;
-        try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
-        for (const e of entries) {
-          if (e.name === '.pnpm' || e.name.startsWith('.')) continue;
-          const p = path.join(d, e.name);
-          if (e.isDirectory()) {
-            const pkg = readJson(path.join(p, 'package.json'), null);
-            if (pkg && builtin.has(pkg.name)) continue; // 内置分发包不扫
-            walk(p, depth + 1);
-          } else if (e.isFile() && SCAN_EXTS.test(e.name)) {
-            let st;
-            try { st = fs.statSync(p); } catch { continue; }
-            if (st.size > SCAN_MAX_FILE_BYTES || total + st.size > SCAN_MAX_TOTAL_BYTES) continue;
-            total += st.size;
-            let text;
-            try { text = fs.readFileSync(p, 'utf8'); } catch { continue; }
-            for (const { code, re } of TROJAN_PATTERNS) {
-              if (re.test(text)) {
-                out.push({
-                  code,
-                  severity: 'high',
-                  message: `静态扫描命中高危模式（${code}）：${path.relative(modulesDir, p)}`,
-                  fixable: false,
-                });
-                break; // 每文件只报首个模式
-              }
-            }
-          }
-        }
-      };
-      walk(modulesDir, 0);
+      if (!fs.existsSync(modulesDir)) return [];
+      return scanDir({
+        root: modulesDir,
+        builtinNames: builtin,
+        maxDepth: 4,
+        maxFindings: 20,
+        labelOf: (p) => path.relative(modulesDir, p),
+      }).map((f) => ({ ...f, fixable: false }));
     } catch { /* 扫描失败按无发现处理 */ }
-    return out;
+    return [];
   }
 
   // ── 修复执行器（只动插件/配置层）────────────────────────────────────
@@ -405,7 +370,12 @@ function createGuard(opts) {
         for (const id of patchRowIds(patch)) ids[id] = ids[id] || null;
         let bundled = [];
         try { bundled = readJson(path.join(dir, 'package.json'))?.dsh?.profile?.bundles || []; } catch { bundled = []; }
-        const { patch: deduped, removed } = removeBundledRowDuplicates(patch, ids, bundled, new Set());
+        // id 级去重已接线：收集 bundle 自身声明的条目 id（覆盖 git/fork/link
+        // 安装、包名与 overlay 行不一致的双登记形态，issue #16）。
+        const { collectBundleEntryIds } = require('./patch-row-heal');
+        let bundleEntryIds = new Set();
+        try { bundleEntryIds = collectBundleEntryIds(bundled, path.join(dir, 'node_modules')); } catch { /* 空集 */ }
+        const { patch: deduped, removed } = removeBundledRowDuplicates(patch, ids, bundled, bundleEntryIds);
         if (removed.length) {
           patch = deduped;
           applied.push('移除与 bundle 重复的 patch 行: ' + removed.join(', '));
