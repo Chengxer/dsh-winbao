@@ -157,7 +157,9 @@ function runNpm(ctx, args, { timeoutMs = 30 * 60 * 1000, logStream = null } = {}
     proc.stdout.on('data', (c) => { stdoutBuf += c.toString(); if (logStream) logStream.write(c); });
     proc.stderr.on('data', (c) => { stderrBuf += c.toString(); if (logStream) logStream.write(c); });
     proc.on('error', (err) => finish(reject, err));
-    proc.on('exit', (code) => {
+    // close（而非 exit）：exit 可能早于 stdio flush，丢掉 stderr 尾巴——
+    // 用户只见裸「npm 退出码 1」无诊断（issue #128）。
+    proc.on('close', (code) => {
       if (code === 0) finish(resolve, stdoutBuf);
       else {
         const tail = (stderrBuf + stdoutBuf).split(/\r?\n/).filter(Boolean).slice(-6).join(' | ');
@@ -306,11 +308,21 @@ async function applyUpdate(ctx, version) {
   const logPath = path.join(ctx.userDataDir, 'logs', 'update.log');
   fs.mkdirSync(path.dirname(logPath), { recursive: true });
   const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+  // issue #128：网络瞬断（ECONNRESET/ETIMEDOUT/EAI_AGAIN）令 ~250MB 的
+  // npm install 偶发失败——重试一次，第二次 --prefer-offline 优先吃本地缓存。
+  const npmArgs = (preferOffline) => [
+    'install', '--prefix', staging, PKG + '@' + version,
+    '--save-exact', '--omit=dev', '--no-audit', '--no-fund', '--no-update-notifier',
+  ].concat(preferOffline ? ['--prefer-offline'] : []);
   try {
-    await runNpm(ctx, [
-      'install', '--prefix', staging, PKG + '@' + version,
-      '--save-exact', '--omit=dev', '--no-audit', '--no-fund', '--no-update-notifier',
-    ], { timeoutMs: 30 * 60 * 1000, logStream });
+    try {
+      await runNpm(ctx, npmArgs(false), { timeoutMs: 30 * 60 * 1000, logStream });
+    } catch (first) {
+      logStream.write('[retry] 首次安装失败（' + first.message + '），重建 staging 重试（--prefer-offline）\n');
+      fs.rmSync(staging, { recursive: true, force: true });
+      fs.mkdirSync(staging, { recursive: true });
+      await runNpm(ctx, npmArgs(true), { timeoutMs: 30 * 60 * 1000, logStream });
+    }
   } catch (err) {
     logStream.end();
     fs.rmSync(staging, { recursive: true, force: true });

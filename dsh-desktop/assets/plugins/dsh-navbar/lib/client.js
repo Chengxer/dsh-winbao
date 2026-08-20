@@ -126,6 +126,10 @@ window.__ModuleLoader__.load({
     transition: none; animation: none;
   }
 }
+/* dsh-synapse 会话地图适配（issue #131）：导航条与预览气泡只服务对话
+   视图，地图 overlay 存在即让位（:has 动态跟随 overlay 增删/隐藏）。 */
+body:has(.dsh-synapse-overlay:not([hidden])) [data-dsh-navbar] { display: none !important; }
+body:has(.dsh-synapse-overlay:not([hidden])) [data-vlln-preview] { display: none !important; }
 `;
 					document.head.appendChild(style);
 				}
