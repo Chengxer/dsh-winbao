@@ -90,6 +90,17 @@
 - **破坏性测试实证**（stability_tests，16s）：伴随插件入口写语法垃圾 → sync
   覆盖修复 → 照常就绪；package.json 写坏 → 瀑布自愈 → 照常就绪
 
+### 内核版本错配修复（用户实测：Failed to load plugins / dsh-session-manager 加载失败）
+- 根因：tauri 线 package.json 声明 rc.7 而 node_modules 实际 rc.8——rc.8 将
+  dsh-client-web-react 溶入 minified dist（包不存在），rc.7 形态的伴随插件
+  require 不到模块表 → 插件加载失败、会话管理 UI 缺失
+- 修复：kernel/dsh-rc8（Electron 线 rc.8 全量适配：双形态锚点 + 补丁重锚定 +
+  dual-form 断言，当时 630 测试过）merge 进 main（deb3e8e，三处冲突手工语义
+  合成：patch-adapters 取 rc8 探测+main 的 loader-isolation markers；
+  integration-runner 取 main 架构+rc8 dual-form 断言套件；CHANGELOG 双段保留）
+- tauri/modular rebase 后实跑验证：**插件加载失败零行**、invoke 三通道全通、
+  UI 完整（会话列表/聊天/composer 截图确认）
+
 ### 已知限制（后续迭代）
 - backup-export 2MB 上限为上游 desktop-backup.js 原生行为（与 Electron 版一致）
 - image_paste_save 返回 E_NOT_IMPLEMENTED（剪贴板位图）
