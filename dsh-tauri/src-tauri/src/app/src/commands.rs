@@ -29,7 +29,7 @@ static SIDECAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub fn run_sidecar(app: &AppHandle, args: &[&str]) -> Result<serde_json::Value, BridgeError> {
     let _serial = SIDECAR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let state = app.state::<AppState>();
-    let sv = state.supervisor.lock().unwrap().clone();
+    let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
     let sv = sv.ok_or_else(|| BridgeError::internal("supervisor 未初始化"))?;
     let out = std::process::Command::new(&sv.node_exe)
         .arg(&sv.sidecar_cli)
@@ -56,7 +56,7 @@ pub fn run_sidecar(app: &AppHandle, args: &[&str]) -> Result<serde_json::Value, 
 pub fn app_init(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
     let state = app.state::<AppState>();
     let (kernel_url, phase_note) = {
-        let sv = state.supervisor.lock().unwrap().clone();
+        let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
         match sv {
             Some(s) => (s.kernel_url(), format!("kernel={}", s.kernel_version)),
             None => (None, "supervisor 未初始化".into()),
@@ -106,8 +106,7 @@ pub async fn menu_action(action: String, payload: Option<serde_json::Value>, app
                 .unwrap_or_else(|| {
                     app.state::<AppState>()
                         .supervisor
-                        .lock()
-                        .unwrap()
+                        .lock().unwrap_or_else(|p| p.into_inner())
                         .clone()
                         .and_then(|s| s.kernel_url())
                         .unwrap_or_else(|| "http://127.0.0.1".into())
@@ -203,14 +202,14 @@ pub fn current_session(state: State<AppState>, session_id: String) -> Result<ser
     if id.is_empty() || id.len() > 256 {
         return Err(BridgeError::invalid_arg("sessionId 为空或超长"));
     }
-    *state.current_session.lock().unwrap() = Some(id);
+    *state.current_session.lock().unwrap_or_else(|p| p.into_inner()) = Some(id);
     Ok(serde_json::Value::Null)
 }
 
 #[tauri::command]
 pub fn restart_service(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
     let state = app.state::<AppState>();
-    let sv = state.supervisor.lock().unwrap().clone();
+    let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
     let sv = sv.ok_or_else(|| BridgeError::internal("supervisor 未初始化"))?;
     let (tx, rx) = std::sync::mpsc::channel();
     let preferred = state.last_port.load(Ordering::Relaxed);
@@ -228,14 +227,13 @@ pub fn restart_service(app: AppHandle) -> Result<serde_json::Value, BridgeError>
 #[tauri::command]
 pub fn recovery_state(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
     let state = app.state::<AppState>();
-    let sv = state.supervisor.lock().unwrap().clone();
+    let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
     let Some(sv) = sv else {
         // 内核未装配（如安装产物缺 dsh-desktop）：客户端仍开着——
         // 展示装配失败原因与「重启内核」重试入口，而非空状态。
         let reason = state
             .boot_error
-            .lock()
-            .unwrap()
+            .lock().unwrap_or_else(|p| p.into_inner())
             .clone()
             .unwrap_or_else(|| "内核未装配（supervisor 未初始化）".to_string());
         return Ok(serde_json::json!({ "state": "no-kernel", "reason": reason }));
@@ -251,7 +249,7 @@ pub fn recovery_state(app: AppHandle) -> Result<serde_json::Value, BridgeError> 
 #[tauri::command]
 pub fn recovery_reload(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
     let state = app.state::<AppState>();
-    let sv = state.supervisor.lock().unwrap().clone();
+    let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
     if let Some(sv) = sv {
         if let Some(url) = sv.kernel_url() {
             navigate_main(&app, &url)?;
@@ -262,14 +260,14 @@ pub fn recovery_reload(app: AppHandle) -> Result<serde_json::Value, BridgeError>
         crate::start_supervisor(app.clone()).map_err(BridgeError::internal)?;
     }
     // 无 URL：回 loading 页。
-    let loading = state.loading_url.lock().unwrap().clone();
+    let loading = state.loading_url.lock().unwrap_or_else(|p| p.into_inner()).clone();
     navigate_main(&app, &loading).map(|_| serde_json::Value::Null)
 }
 
 #[tauri::command]
 pub fn recovery_restart(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
     let state = app.state::<AppState>();
-    let sv = state.supervisor.lock().unwrap().clone();
+    let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
     if let Some(sv) = sv {
         let (tx, _rx) = std::sync::mpsc::channel();
         sv.recovery_restart(tx);
@@ -277,7 +275,7 @@ pub fn recovery_restart(app: AppHandle) -> Result<serde_json::Value, BridgeError
         // 内核从未装配：恢复页「重启内核」= 重新装配（如用户刚补齐安装产物）。
         crate::start_supervisor(app.clone()).map_err(BridgeError::internal)?;
     }
-    let loading = state.loading_url.lock().unwrap().clone();
+    let loading = state.loading_url.lock().unwrap_or_else(|p| p.into_inner()).clone();
     navigate_main(&app, &loading).map(|_| serde_json::Value::Null)
 }
 
@@ -368,7 +366,7 @@ pub fn image_paste_save(payload: serde_json::Value) -> Result<serde_json::Value,
 pub fn balance_refresh(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
     // Electron 语义：触发式（数据经事件推送），不返回值。
     let state = app.state::<AppState>();
-    let sv = state.supervisor.lock().unwrap().clone();
+    let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
     if let Some(sv) = sv {
         if let Some(url) = sv.kernel_url() {
             // 就绪探针式触发（真实余额由内核计算，经 balance-changed 事件下行；
@@ -504,7 +502,7 @@ pub fn float_window(action: String, session_id: Option<String>, app: AppHandle, 
         "open" => {
             let sid = session_id.filter(|s| !s.is_empty()).ok_or_else(|| BridgeError::invalid_arg("bad-session"))?;
             let state = app.state::<AppState>();
-            let sv = state.supervisor.lock().unwrap().clone();
+            let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
             let sv = sv.ok_or_else(|| BridgeError::new("E_KERNEL_NOT_READY", "内核未就绪"))?;
             let url = sv.kernel_url().ok_or_else(|| BridgeError::new("E_KERNEL_NOT_READY", "内核未就绪"))?;
             crate::windows::open_float_window(&app, &url, &sid)
@@ -541,7 +539,7 @@ pub fn pet_window(action: String, app: AppHandle, window: WebviewWindow) -> Resu
                 return Ok(serde_json::json!({ "ok": true, "open": true, "reused": true }));
             }
             let state = app.state::<AppState>();
-            let sv = state.supervisor.lock().unwrap().clone();
+            let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
             let sv = sv.ok_or_else(|| BridgeError::new("E_KERNEL_NOT_READY", "内核未就绪"))?;
             let url = sv.kernel_url().ok_or_else(|| BridgeError::new("E_KERNEL_NOT_READY", "内核未就绪"))?;
             crate::windows::open_pet_window(&app, &url)
@@ -591,7 +589,7 @@ pub fn pet_set_auto_open(enabled: bool, app: AppHandle) -> Result<serde_json::Va
 #[tauri::command]
 pub fn sponsor_qr(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
     let state = app.state::<AppState>();
-    let sv = state.supervisor.lock().unwrap().clone();
+    let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
     let Some(sv) = sv else { return Ok(serde_json::json!({ "ok": false })) };
     let read = |name: &str| -> String {
         let p = sv.app_dir.join("assets").join("sponsor").join(name);
@@ -603,7 +601,7 @@ pub fn sponsor_qr(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
 #[tauri::command]
 pub fn sponsor_window(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
     let state = app.state::<AppState>();
-    let sv = state.supervisor.lock().unwrap().clone();
+    let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
     let Some(sv) = sv else { return Err(BridgeError::internal("supervisor 未初始化")) };
     let read = |name: &str| -> String {
         let p = sv.app_dir.join("assets").join("sponsor").join(name);

@@ -93,8 +93,68 @@ fn load_window_state(state: &AppState) -> Option<(i32, i32, f64, f64, bool)> {
     let ws = shell_core::WindowState::parse_legacy(&raw)?;
     Some((ws.x, ws.y, ws.width, ws.height, ws.maximized))
 }
+/// 全局 panic hook：panic 落盘到日志目录（不静默消失），进程存活优先。
+/// 兼容性原则：任何意外数据/时序都以日志收场，绝不让客户端整个消失。
+fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = format!(
+            "[panic] thread={:?} location={:?} payload={}",
+            std::thread::current().name(),
+            info.location().map(|l| l.to_string()),
+            supervisor::panic_payload_str(info.payload()),
+        );
+        eprintln!("{msg}");
+        // 落盘（失败仅 stderr——hook 里不允许再 panic）。
+        let dir = shell_core::DshPaths::resolve().logs;
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::OpenOptions::new().create(true).append(true)
+            .open(dir.join("panics.log"))
+            .and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "{} {msg}", chrono_like_now())
+            });
+        default(info);
+    }));
+}
+
+/// 无依赖时间戳（年-月-日 时:分:秒；days→civil 与 commands.rs 同源算法）。
+fn chrono_like_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format_unix_secs(secs)
+}
+
+fn format_unix_secs(secs: u64) -> String {
+    let days = secs / 86_400;
+    let z = days as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    let rem = secs % 86_400;
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
 pub fn run() {
+    install_panic_hook();
     tauri::Builder::default()
+        // 第二实例拉起（用户双击图标而应用已在跑）：聚焦既有主窗而非报错退出。
+        // 必须注册在最前（官方要求）；shell-core 单实例锁保留为跨窗体兜底。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
@@ -156,7 +216,7 @@ pub fn run() {
             match event {
                 tauri::RunEvent::ExitRequested { .. } => {
                     if let Some(state) = app.try_state::<AppState>() {
-                        if let Some(sv) = state.supervisor.lock().unwrap().clone() {
+                        if let Some(sv) = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone() {
                             sv.shutdown();
                         }
                     }
@@ -165,11 +225,11 @@ pub fn run() {
                     // std::process::exit 不跑 Drop：锁与内核树在此显式收尾
                     //（Review#2：exit(0) 后锁残留实测）。
                     if let Some(state) = app.try_state::<AppState>() {
-                        if let Some(sv) = state.supervisor.lock().unwrap().clone() {
+                        if let Some(sv) = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone() {
                             sv.shutdown();
                         }
                     }
-                    if let Some(mut g) = INSTANCE_LOCK.lock().unwrap().take() {
+                    if let Some(mut g) = INSTANCE_LOCK.lock().unwrap_or_else(|p| p.into_inner()).take() {
                         g.release();
                     }
                 }
@@ -214,14 +274,14 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             (url.clone(), url)
         }
     };
-    *state.loading_url.lock().unwrap() = loading_url.clone();
-    *state.recovery_url.lock().unwrap() = recovery_url.clone();
+    *state.loading_url.lock().unwrap_or_else(|p| p.into_inner()) = loading_url.clone();
+    *state.recovery_url.lock().unwrap_or_else(|p| p.into_inner()) = recovery_url.clone();
 
     // ---- 单实例锁 ----
     let paths = shell_core::DshPaths::resolve();
     let guard = shell_core::SingleInstanceGuard::acquire(paths.app_data.join("single-instance.lock"))
         .map_err(|_| "DSH Desktop 已在运行")?;
-    *INSTANCE_LOCK.lock().unwrap() = Some(guard);
+    *INSTANCE_LOCK.lock().unwrap_or_else(|p| p.into_inner()) = Some(guard);
 
     // ---- 主窗 ----
     let poc_mode = std::env::var("DSH_TAURI_POC").ok().as_deref() == Some("1");
@@ -248,8 +308,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         if let Err(e) = start_supervisor(app.handle().clone()) {
             eprintln!("[boot] 内核装配失败（主窗转恢复页，不退出）: {e}");
             let state = app.state::<AppState>();
-            *state.boot_error.lock().unwrap() = Some(e);
-            let recovery = state.recovery_url.lock().unwrap().clone();
+            *state.boot_error.lock().unwrap_or_else(|p| p.into_inner()) = Some(e);
+            let recovery = state.recovery_url.lock().unwrap_or_else(|p| p.into_inner()).clone();
             let _ = commands::navigate_main(app.handle(), &recovery);
         }
     }
@@ -265,25 +325,36 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 /// 任何失败只返回 Err(String)，由调用方转恢复页或回显——进程绝不退出。
 fn start_supervisor(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    if state.supervisor.lock().unwrap().is_some() {
+    if state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
         return Ok(()); // 已装配（恢复页重试幂等）
     }
     let root = find_repo_root().map_err(|e| e.to_string())?;
     let supervisor = Arc::new(Supervisor::new(&root));
     let (tx, rx) = std::sync::mpsc::channel::<SupervisorEvent>();
-    *state.supervisor_tx.lock().unwrap() = Some(tx.clone());
-    *state.supervisor.lock().unwrap() = Some(Arc::clone(&supervisor));
+    *state.supervisor_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx.clone());
+    *state.supervisor.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&supervisor));
     supervisor.spawn_boot(tx, load_preferred_port(&app));
     let handle = app.clone();
     std::thread::spawn(move || route_events(handle, rx));
-    *state.boot_error.lock().unwrap() = None;
+    *state.boot_error.lock().unwrap_or_else(|p| p.into_inner()) = None;
     Ok(())
 }
 
 /// supervisor 事件路由：换页 / 恢复页 / 通知 / 端口记忆。
 fn route_events(app: tauri::AppHandle, rx: std::sync::mpsc::Receiver<SupervisorEvent>) {
+    // 逐事件 panic 隔离：单事件路由异常不终结路由线程（后续 kernel-ready /
+    // 恢复页路由不受影响）——客户端必须能打开原则的事件层延伸。
     while let Ok(ev) = rx.recv() {
-        match ev {
+        let h = app.clone();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || route_one_event(&h, ev)));
+        if r.is_err() {
+            eprintln!("[route] 事件路由 panic（已隔离，继续处理后续事件）");
+        }
+    }
+}
+
+fn route_one_event(app: &tauri::AppHandle, ev: SupervisorEvent) {
+    match ev {
             SupervisorEvent::BootStep { name, ok, ms, error } => {
                 let _ = app.emit("boot-step", serde_json::json!({ "name": name, "ok": ok, "ms": ms, "error": error }));
             }
@@ -297,7 +368,7 @@ fn route_events(app: tauri::AppHandle, rx: std::sync::mpsc::Receiver<SupervisorE
                 }
                 let _ = commands::navigate_main(&app, &url);
                 if let Some(w) = app.get_webview_window("main") {
-                    let diag_base = { let u = app.state::<AppState>().loading_url.lock().unwrap().clone(); let mut o = String::new(); if let Some(pos) = u.rfind('/') { o = u[..pos].to_string(); } o };
+                    let diag_base = { let u = app.state::<AppState>().loading_url.lock().unwrap_or_else(|p| p.into_inner()).clone(); let mut o = String::new(); if let Some(pos) = u.rfind('/') { o = u[..pos].to_string(); } o };
                     match w.eval(&format!("window.__DIAG_BASE__={:?}; window.__TAURI_INTERNALS__.invoke('current_session',{{sessionId:'[diag] t0'}}).then(function(){{fetch(window.__DIAG_BASE__+'/__diag/t0-invoke-OK')}},function(err){{fetch(window.__DIAG_BASE__+'/__diag/t0-invoke-REJECT-'+encodeURIComponent(String(err&&err.message||err)))}})", diag_base)) {
                         Ok(_) => eprintln!("[diag] t0 eval OK"),
                         Err(e) => eprintln!("[diag] t0 eval ERR: {e}"),
@@ -318,7 +389,7 @@ fn route_events(app: tauri::AppHandle, rx: std::sync::mpsc::Receiver<SupervisorE
             SupervisorEvent::CrashLoop { .. } => {
                 let _ = app.emit("kernel-fail", serde_json::json!({ "reason": "内核反复异常退出" }));
                 if let Some(state) = app.try_state::<AppState>() {
-                    let recovery = state.recovery_url.lock().unwrap().clone();
+                    let recovery = state.recovery_url.lock().unwrap_or_else(|p| p.into_inner()).clone();
                     let _ = commands::navigate_main(&app, &recovery);
                 }
                 let _ = app.notification().builder()
@@ -331,7 +402,6 @@ fn route_events(app: tauri::AppHandle, rx: std::sync::mpsc::Receiver<SupervisorE
             }
             SupervisorEvent::StateChanged(_) => {}
         }
-    }
 }
 
 fn load_preferred_port(app: &tauri::AppHandle) -> Option<u16> {
@@ -420,7 +490,7 @@ fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
             }
             "quit" => {
                 if let Some(state) = app.try_state::<AppState>() {
-                    if let Some(sv) = state.supervisor.lock().unwrap().clone() {
+                    if let Some(sv) = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone() {
                         sv.shutdown();
                     }
                 }
@@ -696,7 +766,7 @@ fn inject_diag_probe(app: tauri::AppHandle) {
         // 探针结果写 document.title（无 IPC 依赖的可靠回传通道），Rust 侧回读落日志。
         // 探针基址注入（fetch 通道）。`probe base eval`
         if let Some(state) = app.try_state::<AppState>() {
-            let u = state.loading_url.lock().unwrap().clone();
+            let u = state.loading_url.lock().unwrap_or_else(|p| p.into_inner()).clone();
             if let Some(pos) = u.rfind('/') {
                 let _ = win.eval(&format!("window.__DIAG_BASE__={:?}", &u[..pos]));
             }
@@ -771,5 +841,25 @@ mod repo_root_tests {
         assert_eq!(percent_encode("a b<c>"), "a%20b%3Cc%3E");
         // 中文（UTF-8 三字节）逐字节转义。
         assert_eq!(percent_encode("你"), "%E4%BD%A0");
+    }
+}
+
+#[cfg(test)]
+mod panic_hook_tests {
+    use super::*;
+
+    #[test]
+    fn unix_secs_format_known_timestamps() {
+        // 1784419200 = 2026-07-19 00:00:00 UTC（commands.rs day20653 同源基准）。
+        assert_eq!(format_unix_secs(1_784_419_200), "2026-07-19 00:00:00");
+        assert_eq!(format_unix_secs(1_784_419_200 + 3661), "2026-07-19 01:01:01");
+        assert_eq!(format_unix_secs(0), "1970-01-01 00:00:00");
+    }
+
+    #[test]
+    fn panic_payload_str_variants() {
+        assert_eq!(crate::supervisor::panic_payload_str(&"boom"), "boom");
+        assert_eq!(crate::supervisor::panic_payload_str(&String::from("boxed")), "boxed");
+        assert_eq!(crate::supervisor::panic_payload_str(&42u8), "未知 panic 载荷");
     }
 }

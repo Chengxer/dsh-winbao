@@ -21,6 +21,7 @@ preview-server = { path = "../../crates/preview-server" }
 shell-core = { path = "../../crates/shell-core" }
 fence = { path = "../../crates/fence" }
 session-watcher = { path = "../../crates/session-watcher" }
+tauri-plugin-single-instance = "2.4.3"
 
 [features]
 default = []

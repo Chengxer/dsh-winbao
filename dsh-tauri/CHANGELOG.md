@@ -117,6 +117,23 @@
 - 测试：locate_repo_root 候选命中/无效、env 覆盖（合法命中 + 非法报错）、
   percent-encode（ASCII 保留 + 中文 UTF-8 三字节）——workspace **106/0 零警告**。
 
+### 「兼容性不报错」第二层加固（panic 面 + 坏配置自愈）
+- **锁中毒容忍**：全量 `lock().unwrap()` → `unwrap_or_else(into_inner)`（80 处）
+  ——任何线程持锁 panic 后其余命令照常工作，不再级联变僵尸（窗开着但全报错）。
+- **全局 panic hook**：panic 落盘 `logs/panics.log`（无依赖时间戳）+ stderr，
+  不再静默消失；进程存活优先。
+- **关键线程 panic 隔离**：boot 瀑布线程整体 catch_unwind → 异常转恢复页
+  （enter_recovery_tx 兜底）；route_events 逐事件隔离，单事件路由异常不终结
+  路由线程。
+- **settings.json 损坏自愈**：坏 JSON / 顶层非对象 → 隔离 `.broken` 保留现场
+  后从空配置继续（此前 set 的读-改-写会永远静默失败，lastWebPort 持续丢失）。
+- **第二实例拉起**：tauri-plugin-single-instance（注册在最前）——双击图标而
+  应用已在跑时聚焦既有主窗，不再报错退出；shell-core 锁文件保留为兜底。
+- JS 垫片层审计确认已全程防御（try/catch + fire-and-forget 静默）。
+- 测试：settings 自愈契约重写 2 例（隔离现场 + set/get 恢复；顶层非对象）、
+  format_unix_secs 已知时间戳 3 断言、panic_payload_str 三形态——
+  workspace **108/0 零警告**（build+test 双模式）。
+
 ### 已知限制（后续迭代）
 - backup-export 2MB 上限为上游 desktop-backup.js 原生行为（与 Electron 版一致）
 - image_paste_save 返回 E_NOT_IMPLEMENTED（剪贴板位图）

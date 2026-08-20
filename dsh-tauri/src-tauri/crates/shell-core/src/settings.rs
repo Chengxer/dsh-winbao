@@ -33,23 +33,38 @@ impl SettingsStore {
         Self { path: path.into() }
     }
 
-    /// 读取全部设置；文件不存在返回空对象；损坏时返回 Err（调用方决定是否修复）。
+    /// 读取全部设置；文件不存在返回空对象。
+    ///
+    /// **损坏自愈**（兼容性不报错契约）：坏 JSON / 顶层非对象 → 原文件隔离为
+    /// `<name>.json.broken`（保留现场供排查）后从空配置继续——否则 set() 的
+    /// 读-改-写会永远失败（lastWebPort 等壳层偏好持续静默丢失），且调用方
+    /// 只能一路 `.ok()` 降级。壳层偏好可重建，绝不因坏配置卡死读写。
     pub fn load(&self) -> Result<serde_json::Map<String, serde_json::Value>, SettingsError> {
         if !self.path.exists() {
             return Ok(serde_json::Map::new());
         }
         let raw = fs::read_to_string(&self.path)
             .map_err(|e| SettingsError(format!("read {}: {e}", self.path.display())))?;
-        let v: serde_json::Value = serde_json::from_str(&raw)
-            .map_err(|e| SettingsError(format!("parse {}: {e}", self.path.display())))?;
+        let v: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => return Ok(self.quarantine_broken()),
+        };
         match v {
             serde_json::Value::Object(m) => Ok(m),
-            other => Err(SettingsError(format!(
-                "{}: 顶层不是 JSON 对象（{}），拒绝加载",
-                self.path.display(),
-                type_name_of(&other)
-            ))),
+            _other => Ok(self.quarantine_broken()),
         }
+    }
+
+    /// 隔离损坏的 settings 文件并返回空配置（隔离失败也回空——读写必须能继续）。
+    fn quarantine_broken(&self) -> serde_json::Map<String, serde_json::Value> {
+        let backup = self.path.with_extension("json.broken");
+        eprintln!(
+            "[settings] {} 损坏，隔离为 {} 后从空配置继续",
+            self.path.display(),
+            backup.display()
+        );
+        let _ = fs::rename(&self.path, &backup);
+        serde_json::Map::new()
     }
 
     /// 原子写：先写 `<path>.tmp` 再 rename 覆盖。
@@ -78,17 +93,6 @@ impl SettingsStore {
         let mut map = self.load()?;
         map.insert(key.to_string(), value);
         self.save(&map)
-    }
-}
-
-fn type_name_of(v: &serde_json::Value) -> &'static str {
-    match v {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "bool",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
     }
 }
 
@@ -125,13 +129,23 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_file_errors_instead_of_wiping() {
+    fn corrupt_file_quarantined_and_self_heals() {
         let p = temp_path("corrupt");
         fs::write(&p, "{not json").unwrap();
         let store = SettingsStore::new(&p);
-        let err = store.load().unwrap_err();
-        assert!(err.0.contains("parse"), "损坏文件必须显式报错而不是清空: {err}");
+        // 损坏自愈契约：不报错、不卡死——隔离 .broken 后从空配置继续，后续读写正常。
+        assert!(store.load().unwrap().is_empty(), "损坏文件应自愈为空配置");
+        let backup = p.with_extension("json.broken");
+        assert!(backup.exists(), "损坏现场应隔离为 {backup:?}");
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "{not json", "隔离文件保留原始现场");
+        store.set("lastWebPort", json!(51731)).unwrap();
+        assert_eq!(
+            SettingsStore::new(&p).get("lastWebPort").unwrap(),
+            Some(json!(51731)),
+            "自愈后 set/get 应完全恢复"
+        );
         let _ = fs::remove_file(&p);
+        let _ = fs::remove_file(&backup);
     }
 
     #[test]
@@ -143,10 +157,12 @@ mod tests {
     }
 
     #[test]
-    fn top_level_non_object_rejected() {
+    fn top_level_non_object_quarantined() {
         let p = temp_path("nonobj");
         fs::write(&p, "[1,2]").unwrap();
-        assert!(SettingsStore::new(&p).load().is_err());
+        assert!(SettingsStore::new(&p).load().unwrap().is_empty(), "顶层非对象同样自愈");
+        assert!(p.with_extension("json.broken").exists());
         let _ = fs::remove_file(&p);
+        let _ = fs::remove_file(p.with_extension("json.broken"));
     }
 }

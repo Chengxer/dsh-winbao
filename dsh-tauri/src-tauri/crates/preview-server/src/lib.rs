@@ -208,8 +208,6 @@ mod tests {
 #[cfg(test)]
 mod edge_tests {
     use super::*;
-    use std::io::Read as _;
-    use std::io::Write as _;
 
     #[test]
     fn url_builder_and_root() {

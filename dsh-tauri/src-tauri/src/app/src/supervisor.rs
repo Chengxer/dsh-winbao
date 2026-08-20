@@ -97,20 +97,20 @@ impl Supervisor {
     }
 
     pub fn state(&self) -> RunState {
-        self.inner.lock().unwrap().state
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).state
     }
     pub fn kernel_url(&self) -> Option<String> {
-        self.inner.lock().unwrap().kernel_url.clone()
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).kernel_url.clone()
     }
     pub fn crash_count(&self) -> usize {
-        self.inner.lock().unwrap().crash_count
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).crash_count
     }
     pub fn last_error(&self) -> Option<String> {
-        self.inner.lock().unwrap().last_error.clone()
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).last_error.clone()
     }
 
     fn set_state(&self, next: RunState) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if g.state != next {
             let _ = g.state.can_transition_to(next);
             g.state = next;
@@ -128,22 +128,39 @@ impl Supervisor {
     /// ```
     pub fn spawn_boot(self: &Arc<Self>, tx: Sender<SupervisorEvent>, preferred_port: Option<u16>) {
         let this = Arc::clone(self);
+        let tx2 = tx.clone();
         std::thread::spawn(move || {
-            let gen = this.inner.lock().unwrap().generation;
+            // panic 隔离：瀑布任何一环意外 panic（兼容性场景的兜底）→ 落恢复页，
+            // 客户端继续运行（全局 panic hook 已另行落盘 panics.log）。
+            let this2 = Arc::clone(&this);
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                Self::boot_waterfall(this, tx, preferred_port)
+            }));
+            if let Err(p) = r {
+                let msg = panic_payload_str(&*p);
+                this2.enter_recovery_tx(&tx2, &format!("boot 线程异常（已捕获，客户端继续运行）: {msg}"));
+            }
+        });
+    }
+
+    /// 守护瀑布主体（boot 线程内执行；panic 由 spawn_boot 捕获兜底）。
+    fn boot_waterfall(this: Arc<Self>, tx: Sender<SupervisorEvent>, preferred_port: Option<u16>) {
+        {
+            let gen = this.inner.lock().unwrap_or_else(|p| p.into_inner()).generation;
             // ---- [1] sidecar boot ----
             this.set_state(RunState::Repair);
             let t0 = Instant::now();
             match this.run_sidecar_boot(&tx, gen) {
                 Ok(()) => {}
                 Err(e) => {
-                    let mut g = this.inner.lock().unwrap();
+                    let mut g = this.inner.lock().unwrap_or_else(|p| p.into_inner());
                     g.last_error = Some(e.clone());
                     let _ = tx.send(SupervisorEvent::BootStep { name: "sidecar-boot".into(), ok: false, ms: t0.elapsed().as_millis() as u64, error: Some(e) });
                     this.enter_recovery(&tx, "boot 链失败");
                     return;
                 }
             }
-            if this.inner.lock().unwrap().generation != gen || this.inner.lock().unwrap().stopping {
+            if this.inner.lock().unwrap_or_else(|p| p.into_inner()).generation != gen || this.inner.lock().unwrap_or_else(|p| p.into_inner()).stopping {
                 return;
             }
             // ---- [1.5] koffi 预检 → 目录选择器降级 overlay（Electron 对齐，升级适配）----
@@ -162,7 +179,7 @@ impl Supervisor {
                     return;
                 }
             };
-            this.inner.lock().unwrap().port = Some(port);
+            this.inner.lock().unwrap_or_else(|p| p.into_inner()).port = Some(port);
             this.set_state(RunState::Spawn);
 
             // ---- [3] 首次拉起（有界等待 120s，对齐 Electron waitUntilUp）----
@@ -227,14 +244,14 @@ impl Supervisor {
                     this.enter_recovery(&tx, "启动失败且无可回滚快照（可在恢复页重试）");
                 }
             }
-        });
+        }
     }
 
     /// 就绪成功路径：换页事件 + 待落定快照 + 稳定落定线程（45s 后 markGood，
     /// Electron armStabilityWatch 语义：稳定存活即成为「最后良好」回滚锚点）。
     fn on_boot_success(self: &Arc<Self>, tx: &Sender<SupervisorEvent>, url: String, port: u16, gen: u64, snap: Option<String>) {
         {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             g.pending_good = snap;
         }
         self.set_state(RunState::Ready);
@@ -242,12 +259,12 @@ impl Supervisor {
         let this = Arc::clone(self);
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(SERVICE_STABLE_SECS));
-            let g = this.inner.lock().unwrap();
+            let g = this.inner.lock().unwrap_or_else(|p| p.into_inner());
             if g.generation != gen || g.stopping { return; }
             if let Some(id) = g.pending_good.clone() {
                 drop(g);
                 let _ = this.guard_cli_json(&["guard-mark-good", &id]);
-                let mut g2 = this.inner.lock().unwrap();
+                let mut g2 = this.inner.lock().unwrap_or_else(|p| p.into_inner());
                 g2.pending_good = None;
                 g2.crash_count = 0; // 稳定落地 → 崩溃计数复位（Electron 同款）
                 this.inner_crash_reset();
@@ -258,7 +275,7 @@ impl Supervisor {
     }
 
     fn cancelled(&self, gen: u64) -> bool {
-        let g = self.inner.lock().unwrap();
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.generation != gen || g.stopping
     }
 
@@ -270,9 +287,9 @@ impl Supervisor {
     /// 拉起内核并同步等待就绪（瀑布核心原语）。
     fn spawn_and_wait_ready(self: Arc<Self>, port: u16, tx: &Sender<SupervisorEvent>, timeout: Duration) -> Result<String, String> {
         let (rtx, rrx) = std::sync::mpsc::channel::<Result<String, String>>();
-        self.inner.lock().unwrap().ready_tx = Some(rtx);
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).ready_tx = Some(rtx);
         if let Err(e) = self.clone().spawn_kernel(port, tx) {
-            self.inner.lock().unwrap().ready_tx = None;
+            self.inner.lock().unwrap_or_else(|p| p.into_inner()).ready_tx = None;
             return Err(e);
         }
         let deadline = Instant::now() + timeout;
@@ -282,7 +299,7 @@ impl Supervisor {
             Err(_) => {
                 // 超时：杀掉半死进程，按失败处理。
                 self.kill_kernel();
-                self.inner.lock().unwrap().ready_tx = None;
+                self.inner.lock().unwrap_or_else(|p| p.into_inner()).ready_tx = None;
                 Err(format!("{timeout:?} 内未就绪"))
             }
         }
@@ -380,7 +397,7 @@ impl Supervisor {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
                         if let Some(p) = v.get("path").and_then(|p| p.as_str()) {
                             log_line("koffi 预检未过，启用目录选择器降级 overlay");
-                            let mut g = self.inner.lock().unwrap();
+                            let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
                             let path = std::path::PathBuf::from(p);
                             if !g.overlays.contains(&path) {
                                 g.overlays.push(path);
@@ -413,7 +430,7 @@ impl Supervisor {
         }
         if let Some(p) = v.get("path").and_then(|p| p.as_str()) {
             log_line(&format!("安全启动 overlay：禁用 {ids} 个失败插件"));
-            let mut g = self.inner.lock().unwrap();
+            let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             let path = std::path::PathBuf::from(p);
             if !g.overlays.contains(&path) {
                 g.overlays.push(path);
@@ -424,7 +441,7 @@ impl Supervisor {
 
     /// spawn 内核进程 + 就绪行监视线程。
     fn spawn_kernel(self: Arc<Self>, port: u16, tx: &Sender<SupervisorEvent>) -> Result<(), String> {
-        let overlays = self.inner.lock().unwrap().overlays.clone();
+        let overlays = self.inner.lock().unwrap_or_else(|p| p.into_inner()).overlays.clone();
         let spec = SpawnSpec::new(&self.node_exe, &self.bin_js, &self.kernel_version, port, &overlays);
         let mut cmd = Command::new(&spec.node_exe);
         cmd.args(&spec.node_args).arg(&spec.bin_js).args(&spec.web_args);
@@ -448,7 +465,7 @@ impl Supervisor {
         }
         let stdout = child.stdout.take().ok_or("stdout piped 失败")?;
         let stderr = child.stderr.take();
-        self.inner.lock().unwrap().kernel = Some(child);
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).kernel = Some(child);
 
         // 就绪行监视（独占读 stdout；读 EOF 时若进程仍在则继续探活兜底）。
         let this = Arc::clone(&self);
@@ -465,7 +482,7 @@ impl Supervisor {
                 if url.is_none() {
                     if let Some(u) = parser.feed(&format!("{text}\n")) {
                         url = Some(u.clone());
-                        let rtx = { let mut g = this.inner.lock().unwrap(); g.kernel_url = Some(u.clone()); g.ready_tx.take() };
+                        let rtx = { let mut g = this.inner.lock().unwrap_or_else(|p| p.into_inner()); g.kernel_url = Some(u.clone()); g.ready_tx.take() };
                         if let Some(rtx) = rtx { let _ = rtx.send(Ok(u.clone())); }
                         this.set_state(RunState::Ready);
                         let _ = tx2.send(SupervisorEvent::KernelReady { url: u, port });
@@ -474,7 +491,7 @@ impl Supervisor {
             }
             // stdout EOF = 进程退出。
             let (code, exited) = {
-                let mut g = this.inner.lock().unwrap();
+                let mut g = this.inner.lock().unwrap_or_else(|p| p.into_inner());
                 match g.kernel.as_mut() {
                     Some(c) => match c.try_wait() {
                         Ok(Some(st)) => (st.code(), true),
@@ -509,7 +526,7 @@ impl Supervisor {
     fn on_kernel_exit(self: &Arc<Self>, code: Option<i32>, tx: &Sender<SupervisorEvent>) {
         let now = now_ms();
         let (verdict, crashes) = {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             if g.stopping {
                 return;
             }
@@ -528,13 +545,13 @@ impl Supervisor {
             Verdict::Tripped => self.enter_recovery_tx(tx, "崩溃环触发"),
             _ => {
                 // 未成环：自动重启一次（Electron watchServerProc 语义：异常退出自动拉起）。
-                let port = self.inner.lock().unwrap().port;
-                let gen = self.inner.lock().unwrap().generation;
+                let port = self.inner.lock().unwrap_or_else(|p| p.into_inner()).port;
+                let gen = self.inner.lock().unwrap_or_else(|p| p.into_inner()).generation;
                 let this = Arc::clone(self);
                 let tx2 = tx.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_secs(2));
-                    let g = this.inner.lock().unwrap();
+                    let g = this.inner.lock().unwrap_or_else(|p| p.into_inner());
                     if g.stopping || g.generation != gen || g.kernel.is_some() {
                         return;
                     }
@@ -559,7 +576,7 @@ impl Supervisor {
             loop {
                 std::thread::sleep(Duration::from_secs(3));
                 {
-                    let g = this.inner.lock().unwrap();
+                    let g = this.inner.lock().unwrap_or_else(|p| p.into_inner());
                     if g.stopping || g.generation != gen {
                         return;
                     }
@@ -587,7 +604,7 @@ impl Supervisor {
     /// 原地重启（restart_service）：杀树 → 重跑 boot 链 → 换页。
     pub fn restart(self: &Arc<Self>, tx: Sender<SupervisorEvent>, preferred_port: Option<u16>) {
         {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             g.generation += 1;
             g.stopping = false;
             g.kernel_url = None;
@@ -605,17 +622,17 @@ impl Supervisor {
         self.kill_kernel();
         self.set_state(RunState::CrashLoop);
         {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             g.last_error = Some(reason.to_string());
         }
-        let crashes = self.inner.lock().unwrap().crash_count;
+        let crashes = self.inner.lock().unwrap_or_else(|p| p.into_inner()).crash_count;
         let _ = tx.send(SupervisorEvent::CrashLoop { crashes });
     }
 
     /// 恢复页「重启」：手动复位崩溃环。
     pub fn recovery_restart(self: &Arc<Self>, tx: Sender<SupervisorEvent>) {
         {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             g.crash.record_recovery();
             g.crash_count = 0;
             g.last_error = None;
@@ -625,7 +642,7 @@ impl Supervisor {
     }
 
     pub fn kill_kernel(&self) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(mut c) = g.kernel.take() {
             let pid = c.id();
             let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).creation_flags_win().output();
@@ -636,7 +653,7 @@ impl Supervisor {
 
     /// 应用退出路径：同步终结（不依赖事件循环）。
     pub fn shutdown(&self) {
-        self.inner.lock().unwrap().stopping = true;
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).stopping = true;
         self.kill_kernel();
     }
 }
@@ -801,15 +818,26 @@ mod tests {
     fn generation_increments_on_restart_and_state_transitions() {
         let Some(root) = repo_root() else { eprintln!("[skip]"); return; };
         let sv: Arc<Supervisor> = Arc::new(Supervisor::new(&root));
-        let g0 = sv.inner.lock().unwrap().generation;
+        let g0 = sv.inner.lock().unwrap_or_else(|p| p.into_inner()).generation;
         sv.set_state_for_test(RunState::Ready);
         assert_eq!(sv.state(), RunState::Ready);
         let (tx, _rx) = std::sync::mpsc::channel();
         sv.restart(tx, None);
-        assert_eq!(sv.inner.lock().unwrap().generation, g0 + 1, "restart 应递增代际号");
+        assert_eq!(sv.inner.lock().unwrap_or_else(|p| p.into_inner()).generation, g0 + 1, "restart 应递增代际号");
         sv.shutdown();
-        assert!(sv.inner.lock().unwrap().stopping);
+        assert!(sv.inner.lock().unwrap_or_else(|p| p.into_inner()).stopping);
         let _ = Ordering::Relaxed;
+    }
+}
+
+/// panic 载荷转字符串（&str / String / 其他兜底）。
+pub(crate) fn panic_payload_str(p: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = p.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = p.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "未知 panic 载荷".to_string()
     }
 }
 
@@ -817,7 +845,7 @@ mod tests {
 impl Supervisor {
     /// 测试辅助：直接设置状态（绕过迁移表）。
     fn set_state_for_test(&self, s: RunState) {
-        self.inner.lock().unwrap().state = s;
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).state = s;
     }
 }
 
