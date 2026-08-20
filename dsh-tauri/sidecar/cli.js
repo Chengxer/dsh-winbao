@@ -532,13 +532,27 @@ async function cmdBoot(args, ctx) {
   const integration = makeIntegration(mods, { appDir, home, userDataDir: resolveUserData() });
   const t0 = Date.now();
   const steps = [];
+  // 步骤成败分级（对齐 Electron main.js 容忍语义 +「客户端必须能打开」原则）：
+  //   - 显式 r.ok === false（契约性失败）→ 步骤失败（ok:false）。当前四步门面
+  //     （healBeforeServer/syncPlugins/applyPatches/preflightHealth）从不返回
+  //     ok:false——子失败均内部 log 容忍（sync/heal 的告警、applyAll 的
+  //     degraded/errors/warnings 均不映射 ok）——该通道留给未来确需阻断启动的
+  //     致命失败；
+  //   - 实现级瞬态异常（Windows 文件锁 EBUSY/EPERM 等）→ 容忍继续
+  //     （ok:true + warning 落日志与 steps[].warning）。supervisor 对 boot 整体
+  //     失败的响应是直接转恢复页，比 Electron（只 log 继续启动）严苛——四步
+  //     均为自愈/同步/补丁/预检类尽力而为操作，瞬态异常不得把用户挡在恢复页；
+  //     真致命失败（模块缺失/进程崩）走非 0 退出码，supervisor 兜底不变。
   const step = async (name, fn) => {
     const s = Date.now();
-    let ok = true, error = null;
+    let ok = true, error = null, warning = null;
     try { const r = await fn(); if (r && r.ok === false) { ok = false; error = r.error || 'unknown'; } }
-    catch (err) { ok = false; error = String((err && err.message) || err); }
-    steps.push({ name, ok, ms: Date.now() - s, error });
-    log('boot 步骤 ' + name + ' → ' + (ok ? 'OK' : 'FAIL ' + error) + ' (' + (Date.now() - s) + 'ms)');
+    catch (err) {
+      warning = String((err && err.message) || err);
+      log('boot 步骤 ' + name + ' 异常（容忍继续，不阻断启动）: ' + warning);
+    }
+    steps.push({ name, ok, ms: Date.now() - s, error, warning });
+    log('boot 步骤 ' + name + ' → ' + (ok ? 'OK' : 'FAIL ' + error) + ' (' + (Date.now() - s) + 'ms)' + (warning ? ' [警告] ' + warning : ''));
     return ok;
   };
   // 对齐 main.js boot 链（local 模式）：repair → sync → presets → patches → preflight。
@@ -631,7 +645,7 @@ async function main() {
           },
           selfHealHistoryFile: path.join(c.userDataDir, 'self-heal-history.json'),
           yaml: yamlOf(),
-          env: { appVersion: process.env.DSH_TAURI_VERSION || '0.1.0-tauri' },
+          env: { appVersion: process.env.DSH_TAURI_VERSION || '0.5.0-tauri' },
         });
         if (cmd === 'diag-run') return emit({ ok: true, report });
         // 导出：脱敏（token/key/secret 字段掩码，语义对齐 main.js maskDeep）+ 原子写。

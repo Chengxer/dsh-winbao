@@ -357,6 +357,13 @@ fn route_events(app: tauri::AppHandle, rx: std::sync::mpsc::Receiver<SupervisorE
 fn route_one_event(app: &tauri::AppHandle, ev: SupervisorEvent) {
     match ev {
             SupervisorEvent::BootStep { name, ok, ms, error } => {
+                // boot 步骤结果必须落日志（此前只 emit 给 loading 页不打日志，
+                // 「启动受阻」类误报在 app.log 中不可见、无法取证）。
+                if ok {
+                    eprintln!("[route] boot 步骤 {name} OK（{ms}ms）");
+                } else {
+                    eprintln!("[route] boot 步骤 {name} FAIL（{ms}ms）: {}", error.as_deref().unwrap_or("未知失败"));
+                }
                 let _ = app.emit("boot-step", serde_json::json!({ "name": name, "ok": ok, "ms": ms, "error": error }));
             }
             SupervisorEvent::KernelReady { url, port } => {
