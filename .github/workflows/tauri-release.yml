@@ -96,7 +96,8 @@ jobs:
         run: |
           set -e
           DEST="dsh-tauri/package-payload/dsh-desktop"
-          mkdir -p "$DEST/node_modules/@deepseek-ai"
+          # 注意：不预建 node_modules（cp -r 会嵌套 node_modules/node_modules）
+          mkdir -p "$DEST"
           # 根文件
           cp dsh-desktop/*.js "$DEST/" 2>/dev/null || true
           cp dsh-desktop/package.json "$DEST/"
@@ -107,8 +108,9 @@ jobs:
           mkdir -p "$DEST/vendor"
           cp -r dsh-desktop/vendor/node "$DEST/vendor/node"
           cp -r dsh-desktop/vendor/npm "$DEST/vendor/npm" 2>/dev/null || echo "no vendor/npm"
-          # node_modules（排除 devDeps）
-          cp -r dsh-desktop/node_modules "$DEST/node_modules" 2>/dev/null || echo "WARN: node_modules copy issue"
+          # node_modules：先删再拷（避免嵌套 node_modules/node_modules）
+          rm -rf "$DEST/node_modules"
+          cp -r dsh-desktop/node_modules "$DEST/node_modules"
           rm -rf "$DEST/node_modules/electron" "$DEST/node_modules/electron-builder" "$DEST/node_modules/electron-winstaller"
           # rc7 vendor（dist/win-unpacked 已在上一步准备好）
           if [ -d "dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai" ]; then
@@ -221,7 +223,7 @@ jobs:
         run: |
           set -e
           DEST="dsh-tauri/package-payload/dsh-desktop"
-          mkdir -p "$DEST/node_modules/@deepseek-ai"
+          mkdir -p "$DEST"
           cp dsh-desktop/*.js "$DEST/" 2>/dev/null || true
           cp dsh-desktop/package.json "$DEST/"
           cp -r dsh-desktop/scripts "$DEST/scripts"
@@ -229,7 +231,8 @@ jobs:
           mkdir -p "$DEST/vendor"
           cp -r dsh-desktop/vendor/node "$DEST/vendor/node"
           cp -r dsh-desktop/vendor/npm "$DEST/vendor/npm" 2>/dev/null || true
-          cp -r dsh-desktop/node_modules "$DEST/node_modules" 2>/dev/null || true
+          rm -rf "$DEST/node_modules"
+          cp -r dsh-desktop/node_modules "$DEST/node_modules"
           rm -rf "$DEST/node_modules/electron" "$DEST/node_modules/electron-builder" "$DEST/node_modules/electron-winstaller"
           if [ -d "dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai" ]; then
             for pkg in dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai/*/; do
@@ -309,7 +312,7 @@ jobs:
         run: |
           set -e
           DEST="dsh-tauri/package-payload/dsh-desktop"
-          mkdir -p "$DEST/node_modules/@deepseek-ai"
+          mkdir -p "$DEST"
           cp dsh-desktop/*.js "$DEST/" 2>/dev/null || true
           cp dsh-desktop/package.json "$DEST/"
           cp -r dsh-desktop/scripts "$DEST/scripts"
@@ -317,7 +320,8 @@ jobs:
           mkdir -p "$DEST/vendor"
           cp -r dsh-desktop/vendor/node "$DEST/vendor/node"
           cp -r dsh-desktop/vendor/npm "$DEST/vendor/npm" 2>/dev/null || true
-          cp -r dsh-desktop/node_modules "$DEST/node_modules" 2>/dev/null || true
+          rm -rf "$DEST/node_modules"
+          cp -r dsh-desktop/node_modules "$DEST/node_modules"
           rm -rf "$DEST/node_modules/electron" "$DEST/node_modules/electron-builder" "$DEST/node_modules/electron-winstaller"
           if [ -d "dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai" ]; then
             for pkg in dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai/*/; do
