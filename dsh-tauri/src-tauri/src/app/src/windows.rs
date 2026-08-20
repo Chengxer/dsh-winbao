@@ -250,14 +250,32 @@ pub fn open_sponsor_window(app: &tauri::AppHandle, qr_alipay: &str, qr_wechat: &
         return Ok(serde_json::json!({ "ok": true, "reused": true }));
     }
     let html = sponsor_html(qr_alipay, qr_wechat);
-    let url = tauri::WebviewUrl::App("sponsor.html".into());
-    // 写入 ui/（frontendDist）下供 App URL 加载；失败降级 data URL。
-    let _ = url;
-    let data_url = format!("data:text/html;charset=utf-8,{}", urlencode(&html));
+    // 彻底修（用户实测「点咖啡无反应」）：data URL 在 WebView2 对大负载
+    //（两张 base64 码 ~100KB+）导航受限——改写 preview-server 静态目录
+    //（与 loading/recovery 页同源同链路，127.0.0.1 天然在导航围栏白名单）。
+    // preview-server 不在（极罕见 data 降级态）则兜底写 TEMP 文件后
+    // file:// 协议加载（WebView2 无 file:// 导航限制）。
+    let sponsor_url = {
+        let state = app.state::<crate::AppState>();
+        let base = state.loading_url.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if !base.is_empty() {
+            // 从 loading URL（如 http://127.0.0.1:PORT/loading.html）推出
+            // 同源前缀，写 sponsor.html 后以同源 URL 加载。
+            let prefix = base.replace("loading.html", "");
+            let file = std::env::temp_dir().join(format!("dsh-tauri-pages-{}", std::process::id())).join("sponsor.html");
+            let _ = std::fs::write(&file, &html);
+            format!("{prefix}sponsor.html")
+        } else {
+            // 兜底：写 TEMP 文件走 file:// 协议。
+            let file = std::env::temp_dir().join("dsh-sponsor.html");
+            std::fs::write(&file, &html).map_err(|e| BridgeError::internal(format!("赞助页写入: {e}")))?;
+            format!("file:///{}", file.to_string_lossy().replace('\\', "/"))
+        }
+    };
     let win = tauri::webview::WebviewWindowBuilder::new(
         app,
         "sponsor",
-        WebviewUrl::External(parse_url(&data_url)?),
+        WebviewUrl::External(parse_url(&sponsor_url)?),
     )
     .title("请作者喝咖啡")
     // 500x620：二维码 220px（Electron 基准 180px 放大 ~22%，扫码更易）+ 标题/留白。
@@ -285,18 +303,6 @@ font-family:"Segoe UI","Microsoft YaHei",sans-serif;display:flex;flex-direction:
 <div><img src="{wechat}" alt="微信"><div class="cap">微信</div></div>
 </div></body></html>"#
     )
-}
-
-/// 最小 URL 编码（data URL 用）。
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
 
 #[cfg(test)]
