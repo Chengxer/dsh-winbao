@@ -121,3 +121,33 @@ mod tests {
         assert_eq!(tr.get(), None);
     }
 }
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+
+    #[test]
+    fn throttle_is_per_session_independent() {
+        let mut t = NotifyThrottle::new();
+        assert_eq!(t.decide("a", None, 0), NotifyDecision::Notify);
+        assert_eq!(t.decide("a", None, 1_000), NotifyDecision::SuppressedRecent);
+        assert_eq!(t.decide("b", None, 1_000), NotifyDecision::Notify, "不同会话互不影响");
+        assert_eq!(t.decide("a", None, 1_000), NotifyDecision::SuppressedRecent);
+    }
+
+    #[test]
+    fn focused_exempt_does_not_consume_quota() {
+        let mut t = NotifyThrottle::new();
+        // 聚焦豁免不写入 last（不占限流额度）。
+        assert_eq!(t.decide("s", Some("s"), 0), NotifyDecision::SuppressedFocused);
+        assert_eq!(t.decide("s", None, 1), NotifyDecision::Notify, "豁免后应正常通知");
+    }
+
+    #[test]
+    fn custom_interval_boundary() {
+        let mut t = NotifyThrottle::with_min_interval(Duration::from_millis(100));
+        assert_eq!(t.decide("x", None, 0), NotifyDecision::Notify);
+        assert_eq!(t.decide("x", None, 99), NotifyDecision::SuppressedRecent);
+        assert_eq!(t.decide("x", None, 100), NotifyDecision::Notify, "恰好到达间隔应放行");
+    }
+}

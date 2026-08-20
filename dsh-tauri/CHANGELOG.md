@@ -42,8 +42,18 @@
    `KILL_ON_JOB_CLOSE`（+1 测试；实测 taskkill /F 强杀壳后端口零残留）
    另：`RunEvent::Exit` 兜底杀树
 
+### 功能测试补强（全项目）
+- Rust **18 套件 93 测试全绿 0 警告**（自 65 补至 93）：
+  - supervisor 真机集成 ×3（boot 链沙箱建档 / boot→内核→就绪→TCP 全链 15s / 代际号）
+  - commands 纯逻辑 ×7（b64 RFC 向量 / 日期算法 / 原子写 / 备份择新 / file_revert 围栏+幂等+越界拒绝 / sponsor）
+  - windows ×5（label 消毒注入样本 / 浮窗预置脚本 JSON 转义 / 模式脚本标记 / urlencode / parse_url）
+  - pages ×2（loading/recovery 契约标记）+ lib 窗口状态 roundtrip+坏数据钳制
+  - fence 多根/消解返回/空围栏 + preview-server 查询串剥离/POST 405/%2e%2e 编码穿越 + session-watcher 配额语义
+- sidecar CLI **node --test 8 测试全绿**（31.5s，沙箱 home 真机流程：boot 建档 / list 形态 / set-enabled 可逆往返 / diag 报告结构 / backup 导出→token→篡改拒绝→恢复 roundtrip / 用法错误码 / 未知插件容错）
+- 测试过程中实证修正 3 处测试期望（base64 RFC 向量、epoch 天数、日期长度）并确认 1 处实现语义（dsh_home=<home>/.dsh 围栏边界）正确
+
 ### 验证
-- `cargo test`：**18 套件 65 过 0 挂 0 警告**
+- `cargo test`：**18 套件 93 过 0 挂 0 警告**
 - 端到端：loading → boot（3.2s）→ 内核（5.6s 就绪）→ 换页真实 Web UI（截图确认）
 - 端口稳定化实测：两轮启动同端口 63283（localStorage 偏好不丢）
 

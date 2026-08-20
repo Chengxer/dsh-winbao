@@ -80,6 +80,11 @@ fn load_window_state(state: &AppState) -> Option<(i32, i32, f64, f64, bool)> {
     Some((x, y, w, h, v.get("maximized").and_then(|m| m.as_bool()).unwrap_or(false)))
 }
 
+/// 测试用：环境变量互斥锁（DSH_TEST_HOME / DSH_HOME 变更期间串行化，
+/// 防止并行测试读到中间态路径）。
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 进程级单实例锁（退出时 Drop 删锁文件；强杀残留由陈锁回收逻辑兜底）。
 static INSTANCE_LOCK: std::sync::Mutex<Option<shell_core::SingleInstanceGuard>> = std::sync::Mutex::new(None);
 
@@ -374,5 +379,35 @@ mod contract_audit {
     fn cut_channel_not_registered() {
         let reg = registered();
         assert!(!reg.contains(&"guard_action"), "裁撤命令不得注册");
+    }
+}
+
+#[cfg(test)]
+mod window_state_tests {
+    use super::*;
+
+    /// 窗口状态 save→load roundtrip + 坏数据钳制拒绝。
+    #[test]
+    fn window_state_roundtrip_and_clamps() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = std::env::temp_dir().join(format!("dsh-tauri-ws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("DSH_TEST_HOME", &home);
+        std::env::set_var("DSH_TEST_APPDATA", home.join("appdata"));
+        std::env::set_var("DSH_TEST_TMP", home.join("tmp"));
+
+        let state = AppState::empty();
+        save_window_state(&state, (120, 60, 1280.0, 820.0, true)).unwrap();
+        assert_eq!(load_window_state(&state), Some((120, 60, 1280.0, 820.0, true)));
+
+        // 坏尺寸（窗口被甩出屏幕的防护）→ None 回退默认。
+        save_window_state(&state, (5, 5, 2.0, 1.0, false)).unwrap();
+        assert_eq!(load_window_state(&state), None, "非法尺寸应拒绝恢复");
+
+        std::env::remove_var("DSH_TEST_HOME");
+        std::env::remove_var("DSH_TEST_APPDATA");
+        std::env::remove_var("DSH_TEST_TMP");
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

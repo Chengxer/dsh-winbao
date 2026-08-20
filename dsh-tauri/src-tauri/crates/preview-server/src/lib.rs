@@ -197,3 +197,56 @@ mod tests {
         assert_eq!(mime_of(Path::new("/a/b.bin")), "application/octet-stream");
     }
 }
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+    use std::io::Read as _;
+    use std::io::Write as _;
+
+    #[test]
+    fn url_builder_and_root() {
+        let dir = std::env::temp_dir().join(format!("dsh-pv-edge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let srv = PreviewServer::start(&dir).unwrap();
+        assert!(srv.url("x/y.html").starts_with("http://127.0.0.1:"));
+        assert!(srv.url("/leading-slash.txt").contains("/leading-slash.txt"), "前导斜杠应归一");
+        assert_eq!(srv.root(), dir.as_path());
+        srv.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_get_rejected_and_query_stripped() {
+        let dir = std::env::temp_dir().join(format!("dsh-pv-edge2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("q.txt"), b"Q").unwrap();
+        let srv = PreviewServer::start(&dir).unwrap();
+        let raw = |req: &str| {
+            let mut s = TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
+            s.write_all(req.as_bytes()).unwrap();
+            let mut b = String::new();
+            s.read_to_string(&mut b).unwrap();
+            b
+        };
+        assert!(raw("POST /q.txt HTTP/1.0\r\n\r\n").starts_with("HTTP/1.0 405"), "POST 必须 405");
+        assert!(raw("GET /q.txt?v=1&x=2 HTTP/1.0\r\n\r\n").ends_with("Q"), "查询串应剥离");
+        srv.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn percent_encoded_traversal_blocked() {
+        let dir = std::env::temp_dir().join(format!("dsh-pv-edge3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), b"A").unwrap();
+        let srv = PreviewServer::start(&dir).unwrap();
+        let mut s = TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
+        s.write_all(b"GET /%2e%2e/a.txt HTTP/1.0\r\n\r\n").unwrap();
+        let mut b = String::new();
+        s.read_to_string(&mut b).unwrap();
+        assert!(b.starts_with("HTTP/1.0 403"), "编码穿越必须 403: {b}");
+        srv.stop();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

@@ -140,3 +140,32 @@ pub const RECOVERY_HTML: &str = r#"<!doctype html>
 </script>
 </body></html>
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loading_page_contract_markers() {
+        assert!(LOADING_HTML.contains("data-tauri-drag-region"), "PoC-B 标题栏拖拽");
+        assert!(LOADING_HTML.contains("'boot-step'"), "boot 步骤事件订阅");
+        assert!(LOADING_HTML.contains("'kernel-fail'"), "失败事件订阅");
+        assert!(LOADING_HTML.contains("windowControls.minimize"));
+        assert!(LOADING_HTML.contains("dshDesktop"), "垫片可用前提下的降级引用");
+        // 步骤名映射对齐 data-flow.md §3 boot 时序。
+        for (key, label) in [("repair", "自愈"), ("sync", "同步"), ("patches", "补丁"), ("preflight", "预检")] {
+            assert!(LOADING_HTML.contains(key), "缺少步骤 {key}");
+            assert!(LOADING_HTML.contains(label), "缺少步骤中文标签 {label}");
+        }
+    }
+
+    #[test]
+    fn recovery_page_contract_markers() {
+        assert!(RECOVERY_HTML.contains("data-tauri-drag-region"));
+        for (btn, fn_name) in [("doRestart", "restart"), ("doReload", "reload"), ("doLogs", "openLogs")] {
+            assert!(RECOVERY_HTML.contains(btn), "缺按钮 {btn}");
+            assert!(RECOVERY_HTML.contains(&format!("recovery.{fn_name}")), "缺 recovery.{fn_name} 契约调用");
+        }
+        assert!(RECOVERY_HTML.contains("crashes"), "展示崩溃计数");
+    }
+}

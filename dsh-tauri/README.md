@@ -32,8 +32,12 @@ dsh-tauri/
 ## 快速上手
 
 ```bash
-cd dsh-tauri/src-tauri
-cargo test                 # 全 crate 单测
+cd dsh-tauri
+cargo test --manifest-path src-tauri/Cargo.toml   # Rust 全量（93 测试，含 supervisor 真机集成）
+node --test sidecar/cli.test.js                      # sidecar CLI 功能（8 测试，沙箱 home 真机流程）
+
+# 分层速览
+cd src-tauri
 cargo run -p poc-sidecar-spawn            # PoC-C（需 ../dsh-desktop 已 npm install）
 cargo run -p dsh-tauri-app               # PoC-A/B（远程页桥注入 + 自绘标题栏）
 DSH_KERNEL_URL=http://127.0.0.1:<port> cargo run -p dsh-tauri-app   # 连真实内核

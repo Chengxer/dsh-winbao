@@ -253,7 +253,7 @@ pub fn open_sponsor_window(app: &tauri::AppHandle, qr_alipay: &str, qr_wechat: &
     Ok(serde_json::json!({ "ok": true }))
 }
 
-fn sponsor_html(alipay: &str, wechat: &str) -> String {
+pub(crate) fn sponsor_html(alipay: &str, wechat: &str) -> String {
     format!(
         r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>请作者喝咖啡</title>
 <style>*{{box-sizing:border-box;margin:0}}body{{background:#0b1220;color:#e6ecff;
@@ -280,4 +280,55 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn float_label_sanitizes_hostile_input() {
+        assert_eq!(float_label("abc123"), "float-abc123");
+        // 注入字符被白名单替换。
+        assert_eq!(float_label("a\" onclick=x"), "float-a__onclick_x");
+        // 超长截断到 64。
+        let long = "x".repeat(200);
+        assert_eq!(float_label(&long).len(), "float-".len() + 64);
+        // 中文 → 下划线（label 安全字符集）。
+        assert_eq!(float_label("会话"), "float-__");
+    }
+
+    #[test]
+    fn float_preset_embeds_session_and_clears_subagent() {
+        let js = float_session_preset("sess-42");
+        assert!(js.contains("\"sess-42\""), "sessionId 应以 JSON 字符串嵌入: {js}");
+        assert!(js.contains("dsh.sessions.current"));
+        assert!(js.contains("delete parsed.subagentAddress"), "对齐 Electron 语义（清 subagentAddress）");
+        // 引号安全：恶意 id 不逃逸字符串（serde_json 会转义双引号）。
+        let evil = float_session_preset("a\";alert(1);//");
+        assert!(evil.contains("a\\\";alert(1);//"), "应 JSON 转义: {evil}");
+    }
+
+    #[test]
+    fn pet_and_float_mode_scripts_present() {
+        assert!(PET_MODE_SCRIPT.contains("__DSH_PET__"));
+        assert!(PET_MODE_SCRIPT.contains("harness-pet-root"), "对齐 Electron：只保留宠物根节点");
+        assert!(PET_MODE_SCRIPT.contains("background:transparent"));
+        assert!(FLOAT_BAR_SCRIPT.contains("__dsh_desktop_floatbar__"));
+        assert!(FLOAT_BAR_SCRIPT.contains("floatWindow.close"));
+    }
+
+    #[test]
+    fn urlencode_keeps_safe_and_escapes_rest() {
+        assert_eq!(urlencode("AZaz09-_.~"), "AZaz09-_.~");
+        assert_eq!(urlencode("a b&c"), "a%20b%26c");
+        assert_eq!(urlencode("中"), "%E4%B8%AD");
+    }
+
+    #[test]
+    fn parse_url_accepts_local_rejects_junk() {
+        assert!(parse_url("http://127.0.0.1:51731/").is_ok());
+        assert!(parse_url("not a url").is_err());
+        // scheme 不设限（围栏在 on_navigation 层）；只测形态拒绝。
+    }
 }

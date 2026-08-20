@@ -104,3 +104,31 @@ mod tests {
         assert!(fence().ensure(Path::new(r"C:\Users\u\.dsh\sessions\work\notes.md")).is_ok());
     }
 }
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+
+    #[test]
+    fn multi_root_fence() {
+        let f = Fence::new([PathBuf::from(r"C:\a"), PathBuf::from(r"D:\b")]);
+        assert!(f.contains(Path::new(r"C:\a\x")));
+        assert!(f.contains(Path::new(r"D:\b\y\z")));
+        assert!(!f.contains(Path::new(r"C:\c")));
+        assert!(!f.contains(Path::new(r"D:\d")));
+    }
+
+    #[test]
+    fn ensure_returns_cleaned_path() {
+        let f = Fence::new([PathBuf::from(r"C:\root")]);
+        let cleaned = f.ensure(Path::new(r"C:\root\sub\..\x.md")).unwrap();
+        assert_eq!(cleaned, PathBuf::from(r"C:\root\x.md"), "应返回消解 .. 后的清洗路径");
+    }
+
+    #[test]
+    fn empty_fence_rejects_everything() {
+        let f = Fence::new(Vec::<PathBuf>::new());
+        assert!(!f.contains(Path::new(r"C:\any")));
+        assert!(f.ensure(Path::new("relative.txt")).is_err());
+    }
+}

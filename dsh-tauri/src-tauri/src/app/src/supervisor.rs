@@ -447,3 +447,136 @@ impl WinFlags for Command {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// 仓库根定位（与装配层 find_repo_root 同规则）。
+    fn repo_root() -> Option<std::path::PathBuf> {
+        let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        for _ in 0..6 {
+            if dir.join("dsh-desktop").join("vendor").join("node").exists() {
+                return Some(dir);
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        None
+    }
+
+    /// 干净临时 home + userData（测试沙箱）。
+    fn sandbox(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("dsh-tauri-test-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn kernel_version_from_package_json() {
+        let dir = sandbox("ver");
+        let pkg_dir = dir.join("node_modules").join("@deepseek-ai").join("dsh");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("package.json"), r#"{"name":"x","version":"0.1.0-rc.8"}"#).unwrap();
+        assert_eq!(read_kernel_version(&dir), "0.1.0-rc.8");
+        // 缺文件 / 坏 JSON → unknown（不 panic）。
+        assert_eq!(read_kernel_version(&sandbox("ver2")), "unknown");
+        let bad = sandbox("ver3");
+        std::fs::write(bad.join("package.json"), "not json at all").unwrap();
+        assert_eq!(read_kernel_version(&bad), "unknown");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&bad);
+    }
+
+    /// 功能集成：真机 boot 链（sidecar 四步）在沙箱 home 上执行。
+    /// 覆盖：Supervisor::run_sidecar_boot（步骤解析 + ok 判定 + 事件转发）。
+    #[test]
+    fn sidecar_boot_sandbox_integration() {
+        let Some(root) = repo_root() else { eprintln!("[skip] 仓库检出不含 dsh-desktop（CI 无依赖环境）"); return; };
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = sandbox("boot");
+        std::env::set_var("DSH_HOME", &home);
+        std::env::set_var("DSH_TAURI_USERDATA", home.join("ud"));
+        let sv = Supervisor::new(&root);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let result = sv.run_sidecar_boot(&tx, 0);
+        std::env::remove_var("DSH_HOME");
+        std::env::remove_var("DSH_TAURI_USERDATA");
+        assert!(result.is_ok(), "sidecar boot 应成功: {result:?}");
+        // 步骤事件按固定顺序全部转发（data-flow.md §3）。
+        let names: Vec<String> = rx.iter().map(|e| match e { SupervisorEvent::BootStep { name, .. } => name, _ => String::new() }).take(4).collect();
+        assert_eq!(names, vec!["repair", "sync", "patches", "preflight"], "boot 步骤顺序契约");
+        // 沙箱 home 上 profile 结构确已建立（同步器落盘）。
+        assert!(home.join("profiles").join("web").join("cordis.patch.yml").exists(), "profile patch 应已建立");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 功能集成（真机全链）：boot → 内核 spawn → 就绪行 → TCP 可达 → 关停。
+    /// 覆盖：spawn_boot / spawn_kernel / ReadyLineParser 接线 / kill_tree / Job Object。
+    #[test]
+    fn full_boot_to_kernel_ready_integration() {
+        let Some(root) = repo_root() else { eprintln!("[skip] 仓库检出不含 dsh-desktop"); return; };
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = sandbox("full");
+        std::env::set_var("DSH_HOME", &home);
+        std::env::set_var("DSH_TAURI_USERDATA", home.join("ud"));
+        let sv: Arc<Supervisor> = Arc::new(Supervisor::new(&root));
+        assert!(sv.kernel_version.starts_with("0.1.0-rc."), "内核版本应可读: {}", sv.kernel_version);
+        let (tx, rx) = std::sync::mpsc::channel();
+        sv.spawn_boot(tx, None);
+        // boot（~4s）+ 内核就绪（~6s），150s 兜底；先到的 BootStep 逐条核对。
+        let deadline = Instant::now() + Duration::from_secs(150);
+        let mut boot_steps: Vec<String> = Vec::new();
+        let url = loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left.max(Duration::from_millis(1))) {
+                Ok(SupervisorEvent::BootStep { name, ok, .. }) => {
+                    assert!(ok, "boot 步骤 {name} 不应失败");
+                    boot_steps.push(name);
+                }
+                Ok(SupervisorEvent::KernelReady { url, port }) => {
+                    let ok = std::net::TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().unwrap(), Duration::from_secs(3)).is_ok();
+                    assert!(ok, "就绪端口应可连: {port}");
+                    break url;
+                }
+                Ok(other) => panic!("非预期事件: {other:?}"),
+                Err(_) => panic!("150s 内未就绪（boot_steps={boot_steps:?}）"),
+            }
+        };
+        assert_eq!(boot_steps, vec!["repair", "sync", "patches", "preflight"]);
+        assert!(url.starts_with("http://127.0.0.1:"), "就绪 URL 形态: {url}");
+        assert_eq!(sv.state(), RunState::Ready);
+        assert!(sv.kernel_url().is_some());
+        // 关停（杀树；Job Object 兜强杀场景由专测覆盖）。
+        sv.shutdown();
+        std::env::remove_var("DSH_HOME");
+        std::env::remove_var("DSH_TAURI_USERDATA");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn generation_increments_on_restart_and_state_transitions() {
+        let Some(root) = repo_root() else { eprintln!("[skip]"); return; };
+        let sv: Arc<Supervisor> = Arc::new(Supervisor::new(&root));
+        let g0 = sv.inner.lock().unwrap().generation;
+        sv.set_state_for_test(RunState::Ready);
+        assert_eq!(sv.state(), RunState::Ready);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        sv.restart(tx, None);
+        assert_eq!(sv.inner.lock().unwrap().generation, g0 + 1, "restart 应递增代际号");
+        sv.shutdown();
+        assert!(sv.inner.lock().unwrap().stopping);
+        let _ = Ordering::Relaxed;
+    }
+}
+
+#[cfg(test)]
+impl Supervisor {
+    /// 测试辅助：直接设置状态（绕过迁移表）。
+    fn set_state_for_test(&self, s: RunState) {
+        self.inner.lock().unwrap().state = s;
+    }
+}

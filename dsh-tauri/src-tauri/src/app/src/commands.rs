@@ -737,3 +737,109 @@ impl NoWindow for std::process::Command {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn b64_known_vectors() {
+        assert_eq!(b64(b""), "");
+        assert_eq!(b64(b"f"), "Zg==");
+        assert_eq!(b64(b"fo"), "Zm8=");
+        assert_eq!(b64(b"foo"), "Zm9v");
+        assert_eq!(b64(b"foobar"), "Zm9vYmFy");
+        // 二进制安全（RFC 4648：3 字节无填充）。
+        assert_eq!(b64(&[0xffu8; 2]), "//8=");
+        assert_eq!(b64(&[0xffu8; 3]), "////");
+    }
+
+    #[test]
+    fn civil_from_days_epoch_and_known_dates() {
+        // 1970-01-01 = day 0。
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        // 2026-07-19 = day 20653（node: new Date(20653*86400e3) 校准）。
+        assert_eq!(civil_from_days(20653), (2026, 7, 19));
+    }
+
+    #[test]
+    fn chrono_now_shape() {
+        let s = chrono_now();
+        assert_eq!(s.len(), 15, "YYYYMMDD-HHMMSS：{s}");
+        assert_eq!(s.as_bytes()[8], b'-');
+        assert!(s.starts_with("20"), "{s}");
+    }
+
+    #[test]
+    fn atomic_write_replaces_and_cleans_tmp() {
+        let dir = std::env::temp_dir().join(format!("dsh-cmd-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.txt");
+        atomic_write(&f, "v1").unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "v1");
+        atomic_write(&f, "中文 v2").unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "中文 v2");
+        assert!(!f.with_extension("revert-tmp").exists(), "临时文件应被 rename 消费");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn latest_backup_picks_newest_matching_prefix() {
+        let dir = std::env::temp_dir().join(format!("dsh-cmd-bak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(latest_backup(&dir), None, "空目录无备份");
+        std::fs::write(dir.join("dsh-desktop-backup-old.json"), b"1").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(dir.join("dsh-desktop-backup-new.json"), b"2").unwrap();
+        std::fs::write(dir.join("unrelated.json"), b"3").unwrap();
+        let got = latest_backup(&dir).unwrap();
+        assert!(got.ends_with("dsh-desktop-backup-new.json"), "{}", got.display());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// file_revert 功能：围栏内替换（逆序）+ 越界拒绝 + 内容不匹配跳过。
+    #[test]
+    fn file_revert_fence_and_idempotency() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = std::env::temp_dir().join(format!("dsh-cmd-revert-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        // dsh_home = <home>/.dsh（paths 契约）——围栏内文件须在其下。
+        let work = home.join(".dsh").join("sessions").join("w1");
+        std::fs::create_dir_all(&work).unwrap();
+        std::env::set_var("DSH_TEST_HOME", &home);
+        std::fs::write(work.join("a.md"), "after-change").unwrap();
+        std::fs::write(work.join("b.md"), "unrelated-content").unwrap();
+
+        let changes = vec![
+            serde_json::json!({ "path": work.join("a.md").to_string_lossy(), "op": "edit", "oldText": "before-change", "newText": "after-change" }),
+            serde_json::json!({ "path": work.join("b.md").to_string_lossy(), "op": "edit", "oldText": "x", "newText": "keep-me" }),
+        ];
+        let out = file_revert(changes).unwrap();
+        assert_eq!(out["ok"], serde_json::json!(true), "{out}");
+        assert_eq!(out["applied"], serde_json::json!(1), "b.md 内容不匹配应跳过: {out}");
+        assert_eq!(std::fs::read_to_string(work.join("a.md")).unwrap(), "before-change", "应还原为写前文本");
+        assert_eq!(std::fs::read_to_string(work.join("b.md")).unwrap(), "unrelated-content", "不匹配的文件必须原样保留");
+
+        // 越界：home 外路径拒绝（E_FENCE_ROOT 语义：errors 记录、不写）。
+        let outside = std::env::temp_dir().join(format!("dsh-cmd-outside-{}.txt", std::process::id()));
+        std::fs::write(&outside, "secret").unwrap();
+        let out = file_revert(vec![serde_json::json!({ "path": outside.to_string_lossy(), "op": "e", "oldText": "a", "newText": "secret" })]).unwrap();
+        assert_eq!(out["ok"], serde_json::json!(false));
+        assert!(out["errors"].as_array().unwrap()[0].as_str().unwrap().contains("E_FENCE_ROOT"), "{out}");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "secret", "越界文件不得被改");
+
+        std::env::remove_var("DSH_TEST_HOME");
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn sponsor_and_qr_helpers() {
+        let html = crate::windows::sponsor_html("data:image/jpeg;base64,AAA", "data:image/png;base64,BBB");
+        assert!(html.contains("data:image/jpeg;base64,AAA"));
+        assert!(html.contains("data:image/png;base64,BBB"));
+        assert!(html.contains("请作者喝咖啡"));
+    }
+}
