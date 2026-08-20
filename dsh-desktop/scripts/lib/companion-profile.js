@@ -37,6 +37,15 @@ const PLUGIN_FILES = [
 // 配套插件引用的私有依赖（dsh 核心闭包之外）。
 const VENDOR_DEPS = ['schemastery', 'cosmokit', '@standard-schema/spec'];
 
+// 目录级同步的运行资产子目录（正常复制路径全量走这份清单）。
+const SYNC_SUBDIRS = ['lib', 'client', 'data', 'assets', 'src', 'dist', 'public', 'gui', 'node_modules'];
+
+// keep-newer 分支的「缺失资产补齐」清单：与 SYNC_SUBDIRS 的差异是不含
+// node_modules —— 给更新版注入安装包里的旧依赖树，会经由 require 解析顺序
+// 优先命中旧实现，反而破坏新版本代码；其余目录均为静态构建产物
+// （典型：dsh-mini 的 gui/ 手机端快照），更新版缺了就是分发残缺，补齐无害。
+const HEAL_SUBDIRS = SYNC_SUBDIRS.filter((s) => s !== 'node_modules');
+
 // ---------------------------------------------------------------------------
 // 目录/文件清理
 // ---------------------------------------------------------------------------
@@ -230,6 +239,19 @@ function syncCompanionFiles(opts) {
           const dPkg = JSON.parse(fs.readFileSync(dPkgFile, 'utf8'));
           if (dPkg && dPkg.version && compareVersions(dPkg.version, aPkg.version) > 0) {
             if (log) log('插件 ' + p.id + ' 版本 ' + dPkg.version + ' 高于安装包 ' + aPkg.version + '，保留更新版本');
+            // 「保留更新版本」只保护代码文件（lib/、package.json 等）不被降级；
+            // 上游 npm/GitHub 分发包常不带构建产物（dsh-mini 的 gui/ 手机端
+            // 快照），更新版缺这些目录即残缺安装——手机端将持续「GUI 资产缺失」
+            // 且任何重装都无法自愈（本分支每次启动都会跳过）。这里只补整目录
+            // 缺失、绝不覆盖更新版已有文件：
+            for (const sub of HEAL_SUBDIRS) {
+              const sdir = path.join(src, sub);
+              const ddir = path.join(dest, sub);
+              if (fs.existsSync(sdir) && !fs.existsSync(ddir)) {
+                syncDir(sdir, ddir, log);
+                if (log) log('插件 ' + p.id + ' 更新版缺失运行资产目录 ' + sub + '/，已从安装包补齐（不覆盖既有文件）');
+              }
+            }
             if (isBundle) bundleNames.add(p.name);
             continue;
           }
@@ -257,7 +279,7 @@ function syncCompanionFiles(opts) {
         if (onCopyFail) onCopyFail(sf, err);
       }
     }
-    for (const sub of ['lib', 'client', 'data', 'assets', 'src', 'dist', 'public', 'gui', 'node_modules']) {
+    for (const sub of SYNC_SUBDIRS) {
       syncDir(path.join(src, sub), path.join(dest, sub), log);
     }
     if (isBundle) {

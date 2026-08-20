@@ -579,7 +579,7 @@ function buildGuiledIndex() {
       "<div style=\"font-family:system-ui,sans-serif;padding:32px;max-width:520px\">" +
       "<h1>GUI 资产缺失</h1>" +
       "<p>当前 dsh-mini 安装未包含 <code>gui/</code> 运行资产（<code>gui/dist/index.html</code>、<code>gui/manifest.json</code>、<code>gui/bundles/</code>）。</p>" +
-      "<p>请改用最新版安装包（确认内含 <code>gui/</code> 目录）重新安装本插件后重试；若为局域网/移动端连接，请在部署方重新 `npm pack` 后再分发。</p>" +
+      "<p>请重启桌面端（同步器会自动补齐缺失的 <code>gui/</code> 资产）；若仍缺失，改用最新版安装包（确认内含 <code>gui/</code> 目录）重新安装本插件后重试；若为局域网/移动端连接，请在部署方重新 `npm pack` 后再分发。</p>" +
       "</div>";
   }
   const boot = JSON.stringify({ rev, entries: manifest ? manifest.entries : [] });

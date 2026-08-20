@@ -208,3 +208,94 @@ test('syncCompanionFiles: keep-newer-version 分支（dest 版本更高 → 跳�
   assert.ok(r.bundleNames.has('@scope/alpha'), 'keep-newer 分支仍须把 bundle 加入 bundleNames（manifest 登记不缺失）');
   assert.ok(logs.some((m) => m.includes('保留更新版本')), '应有保留更新版本诊断日志');
 });
+
+// ---------------------------------------------------------------------------
+// keep-newer 分支的缺失运行资产补齐（手机端「GUI 资产缺失」自愈，v0.4.2）
+// ---------------------------------------------------------------------------
+
+/** 给 bundle 资产目录补上 gui/ 快照与 node_modules 依赖树（heal 测试夹具）。 */
+function addGuiTreeToAsset(assetsRoot, dirName) {
+  const dir = path.join(assetsRoot, dirName);
+  fs.mkdirSync(path.join(dir, 'gui', 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'gui', 'dist', 'index.html'), '<html>gui-1.4.2</html>');
+  fs.writeFileSync(path.join(dir, 'gui', 'manifest.json'), '{"rev":"r142"}');
+  fs.mkdirSync(path.join(dir, 'gui', 'bundles', 'alpha'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'gui', 'bundles', 'alpha', 'client.js'), 'export {}');
+  fs.mkdirSync(path.join(dir, 'node_modules', 'dep'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'node_modules', 'dep', 'x.js'), 'module.exports = 1;');
+  return dir;
+}
+
+function syncOpts(plugins, assetsRoot, profileDir, vendorRoot, logs) {
+  return {
+    plugins,
+    assetsRoot,
+    profileDir,
+    vendorRoot,
+    removedIds: new Set(),
+    log: (m) => logs.push(m),
+    fail: () => {},
+    onMissingSource: () => {},
+    onCopyFail: () => {},
+    onVerifyFail: () => {},
+    onInstalled: () => {},
+    onVendorSynced: () => {},
+    plan: () => {},
+    dryRun: false,
+  };
+}
+
+test('syncCompanionFiles: keep-newer 且缺 gui/ → 从安装包补齐，不覆盖新版本文件', (t) => {
+  const { profileDir, assetsRoot, vendorRoot, plugins } = makeSyncOpts(t);
+  addGuiTreeToAsset(assetsRoot, 'alpha');
+  // 预置「更新但 gui-less」的安装（上游 npm/GitHub 分发包不带构建产物的形态）
+  const destDir = path.join(profileDir, 'node_modules', '@scope', 'alpha');
+  writeJson(path.join(destDir, 'package.json'), {
+    name: '@scope/alpha',
+    version: '2.0.0',
+    main: 'lib/index.js',
+    dsh: { bundle: { patch: './cordis.patch.yml' } },
+  });
+  fs.mkdirSync(path.join(destDir, 'lib'), { recursive: true });
+  fs.writeFileSync(path.join(destDir, 'lib', 'index.js'), '// newer 2.0.0 code\n');
+  const logs = [];
+  const r = syncCompanionFiles(syncOpts(plugins, assetsRoot, profileDir, vendorRoot, logs));
+  assert.equal(
+    fs.readFileSync(path.join(destDir, 'package.json'), 'utf8').includes('"version": "2.0.0"'),
+    true, '新版本 package.json 必须保留',
+  );
+  assert.equal(fs.readFileSync(path.join(destDir, 'lib', 'index.js'), 'utf8'), '// newer 2.0.0 code\n', '新版本 lib 代码不得被覆盖');
+  assert.equal(fs.readFileSync(path.join(destDir, 'gui', 'dist', 'index.html'), 'utf8'), '<html>gui-1.4.2</html>', '缺失的 gui/dist 应从安装包补齐');
+  assert.ok(fs.existsSync(path.join(destDir, 'gui', 'manifest.json')), '缺失的 gui/manifest.json 应补齐');
+  assert.ok(fs.existsSync(path.join(destDir, 'gui', 'bundles', 'alpha', 'client.js')), '缺失的 gui/bundles 应补齐');
+  assert.ok(!fs.existsSync(path.join(destDir, 'node_modules')), '不得向更新版注入安装包的旧依赖树（require 解析顺序会优先命中旧实现）');
+  assert.ok(r.bundleNames.has('@scope/alpha'), '补齐路径 bundleNames 不缺失');
+  assert.ok(logs.some((m) => m.includes('gui') && m.includes('补齐')), '应有资产补齐诊断日志');
+});
+
+test('syncCompanionFiles: keep-newer 且 gui/ 已存在（半残）→ 不触碰既有目录', (t) => {
+  const { profileDir, assetsRoot, vendorRoot, plugins } = makeSyncOpts(t);
+  addGuiTreeToAsset(assetsRoot, 'alpha');
+  const destDir = path.join(profileDir, 'node_modules', '@scope', 'alpha');
+  writeJson(path.join(destDir, 'package.json'), {
+    name: '@scope/alpha',
+    version: '2.0.0',
+    main: 'lib/index.js',
+    dsh: { bundle: { patch: './cordis.patch.yml' } },
+  });
+  // 半残形态：gui/ 存在但只有用户/上游写入的 stale 文件
+  fs.mkdirSync(path.join(destDir, 'gui', 'bundles'), { recursive: true });
+  fs.writeFileSync(path.join(destDir, 'gui', 'bundles', 'stale.txt'), 'stale');
+  syncCompanionFiles(syncOpts(plugins, assetsRoot, profileDir, vendorRoot, []));
+  assert.equal(fs.readFileSync(path.join(destDir, 'gui', 'bundles', 'stale.txt'), 'utf8'), 'stale', '既有文件不得被覆盖');
+  assert.ok(!fs.existsSync(path.join(destDir, 'gui', 'dist')), '目录已存在时不做增量注入（只补整目录缺失，避免新旧混排）');
+});
+
+test('syncCompanionFiles: 正常全量同步仍复制 gui/（SYNC_SUBDIRS 重构回归）', (t) => {
+  const { profileDir, assetsRoot, vendorRoot, plugins } = makeSyncOpts(t);
+  addGuiTreeToAsset(assetsRoot, 'alpha');
+  syncCompanionFiles(syncOpts(plugins, assetsRoot, profileDir, vendorRoot, []));
+  const destDir = path.join(profileDir, 'node_modules', '@scope', 'alpha');
+  assert.ok(fs.existsSync(path.join(destDir, 'gui', 'dist', 'index.html')), '全量同步必须复制 gui/');
+  assert.ok(fs.existsSync(path.join(destDir, 'node_modules', 'dep', 'x.js')), '全量同步仍复制 node_modules');
+});
