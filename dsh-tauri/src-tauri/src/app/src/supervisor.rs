@@ -162,6 +162,12 @@ impl Supervisor {
     fn boot_waterfall(this: Arc<Self>, tx: Sender<SupervisorEvent>, preferred_port: Option<u16>) {
         {
             let gen = this.inner.lock().unwrap_or_else(|p| p.into_inner()).generation;
+            // ---- [0.5] farm 实体目录去材料化（Electron repairProfileFallback
+            // 等价物，H/V2 实测定论的残余风险）：farm 条目被云同步/复制还原成
+            // 实体目录时内核 heal 直接放弃（"exists and is not a symlink"），
+            // 原生依赖链断裂 → 预设挂载失败。挪开让 heal 重建 junction。
+            // 尽力而为：失败仅日志，绝不阻断 boot 链。
+            this.run_farm_repair();
             // ---- [1] sidecar boot ----
             this.set_state(RunState::Repair);
             let t0 = Instant::now();
@@ -343,6 +349,39 @@ impl Supervisor {
 
     fn inner_crash_reset(&self) { /* 兼容占位：crash_count 复位已直写 */ }
     /// sidecar boot（node cli.js boot），逐步从 stderr 解析 [sidecar] 行转发。
+    /// farm 实体目录去材料化（sidecar/farm-repair.js，node 侧 fs 操作）。
+    /// 失败仅日志（log_line + stderr），绝不影响 boot 链。
+    fn run_farm_repair(&self) {
+        // 双布局：安装形态 app_dir=<install>/resources/dsh-desktop →
+        // ../sidecar（resources/sidecar）；repo 检出 → ../dsh-tauri/sidecar。
+        let installed = self.app_dir.join("..").join("sidecar").join("farm-repair.js");
+        let script = if installed.exists() {
+            installed
+        } else {
+            self.app_dir.join("..").join("dsh-tauri").join("sidecar").join("farm-repair.js")
+        };
+        if !script.exists() {
+            eprintln!("[farm-repair] 脚本缺失（{:?}），跳过", script);
+            return;
+        }
+        let out = Command::new(&self.node_exe)
+            .arg(&script)
+            .arg(&self.app_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .creation_flags_win()
+            .output();
+        match out {
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                for line in stderr.lines().filter(|l| l.contains("[farm-repair]")) {
+                    log_line(line);
+                }
+            }
+            Err(e) => eprintln!("[farm-repair] 执行失败（不阻断）：{e}"),
+        }
+    }
+
     fn run_sidecar_boot(&self, tx: &Sender<SupervisorEvent>, _gen: u64) -> Result<(), String> {
         let out = Command::new(&self.node_exe)
             .arg(&self.sidecar_cli)
@@ -350,6 +389,9 @@ impl Supervisor {
             .arg("--app-dir")
             .arg(&self.app_dir)
             .env("DSH_TAURI_VERSION", env!("CARGO_PKG_VERSION"))
+            // GUI 进程起 console 子进程抑制终端窗（boot 是「启动后弹终端」主源，
+            // 与本文件其余 node spawn 同口径——0.5.0 实测修复）。
+            .creation_flags_win()
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
@@ -771,6 +813,47 @@ impl WinFlags for Command {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    /// #122/#129 假死形态的确定性验证：TCP 握手被 OS 协议栈代答、应用层
+    /// 永不响应——http_alive 必须判死（纯 TCP 探测恒活的正是这种形态）。
+    /// 三态对照：挂死服务器（accept 后不读写）/ 正常 HTTP / 无监听端口。
+    #[test]
+    fn http_alive_detects_zombie_vs_live_vs_dead() {
+        // ① 假死：accept 但永不响应（事件循环卡死的协议栈镜像）
+        let zombie = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let zport = zombie.local_addr().unwrap().port();
+        let zthread = std::thread::spawn(move || {
+            for stream in zombie.incoming() {
+                let _stream: std::net::TcpStream = stream.unwrap();
+                std::thread::sleep(std::time::Duration::from_secs(30)); // 持住连接不响应
+            }
+        });
+        // ② 正常：最小 HTTP 响应（404 也是活）
+        let live = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let lport = live.local_addr().unwrap().port();
+        let lthread = std::thread::spawn(move || {
+            for stream in live.incoming() {
+                let mut s = stream.unwrap();
+                use std::io::{Read, Write};
+                let mut buf = [0u8; 128];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(b"HTTP/1.1 404 Not Found
+Content-Length: 0
+
+");
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(!Supervisor::http_alive(zport), "假死（TCP 通、HTTP 永不响应）必须判死——signal timed out 的根形态");
+        assert!(Supervisor::http_alive(lport), "正常 HTTP（含 404）必须判活");
+        // ③ 端口不存在
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dport = dead.local_addr().unwrap().port();
+        drop(dead);
+        assert!(!Supervisor::http_alive(dport), "无监听端口必须判死");
+        drop(zthread);
+        drop(lthread);
+    }
 
     /// 仓库根定位（与装配层 find_repo_root 同规则）。
     fn repo_root() -> Option<std::path::PathBuf> {
