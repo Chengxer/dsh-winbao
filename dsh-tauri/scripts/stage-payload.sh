@@ -62,7 +62,10 @@ rc() { mirror_dir "$1" "$2"; }
 #      require('../../profile-manifest') 直引根级脚本——缺一件 boot 链即断，
 #      实测曾漏 profile-manifest.js 导致安装包首启全灭）。package-lock.json
 #      不带（payload 不做 npm install）。----
-mirror_dir "$SRC" "$DST"
+# 根文件只拷 *.js + package.json（非全目录镜像）
+  for f in "$SRC"/*.js "$SRC"/package.json; do
+    [ -f "$f" ] && cp -f "$f" "$DST/"
+  done
 
 # ---- scripts / assets：全量镜像 ----
 mirror_dir "$SRC/scripts" "$DST/scripts"
