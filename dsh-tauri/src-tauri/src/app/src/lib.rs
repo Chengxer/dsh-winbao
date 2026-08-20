@@ -38,6 +38,8 @@ pub struct AppState {
     pub paths: shell_core::DshPaths,
     /// supervisor 事件通道（restart_service 复用，保证换页/恢复页路由不断链）。
     pub supervisor_tx: Mutex<Option<std::sync::mpsc::Sender<SupervisorEvent>>>,
+    /// 内核装配失败原因（supervisor 未建立时恢复页展示；None = 正常）。
+    pub boot_error: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -52,6 +54,7 @@ impl AppState {
             last_port: AtomicU32::new(0),
             paths: shell_core::DshPaths::resolve(),
             supervisor_tx: Mutex::new(None),
+            boot_error: Mutex::new(None),
         }
     }
 }
@@ -192,12 +195,27 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(dir.join("loading.html"), pages::LOADING_HTML)?;
     std::fs::write(dir.join("recovery.html"), pages::RECOVERY_HTML)?;
     std::fs::write(dir.join("poc.html"), poc_page::POC_PAGE_HTML)?;
-    let srv = preview_server::PreviewServer::start(&dir)?;
-    let loading_url = srv.url("loading.html");
-    let recovery_url = srv.url("recovery.html");
+    // 静态页服务启动失败（端口耗尽等罕见态）不退出：降级为 data: 内嵌页，
+    // 保住「客户端能打开」的底线（无 IPC，仅静态提示 + 日志路径）。
+    let (loading_url, recovery_url) = match preview_server::PreviewServer::start(&dir) {
+        Ok(srv) => {
+            let l = srv.url("loading.html");
+            let r = srv.url("recovery.html");
+            std::mem::forget(srv);
+            (l, r)
+        }
+        Err(e) => {
+            eprintln!("[pages] preview-server 启动失败（降级 data: 内嵌页）: {e}");
+            let html = format!(
+                "<!doctype html><meta charset=\"utf-8\"><body style=\"font:14px system-ui;background:#0b1220;color:#d7dde4;display:flex;align-items:center;justify-content:center;height:100vh\"><div style=\"max-width:520px\">静态页服务启动失败，请查看日志目录：<br>{}<br>重启应用可重试。</div></body>",
+                shell_core::DshPaths::resolve().logs.display()
+            );
+            let url = format!("data:text/html;charset=utf-8,{}", percent_encode(&html));
+            (url.clone(), url)
+        }
+    };
     *state.loading_url.lock().unwrap() = loading_url.clone();
     *state.recovery_url.lock().unwrap() = recovery_url.clone();
-    std::mem::forget(srv);
 
     // ---- 单实例锁 ----
     let paths = shell_core::DshPaths::resolve();
@@ -221,22 +239,44 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ---- supervisor（PoC 模式不起内核）----
-    let supervisor = Arc::new(Supervisor::new(&find_repo_root()?));
-    *state.supervisor.lock().unwrap() = Some(Arc::clone(&supervisor));
+    // 兼容性第一原则：内核装配失败（安装产物缺 dsh-desktop / vendor 残缺 /
+    // 任何不兼容形态）绝不让进程退出——主窗转恢复页展示原因与重试入口，
+    // 客户端必须能打开。
     app.manage(state);
 
     if !poc_mode {
-        let preferred = load_preferred_port(app.handle());
-        let (tx, rx) = std::sync::mpsc::channel::<SupervisorEvent>();
-        if let Some(st) = app.try_state::<AppState>() {
-            *st.supervisor_tx.lock().unwrap() = Some(tx.clone());
+        if let Err(e) = start_supervisor(app.handle().clone()) {
+            eprintln!("[boot] 内核装配失败（主窗转恢复页，不退出）: {e}");
+            let state = app.state::<AppState>();
+            *state.boot_error.lock().unwrap() = Some(e);
+            let recovery = state.recovery_url.lock().unwrap().clone();
+            let _ = commands::navigate_main(app.handle(), &recovery);
         }
-        supervisor.spawn_boot(tx, preferred);
-        let handle = app.handle().clone();
-        std::thread::spawn(move || route_events(handle, rx));
     }
 
-    setup_tray(app.handle())?;
+    // 托盘失败不影响主窗可用性（日志告警即止）。
+    if let Err(e) = setup_tray(app.handle()) {
+        eprintln!("[tray] 初始化失败（不影响主窗）: {e}");
+    }
+    Ok(())
+}
+
+/// supervisor 装配 + 启动（setup 与恢复页「重启内核 / 重新加载」共用）。
+/// 任何失败只返回 Err(String)，由调用方转恢复页或回显——进程绝不退出。
+fn start_supervisor(app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if state.supervisor.lock().unwrap().is_some() {
+        return Ok(()); // 已装配（恢复页重试幂等）
+    }
+    let root = find_repo_root().map_err(|e| e.to_string())?;
+    let supervisor = Arc::new(Supervisor::new(&root));
+    let (tx, rx) = std::sync::mpsc::channel::<SupervisorEvent>();
+    *state.supervisor_tx.lock().unwrap() = Some(tx.clone());
+    *state.supervisor.lock().unwrap() = Some(Arc::clone(&supervisor));
+    supervisor.spawn_boot(tx, load_preferred_port(&app));
+    let handle = app.clone();
+    std::thread::spawn(move || route_events(handle, rx));
+    *state.boot_error.lock().unwrap() = None;
     Ok(())
 }
 
@@ -300,18 +340,56 @@ fn load_preferred_port(app: &tauri::AppHandle) -> Option<u16> {
     store.get("lastWebPort").ok()?.and_then(|v| v.as_u64()).and_then(|p| u16::try_from(p).ok())
 }
 
+/// 候选目录逐个判定：含 <dir>/dsh-desktop/vendor/node 即视为仓库根/安装根。
+fn locate_repo_root(candidates: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    candidates.iter().find(|c| c.join("dsh-desktop").join("vendor").join("node").exists()).cloned()
+}
+
+/// 内核目录定位（多级回退；找不到只 Err，绝不退出——客户端必须能打开）：
+///   1. DSH_TAURI_REPO_ROOT 显式覆盖（诊断/测试）；
+///   2. 开发态：CARGO_MANIFEST_DIR 向上（编译检出内 dsh-desktop）；
+///   3. 打包态：exe 所在目录向上，含 resources/ 子布局（安装根/dsh-desktop
+///      与 安装根/resources/dsh-desktop 两种产物形态）。
+/// CARGO_MANIFEST_DIR 是编译机绝对路径，在用户机上必然不存在——打包态
+/// 只有 exe 相对布局可靠。
 fn find_repo_root() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    // 开发态：manifest 向上找 dsh-desktop/vendor/node。
+    if let Ok(root) = std::env::var("DSH_TAURI_REPO_ROOT") {
+        let p = std::path::PathBuf::from(&root);
+        if p.join("dsh-desktop").join("vendor").join("node").exists() {
+            return Ok(p);
+        }
+        return Err(format!("DSH_TAURI_REPO_ROOT={root} 不含 dsh-desktop/vendor/node").into());
+    }
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     for _ in 0..6 {
-        if dir.join("dsh-desktop").join("vendor").join("node").exists() {
-            return Ok(dir);
-        }
+        candidates.push(dir.clone());
         if !dir.pop() {
             break;
         }
     }
-    Err("未找到仓库根（dsh-desktop/vendor/node）".into())
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cur = exe.parent().map(|p| p.to_path_buf());
+        while let Some(d) = cur {
+            candidates.push(d.join("resources"));
+            candidates.push(d.clone());
+            cur = d.parent().map(|p| p.to_path_buf());
+        }
+    }
+    locate_repo_root(&candidates)
+        .ok_or_else(|| "未找到内核目录 dsh-desktop（开发检出与安装产物布局均未命中；可设 DSH_TAURI_REPO_ROOT 指定）".into())
+}
+
+/// 极简百分号编码（data: URL 降级页用；UTF-8 字节逐个转义即可）。
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// 托盘：显示主窗 / 打开日志 / 退出（退出前同步杀树）。
@@ -643,4 +721,55 @@ fn inject_diag_probe(app: tauri::AppHandle) {
             }
         });
     });
+}
+
+#[cfg(test)]
+mod repo_root_tests {
+    use super::*;
+
+    /// 构造伪仓库根：<dir>/dsh-desktop/vendor/node。
+    fn fake_root(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("dsh-tauri-root-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("dsh-desktop").join("vendor").join("node")).unwrap();
+        d
+    }
+
+    #[test]
+    fn locate_repo_root_hits_valid_candidate_only() {
+        let good = fake_root("hit");
+        let junk = std::env::temp_dir().join("dsh-tauri-root-definitely-nope");
+        assert_eq!(locate_repo_root(&[junk.clone(), good.clone()]), Some(good.clone()), "命中含 dsh-desktop/vendor/node 的候选");
+        assert_eq!(locate_repo_root(&[]), None, "空候选 → None（调用方转恢复页，不 panic）");
+        assert_eq!(locate_repo_root(&[junk]), None, "无效候选 → None");
+        let _ = std::fs::remove_dir_all(&good);
+    }
+
+    #[test]
+    fn find_repo_root_env_override_wins() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let root = fake_root("env");
+        std::env::set_var("DSH_TAURI_REPO_ROOT", &root);
+        let found = find_repo_root().expect("显式覆盖且布局合法时必须命中");
+        std::env::remove_var("DSH_TAURI_REPO_ROOT");
+        assert_eq!(found, root);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_repo_root_env_override_invalid_is_error() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("DSH_TAURI_REPO_ROOT", std::env::temp_dir());
+        let r = find_repo_root();
+        std::env::remove_var("DSH_TAURI_REPO_ROOT");
+        assert!(r.is_err(), "显式覆盖但布局非法应 Err（提示覆盖值问题）");
+    }
+
+    #[test]
+    fn percent_encode_keeps_unreserved_and_escapes_rest() {
+        assert_eq!(percent_encode("AZaz09-_.~"), "AZaz09-_.~");
+        assert_eq!(percent_encode("a b<c>"), "a%20b%3Cc%3E");
+        // 中文（UTF-8 三字节）逐字节转义。
+        assert_eq!(percent_encode("你"), "%E4%BD%A0");
+    }
 }

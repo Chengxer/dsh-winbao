@@ -101,6 +101,22 @@
 - tauri/modular rebase 后实跑验证：**插件加载失败零行**、invoke 三通道全通、
   UI 完整（会话列表/聊天/composer 截图确认）
 
+### 「客户端必须能打开」加固（任何不兼容形态都不退出）
+- **内核目录定位多级回退**：DSH_TAURI_REPO_ROOT 显式覆盖 → 开发态
+  CARGO_MANIFEST_DIR 向上 → **打包态 exe 所在目录向上**（含 resources/
+  子布局两种产物形态）。此前打包态只有编译机绝对路径，用户机必然找不到
+  内核 → `?` 直接退出不开窗。
+- **装配失败 → 恢复页而非退出**：setup 中 supervisor 装配（find_repo_root /
+  Supervisor::new / spawn_boot）抽出为 start_supervisor，失败仅记录
+  boot_error 并把主窗导航到恢复页；恢复页展示 no-kernel 状态与原因，
+  「重启内核 / 重新加载」按钮重新装配（用户补齐安装产物后无需重启应用）。
+- **托盘初始化失败降级**：日志告警即止，不影响主窗。
+- **静态页服务启动失败降级**：data: 内嵌提示页（percent-encode，无 IPC），
+  保住开窗底线。
+- 语义对齐 Electron 瀑布原则：内核起不来时 App 仍可见、可进日志、可重试。
+- 测试：locate_repo_root 候选命中/无效、env 覆盖（合法命中 + 非法报错）、
+  percent-encode（ASCII 保留 + 中文 UTF-8 三字节）——workspace **106/0 零警告**。
+
 ### 已知限制（后续迭代）
 - backup-export 2MB 上限为上游 desktop-backup.js 原生行为（与 Electron 版一致）
 - image_paste_save 返回 E_NOT_IMPLEMENTED（剪贴板位图）

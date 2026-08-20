@@ -229,7 +229,17 @@ pub fn restart_service(app: AppHandle) -> Result<serde_json::Value, BridgeError>
 pub fn recovery_state(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
     let state = app.state::<AppState>();
     let sv = state.supervisor.lock().unwrap().clone();
-    let Some(sv) = sv else { return Ok(serde_json::json!({ "state": "boot" })); };
+    let Some(sv) = sv else {
+        // 内核未装配（如安装产物缺 dsh-desktop）：客户端仍开着——
+        // 展示装配失败原因与「重启内核」重试入口，而非空状态。
+        let reason = state
+            .boot_error
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| "内核未装配（supervisor 未初始化）".to_string());
+        return Ok(serde_json::json!({ "state": "no-kernel", "reason": reason }));
+    };
     Ok(serde_json::json!({
         "state": format!("{:?}", sv.state()),
         "kernelUrl": sv.kernel_url(),
@@ -247,6 +257,9 @@ pub fn recovery_reload(app: AppHandle) -> Result<serde_json::Value, BridgeError>
             navigate_main(&app, &url)?;
             return Ok(serde_json::Value::Null);
         }
+    } else {
+        // 内核从未装配（装配失败转恢复页后的重试）：重新装配并回 loading 页。
+        crate::start_supervisor(app.clone()).map_err(BridgeError::internal)?;
     }
     // 无 URL：回 loading 页。
     let loading = state.loading_url.lock().unwrap().clone();
@@ -257,9 +270,13 @@ pub fn recovery_reload(app: AppHandle) -> Result<serde_json::Value, BridgeError>
 pub fn recovery_restart(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
     let state = app.state::<AppState>();
     let sv = state.supervisor.lock().unwrap().clone();
-    let sv = sv.ok_or_else(|| BridgeError::internal("supervisor 未初始化"))?;
-    let (tx, _rx) = std::sync::mpsc::channel();
-    sv.recovery_restart(tx);
+    if let Some(sv) = sv {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        sv.recovery_restart(tx);
+    } else {
+        // 内核从未装配：恢复页「重启内核」= 重新装配（如用户刚补齐安装产物）。
+        crate::start_supervisor(app.clone()).map_err(BridgeError::internal)?;
+    }
     let loading = state.loading_url.lock().unwrap().clone();
     navigate_main(&app, &loading).map(|_| serde_json::Value::Null)
 }
