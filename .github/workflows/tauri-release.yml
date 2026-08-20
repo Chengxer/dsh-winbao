@@ -1,0 +1,301 @@
+name: Tauri Release
+
+# Tauri 版三平台发布流水线：
+#   推 v* tag（如 v0.5.0）→ 云端构建 Windows/Linux/macOS 安装包 → 上传 Release
+#   手动触发（workflow_dispatch）→ 指定版本号补传
+#
+# 与旧 Electron release.yml 的区别：走 Tauri CLI（非 electron-builder），
+# 产物为 NSIS/AppImage/dmg；依赖 stage-payload.sh 组装内核 payload。
+#
+# 用法：git tag v0.5.0 && git push origin v0.5.0
+#        gh workflow trigger "Tauri Release" -f version=v0.5.0
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag (e.g. v0.5.0)'
+        required: true
+        default: 'v0.5.0'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    name: Windows x64 (NSIS)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            dsh-tauri/src-tauri/target
+          key: rust-win-${{ hashFiles('dsh-tauri/src-tauri/Cargo.lock') }}
+          restore-keys: rust-win-
+
+      - name: Install dsh-desktop dependencies
+        run: cd dsh-desktop && npm ci --ignore-scripts
+        shell: pwsh
+
+      - name: Download vendor node
+        run: |
+          mkdir -Force dsh-desktop\vendor\node | Out-Null
+          Invoke-WebRequest -Uri 'https://nodejs.org/dist/v22.14.0/win-x64/node.exe' -OutFile dsh-desktop\vendor\node\node.exe
+        shell: pwsh
+
+      - name: Download vendor npm
+        run: |
+          $tmp = "$env:TEMP\npm-pkg"
+          mkdir -Force $tmp | Out-Null
+          Invoke-WebRequest -Uri 'https://registry.npmmirror.com/npm/-/npm-10.9.2.tgz' -OutFile "$tmp\npm.tgz"
+          tar -xzf "$tmp\npm.tgz" -C $tmp
+          mkdir -Force dsh-desktop\vendor\npm | Out-Null
+          Copy-Item "$tmp\package\*" dsh-desktop\vendor\npm\ -Recurse -Force
+        shell: pwsh
+
+      - name: Download rc7 client packages (for compat)
+        run: |
+          $dest = "dsh-desktop\dist\win-unpacked\resources\app\node_modules\@deepseek-ai"
+          mkdir -Force $dest | Out-Null
+          $pkgs = @('dsh-client-web-react','dsh-client-ui-primitives','dsh-client-ui-slots','dsh-client-schema-form','dsh-client-ui-attachment','dsh-client-ui-renderer')
+          foreach ($pkg in $pkgs) {
+            $tmp = "$env:TEMP\pkg-$pkg"
+            mkdir -Force $tmp | Out-Null
+            $url = "https://registry.npmmirror.com/@deepseek-ai/$pkg/-/$pkg-0.1.0-rc.7.tgz"
+            try { Invoke-WebRequest -Uri $url -OutFile "$tmp\pkg.tgz" } catch {
+              $url = "https://registry.npmjs.org/@deepseek-ai/$pkg/-/$pkg-0.1.0-rc.7.tgz"
+              Invoke-WebRequest -Uri $url -OutFile "$tmp\pkg.tgz"
+            }
+            tar -xzf "$tmp\pkg.tgz" -C $tmp
+            mkdir -Force "$dest\$pkg" | Out-Null
+            Copy-Item "$tmp\package\*" "$dest\$pkg\" -Recurse -Force
+          }
+        shell: pwsh
+
+      - name: Stage payload
+        run: bash dsh-tauri/scripts/stage-payload.sh
+        shell: bash
+
+      - name: Run tests
+        run: cd dsh-tauri/src-tauri && cargo test --workspace --quiet
+        shell: bash
+
+      - name: Build installer
+        run: cd dsh-tauri && npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --target x86_64-pc-windows-msvc
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-x64
+          path: dsh-tauri/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  build-linux:
+    name: Linux x64 (AppImage + deb)
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Rust cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            dsh-tauri/src-tauri/target
+          key: rust-linux-${{ hashFiles('dsh-tauri/src-tauri/Cargo.lock') }}
+
+      - name: Install dsh-desktop dependencies
+        run: cd dsh-desktop && npm ci --ignore-scripts
+
+      - name: Download vendor node
+        run: |
+          mkdir -p dsh-desktop/vendor/node
+          wget -q https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.gz
+          tar -xzf node-v22.14.0-linux-x64.tar.gz
+          cp node-v22.14.0-linux-x64/bin/node dsh-desktop/vendor/node/node
+          chmod +x dsh-desktop/vendor/node/node
+
+      - name: Download rc7 client packages
+        run: |
+          dest="dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai"
+          mkdir -p "$dest"
+          for pkg in dsh-client-web-react dsh-client-ui-primitives dsh-client-ui-slots dsh-client-schema-form dsh-client-ui-attachment dsh-client-ui-renderer; do
+            tmp=$(mktemp -d)
+            curl -sL "https://registry.npmmirror.com/@deepseek-ai/$pkg/-/$pkg-0.1.0-rc.7.tgz" -o "$tmp/pkg.tgz" || \
+            curl -sL "https://registry.npmjs.org/@deepseek-ai/$pkg/-/$pkg-0.1.0-rc.7.tgz" -o "$tmp/pkg.tgz"
+            tar -xzf "$tmp/pkg.tgz" -C "$tmp"
+            mkdir -p "$dest/$pkg"
+            cp -r "$tmp/package/"* "$dest/$pkg/"
+          done
+
+      - name: Stage payload
+        run: bash dsh-tauri/scripts/stage-payload.sh
+
+      - name: Build installer
+        run: cd dsh-tauri && npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --target x86_64-unknown-linux-gnu
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: |
+            dsh-tauri/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+            dsh-tauri/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+          if-no-files-found: warn
+
+  build-macos:
+    name: macOS ARM64 (dmg)
+    runs-on: macos-14
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Rust cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            dsh-tauri/src-tauri/target
+          key: rust-mac-${{ hashFiles('dsh-tauri/src-tauri/Cargo.lock') }}
+
+      - name: Install dsh-desktop dependencies
+        run: cd dsh-desktop && npm ci --ignore-scripts
+
+      - name: Download vendor node
+        run: |
+          mkdir -p dsh-desktop/vendor/node
+          wget -q https://nodejs.org/dist/v22.14.0/node-v22.14.0-darwin-arm64.tar.gz
+          tar -xzf node-v22.14.0-darwin-arm64.tar.gz
+          cp node-v22.14.0-darwin-arm64/bin/node dsh-desktop/vendor/node/node
+          chmod +x dsh-desktop/vendor/node/node
+
+      - name: Download rc7 client packages
+        run: |
+          dest="dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai"
+          mkdir -p "$dest"
+          for pkg in dsh-client-web-react dsh-client-ui-primitives dsh-client-ui-slots dsh-client-schema-form dsh-client-ui-attachment dsh-client-ui-renderer; do
+            tmp=$(mktemp -d)
+            curl -sL "https://registry.npmmirror.com/@deepseek-ai/$pkg/-/$pkg-0.1.0-rc.7.tgz" -o "$tmp/pkg.tgz" || \
+            curl -sL "https://registry.npmjs.org/@deepseek-ai/$pkg/-/$pkg-0.1.0-rc.7.tgz" -o "$tmp/pkg.tgz"
+            tar -xzf "$tmp/pkg.tgz" -C "$tmp"
+            mkdir -p "$dest/$pkg"
+            cp -r "$tmp/package/"* "$dest/$pkg/"
+          done
+
+      - name: Stage payload
+        run: bash dsh-tauri/scripts/stage-payload.sh
+
+      - name: Build installer
+        run: cd dsh-tauri && npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --target aarch64-apple-darwin
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: dsh-tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: warn
+
+  publish:
+    name: Publish Release
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    if: always() && !cancelled() && (needs.build-windows.result == 'success' || needs.build-linux.result == 'success' || needs.build-macos.result == 'success')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect installers
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name "*.exe" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.dmg" \) -exec cp {} release-assets/ \;
+          echo "=== 产物清单 ==="
+          ls -lh release-assets/
+
+      - name: Extract version
+        id: ver
+        run: echo "version=${{ github.event.inputs.version || github.ref_name }}" >> $GITHUB_OUTPUT
+
+      - name: Generate release notes
+        run: |
+          VERSION=${{ steps.ver.outputs.version }}
+          cat > release-notes.md << EOF
+          # DSH Desktop ${VERSION} — Tauri 2
+
+          ## 安装包
+
+          | 平台 | 格式 |
+          |------|------|
+          | Windows x64 | NSIS 安装包 (.exe) |
+          | Linux x64 | AppImage / .deb |
+          | macOS ARM64 | .dmg |
+
+          ## 升级说明
+
+          1. 完全退出当前 DSH Desktop（托盘右键 → 退出）
+          2. 下载对应平台安装包并运行
+          3. 安装器自动检测旧版并装回原目录（数据不丢失）
+          4. 首次启动自动同步全部插件与设置
+
+          ## 详细更新日志
+
+          见 [CHANGELOG.md](https://github.com/myYangyunfan/dsh_desktop/blob/tauri/modular/dsh-tauri/CHANGELOG.md)
+          EOF
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: DSH Desktop ${{ steps.ver.outputs.version }}
+          body_path: release-notes.md
+          files: release-assets/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
