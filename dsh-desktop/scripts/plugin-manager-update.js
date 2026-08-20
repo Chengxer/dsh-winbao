@@ -9,9 +9,20 @@
 
 const { compareVersions } = require('./lib/versions');
 
-/** npm registry 的「最新版本」端点（官方 / npmmirror 镜像）。 */
+/**
+ * npm registry 的「最新版本」端点（官方 / npmmirror 镜像）。
+ * U4 实测发现曾硬编码两域名——内网/自建镜像用户完全无法配置。
+ * 现支持 NPM_CONFIG_REGISTRY 环境变量覆盖（官方 npm 同名变量，语义一致：
+ * 设了就只走它；未设保持官方→镜像双源回退）。
+ */
 function npmLatestUrl(pkg, mirror) {
   const enc = encodeURIComponent(String(pkg));
+  const custom = process.env.NPM_CONFIG_REGISTRY;
+  if (custom) {
+    const base = String(custom).replace(/\/+$/, '');
+    // 自定义 registry 优先于双源回退：用户显式配置即单一事实源。
+    return base + '/' + enc + '/latest';
+  }
   const host = mirror ? 'registry.npmmirror.com' : 'registry.npmjs.org';
   return 'https://' + host + '/' + enc + '/latest';
 }

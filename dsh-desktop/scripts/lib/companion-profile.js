@@ -272,6 +272,20 @@ function syncCompanionFiles(opts) {
                 }
               }
             } catch { /* 自愈失败不阻断同步主流程 */ }
+            // U4 实测：插件中心 npm 更新是目录级替换，分发包不带根级
+            // dsh.plugin.json（插件 id/client 入口元数据）→ 两次更新之间
+            // 永久缺失。HEAL_SUBDIRS 只补目录，这里补根级文件（仍只补
+            // 完全缺失、绝不覆盖）。
+            for (const metaFile of ['dsh.plugin.json']) {
+              const srcF = path.join(src, metaFile);
+              const dstF = path.join(dest, metaFile);
+              if (fs.existsSync(srcF) && !fs.existsSync(dstF)) {
+                try {
+                  fs.copyFileSync(srcF, dstF);
+                  if (log) log('插件 ' + p.id + ' 更新版缺根级元数据 ' + metaFile + '，已从安装包补齐（U4 自愈）');
+                } catch { /* 补齐失败不阻断 */ }
+              }
+            }
             if (isBundle) bundleNames.add(p.name);
             continue;
           }
