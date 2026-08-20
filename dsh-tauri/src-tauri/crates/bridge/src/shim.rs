@@ -155,3 +155,53 @@ mod dialog_polyfill_tests {
         assert!(BRIDGE_SHIM_JS.contains("__dshDialogPolyfilled"), "幂等守卫");
     }
 }
+
+#[cfg(test)]
+mod window_chrome_tests {
+    use super::BRIDGE_SHIM_JS;
+
+    /// 内核页窗口控制条：decorations:false 主窗导航到内核 Web UI 后，
+    /// 页面不认识 data-tauri-drag-region（Electron 用 -webkit-app-region，
+    /// WebView2 不支持）→ 不能拖、无窗口按钮（用户实测 bug）。垫片必须注入。
+    #[test]
+    fn window_chrome_injection_present() {
+        assert!(BRIDGE_SHIM_JS.contains("dsh-tauri-chrome"), "控制条特征标记/id 缺失");
+        assert!(BRIDGE_SHIM_JS.contains("data-tauri-drag-region"), "拖拽条必须用 Tauri drag-region 机制");
+        // 按钮必须走垫片已有的 windowControls 桥方法（window_control 命令）。
+        for m in ["windowControls.minimize()", "windowControls.toggleMaximize()", "windowControls.close()"] {
+            assert!(BRIDGE_SHIM_JS.contains(m), "按钮缺桥调用 {m}");
+        }
+        // 最大化/还原图标状态同步。
+        assert!(BRIDGE_SHIM_JS.contains("windowControls.isMaximized()"));
+        assert!(BRIDGE_SHIM_JS.contains("windowControls.onMaximizeChange"));
+        // 内容下推契约：普通流走 padding，fixed 侧边栏（dsh-better-sidebar）读属性。
+        assert!(BRIDGE_SHIM_JS.contains("data-dsh-title-bar-height"), "缺 body 下推的属性声明");
+        assert!(BRIDGE_SHIM_JS.contains("padding-top:"), "缺 body padding 下推");
+    }
+
+    /// 控制条只注入内核页：浮窗/宠物窗/壳页各有标题栏，注入会重复遮挡。
+    #[test]
+    fn window_chrome_scoped_to_kernel_page() {
+        for marker in ["__DSH_FLOAT__", "__DSH_PET__", "loading|recovery|poc"] {
+            assert!(BRIDGE_SHIM_JS.contains(marker), "跳过条件缺 {marker}");
+        }
+        assert!(BRIDGE_SHIM_JS.contains("getElementById(CHROME_ID)"), "幂等检查（先查已存在标记）");
+    }
+
+    /// 初始化脚本先于页面脚本（DOM 未建）→ 等 body；内核 SPA 重挂载 → 自愈。
+    #[test]
+    fn window_chrome_waits_for_body_and_self_heals() {
+        assert!(BRIDGE_SHIM_JS.contains("MutationObserver"), "等 body/重挂观察");
+        assert!(BRIDGE_SHIM_JS.contains("onBodyReady"), "body 未就绪时不早注入");
+        // 全程 try/catch 包裹：注入失败不得影响桥主流程。
+        assert!(BRIDGE_SHIM_JS.contains("注入失败不影响页面主流程"));
+    }
+
+    /// 双击最大化由 Tauri 内置 drag-region 脚本处理（mousedown detail===2 →
+    /// internal_toggle_maximize）；垫片自己再挂 dblclick 监听会双重切换。
+    #[test]
+    fn window_chrome_no_manual_dblclick_handler() {
+        assert!(!BRIDGE_SHIM_JS.contains("'dblclick'"), "双击切换须交给 Tauri 内置脚本，不得自挂监听");
+        assert!(!BRIDGE_SHIM_JS.contains("ondblclick"), "同上");
+    }
+}

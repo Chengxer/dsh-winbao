@@ -228,6 +228,130 @@
 
   Object.defineProperty(window, 'dshDesktop', { value: dshDesktop, writable: false, configurable: false });
 
+  // ---- 窗口控制条注入（内核页）----------------------------------------
+  // 主窗 decorations:false：loading/recovery/poc 壳页自带标题栏，但内核
+  // Web UI 只认识 Electron 的 -webkit-app-region（WebView2 不支持）→ 导航
+  // 到内核页后既不能拖动也没有窗口按钮（用户实测 bug）。对齐 Electron
+  // preload 的 injectChrome：注入全宽 36px 壳标题栏（拖拽 + — □ ×），body
+  // 下推 36px，并声明 data-dsh-title-bar-height 供内核生态里 fixed 定位的
+  // 侧边栏（dsh-better-sidebar）自行下移。
+  //  - 拖拽/双击最大化交给 Tauri 内置 data-tauri-drag-region 脚本（mousedown
+  //    → start_dragging；detail===2 → internal_toggle_maximize），垫片不另挂
+  //    dblclick（会双重切换）；bare 属性只对「直接命中该元素」生效，故左侧
+  //    每个装饰子元素都带属性，右侧按钮天然阻断。
+  //  - 浮窗（__DSH_FLOAT__，自带浮窗条）/宠物窗（__DSH_PET__）/壳页
+  //    （loading|recovery|poc.html 自带 #bar/#titlebar）跳过，防重复控制条。
+  //  - 初始化脚本先于页面脚本运行，DOM 未建：MutationObserver 等 body 出现
+  //    再注入；内核 SPA/插件可能移除 body 直接子元素 → 观察 body childList，
+  //    被移除就重注（幂等：先查 #dsh-tauri-chrome）。
+  //  - 样式走 <style> 元素（内核页 CSP 不放行内联属性）；全程 try/catch，
+  //    注入失败绝不影响桥主流程。
+  var CHROME_ID = 'dsh-tauri-chrome';
+  var CHROME_H = 36;
+  function injectChromeBar() {
+    try {
+      if (document.getElementById(CHROME_ID)) return; // 幂等（重复注入/重注防御）
+      if (window.__DSH_FLOAT__ || window.__DSH_PET__) return; // 专属窗形态，各有各的条
+      if (/(^|\/)(loading|recovery|poc)\.html$/.test(location.pathname)) return; // 壳页自带标题栏
+      var shellBar = document.getElementById('bar');
+      if ((shellBar && shellBar.hasAttribute('data-tauri-drag-region')) || document.getElementById('titlebar')) return;
+
+      var head = document.head || document.documentElement;
+      var css = document.createElement('style');
+      css.setAttribute('data-for', CHROME_ID);
+      css.textContent =
+        '#' + CHROME_ID + '{position:fixed;top:0;left:0;right:0;height:' + CHROME_H + 'px;z-index:2147483000;' +
+          'display:flex;align-items:center;padding:0 0 0 12px;user-select:none;box-sizing:border-box;' +
+          'font:12.5px/16px "Segoe UI","Microsoft YaHei",system-ui,sans-serif;' +
+          'background:rgba(24,30,38,.92);border-bottom:1px solid #232b36;color:#d7dde4}' +
+        '#' + CHROME_ID + ' .dch-logo{width:18px;height:18px;border-radius:5px;margin-right:8px;flex:none;' +
+          'background:linear-gradient(135deg,#4f7cff,#36d1dc)}' +
+        '#' + CHROME_ID + ' .dch-title{font-weight:600;white-space:nowrap}' +
+        '#' + CHROME_ID + ' .dch-badge{font-size:10px;line-height:14px;padding:1px 6px;border-radius:999px;' +
+          'margin-left:8px;white-space:nowrap;color:#93a5d8;border:1px solid rgba(255,255,255,.12);' +
+          'font-family:Consolas,monospace}' +
+        '#' + CHROME_ID + ' .dch-spacer{flex:1}' +
+        '#' + CHROME_ID + ' .dch-btns{display:flex;align-items:center;align-self:stretch}' +
+        '#' + CHROME_ID + ' button{width:44px;height:32px;border:0;background:transparent;color:#d7dde4;' +
+          'font-size:15px;line-height:32px;padding:0;cursor:pointer}' +
+        '#' + CHROME_ID + ' button:hover{background:#2a3341;color:#fff}' +
+        '#' + CHROME_ID + ' button.dch-close:hover{background:#e81123;color:#fff}';
+      head.appendChild(css);
+      // 内容区整体下移（对齐 Electron：普通流走 padding，fixed 侧边栏走属性声明）。
+      var layout = document.createElement('style');
+      layout.setAttribute('data-for', CHROME_ID + '-layout');
+      layout.textContent = 'body{box-sizing:border-box!important;padding-top:' + CHROME_H + 'px!important}';
+      head.appendChild(layout);
+      try { document.documentElement.setAttribute('data-dsh-title-bar-height', String(CHROME_H)); } catch (e2) {}
+
+      function dragEl(el) { el.setAttribute('data-tauri-drag-region', ''); return el; }
+      function mkBtn(cls, glyph, tip, fn) {
+        var b = document.createElement('button');
+        b.className = cls; b.textContent = glyph; b.title = tip; b.setAttribute('aria-label', tip);
+        b.onclick = function () { try { fn(); } catch (e2) { /* 桥不可用时静默 */ } };
+        return b;
+      }
+      var bar = dragEl(document.createElement('div'));
+      bar.id = CHROME_ID;
+      var logo = dragEl(document.createElement('span'));
+      logo.className = 'dch-logo';
+      var title = dragEl(document.createElement('span'));
+      title.className = 'dch-title'; title.textContent = 'DSH Desktop';
+      var badge = dragEl(document.createElement('span'));
+      badge.className = 'dch-badge'; badge.style.display = 'none';
+      var spacer = dragEl(document.createElement('span'));
+      spacer.className = 'dch-spacer';
+      var btns = document.createElement('div');
+      btns.className = 'dch-btns';
+      var maxBtn = mkBtn('dch-max', '\u25A1', '最大化', function () { dshDesktop.windowControls.toggleMaximize(); });
+      btns.appendChild(mkBtn('dch-min', '\u2500', '最小化', function () { dshDesktop.windowControls.minimize(); }));
+      btns.appendChild(maxBtn);
+      btns.appendChild(mkBtn('dch-close', '\u2715', '关闭', function () { dshDesktop.windowControls.close(); }));
+      bar.appendChild(logo); bar.appendChild(title); bar.appendChild(badge);
+      bar.appendChild(spacer); bar.appendChild(btns);
+      document.body.appendChild(bar);
+
+      // 最大化/还原图标状态（失败静默——浏览器模式常见）。
+      function setMaxGlyph(max) {
+        try { maxBtn.textContent = max ? '\u2750' : '\u25A1'; maxBtn.title = max ? '还原' : '最大化'; } catch (e2) {}
+      }
+      try { dshDesktop.windowControls.isMaximized().then(setMaxGlyph).catch(function () {}); } catch (e2) {}
+      try { dshDesktop.windowControls.onMaximizeChange(setMaxGlyph); } catch (e2) {}
+      // 版本徽章回填（getInfo 失败仅无徽章，不影响条本身）。
+      try {
+        dshDesktop.getInfo().then(function (info) {
+          if (info && typeof info.appVersion === 'string' && info.appVersion) {
+            badge.textContent = 'v' + info.appVersion; badge.style.display = '';
+          }
+        }).catch(function () {});
+      } catch (e2) {}
+    } catch (e) { /* 注入失败不影响页面主流程 */ }
+  }
+  function onBodyReady(cb) {
+    if (document.body) { cb(); return; }
+    try {
+      var mo = new MutationObserver(function () {
+        if (document.body) { mo.disconnect(); cb(); }
+      });
+      mo.observe(document.documentElement, { childList: true });
+    } catch (e) {
+      // 观察器不可用的极端环境：退化到 DOMContentLoaded / 立即执行。
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { cb(); });
+      else cb();
+    }
+  }
+  onBodyReady(function () {
+    injectChromeBar();
+    try {
+      // 内核 SPA/插件重挂载防御：控制条是 body 直接子元素，childList（无需
+      // subtree）即可精确感知「被移除」→ 重注（injectChromeBar 自身幂等）。
+      var watch = new MutationObserver(function () {
+        if (!document.getElementById(CHROME_ID)) injectChromeBar();
+      });
+      watch.observe(document.body, { childList: true });
+    } catch (e) { /* 同上：防御性兜底 */ }
+  });
+
   // 自初始化：回填 appVersion（失败静默——浏览器模式常见）。
   try { dshDesktop.getInfo().catch(function () {}); } catch (e) {}
 })();
