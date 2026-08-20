@@ -453,6 +453,16 @@ function injectChrome() {
   style.textContent = CHROME_CSS;
   document.head.appendChild(style);
 
+  // rc.8 菜单视口封顶（issue #36 的 rc.8 形态）：dsh rc.8 起菜单组件移入
+  // 压缩后的前端 dist 产物（dsh-web-frontend），文本手术锚点不再可用；且
+  // 其放置夹紧 `min(max(y,M), vh-lh-M)` 在列表高于视口时仍会裁掉顶部条目
+  // （与 rc.7 的 bug 同源）。改用语义选择器注入 CSS：列表自身封顶 + 滚动，
+  // 不依赖 CSS-module 哈希类名，对后续版本漂移稳健。rc.7 树仍由
+  // patch-menu-viewport 的文本补丁覆盖（双形态兼容）。
+  const menuCap = document.createElement('style');
+  menuCap.textContent = '[role="menu"]{max-height:min(calc(100vh - 24px),560px);overflow-y:auto}';
+  document.head.appendChild(menuCap);
+
   // 内容区整体下移，避免遮挡 Web UI 顶部。
     // 向页面声明自绘标题栏高度：fixed 定位的侧边栏（dsh-better-sidebar）读取
     // 该属性自动下移顶部标签条，body padding 只对普通流内容生效。

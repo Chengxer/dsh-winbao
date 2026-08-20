@@ -38,6 +38,8 @@ window.__ModuleLoader__.load({
 			runningRejected: "该对话正在运行，无法删除：请先停止它再删除",
 			ok: "已操作",
 			failed: "操作失败",
+			timeoutTitle: "后端响应超时",
+			timeoutHint: "DSH 服务可能正忙或暂时无响应（输入不显示、内容刷不出来通常也是这个原因）。",
 			unknownSession: "未知会话",
 			updatedAt: "更新时间",
 			workspace: "项目",
@@ -112,13 +114,37 @@ window.__ModuleLoader__.load({
 			return "unknown error";
 		}
 
+		// RPC 异常的可读化：连接层的 AbortSignal.timeout 超时在 Chromium 里
+		// 是裸 DOMException "signal timed out"（后端假死/正忙时所有带超时
+		// 的请求都报这个），直接 alert 出来完全没法看懂。超时类错误换成人
+		// 话 + 提供壳层「重启服务」出口（window.dshDesktop.restartService
+		// 是受监管的原地重启，不产生游离进程）。
+		function isTimeoutError(error) {
+			var msg = (error && error.message) || String(error || "");
+			return /signal timed out|timeouterror|the operation was aborted/i.test(msg);
+		}
+
+		function reportActionError(error) {
+			if (isTimeoutError(error)) {
+				var restart = window.confirm(
+					L.timeoutTitle + "\n\n" + L.timeoutHint +
+					"\n\n是否立即重启 DSH 服务？（进行中的生成会中断，历史会话不受影响）"
+				);
+				if (restart && window.dshDesktop && typeof window.dshDesktop.restartService === "function") {
+					try { window.dshDesktop.restartService(); } catch (e) { /* 桥不可用时静默 */ }
+				}
+				return;
+			}
+			window.alert(L.failed + ": " + ((error && error.message) || error));
+		}
+
 		async function unarchiveSession(context, sessionId) {
 			try {
 				const { result } = await workspaceApi(context).unarchiveSession({ sessionId });
 				if (!result.ok) window.alert(L.failed + ": " + rpcErrorMessage(result));
 				return result.ok === true;
 			} catch (error) {
-				window.alert(L.failed + ": " + ((error && error.message) || error));
+				reportActionError(error);
 				return false;
 			}
 		}
@@ -134,7 +160,7 @@ window.__ModuleLoader__.load({
 				}
 				return true;
 			} catch (error) {
-				window.alert(L.failed + ": " + ((error && error.message) || error));
+				reportActionError(error);
 				return false;
 			}
 		}

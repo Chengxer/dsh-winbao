@@ -235,8 +235,16 @@ function transformProfileBundleAppBoot(src, file) {
   return { status: 'changed', src: out.src };
 }
 
+// rc.8 起 dsh 主包的两个 profile-boot-*.js 中可能有一个是纯 re-export 存根
+// （如 `import { o as runProfile } from "./profile-boot-DG5t9aNs.js"; export { runProfile };`），
+// 真实装配面在另一个 bundle 里（由它自身的注入覆盖）。存根没有可守护的代码，
+// 不算版本漂移，按已处理跳过，避免每次启动误报失配。
+const PROFILE_BOOT_STUB_RE = /^import\s*\{[^}]+\}\s*from\s*"\.\/profile-boot-[A-Za-z0-9_-]+\.js";\s*export\s*\{[^}]+\};?\s*$/;
+
 function transformProfileBundleProfileBoot(src, file) {
   let current = src;
+  // rc.8 纯 re-export 存根：无 heal/bundle 装配面，无需补丁（幂等静默）。
+  if (PROFILE_BOOT_STUB_RE.test(current.trim())) return { status: 'already' };
   let changed = false;
   // heal 调用防护（独立幂等标记）：入口 bundle 无 heal 调用时静默。
   const heal = applyProfileBootHealGuard(current);
@@ -289,6 +297,10 @@ function transformSettingsSectionGuard(src, file) {
 // dsh-client-ui-workspace 搜索栏修复（原 applyWorkspaceSearchRailFix）。
 // ---------------------------------------------------------------------------
 const WORKSPACE_SEARCH_RAIL_MARKER = 'dsh-desktop fix: rail search expansion';
+// rc.8 起上游原生包含了同款守卫（无 marker 注释的裸形态）：`if (!wide ||
+// !searchExpanded || searchOnExpand) return;`。命中即视为已修复（幂等），
+// rc.7 及更早仍走下方 OLD 锚点路径（双形态兼容）。
+const WORKSPACE_SEARCH_RAIL_NATIVE = 'if (!wide || !searchExpanded || searchOnExpand) return;';
 const WORKSPACE_SEARCH_RAIL_OLD_GUARD = '\t\t\t\tif (!wide || !searchExpanded) return;';
 const WORKSPACE_SEARCH_RAIL_NEW_GUARD = '\t\t\t\tif (!wide || !searchExpanded || searchOnExpand) return; // ' + WORKSPACE_SEARCH_RAIL_MARKER;
 const WORKSPACE_SEARCH_RAIL_OLD_DEPS = '\t\t\t}, [\n\t\t\t\tnormalizedQuery,\n\t\t\t\twide,\n\t\t\t\tsearchExpanded\n\t\t\t]);';
@@ -296,6 +308,8 @@ const WORKSPACE_SEARCH_RAIL_NEW_DEPS = '\t\t\t}, [\n\t\t\t\tnormalizedQuery,\n\t
 
 function transformWorkspaceSearchRailFix(src, file) {
   if (src.includes(WORKSPACE_SEARCH_RAIL_MARKER)) return { status: 'already' };
+  // rc.8+ 原生守卫（无 marker）：视为已修复，不算版本漂移。
+  if (src.includes(WORKSPACE_SEARCH_RAIL_NATIVE)) return { status: 'already' };
   if (!src.includes(WORKSPACE_SEARCH_RAIL_OLD_GUARD) || !src.includes(WORKSPACE_SEARCH_RAIL_OLD_DEPS)) {
     return { status: 'anchor-missing', detail: '锚点未匹配（dsh 版本可能已变化），跳过 ' + file };
   }

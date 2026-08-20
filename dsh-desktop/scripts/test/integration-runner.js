@@ -844,11 +844,17 @@ SCENARIOS['runtime-patches-suite'] = async (t) => {
   await t.waitFor('boot-ready', 240000, 'Web UI 就绪');
   await t.waitFor('界面已稳定', 60000, '稳定期完成');
   const logText = fs.readFileSync(t.desktopLog, 'utf8');
+  // rc.8 起的布局差异：dsh-client-ui-primitives 并入前端 dist 产物（包不再
+  // 落盘），菜单视口封顶改由 preload CSS 注入（无文本补丁目标、无前缀日志）。
+  // rc.7 树仍要求文本补丁与前缀日志（双形态断言）。
+  const nmProbe = path.join(t.dshHome, 'profiles', 'node_modules', '@deepseek-ai');
+  const hasPrimitives = fs.existsSync(path.join(nmProbe, 'dsh-client-ui-primitives', 'lib', 'index.js'));
   // 有日志产出的补丁家族（已应用/锚点失配/写入成功均有前缀日志）
   for (const prefix of [
     'runtime 补丁:', '提示词暴露补丁:', '识图发送补丁:', '识图密钥补丁:',
     'workspace 搜索栏修复:', '插件页标签合并:', 'web-search baseURL 补丁',
-    'menu-viewport 补丁', 'session-manage 补丁',
+    ...(hasPrimitives ? ['menu-viewport 补丁'] : []),
+    'session-manage 补丁',
   ]) {
     t.assert(logText.includes(prefix), '启动日志应包含补丁前缀: ' + prefix);
   }
@@ -862,19 +868,18 @@ SCENARIOS['runtime-patches-suite'] = async (t) => {
   // 闪跳修复（dsh-client-runtime）
   const runtime = readOf(path.join('dsh-client-runtime', 'lib', 'client.js'));
   t.assert(runtime.includes('(value) => baselineByKey.get(keyOf(value)) ?? value).filter((value) => value !== void 0);'), '闪跳修复应落盘');
-  // host-apiproxy：白名单 + 识图转述 + 密钥修复 + 会话删除 RPC。
-  // 注：rc.7 起设置命名空间改为插件自描述的动态描述符，静态白名单注入按设计
-  // 跳过（transformExposeFix 的 DYNAMIC_SETTINGS_ANCHOR 判定 'already'），因此
-  // 'dsh-conversation-tweaks' 字面量在 rc.7 产物中不存在——改为断言「动态锚点
-  // 或旧版静态白名单产物二者之一存在」（陈旧断言与 rc.7 现实同步）。
+  // host-apiproxy：白名单 + 识图转述 + 密钥修复 + 会话删除 RPC
+  // rc.7+ 动态 settings 机制下提示词暴露为原生支持（apiproxy 含
+  // `settings.describe(...).map(namespaceView)`，无 "dsh-conversation-tweaks"
+  // 数组追加 marker）；rc.6 及更早树才要求 marker。双形态接受。
   const apiproxy = readOf(path.join('dsh-host-apiproxy', 'lib', 'index.js'));
+  t.assert(
+    apiproxy.includes('"dsh-conversation-tweaks"') ||
+      apiproxy.includes('namespaces: settings.describe({ redactSecrets: true }).map(namespaceView)'),
+    'host-apiproxy 应包含提示词暴露补丁或 rc.7+ 动态 settings 原生形态');
   for (const marker of ['describeImagesWithVision', 'dsh-desktop fix: read the resolved HOST-side value', 'unarchiveSession']) {
     t.assert(apiproxy.includes(marker), 'host-apiproxy 应包含补丁标记: ' + marker);
   }
-  t.assert(
-    apiproxy.includes('"dsh-conversation-tweaks"') || apiproxy.includes('namespaces: settings.describe({ redactSecrets: true })'),
-    'host-apiproxy 应为「旧版静态白名单已注入」或「rc.7 动态描述符（注入按设计跳过）」之一'
-  );
   // 三个静默幂等的防护类补丁（app-boot / settings）
   const appBoot = readOf(path.join('dsh-app-boot', 'lib', 'index.js'));
   t.assert(appBoot.includes('function loadUserPatchLayer'), 'profile patch 防护应注入');
@@ -883,11 +888,21 @@ SCENARIOS['runtime-patches-suite'] = async (t) => {
   t.assert(settings.includes('dsh-desktop guard: an invalid stored section must not brick'), 'settings 注册防护应注入');
   // workspace 搜索栏 / 插件页标签合并 / menu 视口 / web-search 契约 / 会话删除
   const workspaceUi = readOf(path.join('dsh-client-ui-workspace', 'lib', 'client.js'));
-  t.assert(workspaceUi.includes('dsh-desktop fix: rail search expansion'), 'workspace 搜索栏修复应落盘');
+  // rc.8 起上游原生包含同款守卫（无 marker 裸形态），双形态接受。
+  t.assert(
+    workspaceUi.includes('dsh-desktop fix: rail search expansion') ||
+      workspaceUi.includes('if (!wide || !searchExpanded || searchOnExpand) return;'),
+    'workspace 搜索栏修复应落盘（marker 或 rc.8 原生守卫）');
   const pluginsUi = readOf(path.join('dsh-client-ui-settings-plugins', 'lib', 'client.js'));
   t.assert(pluginsUi.includes('dsh-desktop fix: hide inventory tab'), '插件页标签合并应落盘');
-  const primitives = readOf(path.join('dsh-client-ui-primitives', 'lib', 'index.js'));
-  t.assert(primitives.includes('dsh-desktop patch (issue #36)'), 'menu 视口补丁应落盘');
+  if (hasPrimitives) {
+    const primitives = readOf(path.join('dsh-client-ui-primitives', 'lib', 'index.js'));
+    t.assert(primitives.includes('dsh-desktop patch (issue #36)'), 'menu 视口补丁应落盘');
+  } else {
+    // rc.8 布局：菜单封顶由 preload 的语义选择器 CSS 注入承载（防误删防线）。
+    const preloadSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'preload.js'), 'utf8');
+    t.assert(preloadSrc.includes('[role="menu"]{max-height:'), 'rc.8 布局应由 preload 注入菜单视口封顶 CSS');
+  }
   const webSearch = readOf(path.join('dsh-web-search-deepseek', 'lib', 'index.js'));
   t.assert(webSearch.includes('normalizedBase'), 'web-search baseURL 补丁应落盘');
   const workspacePkg = readOf(path.join('dsh-workspace', 'lib', 'index.js'));
@@ -1360,4 +1375,4 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
-
+

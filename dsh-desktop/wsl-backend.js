@@ -390,9 +390,14 @@ async function activeVersionAsync() {
  */
 function spawnServer() {
   const dir = state.installDir;
+  // rc.8 起 dsh web 默认 openBrowser=true；WSL 内 open 会经 wslview 拉起
+  // Windows 默认浏览器，桌面内嵌场景必须关闭。rc.7 及更早无 --no-open
+  // 选项（未知选项直接报错），故按 WSL 内实际内核版本门控。
+  const { compareVersions } = require('./scripts/lib/versions');
+  const noOpen = compareVersions(activeVersion() || '0.0.0', '0.1.0-rc.8') >= 0 ? ' --no-open' : '';
   // env -u 清掉宿主 harness 残留（DSH_WEB_URL / 会话变量），避免 WSL 内 dsh 误判；
   // DSH_HOME 指向安装目录（profiles/sessions 数据与 agent 同目录）。
-  const cmd = `cd ${dir} && rm -f dsh.pid && echo $$ > dsh.pid && exec env -u DSH_WEB_URL -u DSH_SESSION_ID -u DSH_SESSION_JSONL -u DSH_SHELL -u NODE_OPTIONS DSH_HOME=${dir} node ${agentBin()} web --host 127.0.0.1 --port 0`;
+  const cmd = `cd ${dir} && rm -f dsh.pid && echo $$ > dsh.pid && exec env -u DSH_WEB_URL -u DSH_SESSION_ID -u DSH_SESSION_JSONL -u DSH_SHELL -u NODE_OPTIONS DSH_HOME=${dir} node ${agentBin()} web${noOpen} --host 127.0.0.1 --port 0`;
   log(`启动 WSL dsh web: ${cmd}`);
   const proc = internals.spawn(WSL_EXE, ['-d', state.distro, '-e', 'sh', '-lc', cmd], {
     windowsHide: true,

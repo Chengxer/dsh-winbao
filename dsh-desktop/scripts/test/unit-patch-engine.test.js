@@ -378,6 +378,10 @@ test('runtime-patches: keyed slot 兼容补丁产物可被 node --check 解析',
   ];
   for (const c of cases) {
     const file = path.join(repoRoot, 'node_modules', '@deepseek-ai', c.rel);
+    // rc.8 起 dsh-client-ui-slots 并入前端 dist 产物（node_modules 不再落盘），
+    // 该文件缺失属正常布局：本用例依赖真实文件做语法回归，缺失时跳过该条
+    // （rc.8 布局下此补丁无目标，注册链路由 runner 侧 unkeyed 补丁覆盖）。
+    if (!fs.existsSync(file)) { t.skip(c.rel + ' 不存在（dsh rc.8+ 布局）'); continue; }
     const src0 = fs.readFileSync(file, 'utf8');
     const src = src0.includes(c.newText) ? src0.replace(c.newText, c.oldText) : src0;
     const out = c.transform(src, file);
