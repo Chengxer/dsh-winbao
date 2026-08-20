@@ -21,6 +21,7 @@
 // 用法：node dsh-tauri/scripts/build-client-compat.mjs（stage-payload.sh 内建调用）
 import { execSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -51,6 +52,27 @@ const ROOTS = [
   '@deepseek-ai/dsh-client-web-react',
   '@deepseek-ai/dsh-client-schema-form',
 ];
+
+// web-react 增强导出（高级设置空白 issue #124 的纵深防御）：rc.8 的
+// dsh-client-ui-renderer 只导出 apply/inject，插件回落链 require 本包时，
+// 除 rc.7 原生导出（bindSnapshotSelector 等）外**补一个
+// useSyncExternalStoreWithSelector 具名导出**——旧插件若直接从 web-react
+// 解构该符号（不经 bindSnapshotSelector），兼容注册同样满足。实现：临时
+// CJS 入口 re-export 原包全部导出 + 内联 use-sync-external-store/shim/
+// with-selector（其 react 依赖走 external seed，包体本身内联进 bundle）。
+const ENHANCED_ENTRY_SRC = {
+  // ESM 入口 re-export 原包全部具名导出 + useSyncExternalStoreWithSelector。
+  // 高级设置空白（issue #124）的纵深防御：rc.8 的 dsh-client-ui-renderer 只导出
+  // apply/inject，插件回落到本包时若按新形态解构 useSyncExternalStoreWithSelector
+  // （不经 bindSnapshotSelector），兼容注册同样满足。注意用 `export *`（具名
+  // 直落 module.exports，与旧产物同形）而非 `export default`（esbuild CJS 会
+  // 包成 module.exports.default，页面解构拿 undefined——Node 单测抓出）。
+  // with-selector 直指 production 构建文件（相对依赖由 esbuild 内联）。
+  '@deepseek-ai/dsh-client-web-react': () => `
+export * from ${JSON.stringify(path.join(RC7, '@deepseek-ai', 'dsh-client-web-react', 'lib', 'index.js'))};
+export { useSyncExternalStoreWithSelector } from ${JSON.stringify(path.join(RC7, 'use-sync-external-store', 'cjs', 'use-sync-external-store-shim', 'with-selector.production.min.js'))};
+`,
+};
 
 // node 内建/危险模块黑名单（页面端不可用，出现即构建失败——防把内核侧
 // 库意外拉进闭包）。
@@ -83,11 +105,22 @@ console.log(`[compat] 依赖闭包（将内联）：${[...closureDiag].join(', '
 
 // ---- 每根独立 esbuild：单文件 CJS，external 仅 rc8 seed ----
 function bundleRoot(id) {
-  const pkg = readPkg(id);
-  const entry = path.join(pkgDir(id), pkg.main || 'index.js');
+  let entry = path.join(pkgDir(id), readPkg(id).main || 'index.js');
+  let entrySrc = null;
+  if (ENHANCED_ENTRY_SRC[id]) {
+    // 增强根：写临时 ESM 入口（re-export 原包 + 补强导出），esbuild 打它。
+    entrySrc = ENHANCED_ENTRY_SRC[id]();
+    entry = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-compat-')), 'entry.mjs');
+    fs.writeFileSync(entry, entrySrc, 'utf8');
+  }
   const extArgs = [...RC8_SEED].map((s) => `--external:${s}`).join(' ');
+  // --define 把依赖链里 shim 入口的 `if (process.env.NODE_ENV === "production")`
+  // 静态求值：production 分支保留、dev 块摇掉、**产物不再引用 process**。
+  // 页面端没有 process——实测（Edge CDP）旧产物 factory 执行即抛
+  // "process is not defined"，require('@deepseek-ai/dsh-client-web-react') 从未
+  // 真正成功过（Agent 2 改 require renderer 优先后回落链才不再触发、无人发现）。
   const out = execSync(
-    `npx --yes esbuild@0.25.0 ${JSON.stringify(entry)} --bundle --format=cjs --platform=node ${extArgs} --log-level=error`,
+    `npx --yes esbuild@0.25.0 ${JSON.stringify(entry)} --bundle --format=cjs --platform=node ${extArgs} --define:process.env.NODE_ENV=\\"production\\" --log-level=error`,
     { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
   );
   const requires = [...out.matchAll(/require\("([^"]+)"\)/g)].map((m) => m[1]);
