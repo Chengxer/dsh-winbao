@@ -370,8 +370,114 @@ pub fn file_revert(changes: Vec<serde_json::Value>) -> Result<serde_json::Value,
 
 #[tauri::command]
 pub fn image_paste_save(payload: serde_json::Value) -> Result<serde_json::Value, BridgeError> {
-    let _ = payload;
-    Err(BridgeError::new("E_NOT_IMPLEMENTED", "Phase 3 后续：剪贴板图片落盘（tauri-plugin-clipboard-manager 位图支持）"))
+    // Electron imagePasteSave（main.js:2930）对齐。原「Phase 3 剪贴板位图」
+    // 占位是理解偏差：插件 client 已把粘贴图捕获为 dataUrl 字符串（真实
+    // 场景测试 U2 确认），壳侧只需落盘——无需 clipboard 插件。
+    image_paste_save_impl(&payload).map_err(|e| BridgeError::new("E_IMAGE_PASTE", &e))
+}
+
+fn image_paste_save_impl(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let data_url = payload.get("dataUrl").and_then(|v| v.as_str()).ok_or("缺 dataUrl")?;
+    let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("粘贴图片");
+    let (head, b64) = data_url.split_once(',').ok_or("不是合法的图片 data URL")?;
+    let mime = head.strip_prefix("data:").unwrap_or(head).split(';').next().unwrap_or("").to_lowercase();
+    let ext = match mime.as_str() {
+        "image/png" => ".png",
+        "image/jpeg" => ".jpg",
+        "image/webp" => ".webp",
+        "image/gif" => ".gif",
+        "image/bmp" => ".bmp",
+        "image/avif" => ".avif",
+        "image/ico" => ".ico",
+        _ => return Err(format!("不支持的图片类型: {mime}")),
+    };
+    let bytes = b64_decode(b64).ok_or("base64 解码失败")?;
+    if bytes.is_empty() {
+        return Err("图片内容为空".into());
+    }
+    if bytes.len() > 15 * 1024 * 1024 {
+        return Err("图片超过 15MB 上限".into());
+    }
+    let dir = shell_core::DshPaths::resolve().paste_tmp;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // 顺手治 Electron 版的小泄漏（U2 发现其从不清理、随系统 %TEMP%）：
+    // 每次保存顺带清 7 天前的粘贴文件。
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for entry in rd.flatten() {
+            if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+                if let Ok(age) = modified.elapsed() {
+                    if age.as_secs() > 7 * 86400 {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+    }
+    // 文件名消毒（对齐 Electron：禁字符过滤、截 40、空回退），防路径注入。
+    let forbidden = r#"\/:*?"<>|"#;
+    let base: String = name
+        .chars()
+        .filter(|c| !forbidden.contains(*c) && (*c as u32) >= 0x20)
+        .take(40)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    let base = if base.is_empty() { "粘贴图片".to_string() } else { base };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let file = dir.join(format!("{base}-{ts}{ext}"));
+    std::fs::write(&file, &bytes).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "ok": true, "path": file.to_string_lossy(), "size": bytes.len() }))
+}
+
+/// 标准 base64 解码（无依赖实现，容错空白与缺省 padding）。
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let cleaned: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    let mut out = Vec::with_capacity(cleaned.len() / 4 * 3);
+    let mut chunk = [0u8; 4];
+    let mut n = 0usize;
+    for &b in &cleaned {
+        if b == b'=' {
+            break;
+        }
+        chunk[n] = val(b)?;
+        n += 1;
+        if n == 4 {
+            let v = (u32::from(chunk[0]) << 18) | (u32::from(chunk[1]) << 12) | (u32::from(chunk[2]) << 6) | u32::from(chunk[3]);
+            out.push((v >> 16) as u8);
+            out.push((v >> 8) as u8);
+            out.push(v as u8);
+            n = 0;
+        }
+    }
+    match n {
+        0 => Some(out),
+        1 => None, // 单字符不成组
+        2 => {
+            let v = (u32::from(chunk[0]) << 18) | (u32::from(chunk[1]) << 12);
+            out.push((v >> 16) as u8);
+            Some(out)
+        }
+        3 => {
+            let v = (u32::from(chunk[0]) << 18) | (u32::from(chunk[1]) << 12) | (u32::from(chunk[2]) << 6);
+            out.push((v >> 16) as u8);
+            out.push((v >> 8) as u8);
+            Some(out)
+        }
+        _ => None,
+    }
 }
 
 #[tauri::command]
@@ -896,6 +1002,61 @@ impl NoWindow for std::process::Command {
     }
 }
 
+
+#[cfg(test)]
+mod image_paste_tests {
+    use super::*;
+
+    #[test]
+    fn b64_decode_roundtrip_and_padding() {
+        // 与既有 b64 编码器互逆（含 1/2/3 字节尾组与无 padding 形态）。
+        for data in [b"" as &[u8], b"a", b"ab", b"abc", b"abcd", b"foobarbaz!"] {
+            let enc = b64(data);
+            assert_eq!(b64_decode(&enc).as_deref(), Some(data), "roundtrip {data:?}");
+        }
+        assert_eq!(b64_decode("aGVsbG8=").as_deref(), Some(b"hello".as_slice()));
+        assert_eq!(b64_decode("aGVsbG8").as_deref(), Some(b"hello".as_slice())); // 缺省 padding
+        // 空白容错：base64 文本内嵌空白/换行应被忽略（"YWJj" → 字节 "abc"）。
+        assert_eq!(b64_decode("YW J j\n").as_deref(), Some(b"abc".as_slice()));
+        assert!(b64_decode("!!!").is_none());
+        assert!(b64_decode("A").is_none()); // 单字符不成组
+    }
+
+    #[test]
+    fn image_paste_save_impl_contract() {
+        // Electron 契约形态：合法 png 落盘返回 {ok,path,size}；坏输入带可读错误。
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!("dsh-paste-test-{}", std::process::id()));
+        std::env::set_var("DSH_TEST_TMP", &tmp);
+        // 1x1 PNG（70B 真实字节）
+        let png: Vec<u8> = vec![
+            0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A,0,0,0,0x0D,0x49,0x48,0x44,0x52,0,0,0,1,0,0,0,1,
+            0x08,0x06,0,0,0,0x1F,0x15,0xC4,0x89,0,0,0,0x0A,0x49,0x44,0x41,0x54,0x78,0x9C,0x63,0,1,
+            0,0,5,0,0x02,0x0A,0x2B,0xB5,0x38,0xFD,0,0,0,0,0x49,0x45,0x4E,0x44,0xAE,0x42,0x60,0x82,
+        ];
+        let payload = serde_json::json!({
+            "dataUrl": format!("data:image/png;base64,{}", b64(&png)),
+            "name": "screens\\hot/粘贴:图?"
+        });
+        let r = image_paste_save_impl(&payload).unwrap();
+        assert_eq!(r["ok"], serde_json::json!(true));
+        assert_eq!(r["size"], serde_json::json!(png.len()));
+        let path = std::path::PathBuf::from(r["path"].as_str().unwrap());
+        // 注意 Path::ends_with 是整组件匹配，后缀断言用字符串形态。
+        assert!(path.exists() && path.to_string_lossy().ends_with(".png"));
+        assert_eq!(std::fs::read(&path).unwrap(), png);
+        let fname = path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(!fname.contains('\\') && !fname.contains('/') && !fname.contains(':') && !fname.contains('?'), "消毒后文件名 {fname}");
+        std::fs::remove_file(&path).ok();
+        // 坏输入
+        let bad = image_paste_save_impl(&serde_json::json!({ "dataUrl": "data:image/tiff;base64,QUJD", "name": "x" }));
+        assert!(bad.unwrap_err().contains("不支持的图片类型"));
+        let bad2 = image_paste_save_impl(&serde_json::json!({ "name": "x" }));
+        assert!(bad2.unwrap_err().contains("dataUrl"));
+        std::env::remove_var("DSH_TEST_TMP");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
 
 #[cfg(test)]
 mod tests {
