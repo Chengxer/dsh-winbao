@@ -2,10 +2,12 @@
 ; ==========================================================================
 ; 目标：旧用户（Electron NSIS 安装版）双击 Tauri 版安装包 →
 ;   1. 检测旧版正在运行 → 提示关闭（不杀进程，避免会话数据风险）
-;   2. 检测旧版安装（Add/Remove Programs，DisplayName = "DSH Desktop"）
+;   2. 检测旧版安装（Add/Remove Programs，DisplayName = "DSH Desktop"），
+;      同时捕获同键 InstallLocation（旧版安装目录）
 ;   3. 静默运行旧版卸载器：`<uninstall> /S /KEEP_APP_DATA --updated`
 ;      （0.4.1+ 卸载器识别 /KEEP_APP_DATA：保留 %APPDATA%\dsh-desktop 与 ~/.dsh 全部数据）
-;   4. 继续安装新版 → 数据原地保留，用户零感知
+;   4. 装回旧版安装位置（改写 $INSTDIR + SetOutPath，可写性试探失败则
+;      回退默认目录）→ 数据原地保留、目录不变、快捷方式不分裂，用户零感知
 ;
 ; 数据安全保证：
 ;   - 本钩子绝不触碰 $APPDATA 与 $PROFILE\.dsh
@@ -40,7 +42,11 @@
   ; ---- 2) 定位旧版（Electron NSIS）卸载注册表项 ----
   ; electron-builder perUser 安装：HKCU Uninstall 键（GUID 或 appId 命名）；
   ; 兼容 perMachine：HKLM 同查。按 DisplayName = "DSH Desktop" 精确匹配。
+  ; FindLegacyUninstall 同时经 $R8 带回同键的 InstallLocation（旧版安装目录，
+  ; 必须在静默卸载前捕获——卸载后注册表键即消失）。
   StrCpy $R0 ""   ; 卸载命令
+  StrCpy $R8 ""   ; 旧版安装目录（InstallLocation）
+  StrCpy $R9 ""   ; 备用：卸载器父目录
 
   SetRegView 64
   Push "DSH Desktop"
@@ -55,10 +61,16 @@
   ${EndIf}
 
   ${If} $R0 != ""
-    DetailPrint "检测到旧版 DSH Desktop，正在保数据静默卸载…"
+    DetailPrint "检测到旧版 DSH Desktop（目录：$R8），正在保数据静默卸载…"
     ; 剥离可能的引号与参数，取纯路径
     StrCpy $R1 $R0 "" 1            ; 去首个引号
     StrCpy $R1 $R1 1 -1            ; 去末个引号（若原始带引号）
+    ; InstallLocation 缺失时用卸载器父目录兜底（electron-builder 卸载器
+    ; 就装在安装根）。
+    ${If} $R8 == ""
+      ${GetParent} "$R1" $R9
+      StrCpy $R8 $R9
+    ${EndIf}
     ${If} ${FileExists} "$R1"
       ; ---- 3) 静默卸载 + 保数据（KEEP_APP_DATA 是 0.4.1+ 协议；--updated 兼容更早）----
       ExecWait '"$R1" /S /KEEP_APP_DATA --updated' $R2
@@ -72,18 +84,41 @@
     DetailPrint "未检测到旧版 DSH Desktop（全新安装）"
   ${EndIf}
 
+  ; ---- 4) 装回旧位置（用户诉求：升级不换目录，避免两份并存/快捷方式分裂）----
+  ; 本钩子运行于 Section Install 首行 SetOutPath 之后、文件复制之前——
+  ; 在此改写 $INSTDIR 并重新 SetOutPath，后续 File/CreateDirectory/快捷方式
+  ; /卸载登记全部落到旧目录。可写性试探：旧版若 perMachine 装在
+  ; Program Files 而当前用户无权写入，则回退模板默认目录（不硬撑）。
+  ${If} $R8 != ""
+    ClearErrors
+    CreateDirectory "$R8"
+    FileOpen $R6 "$R8\.__dsh_write_test" w
+    ${If} ${Errors}
+      DetailPrint "旧目录不可写（$R8），回退默认安装目录"
+    ${Else}
+      FileClose $R6
+      Delete "$R8\.__dsh_write_test"
+      StrCpy $INSTDIR "$R8"
+      SetOutPath "$INSTDIR"
+      DetailPrint "沿用旧版安装位置：$INSTDIR"
+    ${EndIf}
+  ${EndIf}
+
   SetRegView 64
 !macroend
 
 ; ---------------------------------------------------------------------------
 ; FindLegacyUninstall：在 HKCU/HKLM Uninstall 下按 DisplayName 找卸载串。
 ; 栈输入：显示名；栈输出：卸载命令（UninstallString，找不到返回 ""）。
+; 副作用（全局寄存器出参）：$R8 = 同键 InstallLocation（旧版安装目录，
+; 可能为空）——调用方必须在静默卸载前读取（卸载后注册表键消失）。
 ; ---------------------------------------------------------------------------
 Function FindLegacyUninstall
   Exch $R3            ; 显示名
   Push $R4            ; 注册表根循环游标
   Push $R5            ; 键句柄
   Push $R6            ; 当前 DisplayName
+  StrCpy $R8 ""
   StrCpy $R4 0
 
   FindLoop:
@@ -98,6 +133,7 @@ Function FindLegacyUninstall
   FoundHKCU:
     ReadRegStr $R7 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R5" "UninstallString"
     StrCpy $R3 $R7
+    ReadRegStr $R8 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R5" "InstallLocation"
     Goto Done
 
   TryHKLM:
@@ -113,6 +149,7 @@ Function FindLegacyUninstall
   FoundHKLM:
     ReadRegStr $R7 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R5" "UninstallString"
     StrCpy $R3 $R7
+    ReadRegStr $R8 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R5" "InstallLocation"
     Goto Done
 
   NotFound:

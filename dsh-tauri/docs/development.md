@@ -1,0 +1,145 @@
+# DSH Desktop（Tauri 版）开发手册
+
+> 统一入口：本文回答「代码怎么改、接口在哪、怎么测、怎么打包」。
+> 接口的**逐字段规范**永远以 `contracts/` 五份契约为准（单一事实源），
+> 本手册是导航与流程，不复写契约内容。
+
+## 1. 架构地图（30 秒版）
+
+```
+dsh-tauri/
+├── contracts/          ★ 五份硬契约（接口唯一事实源，见 §2）
+├── src-tauri/
+│   ├── crates/         Rust 模块层（依赖单向：下层不依赖上层）
+│   │   ├── shell-core        路径/设置/单实例/run-state（std 优先，可独立单测）
+│   │   ├── kernel-process    spawn 规格/就绪行/Job Object 杀树/崩溃环
+│   │   ├── bridge            dshDesktop 垫片 JS + initialization_script
+│   │   ├── fence             文件围栏（zstd 首帧 cwd）+ file-open/revert
+│   │   ├── preview-server    127.0.0.1 静态页 + /__diag/ 诊断端点
+│   │   ├── session-watcher   zstd 会话日志监视 + 通知限流
+│   │   └── sidecar-orchestrator  boot 时序契约（Node 脚本编排规格）
+│   └── src/app/        装配根（只做接线：lib.rs / supervisor / commands / windows / pages）
+├── sidecar/cli.js      Node sidecar 单一入口（复用 dsh-desktop/scripts，零逻辑重写）
+└── scripts/            stage-payload.sh（打包暂存）/ smoke-installed.sh（安装布局冒烟）
+```
+
+**分层铁律**：crates 不依赖 tauri 运行时；装配根只接线不实现；Node 侧逻辑全部
+活在 `dsh-desktop/scripts/`（Electron 线共用），sidecar 是薄封装。
+
+## 2. 统一接口（五契约索引 + 强制机制）
+
+| 契约 | 管什么 | 变更即破坏性？ |
+|------|--------|----------------|
+| `contracts/bridge-api.md` | `window.dshDesktop` 48 方法逐字段签名 + 页面事件（页面插件直接消费） | 是——升版本 + CHANGELOG 标注 |
+| `contracts/ipc-commands.md` | Electron IPC → Tauri command 43 通道映射 + 通用约定 | 是 |
+| `contracts/data-flow.md` | 配置叠加树 / 单一数据流 / **boot 守护瀑布** / 持久化与 env 覆盖通道 | 是 |
+| `contracts/plugin-contract.md` | 三层插件辨析（内核 cordis / 伴随 / 用户）+ seam 三角色 | 是 |
+| `contracts/error-codes.md` | 六域错误码（PluginError {code} 口径） | 是 |
+
+**防漂移是机器强制的**（不是口头约定）：
+- `lib.rs` 的契约审计测试：注册命令必须出现在契约表内，否则
+  `no_extra_commands_beyond_contract_and_poc` 失败——**加命令不改契约 = 测试红**。
+- sidecar `node --test`：boot 步骤顺序契约（repair→sync→patches→preflight）。
+- Electron 线 `unit-patch-engine` / `unit-compat-companion` 等对共享 Node 脚本
+  的行为契约（两侧共用同一实现，一处修复双线同愈）。
+
+## 3. 开发环境与常用命令
+
+```bash
+# 前置：dsh-desktop/ 已 npm install（vendor node + node_modules 就位）
+export PATH="$PATH:$USERPROFILE/.cargo/bin"   # cargo
+
+# 测试（改任何代码后的最低门槛）
+cd dsh-tauri/src-tauri && cargo test --workspace        # Rust 全量（~109 例）
+cd dsh-tauri && node --test sidecar/cli.test.js         # sidecar（12 例）
+cd dsh-desktop && node --test scripts/test/unit-compat-companion.test.js  # 共享脚本回归
+
+# 开发运行（debug）
+cd dsh-tauri/src-tauri/src/app && cargo run
+
+# 打包（见 §6）
+bash dsh-tauri/scripts/stage-payload.sh
+npx --yes @tauri-apps/cli build --config src-tauri/src/app/tauri.conf.json \
+  --target x86_64-pc-windows-msvc
+```
+
+**调试开关**（保留在产物里，实装排障用）：
+- `DSH_TAURI_DIAG=1`：换页后注入页面探针（dialog/composer/console 状态回传）
+- `DSH_TAURI_DEVTOOLS=1`：debug build 自动开 DevTools
+- `DSH_TAURI_REPO_ROOT=<dir>`：内核目录显式指定（绕过 exe-walk/manifest 回退）
+- `DSH_HOME` / `DSH_TAURI_USERDATA`：数据目录重定向（冒烟/便携，Rust+Node 同口径）
+
+## 4. 端到端加一个桥命令（五步，缺一测试红）
+
+以「新增 `fooBar` 命令」为例：
+
+1. **契约先行**：`contracts/ipc-commands.md` 映射表加行（Electron 通道 →
+   `foo_bar` command，归属 crate）；若页面要消费，`contracts/bridge-api.md`
+   同步加方法签名（标注 Tauri command 通道）。
+2. **实现**：命令体放归属 crate（纯逻辑）或 `commands.rs`（接线）；
+   `#[tauri::command] pub fn foo_bar(...)`。
+3. **注册**：`lib.rs` `generate_handler![]` 加 `commands::foo_bar`。
+4. **垫片**（仅页面消费时）：`crates/bridge/dist/bridge-shim.js` 加转发
+   （对齐 bridge-api.md 签名；fire-and-forget 用 `send`）。
+5. **测试**：跑 `cargo test`——契约审计测试自动校验注册⊆契约；为命令本身
+   写单测（参考 `commands.rs` tests 模式的沙箱写法）。
+
+> 历史教训：`file_open` 曾注册成 `open_path` 而契约/垫片调 `file_open`——
+> 正是审计测试抓住的漂移。**先改契约再写代码**不是仪式，是流程防线。
+
+## 5. 加一个伴随插件（桌面内置插件）
+
+1. **单一来源登记**：`dsh-desktop/scripts/lib/companion-plugins.js` 的
+   `COMPANION_PLUGINS` 数组加条目（id 必须与该插件 cordis.patch.yml 的 loader
+   id 一致——issue #104 教训；name 含 scope 则落 `node_modules/@scope/`）。
+2. **资产**：`dsh-desktop/assets/plugins/<dir>/` 放插件本体（package.json
+   version 用于 keep-newer 判定；运行资产目录 gui/public/dist 由
+   `SYNC_SUBDIRS` 全量同步，keep-newer 分支只补**整目录缺失**）。
+3. **测试**：`dsh-desktop` 的 `unit-compat-companion.test.js`（同步语义）+
+   `dsh-mini.test.js` 风格的插件自身用例。
+4. 打包时 `stage-payload.sh` 自动带入（assets/ 全量镜像）。
+
+## 6. 打包与验证（win-x64）
+
+```bash
+bash dsh-tauri/scripts/stage-payload.sh    # ① 内核 payload 暂存（~500MB，fail-fast 校验）
+npx --yes @tauri-apps/cli build \
+  --config src-tauri/src/app/tauri.conf.json \
+  --target x86_64-pc-windows-msvc           # ② NSIS 安装包（LZMA ~79MiB）
+bash dsh-tauri/scripts/smoke-installed.sh  # ③ 安装布局冒烟（绝不跑真安装器！）
+```
+
+- 产物：`src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe`
+- 升级链（installerHooks.nsh）：旧版进程检测 → 注册表定位（捕获
+  InstallLocation）→ `/S /KEEP_APP_DATA --updated` 静默卸载 → **装回旧位置**
+  （可写性试探，Program Files 无权则回退默认）→ 数据全程不动。
+- **冒烟为什么手拼布局**：真安装器的 PREINSTALL 会静默卸载本机真实
+  Electron 版——开发机上绝不允许。
+- 冒烟判据：preview+内核双新增监听 + 隔离 profile 建立 + 杀壳 Job Object
+  零残留（监听 PID 差集法，防本机正式版 node.exe 污染）。
+
+## 7. 稳定性三条原则（评审时的默认立场）
+
+1. **客户端必须能打开**：任何装配失败终态恢复页，绝不退出（含静态页服务
+   失败降级 data: 页）。见 data-flow.md §3.2。
+2. **兼容性不报错**：锁中毒容忍 / panic hook 落盘 panics.log / boot 线程
+   catch_unwind / 坏配置自愈——意外以日志收场，不以崩溃收场。
+3. **用户数据不动**：升级/重装/冒烟全链路不触碰 `%APPDATA%\dsh-desktop`
+   与 `~/.dsh` 内容；冒烟必须走 DSH_HOME/DSH_TAURI_USERDATA 隔离。
+
+## 8. 测试矩阵速查
+
+| 层 | 命令 | 规模 |
+|----|------|------|
+| Rust 全量（crates+app，含契约审计/瀑布破坏性实测） | `cargo test --workspace` | ~109 |
+| sidecar（boot 顺序/插件通道/诊断） | `node --test sidecar/cli.test.js` | 12 |
+| 共享 Node 脚本（Electron 线同源回归） | `node --test scripts/test/unit-*.test.js` | dsh-desktop 侧 |
+| 安装布局冒烟 | `smoke-installed.sh` | PASS/FAIL |
+| 静态检查 | `cargo build --workspace`（零警告纪律） | — |
+
+## 9. 相关文档
+
+- `docs/migration-roadmap.md`——重构决策与 Phase 0-4 状态矩阵
+- `docs/upgrade-guide.md`——Electron→Tauri 升级与数据兼容
+- `docs/release-keys.md`——发版密钥/更新链/打包流程
+- `CHANGELOG.md`——逐提交变更与实测记录

@@ -53,21 +53,45 @@ dsh web 进程（读合成后的叠加树）
 2. 每次写入要么整体成功（原子写 + 临时文件 rename），要么回滚到写入前快照。
 3. Manifest 是唯一事实源：inventory/inference/repair 全部从 Manifest 推导，不反向写。
 
-## 3. Boot 时序（对齐 Electron 版 main.js boot 链）
+## 3. Boot 时序（对齐 Electron plugin-guard guardedBoot——守护瀑布）
 
 ```
 app 启动
- ├─ [0] 单实例锁 + run-state 初始化                    （shell-core）
- ├─ [1] repair：损坏 manifest/home patch 自愈          （sidecar-orchestrator → Node）
- ├─ [2] sync：伴随插件同步 + presets                    （sidecar-orchestrator → Node）
- ├─ [3] patches：22 个文本手术（幂等）                  （sidecar-orchestrator → Node）
- ├─ [4] preflight：补丁就绪 + 端口探测 + 安全端口选择   （kernel-process）
- ├─ [5] spawn：vendor-node bin.js web --no-open         （kernel-process）
- ├─ [6] ready-line 解析 → 主窗换页（loading → Web UI）   （bridge）
- └─ [7] supervision：探活 + 崩溃环状态机                （kernel-process）
+ ├─ [0] 单实例锁 + run-state + panic hook                      （shell-core/lib）
+ ├─ [1] repair：损坏 manifest/home patch 自愈                  （sidecar boot 步骤①）
+ ├─ [2] sync：伴随插件同步 + presets                            （sidecar boot 步骤②）
+ ├─ [3] patches：22 个文本手术（幂等）                          （sidecar boot 步骤③）
+ ├─ [4] preflight：补丁就绪 + koffi 预检 → 降级 overlay         （sidecar 步骤④）
+ ├─ [5] guard-snapshot（boot 前快照，GUARD_FILES 四配置文件）
+ ├─ [6] spawn：vendor-node bin.js web --no-open（120s 有界等待）
+ ├─ [7] ready-line 解析 → 主窗换页（loading → Web UI）
+ └─ [8] supervision：探活 + 崩溃环 + 45s 稳定落定 markGood
 ```
 
-- 步骤 [1]-[3] 全部经 sidecar（Node 脚本复用 `dsh-desktop/scripts/`），Rust 只编排不实现。
+### 3.1 守护瀑布（「坏插件也永远能打开 dsh」——三层重试）
+
+```
+[6] 首次拉起(120s) ─成功→ 换页 + 稳定落定
+      └失败→ 重跑 [1]-[4]（sync 为自愈主力：坏插件文件靠重新同步覆盖）
+             + guard-repair + safe-overlay 禁用失败插件
+             → 二次拉起(90s) ─成功→ 事故报告 boot-recovered + 换页
+                   └失败→ guard-restore 回滚最后良好快照（markGood 锚点）
+                          → 三次拉起(90s) ─成功→ rollback-recovered
+                                └失败→ 事故报告 boot-failed + 恢复页
+```
+
+### 3.2 恢复页语义（「客户端必须能打开」原则）
+
+- 任何装配失败（含内核目录缺失、boot 线程 panic 被 catch_unwind 捕获）都
+  终态于**恢复页**而非进程退出：`recovery_state` 回
+  `{state, kernelUrl?, crashes?, reason}`；未装配态回
+  `{state:"no-kernel", reason}`。
+- 恢复页「重启内核 / 重新加载」在 supervisor 缺位时**重新装配**
+  （start_supervisor，幂等），不要求重启应用。
+- 静态页服务启动失败 → data: 内嵌提示页降级（无 IPC 的静态兜底）。
+- panic 全局 hook：落盘 `%APPDATA%/dsh-desktop/logs/panics.log`，进程存活优先。
+
+- 步骤 [1]-[4] 全部经 sidecar（Node 脚本复用 `dsh-desktop/scripts/`），Rust 只编排不实现。
 - **无 overlay 更新链**：Electron 版在 [2] 前的「检查/应用内核更新」整体不存在；overlay 布局恒为随版本分发的静态副本。
 
 ## 4. 运行时数据流（桥 + 事件）
@@ -87,10 +111,25 @@ app 启动
 | 数据 | Electron 路径 | Tauri 路径（不变，保证用户数据兼容） |
 |------|---------------|--------------------------------------|
 | dsh home | `%USERPROFILE%/.dsh` | 同左（shell-core 解析） |
-| 用户设置 | `%APPDATA%/dsh-desktop/settings.json`（updater.loadSettings） | 同路径，schema 兼容读取 |
-| 日志 | `%APPDATA%/dsh-desktop/logs/desktop.log` | 同路径 |
+| 用户设置 | `%APPDATA%/dsh-desktop/settings.json`（updater.loadSettings） | 同路径，schema 兼容读取；**损坏自愈**：坏 JSON/非对象 → 隔离 `.broken` 后从空配置继续 |
+| 窗口状态 | `%APPDATA%/dsh-desktop/window-state.json` | 同名同 schema（bounds/maximized），双向兼容 |
+| 日志 | `%APPDATA%/dsh-desktop/logs/desktop.log` | 同路径（另含 `panics.log`） |
 | 隔离区 | `%APPDATA%/dsh-desktop/plugin-quarantine/` | 同路径 |
 | 粘贴临时 | `%TEMP%/dsh-paste/` | 同路径 |
 
 > 设置文件沿用 updater.js 的 JSON schema（含已裁撤字段如 kernelUpdate.skipVersion：
 > 读取时忽略并清理，不报错——**向前兼容旧用户目录**）。
+
+### 5.1 环境覆盖通道（生产与测试两套，优先级从高到低）
+
+| 通道 | 语义 | 消费方 |
+|------|------|--------|
+| `DSH_TEST_HOME` / `DSH_TEST_APPDATA` / `DSH_TEST_TMP` | 测试覆盖（最高优先级） | shell-core（Rust） |
+| `DSH_HOME` | dsh home 根**直接替换**（不再拼 `.dsh`） | shell-core（Rust）+ sidecar（Node）+ 内核 spawn 白名单——**三侧同口径** |
+| `DSH_TAURI_USERDATA` | 壳 AppData 根**直接替换**（不再拼 `dsh-desktop`）；便携版 userData 重定向同通道 | shell-core（Rust）+ sidecar（Node） |
+| `DSH_TAURI_REPO_ROOT` | 内核目录定位显式覆盖（诊断） | lib.rs find_repo_root |
+
+> 历史教训（2026-08-20 实测）：曾只有 Node 侧消费 DSH_HOME/DSH_TAURI_USERDATA，
+> Rust 侧不读——便携重定向与冒烟隔离在 Rust 侧是「幽灵变量」。现两侧必须同时
+> 生效，此表即防回归契约。内核目录定位顺序：DSH_TAURI_REPO_ROOT → exe 相对
+> 布局（安装产物优先，防编译机检出遮蔽）→ CARGO_MANIFEST_DIR 兜底。
