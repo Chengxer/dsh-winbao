@@ -71,7 +71,10 @@ const API_PREFIX = "/dsh-mini/api";
 const APP_PREFIX = "/dsh-mini";
 const PUBLIC_DIR = resolve(fileURLToPath(new URL("../public", import.meta.url)));
 const GUI_DIR = resolve(fileURLToPath(new URL("../gui", import.meta.url)));
-const MINI_HOME = join(homedir(), ".dsh", "dsh-mini");
+// 跟随 DSH_HOME（dshHome 在下方函数声明，提升后此处可用）：隔离部署/
+// 多实例时 token/config 不再写进真实用户 profile（实测缺陷：自定义
+// DSH_HOME 下曾静默在 homedir() 生成新 token，双开共享 token 亦源于此）。
+const MINI_HOME = join(dshHome(), "dsh-mini");
 
 // GUI 静态服务 —— 官方 DSH 前端快照（阶段0 采集的 gui/dist + gui/bundles）
 const GUI_DIST = join(GUI_DIR, "dist");
@@ -1144,7 +1147,9 @@ function gatewayStatus(ctx) {
   // SPEC v4 §6.2：publicMode 且已配 publicUrl 时，二维码/连接 URL 优先走公网地址
   if (cfg.publicMode && cfg.publicUrl && gwListening) {
     url = `${cfg.publicUrl}/?token=${encodeURIComponent(token)}`;
-  } else if (cfg.lanEnabled && ips.length) {
+  } else if (cfg.lanEnabled && ips.length && !gwListenError) {
+    // 监听失败（如 EADDRINUSE）绝不外发 LAN URL：手机会连到占用端口的
+    // 另一实例（双开场景实测缺陷）——降级回 loopback，bindWarn 给指引。
     url = `http://${ips[0]}:${cfg.gatewayPort}/?token=${encodeURIComponent(token)}`; // v3: 根路径直接出 GUI
   } else if (port > 0) {
     url = `http://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`;
@@ -1153,7 +1158,12 @@ function gatewayStatus(ctx) {
   if (cfg.publicMode && !cfg.publicUrl) {
     bindWarn = "允许外网访问已开启，但尚未填写公网地址（publicUrl）。填入隧道公网地址后二维码将切为公网 URL。";
   } else if (cfg.lanEnabled) {
-    if (gwListenError) bindWarn = "LAN 网关启动失败：" + gwListenError;
+    if (gwListenError) {
+      bindWarn = "LAN 网关启动失败：" + gwListenError;
+      if (/EADDRINUSE/i.test(gwListenError)) {
+        bindWarn += "（端口被另一实例占用——手机扫码会连到那个实例；请在本实例设置中更换网关端口，或退出另一实例）";
+      }
+    }
     else if (!gwListening) bindWarn = "LAN 网关未在监听（正在启动或端口被占用）。";
     else if (ips.length === 0) bindWarn = "未检测到局域网 IPv4 地址，手机无法访问本机。";
   }
