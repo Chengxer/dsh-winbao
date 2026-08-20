@@ -40,12 +40,16 @@ const RC8_SEED = new Set([
   '@deepseek-ai/dsh-client-ui-primitives',
 ]);
 
-// 根：rc.8 前端 seed 缺失且被插件 require 的三个（用户 profile 实测：
-// web-react ×9、schema-form ×3、ui-attachment ×1）。
+// 根：rc.8 前端 seed 缺失且被插件 require 的包。**必须同时不在 rc.8 boot
+// graph 行里**——arrive() 见 factories.has(id) 会跳过该行 bundle 拉取
+// （client.js arrive()：loadCache/factories 命中即 resolve），预注册的
+// rc.7 纯对象形态会顶死 rc.8 客户端插件条目 → 「invalid plugin, expect
+// function or object with an "apply" method, received object」启动横幅
+// （实测：ui-attachment 在 71 图行中，曾入 ROOTS 即触发该横幅；web-react/
+// schema-form 无图行，安全）。graph 行原生供给的包一律不得入此清单。
 const ROOTS = [
   '@deepseek-ai/dsh-client-web-react',
   '@deepseek-ai/dsh-client-schema-form',
-  '@deepseek-ai/dsh-client-ui-attachment',
 ];
 
 // node 内建/危险模块黑名单（页面端不可用，出现即构建失败——防把内核侧

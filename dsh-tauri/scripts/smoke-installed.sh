@@ -52,6 +52,8 @@ if [ "${REAL_PROFILE:-0}" = "1" ]; then
   # home fallback farm 的 junction 指向用户旧安装——全量重指到冒烟 payload
   # （模拟真实机上 healProfilesModuleFallback 对新安装的自动重指）。只重指
   # 部分曾致 koffi/sharp 等原生包解析到旧安装而产生伪失败。
+  # SMOKE_KEEP_FARM=1：跳过重指（用户保真态——复现 farm 相关差异）。
+  if [ "${SMOKE_KEEP_FARM:-0}" != "1" ]; then
   FARM="$SMOKE/home/profiles/node_modules"
   PLNM="$SMOKE/resources/dsh-desktop/node_modules"
   repointed=0
@@ -66,6 +68,9 @@ if [ "${REAL_PROFILE:-0}" = "1" ]; then
     if [ -e "$FARM/$name" ]; then rm -rf "$FARM/$name"; robocopy "$d" "$FARM/$name" //MIR //R:1 //W:1 > /dev/null; repointed=$((repointed+1)); fi
   done
   echo "[smoke] 前端/原生包 fallback 已重指 $repointed 项到冒烟 payload"
+  else
+    echo "[smoke] SMOKE_KEEP_FARM=1：farm 保持用户原样（保真态）"
+  fi
 fi
 # 页面级证据通道常开：DIAG 探针把 console.error/error/rejection 回传
 # app.log（[diag-title] 行）——「missed the module table」类页面错误的
@@ -93,7 +98,7 @@ echo "[smoke] --- 隔离 userData 树 ---"; find "$SMOKE/ud" -maxdepth 2 | head 
 echo "[smoke] --- app.log 尾部 ---"; tail -6 "$SMOKE/app.log" 2>/dev/null
 
 # 插件加载断言：内核转发行里出现任一致命串即 FAIL（曾经的冒烟盲区）。
-if grep -q "Failed to load plugins\|missed the module table" "$SMOKE/app.log" 2>/dev/null; then
+if grep -q "Failed to load plugins\|missed the module table\|invalid plugin" "$SMOKE/app.log" 2>/dev/null; then
   echo "[smoke] ✗ 检出插件加载失败："
   grep -m 4 "Failed to load plugins\|missed the module table\|web|" "$SMOKE/app.log" | head -6
   taskkill //IM "dsh-tauri-app.exe" //F //T > /dev/null 2>&1
