@@ -63,14 +63,11 @@ rc "$SRC/vendor/npm" "$DST/vendor/npm" //MIR //R:2 //W:1
 rc "$SRC/node_modules" "$DST/node_modules" //MIR //R:2 //W:1 \
    //XD electron electron-builder electron-winstaller
 
-# ---- rc7 客户端包 vendor（用户实测「插件全灭+侧边栏消失」的根因）----
-# 机制：rc8 内核把 client-web 系溶入 minified dist（kernel 自身 OK），但伴随
-# 插件 client.js 仍 require("@deepseek-ai/dsh-client-web-react" /
-# "dsh-client-ui-primitives")——client-modules loader 找不到 module table 种子
-# 时走 package factory 路径，需要真实包在 node_modules。Electron 0.4.1 正是
-# 带着 rc7 残留包发版才正常（实测 dev 检出/payload 缺它们 → 全部插件加载
-# 失败）。源：本机 0.4.1 构建产物 node_modules（与发版字节一致的已验证闭包），
-# 补齐其中 payload 缺失的所有顶层包（闭包自维护，无需手工枚举传递依赖）。
+# ---- rc7 客户端包 vendor（历史层：内核侧 fallback farm 兜底）----
+# 注：页面端「missed the module table」的真修复是下方 build-client-compat
+# （seed 表机制——页面永远不读 node_modules）。本块保留的意义：profile
+# fallback farm 的 junction 指向 payload node_modules，内核侧（Node 进程）
+# 若 require 这些包可解析。源与发版字节一致，无冲突。
 VENDOR_SRC="$REPO_ROOT/dsh-desktop/dist/win-unpacked/resources/app/node_modules"
 if [ -d "$VENDOR_SRC" ]; then
   vendored=0
@@ -90,12 +87,17 @@ if [ -d "$VENDOR_SRC" ]; then
       vendored=$((vendored+1))
     fi
   done
-  echo "[stage] vendor rc7 客户端闭包：补 $vendored 个缺失包（源 = 0.4.1 构建产物）"
+  echo "[stage] vendor rc7 客户端闭包：补 $vendored 个缺失包（内核侧 fallback farm 兜底）"
 else
-  echo "[stage] ⚠ 缺 0.4.1 构建产物（$VENDOR_SRC）——插件客户端包将缺失，页面插件会加载失败！" >&2
+  echo "[stage] ⚠ 缺 0.4.1 构建产物（$VENDOR_SRC）——client-compat 无法构建，页面插件会加载失败！" >&2
   echo "[stage]   请先在 dsh-desktop 构建过 0.4.1（或恢复 dist/win-unpacked）。" >&2
   exit 1
 fi
+
+# ---- 页面端 client-compat（「missed the module table」的真修复）----
+# 必须在 node_modules //MIR 之后：compat 会向 payload 的 dsh-web-frontend
+# dist 注入 index.html <script> 与 assets/client-compat.js，先跑会被镜像冲掉。
+node "$REPO_ROOT/dsh-tauri/scripts/build-client-compat.mjs"
 
 echo "[stage] 完成。体积统计："
 du -sm "$DST" "$DST/node_modules" "$DST/vendor" "$DST/assets" 2>/dev/null

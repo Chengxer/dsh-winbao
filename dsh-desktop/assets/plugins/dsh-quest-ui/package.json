@@ -20,6 +20,9 @@
       "inject": [
         "@deepseek-ai/dsh-client-ui-conversation"
       ],
+      "external": [
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ],
       "platform": "web"
     }
   }

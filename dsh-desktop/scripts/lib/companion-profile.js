@@ -252,6 +252,26 @@ function syncCompanionFiles(opts) {
                 if (log) log('插件 ' + p.id + ' 更新版缺失运行资产目录 ' + sub + '/，已从安装包补齐（不覆盖既有文件）');
               }
             }
+            // 更新版依赖缺位自愈（issue #125：billion-context-dsh 经插件中心
+            // 从 npm 更新后 acp-kernel 丢失，内核 ERR_MODULE_NOT_FOUND 起不来，
+            // 且 keep-newer 每次跳过使重装永不能愈）。只补「内外层都完全
+            // 不存在」的依赖，绝不覆盖已有任何版本——保持不降级语义。
+            try {
+              const dPkg2 = JSON.parse(fs.readFileSync(path.join(dest, 'package.json'), 'utf8'));
+              for (const dep of Object.keys((dPkg2 && dPkg2.dependencies) || {})) {
+                const inner = path.join(dest, 'node_modules', ...dep.split('/'));
+                const top = path.join(profileDir, 'node_modules', ...dep.split('/'));
+                if (fs.existsSync(path.join(inner, 'package.json'))
+                  || fs.existsSync(path.join(top, 'package.json'))) continue;
+                const fromSrc = path.join(src, 'node_modules', ...dep.split('/'));
+                if (fs.existsSync(path.join(fromSrc, 'package.json'))) {
+                  syncDir(fromSrc, inner, log);
+                  if (log) log('插件 ' + p.id + ' 更新版缺依赖 ' + dep + '，已从安装包补齐到内层 node_modules（issue #125 自愈）');
+                } else if (log) {
+                  log('警告: 插件 ' + p.id + ' 依赖 ' + dep + ' 缺失且安装包未携带——更新源分发包疑似不完整');
+                }
+              }
+            } catch { /* 自愈失败不阻断同步主流程 */ }
             if (isBundle) bundleNames.add(p.name);
             continue;
           }

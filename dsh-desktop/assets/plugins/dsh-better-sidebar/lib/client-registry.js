@@ -1298,6 +1298,8 @@ window.__ModuleLoader__.load({
 			"react-dom/client",
 			"cordis",
 			"@deepseek-ai/dsh-client-ui-slots",
+			// rc.8 起 web-react 并入 ui-renderer（issue #124）
+			"@deepseek-ai/dsh-client-ui-renderer",
 			"@deepseek-ai/dsh-client-web-react",
 			"@deepseek-ai/dsh-client-ui-primitives",
 			"@deepseek-ai/dsh-client-schema-form",

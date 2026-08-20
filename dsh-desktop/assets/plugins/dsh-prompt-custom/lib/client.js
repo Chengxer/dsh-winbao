@@ -13,7 +13,21 @@ window.__ModuleLoader__.load({
 
 		const react = require("react");
 		const { jsx, jsxs } = require("react/jsx-runtime");
-		const { bindSnapshotSelector } = require("@deepseek-ai/dsh-client-web-react");
+		// rc.8 起官方把 dsh-client-web-react 并入 dsh-client-ui-renderer（不再导出
+		// bindSnapshotSelector）；用 renderer 导出的 useSyncExternalStoreWithSelector
+		// 等价重建（订阅/快照闭包按源捕获一次，与旧实现语义一致，issue #124）。
+		// 旧内核（rc.7 及更早仍提供 web-react）回落原实现，双端兼容。
+		let bindSnapshotSelector;
+		try {
+			const { useSyncExternalStoreWithSelector } = require("@deepseek-ai/dsh-client-ui-renderer");
+			bindSnapshotSelector = (source) => {
+				const subscribe = (fn) => source.subscribe(fn);
+				const getSnapshot = () => source.getSnapshot();
+				return (selector, isEqual) => useSyncExternalStoreWithSelector(subscribe, getSnapshot, void 0, selector, isEqual);
+			};
+		} catch {
+			({ bindSnapshotSelector } = require("@deepseek-ai/dsh-client-web-react"));
+		}
 		const { Button } = require("@deepseek-ai/dsh-client-ui-primitives");
 
 		const NS = "dsh-prompt";

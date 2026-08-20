@@ -679,8 +679,14 @@ function registerCompanionPatchEntries(patch, opts) {
     if (bundleNames.has(p.name)) continue;
     if (missingNames.has(p.name)) continue;
     const reId = escRegExp(p.id);
+    // 条目行锚点（issue #116）：顶层条目缩进 0-2、insert 内层条目缩进 4，且必须
+    // 带列表符 `- `。历史实现是「任意缩进 + 可省略 `-`」的宽匹配——补丁层里任何
+    // 深度的 `id: <配套id>` 映射键（用户/官方插件的 config 块）或嵌套列表项都会
+    // 被误判为「已注册」而静默跳过：文件照常复制但永不登记，客户端因此看不到
+    // 任何预装插件（先有官方 dsh 使用史的 profile 更可能带这类条目）。
+    const entryRow = '(?:^|\\n)(?:[ \\t]{0,2}|[ \\t]{4})- id:\\s*';
     // 引号三形态：'x' / "x" / x。分组：1=前缀、2=引号、3=名（替换时 $2 复用）。
-    const idNameRe = new RegExp('(id:\\s*' + reId + '(?![A-Za-z0-9_.-])[^\\n]*\\n[ \\t]*name:\\s*)([\'"]?)([^\'"\\n]*)\\2');
+    const idNameRe = new RegExp('(' + entryRow + reId + '(?![A-Za-z0-9_.-])[^\\n]*\\n[ \\t]*name:\\s*)([\'"]?)([^\'"\\n]*)\\2');
     const m = text.match(idNameRe);
     if (m) {
       if (m[3] !== p.name) {
@@ -691,7 +697,7 @@ function registerCompanionPatchEntries(patch, opts) {
       }
       continue;
     }
-    if (new RegExp('(?:^|\\n)\\s*-?\\s*id\\s*:\\s*' + reId + '(?![A-Za-z0-9_.-])').test('\n' + text)) {
+    if (new RegExp(entryRow + reId + '(?![A-Za-z0-9_.-])').test(text)) {
       continue;
     }
     const block = `- insert:\n    - id: ${p.id}\n      name: '${p.name}'\n`;

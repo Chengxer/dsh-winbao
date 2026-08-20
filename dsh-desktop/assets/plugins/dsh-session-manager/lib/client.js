@@ -21,7 +21,10 @@ window.__ModuleLoader__.load({
 
 		const react = require("react");
 		const { jsx, jsxs } = require("react/jsx-runtime");
-		const { bindSnapshotSelector } = require("@deepseek-ai/dsh-client-web-react");
+		// issue #124：此处曾有对 @deepseek-ai/dsh-client-web-react 的 require 解构
+		// bindSnapshotSelector 但从未使用——rc.8 内核的客户端模块表已移除该包
+		//（并入 dsh-client-ui-renderer），残留 require 会让整个插件树加载失败，
+		// 故直接删除（本插件不消费任何快照选择器）。
 		const { Button } = require("@deepseek-ai/dsh-client-ui-primitives");
 
 		const NS = "dsh-session-manager";

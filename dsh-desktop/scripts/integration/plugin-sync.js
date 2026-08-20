@@ -381,6 +381,9 @@ function createPluginSync(ctx) {
         missingNames: missingSourceNames,
         removedIds,
         onDrop: (m) => log(m),
+        // issue #116 诊断性：登记/改名逐条进日志——「文件已复制但未登记」类问题
+        // （历史上注册被补丁层既有内容误抑制）从日志即可定位，不再无痕静默。
+        onEntry: (m) => log(m),
       });
       if (registration.changed) {
         writeFileAtomic(patchFile, registration.patch);

@@ -49,7 +49,28 @@ if [ "${REAL_PROFILE:-0}" = "1" ]; then
   echo "[smoke] REAL_PROFILE=1：镜像真实 ~/.dsh → 隔离 home（写零接触）"
   robocopy "$(cygpath -u "$USERPROFILE")/.dsh" "$SMOKE/home" //MIR //R:1 //W:1 > /dev/null
   rc=$?; [ $rc -lt 8 ] || { echo "[smoke] 真实 home 镜像失败($rc)"; exit 1; }
+  # home fallback farm 的 junction 指向用户旧安装——全量重指到冒烟 payload
+  # （模拟真实机上 healProfilesModuleFallback 对新安装的自动重指）。只重指
+  # 部分曾致 koffi/sharp 等原生包解析到旧安装而产生伪失败。
+  FARM="$SMOKE/home/profiles/node_modules"
+  PLNM="$SMOKE/resources/dsh-desktop/node_modules"
+  repointed=0
+  for d in "$PLNM"/@*/*/; do
+    [ -d "$d" ] || continue
+    scope="$(basename "$(dirname "$d")")"; name="$(basename "$d")"; rel="$scope/$name"
+    if [ -e "$FARM/$rel" ]; then rm -rf "$FARM/$rel"; robocopy "$d" "$FARM/$rel" //MIR //R:1 //W:1 > /dev/null; repointed=$((repointed+1)); fi
+  done
+  for d in "$PLNM"/*/; do
+    name="$(basename "$d")"; [ "$name" = "@deepseek-ai" ] && continue
+    case "$name" in .bin|*.json) continue ;; esac
+    if [ -e "$FARM/$name" ]; then rm -rf "$FARM/$name"; robocopy "$d" "$FARM/$name" //MIR //R:1 //W:1 > /dev/null; repointed=$((repointed+1)); fi
+  done
+  echo "[smoke] 前端/原生包 fallback 已重指 $repointed 项到冒烟 payload"
 fi
+# 页面级证据通道常开：DIAG 探针把 console.error/error/rejection 回传
+# app.log（[diag-title] 行）——「missed the module table」类页面错误的
+# 唯一可靠断言来源（内核 stderr 是假阴性）。
+export DSH_TAURI_DIAG=1
 
 echo "[smoke] 启动（DSH_HOME/DSH_TAURI_USERDATA 全隔离），日志 → $SMOKE/app.log"
 DSH_HOME="$(cygpath -w "$SMOKE/home")" \

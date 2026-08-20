@@ -299,3 +299,30 @@ test('syncCompanionFiles: 正常全量同步仍复制 gui/（SYNC_SUBDIRS 重构
   assert.ok(fs.existsSync(path.join(destDir, 'gui', 'dist', 'index.html')), '全量同步必须复制 gui/');
   assert.ok(fs.existsSync(path.join(destDir, 'node_modules', 'dep', 'x.js')), '全量同步仍复制 node_modules');
 });
+
+test('syncCompanionFiles: keep-newer 且依赖缺失 → 内层补齐（issue #125 自愈）', (t) => {
+  const { profileDir, assetsRoot, vendorRoot, plugins } = makeSyncOpts(t);
+  const dir = path.join(assetsRoot, 'alpha');
+  // 资产侧带内层依赖（模拟 billion-context-dsh 的 node_modules/acp-kernel）
+  fs.mkdirSync(path.join(dir, 'node_modules', 'acp-kernel'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'node_modules', 'acp-kernel', 'package.json'), '{"name":"acp-kernel","version":"0.0.24"}');
+  fs.writeFileSync(path.join(dir, 'node_modules', 'acp-kernel', 'index.js'), 'module.exports=1;');
+  // 预置「更新但缺依赖」的 profile 安装（插件中心 npm 更新后的形态）
+  const destDir = path.join(profileDir, 'node_modules', '@scope', 'alpha');
+  writeJson(path.join(destDir, 'package.json'), {
+    name: '@scope/alpha', version: '2.0.0', main: 'lib/index.js',
+    dependencies: { 'acp-kernel': '0.0.24' },
+    dsh: { bundle: { patch: './cordis.patch.yml' } },
+  });
+  fs.mkdirSync(path.join(destDir, 'lib'), { recursive: true });
+  fs.writeFileSync(path.join(destDir, 'lib', 'index.js'), '// newer\n');
+  const logs = [];
+  syncCompanionFiles(syncOpts(plugins, assetsRoot, profileDir, vendorRoot, logs));
+  assert.ok(fs.existsSync(path.join(destDir, 'node_modules', 'acp-kernel', 'package.json')), '缺失依赖应从安装包内层补齐');
+  assert.equal(fs.readFileSync(path.join(destDir, 'lib', 'index.js'), 'utf8'), '// newer\n', '更新版代码不被覆盖');
+  assert.ok(logs.some((m) => m.includes('acp-kernel') && m.includes('补齐')), '应有依赖补齐日志');
+  // 已有依赖（无论内层/顶层）绝不覆盖
+  fs.writeFileSync(path.join(destDir, 'node_modules', 'acp-kernel', 'package.json'), '{"name":"acp-kernel","version":"9.9.9","marker":"keep"}');
+  syncCompanionFiles(syncOpts(plugins, assetsRoot, profileDir, vendorRoot, []));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(destDir, 'node_modules', 'acp-kernel', 'package.json'), 'utf8')).marker, 'keep', '已有版本绝不覆盖');
+});

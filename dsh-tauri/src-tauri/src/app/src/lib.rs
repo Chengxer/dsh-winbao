@@ -760,6 +760,9 @@ fn inject_diag_probe(app: tauri::AppHandle) {
           var errs=[];
           window.addEventListener('error',function(e){ errs.push('ERR:'+(e.message||'?')) });
           window.addEventListener('unhandledrejection',function(e){ errs.push('REJ:'+((e.reason&&e.reason.message)||e.reason||'?')) });
+          // 插件 loader 失败常以 console.error 呈现（不经 error/rejection 事件），
+          // 必须同挂——曾因只挂两者漏掉「missed the module table」页面级证据。
+          var __ce=console.error; console.error=function(){ try{errs.push('CON:'+[].slice.call(arguments).join(' ').slice(0,200))}catch(e){} __ce.apply(console,arguments) };
           setTimeout(function(){
             probeComposer('t0');
             var btns=[];
