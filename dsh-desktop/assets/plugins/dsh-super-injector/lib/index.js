@@ -230,8 +230,8 @@ export const Config = z.object({
 export function apply(ctx: AppContext, config: Config): void {
   // 短名（去 scope）：日志文件名不能含 '/'（会变成子路径）
   const SHORT = ${JSON.stringify(pkgName.split('/').pop() ?? 'plugin')}
-  const logFile = config.logFile || join(homedir(), '.dsh', 'super-injector', SHORT + '.log')
-  const watchFile = config.watchFile || join(homedir(), '.dsh', 'super-injector', 'self-heal.log')
+  const logFile = config.logFile || join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector', SHORT + '.log')
+  const watchFile = config.watchFile || join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector', 'self-heal.log')
   let cycles = 0
   let llmCalls = 0
   let lastRoute: { provider: string; model: string } | null = null
@@ -518,8 +518,8 @@ function withOpLock(fn) {
 }
 export function apply(ctx, config) {
     const logger = ctx.logger;
-    const registryFile = config.registryFile || join(homedir(), '.dsh', 'super-injector', 'registry.json');
-    const profileNodeModules = config.profileNodeModules || join(homedir(), '.dsh', 'profiles', 'web', 'node_modules');
+    const registryFile = config.registryFile || join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector', 'registry.json');
+    const profileNodeModules = config.profileNodeModules || join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'profiles', 'web', 'node_modules');
     // 热重载的 config 合并路径可能缺 schema 新字段（旧 fiber _config + patch 旧值），
     // 防御性兜底（schema 默认值只在 loader 装配时保证）。
     const intervalMs = config.intervalMs ?? 1500;
@@ -1350,7 +1350,7 @@ appendFileSync(patchFile, `\n# super-injector heal ${Date.now()}\n`);
                     keys.push(String(k));
                 dbg.push(`  table keys(${keys.length}): ${keys.filter((k) => k.includes('engram') || k.includes('dsh-external')).join(',') || '(none)'}`);
             }
-            appendFileSync(join(homedir(), '.dsh', 'super-injector', 'reload-debug.log'), dbg.join('\n') + '\n');
+            appendFileSync(join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'super-injector', 'reload-debug.log'), dbg.join('\n') + '\n');
         }
         catch { /* 诊断失败不阻塞 */ }
         // client 模块补扫（表丢失/从未注册时自愈——web 重启后幽灵 entry 场景）
@@ -2595,7 +2595,7 @@ appendFileSync(patchFile, `\n# super-injector heal ${Date.now()}\n`);
             render: (_args, value) => [{ type: 'text', text: String(value) }],
         },
         async execute(args) {
-            const profilesRoot = join(homedir(), '.dsh', 'profiles');
+            const profilesRoot = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'profiles');
             let profileDirs = [];
             try {
                 profileDirs = readdirSync(profilesRoot).filter((d) => !d.startsWith('.'));
