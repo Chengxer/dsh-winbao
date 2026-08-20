@@ -638,6 +638,11 @@
       else cb();
     }
   }
+  // iframe 守卫（用户实测「会话地图双层壳」根治）：Tauri initialization_script
+  // 会注入同源所有 iframe（synapse /synapse/ 等），而 Electron contextBridge
+  // 只跑主框架——主框架独占壳（标题栏/菜单/拖拽），iframe 里全部跳过。
+  if (window.top !== window.self) return;
+
   onBodyReady(function () {
     injectChromeBar();
     try {
