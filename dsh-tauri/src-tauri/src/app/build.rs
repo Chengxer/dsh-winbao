@@ -1,3 +1,5 @@
+//! 构建脚本：tauri-build 资源生成 + Windows manifest 对所有产物（含测试 exe）注入。
+
 fn main() {
     // Windows 集成测试修复（tauri 已知 bug #13419/#13948/#14580）：
     // tauri-build 的 tauri-winres::compile 只把 app manifest 嵌进主 bin，
