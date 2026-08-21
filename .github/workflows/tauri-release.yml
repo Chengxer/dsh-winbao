@@ -512,8 +512,22 @@ jobs:
           done
           echo "rc7 packages ready"
 
-      - name: Stage payload (full)
-        run: bash dsh-tauri/scripts/stage-payload.sh
+      - name: Stage payload (CI simplified)
+        run: |
+          set -e
+          DEST="dsh-tauri/package-payload/dsh-desktop"
+          mkdir -p "$DEST"
+          cp dsh-desktop/*.js "$DEST/" 2>/dev/null || true
+          cp dsh-desktop/package.json "$DEST/"
+          cp -r dsh-desktop/scripts "$DEST/scripts"
+          cp -r dsh-desktop/assets "$DEST/assets"
+          mkdir -p "$DEST/vendor"
+          cp -r dsh-desktop/vendor/node "$DEST/vendor/node"
+          cp -r dsh-desktop/vendor/npm "$DEST/vendor/npm" 2>/dev/null || true
+          rm -rf "$DEST/node_modules"
+          cp -r dsh-desktop/node_modules "$DEST/node_modules"
+          rm -rf "$DEST/node_modules/electron" "$DEST/node_modules/electron-builder" "$DEST/node_modules/electron-winstaller" "$DEST/node_modules/@electron"
+          echo "Payload: $(du -sm "$DEST" | cut -f1)MB"
 
       - name: Build installer
         run: cd dsh-tauri && npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --target x86_64-unknown-linux-gnu
@@ -602,8 +616,22 @@ jobs:
           done
           echo "rc7 packages ready"
 
-      - name: Stage payload (full)
-        run: bash dsh-tauri/scripts/stage-payload.sh
+      - name: Stage payload (CI simplified)
+        run: |
+          set -e
+          DEST="dsh-tauri/package-payload/dsh-desktop"
+          mkdir -p "$DEST"
+          cp dsh-desktop/*.js "$DEST/" 2>/dev/null || true
+          cp dsh-desktop/package.json "$DEST/"
+          cp -r dsh-desktop/scripts "$DEST/scripts"
+          cp -r dsh-desktop/assets "$DEST/assets"
+          mkdir -p "$DEST/vendor"
+          cp -r dsh-desktop/vendor/node "$DEST/vendor/node"
+          cp -r dsh-desktop/vendor/npm "$DEST/vendor/npm" 2>/dev/null || true
+          rm -rf "$DEST/node_modules"
+          cp -r dsh-desktop/node_modules "$DEST/node_modules"
+          rm -rf "$DEST/node_modules/electron" "$DEST/node_modules/electron-builder" "$DEST/node_modules/electron-winstaller" "$DEST/node_modules/@electron"
+          echo "Payload: $(du -sm "$DEST" | cut -f1)MB"
 
       - name: Build installer
         run: cd dsh-tauri && npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --target aarch64-apple-darwin
