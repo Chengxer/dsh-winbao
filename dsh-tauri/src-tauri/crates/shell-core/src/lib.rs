@@ -12,12 +12,14 @@
 //! - [`settings`] —— 设置存储（JSON，schema 兼容 Electron 版 updater.loadSettings）
 //! - [`run_state`] —— 应用运行态状态机
 //! - [`single_instance`] —— 单实例锁（Phase 0 为锁文件占位，Phase 1 换 OS 命名互斥体）
+//! - [`time`]     —— 无依赖 UTC 时间换算（days→civil + 时间戳格式化）
 
 pub mod paths;
 pub mod upgrade;
 pub mod run_state;
 pub mod settings;
 pub mod single_instance;
+pub mod time;
 
 pub use paths::DshPaths;
 pub use run_state::RunState;

@@ -119,29 +119,13 @@ fn install_panic_hook() {
     }));
 }
 
-/// 无依赖时间戳（年-月-日 时:分:秒；days→civil 与 commands.rs 同源算法）。
+/// 无依赖时间戳（年-月-日 时:分:秒，UTC）。算法单一来源：`shell_core::time`。
 fn chrono_like_now() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    format_unix_secs(secs)
-}
-
-fn format_unix_secs(secs: u64) -> String {
-    let days = secs / 86_400;
-    let z = days as i64 + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    let rem = secs % 86_400;
-    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
+    shell_core::time::format_unix_secs(secs)
 }
 
 pub fn run() {
@@ -867,14 +851,6 @@ mod repo_root_tests {
 #[cfg(test)]
 mod panic_hook_tests {
     use super::*;
-
-    #[test]
-    fn unix_secs_format_known_timestamps() {
-        // 1784419200 = 2026-07-19 00:00:00 UTC（commands.rs day20653 同源基准）。
-        assert_eq!(format_unix_secs(1_784_419_200), "2026-07-19 00:00:00");
-        assert_eq!(format_unix_secs(1_784_419_200 + 3661), "2026-07-19 01:01:01");
-        assert_eq!(format_unix_secs(0), "1970-01-01 00:00:00");
-    }
 
     #[test]
     fn panic_payload_str_variants() {
