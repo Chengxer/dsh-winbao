@@ -73,6 +73,10 @@ struct Inner {
     stopping: bool,
 }
 
+
+/// 带超时的 .output()——D2 诊断「永挂形态」根治：vendor node 调用在
+/// 用户机上可能被 AV/SmartScreen 拦到半死，无超时则 boot 线程永挂
+/// loading 页（连恢复页都不出现）。超时按失败处理，进瀑布/恢复页。
 impl Supervisor {
     pub fn new(repo_root: &std::path::Path) -> Self {
         let app_dir = repo_root.join("dsh-desktop");
@@ -145,6 +149,19 @@ impl Supervisor {
         let this = Arc::clone(self);
         let tx2 = tx.clone();
         std::thread::spawn(move || {
+            // 看门狗（D2 永挂形态根治）：boot 全链有界 5 分钟，超时进恢复页
+            // ——防 vendor node 被 AV 拦到半死导致 loading 永挂。
+            let wd_tx = tx.clone();
+            let this_wd = Arc::clone(&this);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(300));
+                let g = this_wd.inner.lock().unwrap_or_else(|p| p.into_inner());
+                if !g.stopping && g.state != RunState::Ready && g.state != RunState::Recovery {
+                    drop(g);
+                    eprintln!("[supervisor] 看门狗：boot 链 5 分钟超时，转恢复页");
+                    this_wd.enter_recovery_tx(&wd_tx, "boot 链超时（5 分钟看门狗）");
+                }
+            });
             // panic 隔离：瀑布任何一环意外 panic（兼容性场景的兜底）→ 落恢复页，
             // 客户端继续运行（全局 panic hook 已另行落盘 panics.log）。
             let this2 = Arc::clone(&this);
