@@ -1,5 +1,56 @@
 # Changelog — DSH Desktop（Tauri 版，`tauri/modular` 分支）
 
+## [未发布] — Windows 升级目录识别 + macOS arm64「已损坏」根治
+
+### Windows：0.4.x Electron → Tauri 升级「无法识别旧版安装目录」根治
+
+- **现象**：v0.5.0 NSIS 安装包升级安装时目录页默认 `%LOCALAPPDATA%\DSH
+  Desktop`，认不出 Electron 线（0.3.x/0.4.x）的安装目录 → 老用户装出
+  双安装（本机取证：Electron 在 `D:\app\dsh\DSH Desktop`，v0.5.0 装到
+  `D:\app\DSH Desktop`）。
+- **根因**：Tauri 模板 `RestorePreviousInstallLocation` 只认 Tauri 自写的
+  `HKCU\Software\deepseek\DSH Desktop` 键；Electron 线写的是
+  `Uninstall\62276e9d-c5f3-5091-b4ee-c7144d6db450`（appId v5 UUID）与
+  `HKCU\Software\DSH Desktop`（INSTALL_REGISTRY_KEY），互不相识。
+- **修复**：vendor NSIS 模板 `installer-template.nsi`（基线 tauri-cli
+  v2.11.4，经 `nsis.template` 挂载，与上游 diff 仅一处守卫式挂载点）+
+  `installerHooks.nsh` 新增 `DSH_DETECT_LEGACY_INSTALLDIR` 宏——Tauri
+  自身键为空时只读探测上述两键 `InstallLocation`，归一化并校验旧目录
+  标记（`DSH Desktop.exe` / `resources\node\node.exe` /
+  `Uninstall_DSH_Desktop.exe`）后预填 `$INSTDIR`。**只读**：
+  ReadRegStr/StrCpy/LogicLib/DetailPrint 以外零调用（v0.5.0 五轮安装器
+  卡死的铁律），绝不移动/删除旧目录内容，不影响用户在目录页手改。
+- **验证**：82k 行完整 installer.nsi 实编译 0 错 0 警；注册表场景夹具
+  6/6（含 Tauri 键优先/无标记拒绝/兜底键）；passive 端到端装机落点与
+  注册表记录均断言通过，且卸载器对旧目录残留文件零触碰。
+- **v0.5.0 双安装用户**：数据不受影响（`~/.dsh`、`%APPDATA%\dsh-desktop`
+  两版共用），手动卸掉两份安装之一即可（详见 upgrade-guide.md §5）。
+
+### macOS 包完全无签名问题（v0.5.0 报「已损坏」且 xattr 无效的根因）
+
+- **定性**：Tauri v2 在未配置 `signingIdentity` 且无 `APPLE_CERTIFICATE`
+  环境变量时会**静默跳过整个 codesign 阶段**——v0.5.0 的 .app 内
+  `_CodeSignature` 完全缺失（无 bundle 级密封），仅主二进制带 rustc/ld
+  在 arm64 上自动打的链接期 ad-hoc 签名。Apple Silicon 内核强制代码签名
+  + macOS Sequoia 起 Gatekeeper 对 quarantine 应用收紧，两重作用下系统
+  报「已损坏，建议移到废纸篓」，且 `xattr -cr` 与右键打开均无效
+  （右键绕过在 Sequoia 已被 Apple 移除）。此前 f8a5437 的指引只覆盖
+  quarantine 型，对这型无效。已用 UDIF/HFS+ 解剖 v0.5.0 DMG 证实。
+- **修复（构建配置显式化）**：
+  1. `tauri.conf.json` 显式 `bundle.macOS.signingIdentity: "-"`（ad-hoc），
+     由 Tauri 在打 DMG 前按由内向外顺序对 .app 做正规签名——payload 资源
+     本就全部走 `bundle.resources` 通道在签名前打入，密封从此完整；
+  2. CI mac job 新增 `Verify ad-hoc signature` 步骤：`codesign --verify
+     --deep --strict` 校验，失败即回退 `codesign --force --deep --sign -`
+     重签并重打 DMG——绝不再发出无签名 mac 包；
+  3. 排障手册 macOS 专章改为先分型（`codesign --verify`）再对症：
+     隔离属性型（xattr 可解）vs 签名缺失/密封破坏型（必须本机重签），
+     README 提示同步。
+- **用户侧过渡方案**（修复版本发布前）：本机执行
+  `sudo codesign --force --deep --sign - "/Applications/DSH Desktop.app"` 后
+  再 `sudo xattr -cr` 同路径即可救活 v0.5.0。
+- **长期**：取得 Apple Developer ID 后做正式签名 + 公证，下载即开。
+
 ## [0.5.1] — 2026-08-21 本地打包（预览版，不发布）
 
 > 紧随 v0.5.0 的收敛版：内核家族随官方 deepseek-harness 1.1rc 平移，

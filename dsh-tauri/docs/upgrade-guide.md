@@ -20,21 +20,64 @@
 
 ## 2. 安装器升级链（NSIS）
 
-`src-tauri/src/app/nsis/installerHooks.nsh`（`NSIS_HOOK_PREINSTALL`）：
+### 2.1 v0.5.0 实际形态（历史教训）
 
-1. **进程占用检测**：旧版（dsh-desktop.exe）或新版运行中 → 提示完全退出（重试/取消），
-   绝不强杀（防会话写盘中断）；
-2. **定位旧版**：HKCU/HKLM Uninstall 按 `DisplayName = "DSH Desktop"` 精确匹配
-   （兼容 electron-builder 的 GUID/appId 键名与 perUser/perMachine）；
-3. **静默卸旧保数据**：`<旧卸载器> /S /KEEP_APP_DATA --updated`
-   —— 0.4.1+ 卸载器识别 `/KEEP_APP_DATA`（保留全部用户数据）；定位失败则跳过
-   卸载直接安装（两版共存，数据仍不受影响）；
-4. **安装新版**：`installMode: currentUser`（对齐 electron-builder perUser）；
-   identifier `com.deepseek.dsh.desktop`（对齐 Electron appId）；快捷方式名
-   `DSH Desktop`（Tauri NSIS 默认按 productName）一致。
+`src-tauri/src/app/nsis/installerHooks.nsh` 的 `NSIS_HOOK_PREINSTALL` **置空**
+（仅一行 DetailPrint）：五轮「进程检测 + 注册表扫描 + 静默卸旧」迭代在部分
+用户机上反复卡死（NSIS 栈序 / strip 引号 / 模式变量 / ExecWait UAC / C#
+卸载器自提权，五轮修五轮仍有新根因），最终裁决是**安装器只装文件**：
 
-> NSIS 脚本语法在 `tauri build` 打包时由 makensis 编译校验——本地未出包，
-> 首次出包（docs/release-keys.md 流程）时验证 hook 编译与静默卸载行为。
+- 进程占用检测交给 Tauri 模板自带 `CheckIfAppIsRunning`；
+- 旧注册表键清理交给应用首启 sidecar boot 链（companion-profile 自愈）；
+- 数据目录（`~/.dsh` 与 `%APPDATA%\dsh-desktop`）不在安装目录内，天然不受影响。
+
+### 2.2 升级目录识别（v0.5.1 起补齐的缺口）
+
+**问题**：Tauri 模板的 `RestorePreviousInstallLocation` 只认 Tauri 自己写的
+`HKCU\Software\deepseek\DSH Desktop` 默认值。Electron 线（0.3.x/0.4.x，
+electron-builder NSIS）写的是另一套键——于是 0.4.x → 0.5.0 升级时目录页
+默认落到 `%LOCALAPPDATA%\DSH Desktop`，老用户装出**双安装/数据割裂**
+（本机实测取证：Electron 装在 `D:\app\dsh\DSH Desktop`，v0.5.0 却装到
+`D:\app\DSH Desktop`）。
+
+**Electron 线注册表事实**（`dsh-desktop/electron-builder.yml` +
+`uninstaller/DSH_Desktop_Uninstaller.cs` 推导，本机 `Log.log` 卸载记录实证）：
+
+| 键 | 名称 | 来源 |
+|----|------|------|
+| 卸载键 | `HKCU/HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\62276e9d-c5f3-5091-b4ee-c7144d6db450` | `UUID.v5(appId="com.deepseek.dsh.desktop")`（nsis.guid 未显式配置） |
+| 安装键 | `HKCU\Software\DSH Desktop` | electron-builder `INSTALL_REGISTRY_KEY`（APP_FILENAME，oneClick:false → 保留空格） |
+| 值 | 两键均写 `InstallLocation` | per-user 默认 HKCU，防御性补读 HKLM/WOW6432Node |
+
+**修复机制**（三层，全部只读，绝不移动/删除旧目录内容）：
+
+1. **vendor 模板** `src-tauri/src/app/nsis/installer-template.nsi`（基线
+   tauri-cli-v2.11.4 的 `crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi`，
+   经 `tauri.conf.json` 的 `bundle.windows.nsis.template` 挂载）：与上游的
+   全部差异仅一处——`RestorePreviousInstallLocation` 尾部追加对
+   `DSH_DETECT_LEGACY_INSTALLDIR` 宏的 `!ifmacrodef` 守卫调用；
+2. **检测宏**（`installerHooks.nsh`）：仅当 Tauri 自身键为空时，依次读上表
+   两键的 `InstallLocation`，归一化（去成对引号/尾反斜杠）后校验旧目录标记
+   ——`DSH Desktop.exe` / `resources\node\node.exe` /
+   `Uninstall_DSH_Desktop.exe` 三者其一存在才采纳，把 `$INSTDIR` 预填为旧目录；
+   目录页仍可手动改（`.onInit` 先于目录页，不覆盖用户选择）；
+3. **优先级**：Tauri 自身键 > Electron 旧键——0.5.0+ 之间升级走原生逻辑，
+   已双装的 v0.5.0 用户继续留在 0.5.0 目录（旧 Electron 目录原样保留，
+   由首启 sidecar 自愈链处理，不做意外搬家）。
+
+**安全边界（.onInit 铁律）**：宏体只允许
+`ReadRegStr / StrCpy / LogicLib ${If} / ${FileExists} / DetailPrint`；
+`MessageBox / Exec* / Push/Pop / Sleep / CopyFiles / 写注册表` 等任何可能
+阻塞 UI 线程的调用一律禁止（v0.5.0 五轮卡死的教训）。
+
+**已验证**（2026-08-21，本机，`%LOCALAPPDATA%\tauri\NSIS\Bin\makensis.exe`）：
+
+- 完整 82k 行 installer.nsi（0.5.1 实际产物 + 本改动）实编译：0 error / 0 warning；
+- 注册表场景夹具 6/6 通过：带引号+尾斜杠采纳、无标记拒绝、无旧键默认、
+  Tauri 键优先、安装键兜底、裸值采纳；
+- passive 端到端（改名 `DSH LegacyTest` 隔离真机状态）：种旧键 → `/P`
+  安装 → 文件落在**采纳的旧目录**、Tauri 恢复键/ARP `InstallLocation`
+  均记录旧目录 → 自带卸载器只清自身文件，**旧目录残留标记文件原样未动**。
 
 ## 3. 运行时行为对齐（升级用户无感差异）
 
@@ -55,8 +98,13 @@
 
 ## 5. 已知边界
 
-- 极旧版本（0.4.0 及更早）卸载器无 `/KEEP_APP_DATA` 参数识别：静默卸载默认仍保留
-  用户数据（更新场景），但建议此类用户先用 Electron 版内置更新到 0.4.1+ 再升 Tauri；
+- **v0.5.0 双安装受害者**（目录识别修复前升级）：0.5.0 装在了新目录、旧
+  Electron 目录还在。数据不受影响（`~/.dsh` 与 `%APPDATA%\dsh-desktop`
+  全程共用），但请手动卸载其中一个目录的多余一份（控制面板/设置里的
+  「DSH Desktop」条目对应 0.5.x，旧目录的 `Uninstall_DSH_Desktop.exe`
+  对应 Electron 版）——两个卸载器互不认识对方，任卸其一只清自身；
+- 极旧版本（0.4.0 及更早）卸载器无 `/KEEP_APP_DATA` 参数识别：建议先用
+  Electron 版内置更新到 0.4.1+ 再升 Tauri；
 - WSL 托管模式用户：Tauri 版暂未实装 WSL 后端，v0.5.1 起设置项**诚实提示
   「暂未实装」**（不再呈现可切换的假开关）；#132 pnpm 结构误判已修
   （resolveViaPnpmStore 回落 + WSL UNC 防误删 + 历史误隔离自愈）。完整托管

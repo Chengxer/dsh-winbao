@@ -34,13 +34,17 @@
       "../../../package-payload/dsh-desktop/": "dsh-desktop/"
     },
     "externalBin": [],
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "windows": {
       "webviewInstallMode": {
         "type": "embedBootstrapper"
       },
       "nsis": {
         "installMode": "currentUser",
-        "installerHooks": "nsis/installerHooks.nsh"
+        "installerHooks": "nsis/installerHooks.nsh",
+        "template": "nsis/installer-template.nsi"
       }
     }
   }
