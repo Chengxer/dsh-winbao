@@ -2002,6 +2002,7 @@ dependencies = [
 name = "kernel-process"
 version = "0.5.1"
 dependencies = [
+ "libc",
  "windows-sys 0.59.0",
 ]
 

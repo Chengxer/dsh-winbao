@@ -50,7 +50,14 @@ mod imp {
 pub use imp::assign_child_to_kill_on_close_job;
 
 #[cfg(not(windows))]
-/// 非 Windows：进程组语义天然部分覆盖；显式 kill 仍是主路径。
+/// 非 Windows 空壳（保持现状，无 OS 句柄可建）。Unix 侧的进程树收割语义
+/// 由**进程组**承担：spawn 时设内核为进程组长（`kill_tree::
+/// set_process_group_leader`，子孙天然继承 PGID）+ 显式退出/重启路径
+/// `killpg(-pgid, SIGKILL)`（`kill_tree::kill_tree`）。注意进程组与 Job
+/// Object 的边界差异：Job Object 连「壳被第三方强杀」都能兜（句柄表关闭即
+/// 收割）；进程组只覆盖显式 kill 路径——壳本身被 SIGKILL 时内核组不随父
+/// 死，属 Unix 已知边界（本次修复目标是「退出应用杀不干净」，显式路径
+/// 已全覆盖）。本函数恒成功（no-op）。
 pub fn assign_child_to_kill_on_close_job(_child: &std::process::Child) -> Result<(), String> {
     Ok(())
 }

@@ -8,7 +8,9 @@
 //!   → ReadyLineParser → kernel-ready → 主窗换页
 //!   → 探活（TCP + 进程 wait）→ 崩溃环 → 恢复页
 //! ```
-//! 杀树：taskkill /T /F（Electron 版实证：控制台进程优雅 kill 无效）。
+//! 杀树：Windows taskkill /T /F（Electron 版实证：控制台进程优雅 kill 无效）；
+//! Unix killpg(-pgid, SIGKILL)——spawn 时设内核为进程组长，整组一次收割
+//! （kernel_process::kill_tree）。
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -17,7 +19,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use kernel_process::{choose_stable_port, CrashLoopDetector, ReadyLineParser, SpawnSpec};
+use kernel_process::{choose_stable_port, kill_tree, CrashLoopDetector, ReadyLineParser, SpawnSpec};
 use kernel_process::crash_loop::Verdict;
 /// 稳定落定窗口（Electron SERVICE_STABLE_MS 同语义：就绪后稳定存活此时长，
 /// 启动快照才成为「最后良好」回滚锚点）。
@@ -562,6 +564,11 @@ impl Supervisor {
         cmd.current_dir(&self.app_dir).stdin(Stdio::null())
             .stdout(Stdio::piped()).stderr(Stdio::piped())
             .creation_flags_win();
+        // Unix 杀树根基：内核设为进程组长（PGID == pid），后续全部子孙（工具
+        // 进程/持久终端会话）天然继承同组——kill_kernel 的 killpg(-pgid) 才能
+        // 整组收割（mac 退出后内核残留的根因）。Windows no-op（杀树走 Job
+        // Object + taskkill）。
+        kernel_process::kill_tree::set_process_group_leader(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
         let pid = child.id();
         log_line(&format!("内核 pid={pid} spawn: {}", spec.display_cmd()));
@@ -792,13 +799,14 @@ impl Supervisor {
         self.restart(tx, None);
     }
 
+    /// 杀内核整树（restart / 恢复页 / 探活失败 / 应用退出共用）。
+    /// Windows：taskkill /T /F；Unix：killpg(-pgid, SIGKILL) 整组收割
+    /// ——OS 绑定见 kernel_process::kill_tree（本函数仅持锁取 child + 派发）。
     pub fn kill_kernel(&self) {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(mut c) = g.kernel.take() {
             let pid = c.id();
-            let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).creation_flags_win().output();
-            let _ = c.kill();
-            let _ = c.wait();
+            kill_tree(&mut c, pid);
         }
     }
 
