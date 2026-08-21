@@ -539,9 +539,13 @@ jobs:
         # 是 linuxdeploy/AppImage 打包失败的已知根因（deb 不受影响）；产物
         # 最终文件名由 Rename 步骤统一，与 productName 无耦合。
         # deb 先行（必须成功）；AppImage 单独跑且非阻断——有 deb 兜底。
+        # APPIMAGE_EXTRACT_AND_RUN=1：linuxdeploy 自身是 AppImage，runner 无
+        # /dev/fuse 无法自挂载执行（exec 失败＝"failed to run linuxdeploy"），
+        # 强制解压运行；NO_STRIP=1 防符号剥离报错。
         run: |
           cd dsh-tauri
           npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --config '{"productName":"DSH-Desktop"}' --target x86_64-unknown-linux-gnu --bundles deb
+          export APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=1
           npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --config '{"productName":"DSH-Desktop"}' --target x86_64-unknown-linux-gnu --bundles appimage || echo "::warning::AppImage bundling failed (deb still published)"
 
       - name: Rename artifacts
