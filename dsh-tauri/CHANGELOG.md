@@ -1,4 +1,18 @@
-# Changelog — DSH Desktop（Tauri 版，`tauri/modular` 分支）
+# Changelog
+
+## [0.5.2] — 2026-08-22
+
+### 修复（用户实测反馈驱动）
+- **频繁重启 + 白屏四根因根治**（14179788）：恢复页「重启内核」事件断链（内核就绪页面仍卡 loading）· 崩溃环冷却期仍后台反复拉起内核 · 假死探活重启后不重布+旧环补刀杀新内核 · KernelReady 双发与换页前无热探（chrome-error 页假健康）。真机复现前后对照：崩溃环后零后台拉起、恢复页重启 5 步上屏成功换页、二次假死均 60s 自愈
+- **设置页读取不到 opencode-go 的 DeepSeek V4 Flash Vision Exp**（a3e73ae2）：pi-ai 内置模型目录落后于线上端点——runtime-patch 克隆同族条目补齐 image 输入，幂等、上游收录后自动退役
+- **内存泄漏两处**：心跳监测线程随内核重启无限叠加（bf6c673 代数守卫）· 桥垫片控制条自愈重注样式叠注+订阅泄漏（6ad20af）；真机长时实测（菜单/赞助窗/设置/reload/压测/静置）裁定健康
+- kill 目标 pid≤1 防御（68826305）
+
+### 功能
+- **Electron 余额生态全量收口**（cccedf27）：数据生产链接线（3min 轮询/可见性暂停/恢复回放）——此前 dock 恒走降级态；pr-107 代理隧道/mtime 缓存/暂停门移植；toggle 即时刷新
+- **壳层预设全集迁移**（60d6f884）：boot 链 presets 步，8 预设含 router-standard 与 v4-flash-godmode-opencode-go（router 定性=reasoning 四档任务路由预设）
+
+ DSH Desktop（Tauri 版，`tauri/modular` 分支）
 
 ## [未发布] — Windows 升级目录识别 + macOS arm64「已损坏」根治
 
