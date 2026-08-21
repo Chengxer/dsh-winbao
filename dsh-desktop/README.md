@@ -35,7 +35,9 @@
 > 若想强制指定 DSH 配置目录，启动前设置环境变量 `DSH_HOME` 即可（与 dsh CLI 行为一致）。
 
 > **macOS 用户**：当前构建未做 Apple 公证，首次打开若提示“已损坏，无法打开”，
-> 执行 `sudo xattr -cr "/Applications/DSH Desktop.app"` 即可；
+> 请先执行 `codesign --verify --deep --strict "/Applications/DSH Desktop.app"` 分型：
+> v0.5.0 属签名缺失型（`xattr` 无效，需 `codesign --force --deep --sign -` 重签），
+> 修复版本起属隔离属性型（`sudo xattr -cr` 即可）。
 > 详见 [docs/troubleshooting.md](docs/troubleshooting.md) 的 macOS 专章。
 
 ## 跟随官方更新（用户同意后自动更新）

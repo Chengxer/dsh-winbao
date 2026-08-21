@@ -49,6 +49,10 @@
 - **用户侧过渡方案**（修复版本发布前）：本机执行
   `sudo codesign --force --deep --sign - "/Applications/DSH Desktop.app"` 后
   再 `sudo xattr -cr` 同路径即可救活 v0.5.0。
+- **附带发现（发布卫生）**：线上 `DSH-Desktop-0.5.0-macos-arm64.dmg` 由
+  09:01 的 workflow_dispatch 补传 run 重建，其时分支 `tauri.conf.json`
+  版本已 bump——该「0.5.0」包内 Info.plist 实标 0.5.1（解剖所见）。后续
+  补传应从对应 tag 的提交构建，避免版本错标。
 - **长期**：取得 Apple Developer ID 后做正式签名 + 公证，下载即开。
 
 ## [0.5.1] — 2026-08-21 本地打包（预览版，不发布）

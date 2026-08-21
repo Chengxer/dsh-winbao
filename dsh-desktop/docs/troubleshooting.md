@@ -43,38 +43,62 @@ Get-Content -LiteralPath "$env:APPDATA\DSH Desktop\logs\desktop.log" -Tail 80
 
 ## macOS 专章：提示“已损坏，无法打开”或“无法验证开发者”
 
-> 适用：从浏览器/网盘下载的 dmg/zip 包。根因：当前构建无 Apple Developer
-> 签名与公证（仅 ad-hoc 签名），macOS 会给下载文件打隔离属性
-> `com.apple.quarantine`，Gatekeeper 对未公证应用直接拒绝，
-> 在较新系统上表现为“已损坏”。**这不是安装包真的损坏。**
+> 适用：从浏览器/网盘下载的 dmg/zip 包。**这不是安装包数据损坏**，
+> 而是 Apple 代码签名体系的问题。我们无 Apple Developer 证书
+> （未做签名公证，仅 ad-hoc），macOS 给下载文件打隔离属性
+> `com.apple.quarantine` 后，Gatekeeper 对它的处置分两型，
+> 修复手段完全不同——先用下面的判定步骤分型，再对症下药。
 
-### 修复步骤（按顺序执行，命中即停）
+### 第 0 步：分型判定（在终端执行，看输出）
 
-1. **移除隔离属性**（首选，绝大多数情况一步到位）：
+```bash
+codesign --verify --deep --strict “/Applications/DSH Desktop.app” && echo OK
+```
+
+- 输出 `OK` → **A 型（隔离属性型）**：签名密封完好，只是被 Gatekeeper 拦；
+  `xattr` 移除隔离属性即可，见步骤 1。
+- 报 `code object is not signed at all` / 其他失败 → **B 型（签名缺失/密封破坏型）**：
+  `xattr` 救不了，必须重新签名，见步骤 2。
+
+### A 型：隔离属性型（签名完好，xattr 可解）
+
+- **移除隔离属性**：
    ```bash
-   sudo xattr -cr "/Applications/DSH Desktop.app"
+   sudo xattr -cr “/Applications/DSH Desktop.app”
    ```
-   （把 app 拖到 `/Applications` 后再执行；若装在其他位置换成实际路径）
+   （把 app 拖到 `/Applications` 后再执行；若装在其他位置换成实际路径。
+   注意：直接双击挂载 dmg 后在 dmg 里右键打开是**只读卷，xattr 会失败**，
+   一定要先拷贝到 `/Applications`。）
 
-2. **Apple Silicon 上仍报“已损坏”** → 重新做 ad-hoc 签名（arm64 内核要求可执行文件至少带 ad-hoc 签名，下载/解压过程可能破坏）：
+- **提示“无法验证开发者”** → macOS 15 (Sequoia) 起右键打开的绕过方式已被
+   Apple 移除，请改走：系统设置 → 隐私与安全性 → 页面底部“仍要打开”。
+
+### B 型：签名缺失/密封破坏型（xattr 无效，必须重签）
+
+> v0.5.0 的 macOS 包即属此型：构建流水线未对 .app 做任何 bundle 级签名
+> （`_CodeSignature` 缺失），仅主二进制带链接期 ad-hoc 签名。arm64 内核
+> 强制代码签名 + Gatekeeper 双重校验下表现为「已损坏」，且
+> `xattr -cr` 与右键打开都无效。**下一个修复版本起构建时已内置 ad-hoc
+> 密封，此型不再出现**（届时只剩 A 型，`xattr` 即可解决）。
+
+- **重新做 ad-hoc 签名，再清隔离属性**：
    ```bash
-   sudo codesign --force --deep --sign - "/Applications/DSH Desktop.app"
+   sudo codesign --force --deep --sign - “/Applications/DSH Desktop.app”
+   sudo xattr -cr “/Applications/DSH Desktop.app”
    ```
-   然后重复第 1 步的 `xattr -cr`。
+   （`--sign -` 中的 `-` 就是 ad-hoc 身份，不需要任何证书。）
 
-3. **提示“无法验证开发者”（而非“已损坏”）** → 在访达中右键 app → 打开 → 再点“打开”；
-   或：系统设置 → 隐私与安全性 → 页面底部“仍要打开”。
+### 通用兜底
 
-4. 还不行 → 在终端直接启动看真实报错（绕过 Gatekeeper 弹窗）：
-   ```bash
-   "/Applications/DSH Desktop.app/Contents/MacOS/DSH Desktop"
+- 仍不行 → 在终端直接启动看真实报错（绕过 Gatekeeper 弹窗）：   ```bash
+   “/Applications/DSH Desktop.app/Contents/MacOS/DSH Desktop”
    ```
    把终端输出连同 `~/Library/Application Support/DSH Desktop/logs/dsh-web.log`
    尾部 80 行一起发给技术支持。
 
 ### 说明与长期方案
 
-- 每次从网上重新下载覆盖安装后，隔离属性会重新打上，需再次执行第 1 步。
+- 每次从网上重新下载覆盖安装后，隔离属性会重新打上，需再次执行 A 型步骤。
 - `xattr -cr` 与 ad-hoc 重签只影响本机该副本，不会改动安装包本身。
 - 长期方案：取得 Apple Developer ID 证书并做签名 + 公证（notarization）后，
   下载即开，无需上述任何步骤。
