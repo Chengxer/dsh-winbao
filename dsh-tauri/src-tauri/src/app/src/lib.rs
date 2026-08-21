@@ -767,7 +767,6 @@ fn inject_diag_probe(app: tauri::AppHandle) {
           }, 2500);
         })()"#;
 
-        // 探针结果写 document.title（无 IPC 依赖的可靠回传通道），Rust 侧回读落日志。
         // 探针基址注入（fetch 通道）。`probe base eval`
         if let Some(state) = app.try_state::<AppState>() {
             let u = state.loading_url.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -779,21 +778,9 @@ fn inject_diag_probe(app: tauri::AppHandle) {
             Ok(_) => eprintln!("[diag] probe eval OK"),
             Err(e) => eprintln!("[diag] probe eval ERR: {e}"),
         }
-        let win2 = win.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(6));
-            if let Ok(title) = win2.title() {
-                if title.contains("[diag]") {
-                    for line in title.split("~~") {
-                        if line.contains("[diag]") {
-                            eprintln!("[diag-title] {line}");
-                        }
-                    }
-                } else {
-                    eprintln!("[diag-title] 探针未写入 title（title={title:?}）——页面脚本可能未执行或 DOM 未就绪");
-                }
-            }
-        });
+        // R2 复盘：title 回读通道已删——探针从不写 document.title（fetch/invoke
+        // 双通道才是回传路径），回读分支恒走 else 输出「页面脚本可能未执行」
+        // 误导日志，且污染窗口标题语义。fetch 通道自 R2 起带 CORS 头真实可用。
     });
 }
 

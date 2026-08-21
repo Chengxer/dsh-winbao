@@ -73,10 +73,16 @@ fn handle(mut stream: TcpStream, root: &Path) {
         return;
     }
     // 诊断端点：远程页探针经 fetch 回传（无 IPC 依赖的可靠通道）。
+    // CORS 放行（R2 实测）：探针从内核页 origin（:随机端口）跨源打本服务，
+    // 无 ACAO 头时浏览器把每条回传拦成 unhandledrejection——DIAG 启动一次
+    // 污染 page-error 通道 21-45 条假阳（真实业务 fetch 失败实为 0）。
     if let Some(payload) = path.strip_prefix("/__diag/") {
         let msg = percent_decode(payload);
         eprintln!("[diag-fetch] {msg}");
-        let _ = write_response(&mut stream, 200, "text/plain; charset=utf-8", b"ok");
+        let head = format!(
+            "HTTP/1.0 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+        );
+        let _ = stream.write_all(head.as_bytes()).and_then(|_| stream.write_all(b"ok")).and_then(|_| stream.flush());
         return;
     }
     let rel = path.trim_start_matches('/');

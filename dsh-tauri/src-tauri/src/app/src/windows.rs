@@ -357,7 +357,9 @@ pub fn sponsor_inject_script(alipay_uri: &str, wechat_uri: &str) -> String {
   var BODY = {body};
   function apply(){{
     try {{
-      if (document.head) document.head.innerHTML = CSS;
+      // CSS 文本必须包 <style> 再入 head——裸文本只是文本节点，永远不成
+      // 样式表（R2 实测：零样式渲染，二维码按 1260px 原图挤进 501×620 窗）。
+      if (document.head) document.head.innerHTML = '<style>' + CSS + '</style>';
       if (document.body) document.body.innerHTML = BODY;
       document.title = '请作者喝咖啡';
     }} catch (e) {{}}
@@ -487,6 +489,9 @@ mod tests {
             "支付宝 data URI 必须内嵌: {s}");
         assert!(s.contains("data:image/png;base64,iVBORw0KGgo="), "微信 data URI 必须内嵌: {s}");
         assert!(s.contains("document.head.innerHTML"), "样式经 head 整体替换: {s}");
+        // R2 实测回归锚点：CSS 必须包 <style> 入 head，裸文本永远不生效。
+        assert!(s.contains("'<' + 'style'") || s.contains("'<style>'") || s.contains("\\u003cstyle"),
+            "CSS 须经 <style> 包裹注入（裸文本只是文本节点，零样式渲染实锄）: {s}");
         assert!(s.contains("document.body.innerHTML"), "内容经 body 整体替换: {s}");
         assert!(s.contains("DOMContentLoaded"), "loading 态必须等 DOM 就绪: {s}");
         assert!(s.contains("document.title"), "必须设置窗口标题: {s}");
