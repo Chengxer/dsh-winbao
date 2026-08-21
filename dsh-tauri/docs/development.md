@@ -39,7 +39,7 @@ dsh-tauri/
 **防漂移是机器强制的**（不是口头约定）：
 - `lib.rs` 的契约审计测试：注册命令必须出现在契约表内，否则
   `no_extra_commands_beyond_contract_and_poc` 失败——**加命令不改契约 = 测试红**。
-- sidecar `node --test`：boot 步骤顺序契约（repair→sync→patches→preflight）。
+- sidecar `node --test`：boot 步骤顺序契约（repair→sync→presets→patches→preflight）。
 - Electron 线 `unit-patch-engine` / `unit-compat-companion` 等对共享 Node 脚本
   的行为契约（两侧共用同一实现，一处修复双线同愈）。
 

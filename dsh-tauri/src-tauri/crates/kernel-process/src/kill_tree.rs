@@ -46,7 +46,9 @@ pub fn kill_branch() -> KillBranch {
 /// - `pid > i32::MAX`：无法表示为负 pgid（Linux/Mac 的 pid 上限远低于此，
 ///   纯防御）。
 pub fn unix_kill_target(pid: u32) -> Option<i32> {
-    if pid == 0 {
+    // pid<=1 一律拒绝：pid=0 会打自身进程组，pid=1 的 -1 会广播全系统
+    // （内核是 GUI 子进程不可能为 1，纯理论防御——W4 审查建议）。
+    if pid <= 1 {
         return None;
     }
     i32::try_from(pid).ok().map(|p| -p)
@@ -132,11 +134,11 @@ mod tests {
     #[test]
     fn unix_kill_target_negates_pid() {
         assert_eq!(unix_kill_target(4242), Some(-4242));
-        assert_eq!(unix_kill_target(1), Some(-1));
         assert_eq!(unix_kill_target(i32::MAX as u32), Some(i32::MIN + 1));
         assert_eq!(unix_kill_target(0), None, "pid=0 必须判非法：killpg(0) 会误杀自己的进程组");
+        assert_eq!(unix_kill_target(1), None, "pid=1 的 -1 会广播全系统，判非法（W4 防御）");
         assert_eq!(unix_kill_target(i32::MAX as u32 + 1), None, "超 i32::MAX 的 pid 无法表示为 -pgid");
-        for pid in 1..=4096u32 {
+        for pid in 2..=4096u32 {
             assert!(unix_kill_target(pid).unwrap() < 0, "合法 pid 目标恒负（-pgid 约定）: {pid}");
         }
     }

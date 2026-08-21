@@ -82,7 +82,7 @@ pub const LOADING_HTML: &str = r#"<!doctype html>
       }).catch(function(){});
     } catch (e) {}
   }
-  var NAMES = { repair:'自愈检查', sync:'伴随插件同步', patches:'运行时补丁', preflight:'就绪预检',
+  var NAMES = { repair:'自愈检查', sync:'伴随插件同步', presets:'内置预设对账', patches:'运行时补丁', preflight:'就绪预检',
                 'sidecar-boot':'启动链', spawn:'内核拉起' };
   listen('boot-step', function(ev){
     addLine(ev.ok ? 'ok' : 'fail', (NAMES[ev.name] || ev.name) + ' ' + (ev.ms||0) + 'ms' + (ev.ok ? '' : '：' + (ev.error||'失败')));
@@ -190,7 +190,7 @@ mod tests {
         assert!(LOADING_HTML.contains("windowControls.minimize"));
         assert!(LOADING_HTML.contains("dshDesktop"), "垫片可用前提下的降级引用");
         // 步骤名映射对齐 data-flow.md §3 boot 时序。
-        for (key, label) in [("repair", "自愈"), ("sync", "同步"), ("patches", "补丁"), ("preflight", "预检")] {
+        for (key, label) in [("repair", "自愈"), ("sync", "同步"), ("presets", "预设"), ("patches", "补丁"), ("preflight", "预检")] {
             assert!(LOADING_HTML.contains(key), "缺少步骤 {key}");
             assert!(LOADING_HTML.contains(label), "缺少步骤中文标签 {label}");
         }
