@@ -53,6 +53,8 @@ const {
   SLOT_COMPAT_PKG_RELS,
   PW_REL,
   BASH_REL,
+  PERSISTENT_SHELL_PKG_RELS,
+  TERMINAL_BASH_REL,
   CODE_PRESET_REL,
   ATTACH_LOCAL_REL,
   LOADER_PKG_REL,
@@ -76,6 +78,8 @@ const {
   transformSettingsSectionGuard,
   transformWorkspaceSearchRailFix,
   transformPluginInventoryTabMergeFix,
+  transformPersistentShellAbortRace,
+  transformTerminalInterruptEscalation,
   rootAppliers,
 } = require('./patch-adapters');
 
@@ -91,6 +95,8 @@ const {
   SETTINGS_SECTION_MARKER,
   WORKSPACE_SEARCH_RAIL_MARKER,
   PLUGIN_INVENTORY_TAB_MARKER,
+  PERSISTENT_ABORT_RACE_MARKER,
+  INTERRUPT_ESCALATION_MARKER,
   LOADER_TREE_ISOLATION_MARKER,
   LOADER_ACTIVATION_ISOLATION_MARKER,
   FAIL_LOUD_ISOLATION_MARKER,
@@ -336,6 +342,63 @@ const PATCH_SPECS = [
       alreadyLog: alreadySkip,
       doneLog: (file) => '已修复 apiKey 被脱敏截断 ' + file,
       failLog: (file, err) => '识图密钥补丁失败(' + file + '): ' + err.message,
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // 持久 shell 停止修复（会话内停止任务停不下来，Windows 主现场）。
+  //
+  // 根因：用户点停止 → abort → PTY 侧只写 \x03，对 trap/忽略 SIGINT 的命令
+  // 无效，`await operation.done` 挂到 300s 发送超时；兜底杀梯因 node-pty
+  // 1.2.0-beta.15 在 Windows 返回 pid=0（descendants() 恒空）而是死代码。
+  // 实测 terminal.kill() 复位会话能杀掉附着进程。两层修法：
+  //   1) persistent-shell-abort-race：两个 persistent 工具包的
+  //      `await operation.done` 与工具 signal abort race，abort 先醒即
+  //      shells.reset(...) 让 terminal.kill() 生效（正常完成路径不变）；
+  //   2) terminal-interrupt-escalation：dsh-terminal-bash interruptOnce
+  //      中断 2s 后仍未 settle 即 close("interrupt escalation")，不再等
+  //      300s（兜底其他消费方）。
+  // 上游修复意向：上游内置同款 abort race / 中断升级后，两补丁经 already /
+  // anchor-missing 自然退役（参照 vision-key-fix 休眠先例），无需手工摘除。
+  // -------------------------------------------------------------------------
+  {
+    id: 'persistent-shell-abort-race',
+    group: 'runtime',
+    order: 105,
+    kind: 'file',
+    layout: 'runtime-local',
+    wslLayout: 'wsl',
+    pkgRels: PERSISTENT_SHELL_PKG_RELS,
+    transform: transformPersistentShellAbortRace,
+    marker: PERSISTENT_ABORT_RACE_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: '持久 shell 停止补丁',
+      alreadyLog: alreadySkip,
+      doneLog: (file) => '已让中止即时复位持久 shell ' + file,
+      failLog: (file, err) => '持久 shell 停止补丁失败(' + file + '): ' + err.message,
+    },
+  },
+  {
+    id: 'terminal-interrupt-escalation',
+    group: 'runtime',
+    order: 106,
+    kind: 'file',
+    layout: 'runtime-local',
+    wslLayout: 'wsl',
+    pkgRel: TERMINAL_BASH_REL,
+    transform: transformTerminalInterruptEscalation,
+    marker: INTERRUPT_ESCALATION_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: 'PTY 中断升级补丁',
+      alreadyLog: alreadySkip,
+      doneLog: (file) => '已注入中断升级到 ' + file,
+      failLog: (file, err) => 'PTY 中断升级补丁失败(' + file + '): ' + err.message,
     },
   },
 

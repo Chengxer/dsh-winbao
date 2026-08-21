@@ -86,6 +86,7 @@ test('防护类补丁与包级补丁均已登记（无遗漏 apply*）', () => {
     'slot-legacy-key', 'slot-unkeyed-compat', 'slot-error-isolation',
     'runtime-flash-fix', 'prompt-expose-fix', 'shell-description-compat',
     'code-mode-compat', 'image-send-fix', 'attachment-mime-trust', 'vision-key-fix',
+    'persistent-shell-abort-race', 'terminal-interrupt-escalation',
     'profile-patch-guard', 'profile-bundle-guard-appboot', 'profile-bundle-guard-profileboot',
     'settings-section-guard', 'workspace-search-rail-fix', 'plugin-inventory-tab-merge',
     'web-search-baseurl', 'menu-viewport', 'session-manage', 'open-project-dir',

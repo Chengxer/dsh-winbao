@@ -30,6 +30,11 @@ const SLOT_UNKEYED_COMPAT_PKG_REL = path.join('dsh-cordis-client-runner', 'lib',
 const SLOT_COMPAT_PKG_RELS = [SLOT_KEY_COMPAT_PKG_REL, SLOT_UNKEYED_COMPAT_PKG_REL];
 const PW_REL = path.join('dsh-tool-pwsh', 'lib', 'index.js');
 const BASH_REL = path.join('dsh-tool-bash', 'lib', 'index.js');
+// 持久 shell（pwsh / bash persistent）与其 PTY 后端的停止修复补丁目标。
+const PWSH_PERSIST_REL = path.join('dsh-tool-pwsh-persistent', 'lib', 'index.js');
+const BASH_PERSIST_REL = path.join('dsh-tool-bash-persistent', 'lib', 'index.js');
+const PERSISTENT_SHELL_PKG_RELS = [PWSH_PERSIST_REL, BASH_PERSIST_REL];
+const TERMINAL_BASH_REL = path.join('dsh-terminal-bash', 'lib', 'index.js');
 const CODE_PRESET_REL = path.join('dsh', 'config', 'agent-presets', 'code', 'agent.cordis.yml');
 const ATTACH_LOCAL_REL = path.join('dsh-attachment-local', 'lib', 'index.js');
 // loader 自动隔离补丁目标（cordis-plugin-loader 是 @deepseek-ai scope 下的包）。
@@ -187,6 +192,10 @@ module.exports = {
   SLOT_COMPAT_PKG_RELS,
   PW_REL,
   BASH_REL,
+  PWSH_PERSIST_REL,
+  BASH_PERSIST_REL,
+  PERSISTENT_SHELL_PKG_RELS,
+  TERMINAL_BASH_REL,
   CODE_PRESET_REL,
   ATTACH_LOCAL_REL,
   LOADER_PKG_REL,

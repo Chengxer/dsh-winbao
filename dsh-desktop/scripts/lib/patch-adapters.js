@@ -331,6 +331,109 @@ function transformPluginInventoryTabMergeFix(src, file) {
   return { status: 'changed', src: src.replace(PLUGIN_INVENTORY_TAB_OLD, PLUGIN_INVENTORY_TAB_NEW) };
 }
 
+// ---------------------------------------------------------------------------
+// 持久 shell 停止修复（会话内停止任务停不下来，Windows 主现场）。
+//
+// 根因（调查定案）：持久 shell 工具 executeCommand 里 `await operation.done`
+// 在用户中止后只能等 PTY 侧 300s 发送超时才醒来——中止动作只是向 PTY 写
+// \x03，对 trap/忽略 SIGINT 的命令（dev server 等）无效；而兜底杀梯
+// （SIGTERM/SIGKILL descendants）在 Windows 上因 node-pty 1.2.0-beta.15
+// 返回 pid=0、rootIdentity 恒 undefined 而恒空，是死代码。实测
+// terminal.kill()（经 shells.reset 收口）能杀掉附着进程（含 Ctrl+C 掩码者）。
+//
+// 修法：`await operation.done` 改为与「工具 signal 的 abort latch」race；
+// abort 先醒即 shells.reset(...) 复位会话，让 terminal.kill() 生效。正常
+// 完成路径逐字不变（race 只加 abort 分支）；pwsh / bash 两包共用同一
+// transform，方言（reset reason 措辞）按包内既有字面量推导。
+// 上游修复意向：上游在 persistent 工具内内置 abort race 后，本补丁经
+// already / anchor-missing 自然退役（参照 vision-key-fix 休眠先例）。
+// ---------------------------------------------------------------------------
+const PERSISTENT_ABORT_RACE_MARKER = 'dsh-desktop fix: race the persistent send against tool abort';
+const PERSISTENT_ABORT_RACE_ANCHOR = '\t\t\t\tfirst = false;\n\t\t\t\tresult = await operation.done;';
+// `upstream` 形参名护栏：注入代码直接引用 upstream；若上游重命名形参而
+// 锚点串恰好仍命中，会在运行时抛 ReferenceError。此锚点证明 executeCommand
+// 内仍是 `deadline(upstream, ...)` 原名，缺它按失配跳过（不冒险注入）。
+const PERSISTENT_ABORT_RACE_SCOPE_GUARD = 'deadline(upstream, config.timeoutMs, TIMEOUT_CODE)';
+
+function persistentAbortRaceInjection(reason) {
+  return '\t\t\t\tfirst = false;\n' +
+    '\t\t\t\t// ' + PERSISTENT_ABORT_RACE_MARKER + '. On Windows the kill ladder is dead code\n' +
+    '\t\t\t\t// (node-pty 1.2.0-beta.15 reports pid=0, so descendants() never resolves the tree)\n' +
+    '\t\t\t\t// and a bare \\x03 cannot stop commands that trap/ignore SIGINT (dev servers),\n' +
+    '\t\t\t\t// so this await used to hang until the 300s send timeout. Racing the tool abort\n' +
+    '\t\t\t\t// signal lets us reset now; terminal.kill() does kill attached processes.\n' +
+    '\t\t\t\tconst abortWake = { dshDesktopToolAbort: true };\n' +
+    '\t\t\t\tlet wakeOnToolAbort = null;\n' +
+    '\t\t\t\tconst abortLatch = new Promise((wake) => {\n' +
+    '\t\t\t\t\twakeOnToolAbort = () => wake(abortWake);\n' +
+    '\t\t\t\t\tif (upstream.aborted) wake(abortWake);\n' +
+    '\t\t\t\t\telse upstream.addEventListener("abort", wakeOnToolAbort, { once: true });\n' +
+    '\t\t\t\t});\n' +
+    '\t\t\t\ttry {\n' +
+    '\t\t\t\t\tresult = await Promise.race([operation.done, abortLatch]);\n' +
+    '\t\t\t\t\tif (result === abortWake) {\n' +
+    '\t\t\t\t\t\tawait shells.reset(owner, "' + reason + '");\n' +
+    '\t\t\t\t\t\tcommandDeadline.signal.throwIfAborted();\n' +
+    '\t\t\t\t\t}\n' +
+    '\t\t\t\t} finally {\n' +
+    '\t\t\t\t\tif (wakeOnToolAbort !== null) upstream.removeEventListener("abort", wakeOnToolAbort);\n' +
+    '\t\t\t\t}';
+}
+
+function transformPersistentShellAbortRace(src, file) {
+  if (src.includes(PERSISTENT_ABORT_RACE_MARKER)) return { status: 'already' };
+  if (!src.includes(PERSISTENT_ABORT_RACE_ANCHOR) || !src.includes(PERSISTENT_ABORT_RACE_SCOPE_GUARD)) {
+    return { status: 'anchor-missing', detail: '锚点未匹配（版本可能已变化），跳过 ' + file };
+  }
+  // 方言推导：复用包内既有中止分支的 reason 字面量，注入分支与其一致。
+  for (const reason of ['persistent pwsh command aborted', 'persistent bash command aborted']) {
+    if (src.includes('"' + reason + '"')) {
+      return { status: 'changed', src: src.replace(PERSISTENT_ABORT_RACE_ANCHOR, persistentAbortRaceInjection(reason)) };
+    }
+  }
+  return { status: 'anchor-missing', detail: '未识别持久 shell 方言（pwsh/bash reason 字面量缺失），跳过 ' + file };
+}
+
+// ---------------------------------------------------------------------------
+// PTY 中断升级（dsh-terminal-bash interruptOnce）。
+//
+// 根因同上：中断只是 signalForeground("SIGINT")（Windows 上等价向 PTY 写
+// \x03），对掩码 SIGINT 的前台命令无效；杀梯因 pid=0 恒空。中断后 operation
+// 长时间不 settle，消费方只能等 300s 发送超时。
+//
+// 修法：中断发出后挂 2s 定时器，届时 operation 仍未 settle 且句柄仍 active
+// → 直接 close("interrupt escalation") 复位会话（terminate 会杀附着进程，
+// 并以 session_exit settle 挂起的发送），不再等 300s。
+// 上游修复意向：上游内置中断升级后本补丁经 already / anchor-missing 退役。
+// ---------------------------------------------------------------------------
+const INTERRUPT_ESCALATION_MARKER = 'dsh-desktop fix: interrupt escalation';
+const INTERRUPT_ESCALATION_ANCHOR = '\t\tif (this.active === operation && operation.settled) this.clearActive();\n\t\telse if (this.active === operation && !this.closing) {\n\t\t\tthis.pollingReady = operation;\n\t\t\tthis.schedulePoll(operation, 0);\n\t\t}\n\t}\n\tasync closeOnce(reason) {';
+const INTERRUPT_ESCALATION_INJECTION =
+  '\t\tif (this.active === operation && operation.settled) this.clearActive();\n' +
+  '\t\telse if (this.active === operation && !this.closing) {\n' +
+  '\t\t\tthis.pollingReady = operation;\n' +
+  '\t\t\tthis.schedulePoll(operation, 0);\n' +
+  '\t\t\t// ' + INTERRUPT_ESCALATION_MARKER + ': a bare SIGINT/\\x03 cannot stop foreground\n' +
+  '\t\t\t// commands that trap or ignore it, and the pid-based kill ladder is dead code on\n' +
+  '\t\t\t// Windows (node-pty 1.2.0-beta.15 reports pid=0). If the operation is still\n' +
+  '\t\t\t// unsettled 2s after the interrupt, close the session: terminate() kills the\n' +
+  '\t\t\t// attached process tree and settles the pending send with session_exit.\n' +
+  '\t\t\tsetTimeout(() => {\n' +
+  '\t\t\t\tif (this.active !== operation || operation.settled || this.closing) return;\n' +
+  '\t\t\t\tthis.close("interrupt escalation").catch(() => {});\n' +
+  '\t\t\t}, 2e3);\n' +
+  '\t\t}\n' +
+  '\t}\n' +
+  '\tasync closeOnce(reason) {';
+
+function transformTerminalInterruptEscalation(src, file) {
+  if (src.includes(INTERRUPT_ESCALATION_MARKER)) return { status: 'already' };
+  if (!src.includes(INTERRUPT_ESCALATION_ANCHOR)) {
+    return { status: 'anchor-missing', detail: '锚点未匹配（版本可能已变化），跳过 ' + file };
+  }
+  return { status: 'changed', src: src.replace(INTERRUPT_ESCALATION_ANCHOR, INTERRUPT_ESCALATION_INJECTION) };
+}
+
 module.exports = {
   // runtime-patches 的 9 个 transform（re-export）。其中
   // transformPersistenceAll 不被 registry 直接引用，其消费方是
@@ -354,6 +457,9 @@ module.exports = {
   transformSettingsSectionGuard,
   transformWorkspaceSearchRailFix,
   transformPluginInventoryTabMergeFix,
+  // 持久 shell 停止修复（abort race + 中断升级）。
+  transformPersistentShellAbortRace,
+  transformTerminalInterruptEscalation,
   // 包级补丁 node_modules 根应用器（唯一实现）。
   rootAppliers: {
     patchWebSearchBaseUrl,
@@ -380,6 +486,8 @@ module.exports = {
     SETTINGS_SECTION_MARKER,
     WORKSPACE_SEARCH_RAIL_MARKER,
     PLUGIN_INVENTORY_TAB_MARKER,
+    PERSISTENT_ABORT_RACE_MARKER,
+    INTERRUPT_ESCALATION_MARKER,
     ...require('./loader-isolation').markers,
   },
 };
