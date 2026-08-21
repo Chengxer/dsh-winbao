@@ -44,7 +44,7 @@ jobs:
       - name: Resolve version
         id: ver
         shell: bash
-        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo '${GITHUB_REF_NAME#v}'; fi)" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo "${GITHUB_REF_NAME#v}"; fi)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -105,8 +105,31 @@ jobs:
           echo "rc7 packages ready"
         shell: bash
 
-      - name: Stage payload (full)
-        run: bash dsh-tauri/scripts/stage-payload.sh
+      - name: Stage payload (CI simplified)
+        run: |
+          set -e
+          DEST="dsh-tauri/package-payload/dsh-desktop"
+          mkdir -p "$DEST"
+          cp dsh-desktop/*.js "$DEST/" 2>/dev/null || true
+          cp dsh-desktop/package.json "$DEST/"
+          cp -r dsh-desktop/scripts "$DEST/scripts"
+          cp -r dsh-desktop/assets "$DEST/assets"
+          mkdir -p "$DEST/vendor"
+          cp -r dsh-desktop/vendor/node "$DEST/vendor/node"
+          cp -r dsh-desktop/vendor/npm "$DEST/vendor/npm" 2>/dev/null || true
+          rm -rf "$DEST/node_modules"
+          cp -r dsh-desktop/node_modules "$DEST/node_modules"
+          rm -rf "$DEST/node_modules/electron" "$DEST/node_modules/electron-builder" "$DEST/node_modules/electron-winstaller" "$DEST/node_modules/@electron" "$DEST/node_modules/@img/sharp-darwin-arm64" "$DEST/node_modules/@img/sharp-libvips-darwin-arm64" "$DEST/node_modules/@img/sharp-wasm32" "$DEST/node_modules/@koromix/koffi-darwin-arm64"
+          # rc7 vendor（非阻断——renderer 三级回落链兜底）
+          if [ -d "dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai" ]; then
+            for pkg in dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai/*/; do
+              name=$(basename "$pkg")
+              [ -d "$DEST/node_modules/@deepseek-ai/$name" ] || cp -r "$pkg" "$DEST/node_modules/@deepseek-ai/$name"
+            done
+          fi
+          # compat（非阻断——有 renderer 回落链）
+          node dsh-tauri/scripts/build-client-compat.mjs 2>&1 || echo "WARN: compat failed (non-blocking)"
+          echo "Payload: $(du -sm "$DEST" | cut -f1)MB"
         shell: bash
 
       - name: Run tests (unit only, skip env-dependent integration)
@@ -171,7 +194,7 @@ jobs:
       - name: Resolve version
         id: ver
         shell: bash
-        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo '${GITHUB_REF_NAME#v}'; fi)" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo "${GITHUB_REF_NAME#v}"; fi)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -232,8 +255,31 @@ jobs:
           echo "rc7 packages ready"
         shell: bash
 
-      - name: Stage payload (full)
-        run: bash dsh-tauri/scripts/stage-payload.sh
+      - name: Stage payload (CI simplified)
+        run: |
+          set -e
+          DEST="dsh-tauri/package-payload/dsh-desktop"
+          mkdir -p "$DEST"
+          cp dsh-desktop/*.js "$DEST/" 2>/dev/null || true
+          cp dsh-desktop/package.json "$DEST/"
+          cp -r dsh-desktop/scripts "$DEST/scripts"
+          cp -r dsh-desktop/assets "$DEST/assets"
+          mkdir -p "$DEST/vendor"
+          cp -r dsh-desktop/vendor/node "$DEST/vendor/node"
+          cp -r dsh-desktop/vendor/npm "$DEST/vendor/npm" 2>/dev/null || true
+          rm -rf "$DEST/node_modules"
+          cp -r dsh-desktop/node_modules "$DEST/node_modules"
+          rm -rf "$DEST/node_modules/electron" "$DEST/node_modules/electron-builder" "$DEST/node_modules/electron-winstaller" "$DEST/node_modules/@electron" "$DEST/node_modules/@img/sharp-darwin-arm64" "$DEST/node_modules/@img/sharp-libvips-darwin-arm64" "$DEST/node_modules/@img/sharp-wasm32" "$DEST/node_modules/@koromix/koffi-darwin-arm64"
+          # rc7 vendor（非阻断——renderer 三级回落链兜底）
+          if [ -d "dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai" ]; then
+            for pkg in dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai/*/; do
+              name=$(basename "$pkg")
+              [ -d "$DEST/node_modules/@deepseek-ai/$name" ] || cp -r "$pkg" "$DEST/node_modules/@deepseek-ai/$name"
+            done
+          fi
+          # compat（非阻断——有 renderer 回落链）
+          node dsh-tauri/scripts/build-client-compat.mjs 2>&1 || echo "WARN: compat failed (non-blocking)"
+          echo "Payload: $(du -sm "$DEST" | cut -f1)MB"
         shell: bash
 
       - name: Build installer (aarch64 cross)
@@ -250,8 +296,10 @@ jobs:
         shell: bash
         run: |
           VERSION=${{ steps.ver.outputs.version }}
-          cd dsh-tauri/src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis
-          ls -la || true
+          NSIS_DIR="dsh-tauri/src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis"
+          if [ ! -d "$NSIS_DIR" ]; then echo "no nsis bundle dir (build failed?), skip rename"; exit 0; fi
+          cd "$NSIS_DIR"
+          ls -la
           if ls *_arm64-setup.exe >/dev/null 2>&1; then
             cp *_arm64-setup.exe "DSH-Desktop-Setup-${VERSION}-win-arm64.exe"
             ls -la
@@ -280,7 +328,7 @@ jobs:
       - name: Resolve version
         id: ver
         shell: bash
-        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo '${GITHUB_REF_NAME#v}'; fi)" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo "${GITHUB_REF_NAME#v}"; fi)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -335,8 +383,31 @@ jobs:
           echo "rc7 packages ready"
         shell: bash
 
-      - name: Stage payload (full)
-        run: bash dsh-tauri/scripts/stage-payload.sh
+      - name: Stage payload (CI simplified)
+        run: |
+          set -e
+          DEST="dsh-tauri/package-payload/dsh-desktop"
+          mkdir -p "$DEST"
+          cp dsh-desktop/*.js "$DEST/" 2>/dev/null || true
+          cp dsh-desktop/package.json "$DEST/"
+          cp -r dsh-desktop/scripts "$DEST/scripts"
+          cp -r dsh-desktop/assets "$DEST/assets"
+          mkdir -p "$DEST/vendor"
+          cp -r dsh-desktop/vendor/node "$DEST/vendor/node"
+          cp -r dsh-desktop/vendor/npm "$DEST/vendor/npm" 2>/dev/null || true
+          rm -rf "$DEST/node_modules"
+          cp -r dsh-desktop/node_modules "$DEST/node_modules"
+          rm -rf "$DEST/node_modules/electron" "$DEST/node_modules/electron-builder" "$DEST/node_modules/electron-winstaller" "$DEST/node_modules/@electron" "$DEST/node_modules/@img/sharp-darwin-arm64" "$DEST/node_modules/@img/sharp-libvips-darwin-arm64" "$DEST/node_modules/@img/sharp-wasm32" "$DEST/node_modules/@koromix/koffi-darwin-arm64"
+          # rc7 vendor（非阻断——renderer 三级回落链兜底）
+          if [ -d "dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai" ]; then
+            for pkg in dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai/*/; do
+              name=$(basename "$pkg")
+              [ -d "$DEST/node_modules/@deepseek-ai/$name" ] || cp -r "$pkg" "$DEST/node_modules/@deepseek-ai/$name"
+            done
+          fi
+          # compat（非阻断——有 renderer 回落链）
+          node dsh-tauri/scripts/build-client-compat.mjs 2>&1 || echo "WARN: compat failed (non-blocking)"
+          echo "Payload: $(du -sm "$DEST" | cut -f1)MB"
         shell: bash
 
       # ---- 组装便携版布局（与 NSIS 安装后布局一致）----
@@ -388,7 +459,7 @@ jobs:
       - name: Resolve version
         id: ver
         shell: bash
-        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo '${GITHUB_REF_NAME#v}'; fi)" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo "${GITHUB_REF_NAME#v}"; fi)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -483,7 +554,7 @@ jobs:
       - name: Resolve version
         id: ver
         shell: bash
-        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo '${GITHUB_REF_NAME#v}'; fi)" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo "${GITHUB_REF_NAME#v}"; fi)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -573,7 +644,11 @@ jobs:
           mkdir -p release-assets
           # 全部发布产物（含便携版 zip）；排除中间产物（win-x64-bin 里的裸 exe，
           # 它只是便携版 job 的原料，不进 Release）
-          find artifacts -type f \( -name "*.exe" -o -name "*.zip" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.dmg" \) ! -name "dsh-tauri-app.exe" -exec cp {} release-assets/ \;
+          find artifacts -type f \( -name "*.exe" -o -name "*.zip" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.dmg" \) ! -name "dsh-tauri-app.exe" -exec cp {} release-assets/ \; || true
+          if [ -z "$(ls -A release-assets)" ]; then
+            echo "::error::没有任何构建产物被收集（所有 build job 均失败？）——中止发布"
+            exit 1
+          fi
           echo "=== 产物清单 ==="
           ls -lh release-assets/
 
