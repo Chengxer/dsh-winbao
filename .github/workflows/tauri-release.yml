@@ -529,6 +529,11 @@ jobs:
           rm -rf "$DEST/node_modules"
           cp -r dsh-desktop/node_modules "$DEST/node_modules"
           rm -rf "$DEST/node_modules/electron" "$DEST/node_modules/electron-builder" "$DEST/node_modules/electron-winstaller" "$DEST/node_modules/@electron"
+          # musl prebuild（*.musl.node）：linuxdeploy 扫描 AppDir 内所有 ELF，
+          # 遇 musl 链接的 @photostructure/sqlite prebuild 会找
+          # libc.musl-x86_64.so.1（glibc runner 不存在）→ AppImage 打包失败。
+          # glibc 系统上 musl prebuild 本就是死重量，直接剔除。
+          find "$DEST/node_modules" "$DEST/assets" -name "*.musl.node" -type f -delete 2>/dev/null || true
           echo "Payload: $(du -sm "$DEST" | cut -f1)MB"
 
       - name: Build installer
