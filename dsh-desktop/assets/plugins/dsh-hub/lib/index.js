@@ -1122,17 +1122,25 @@ async function collectCheck() {
 }
 
 /** 用 curl 下载文件到磁盘（走系统证书链；Windows 下跳过吊销检查）。 */
-async function downloadFile(url, dest, timeoutMs = DOWNLOAD_TIMEOUT_MS) {
+async function downloadFile(url, dest, timeoutMs = DOWNLOAD_TIMEOUT_MS, extraCurlArgs = []) {
   const args = [
     '-sS', '-fL', '--max-time', String(Math.ceil(timeoutMs / 1000)),
     ...(IS_WIN ? ['--ssl-no-revoke'] : []),
+    ...extraCurlArgs,
     '-o', dest, url,
   ]
   const run = await runCli(CURL_BIN, args, timeoutMs, { shell: false })
   return run.code === 0
 }
 
-/** 依次尝试国内镜像与 GitHub 直连，下载指定 tag 的 zip。 */
+/** 依次尝试官方源与国内镜像，下载指定 tag 的 zip。
+ *
+ * 安全审计 2026-08：下载顺序改为「官方 codeload 优先，镜像兜底」——镜像
+ * （ghfast.top / gh-proxy.com 等第三方）只做字节转发、不提供任何完整性承诺，
+ * 排在首位等于把供应链信任锚交给匿名第三方。官方源直连用短 connect-timeout
+ * （8s）探测：可达则零额外成本，不可达（国内常见）也只损失一个 TCP 连接
+ * 超时，随后照旧走镜像，更新成功率不回退。
+ */
 async function downloadGithubZip(owner, repo, tag) {
   // jsDelivr 的版本列表去掉 v 前缀（真实 tag 为 v2.0.0 时它返回 2.0.0），而
   // codeload / archive 需要精确 tag 名：先试原 tag，再试 v+tag / 去 v，避免
@@ -1144,20 +1152,27 @@ async function downloadGithubZip(owner, repo, tag) {
   ])].filter(Boolean)
   const dir = mkdtempSync(join(tmpdir(), 'dsh-plugin-updates-'))
   const zip = join(dir, `${repo}-${raw.replace(/[^A-Za-z0-9._-]/g, '-')}.zip`)
+  // 官方直连的连接阶段探测上限：只约束 TCP/TLS 建连，不缩短传输阶段。
+  const OFFICIAL_CONNECT_TIMEOUT_S = 8
   try {
     for (const candidate of candidates) {
       const encodedTag = encodeURIComponent(candidate)
+      // 官方 codeload 在前（信任锚），镜像兜底（可达性）。
       const urls = [
-        ...GITHUB_MIRRORS.map((mirror) => `${mirror}https://github.com/${owner}/${repo}/archive/refs/tags/${encodedTag}.zip`),
-        `https://codeload.github.com/${owner}/${repo}/zip/refs/tags/${encodedTag}`,
+        { url: `https://codeload.github.com/${owner}/${repo}/zip/refs/tags/${encodedTag}`, official: true },
+        ...GITHUB_MIRRORS.map((mirror) => ({ url: `${mirror}https://github.com/${owner}/${repo}/archive/refs/tags/${encodedTag}.zip`, official: false })),
       ]
       // main 分支：只推文件不打 tag 的仓库（如 dsh-hub 自身发布）走 refs/heads。
       if (candidate === 'main') {
-        urls.push(...GITHUB_MIRRORS.map((mirror) => `${mirror}https://github.com/${owner}/${repo}/archive/refs/heads/main.zip`))
-        urls.push(`https://codeload.github.com/${owner}/${repo}/zip/refs/heads/main`)
+        urls.push({ url: `https://codeload.github.com/${owner}/${repo}/zip/refs/heads/main`, official: true })
+        urls.push(...GITHUB_MIRRORS.map((mirror) => ({ url: `${mirror}https://github.com/${owner}/${repo}/archive/refs/heads/main.zip`, official: false })))
       }
-      for (const url of urls) {
-        if (await downloadFile(url, zip)) return { zip, dir }
+      for (const { url, official } of urls) {
+        const extra = official ? ['--connect-timeout', String(OFFICIAL_CONNECT_TIMEOUT_S)] : []
+        if (await downloadFile(url, zip, DOWNLOAD_TIMEOUT_MS, extra)) {
+          console.log(`dsh-plugin-updates: 已从${official ? '官方 codeload' : '镜像'}下载 ${owner}/${repo}#${candidate}`)
+          return { zip, dir }
+        }
       }
     }
     return { zip: null, dir }
@@ -1406,6 +1421,17 @@ async function applyNewSource(realDir, root, preserveFiles = []) {
   }
 }
 
+/** 安全审计 2026-08：GitHub archive 顶层目录锚点纯校验。
+ * codeload 生成的源码包顶层目录恒为 `<repo>-<ref>`（镜像转发的也是同一
+ * archive）。顶层目录对不上说明下载物不是请求的仓库（镜像串包/被替换），
+ * updateLocalFromGithub 据此拒绝安装；抽出为纯函数供单测覆盖。 */
+export function archiveRootMatchesRepo(repo, rootBase) {
+  return typeof repo === 'string'
+    && typeof rootBase === 'string'
+    && repo.length > 0
+    && rootBase.startsWith(repo + '-')
+}
+
 async function updateLocalFromGithub(name, owner, repo, tag, realDirOverride, preserveFiles = []) {
   let realDir
   try {
@@ -1423,6 +1449,14 @@ async function updateLocalFromGithub(name, owner, repo, tag, realDirOverride, pr
     mkdirSync(extractDir, { recursive: true })
     const root = extractZip(zip, extractDir)
     if (!root) return { ok: false, error: '源码包解压失败（文件可能损坏）。' }
+    // 安全审计 2026-08：结构锚点校验（见 archiveRootMatchesRepo 注释）。
+    // 顶层目录对不上说明下载物不是请求的仓库源码包（镜像串包/被替换/错误页
+    // 被 -f 漏放），直接拒绝——宁可让用户重试，也不把来路不明的目录整进
+    // 插件位置执行构建。
+    const rootBase = basename(root)
+    if (!archiveRootMatchesRepo(repo, rootBase)) {
+      return { ok: false, error: `源码包顶层目录异常（期望 ${repo}-<tag>，实际 ${rootBase}），已拒绝安装。请重试；持续失败请手动到 https://github.com/${owner}/${repo}/releases 下载。` }
+    }
     return await applyNewSource(realDir, root, preserveFiles)
   } finally {
     rmSync(dir, { recursive: true, force: true })

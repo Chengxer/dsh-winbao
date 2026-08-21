@@ -1,5 +1,6 @@
 'use strict';
 // dsh-mini 插件单测（对齐上游 hzhz314159/dsh-mini v1.4.1）：
+//   index.js   — tokenEquals / maskToken（安全审计 2026-08：恒时比对 + 日志脱敏）
 //   gui-ws.js  — 帧封装 / 工具卡视图 / lastEventSeq（_internal 导出）
 //   zstd-log.js — zstd 帧解析 / 多帧解压 / walkSessionFiles 纯 TTL 缓存
 // 说明：上游 v1.4.1 的安全模型（isLoopback 免 token + 公网模式默认关 +
@@ -16,10 +17,54 @@ const { zstdCompressSync } = require('node:zlib');
 const LIB = '../../assets/plugins/dsh-mini/lib/';
 let gws = null;
 let zlog = null;
+let mini = null;
 
 before(async () => {
+  mini = await import(LIB + 'index.js');
   gws = await import(LIB + 'gui-ws.js');
   zlog = await import(LIB + 'zstd-log.js');
+});
+
+// ---------------------------------------------------------------------------
+// index.js（_internal：tokenEquals / maskToken —— 安全审计 2026-08）
+// ---------------------------------------------------------------------------
+test('tokenEquals：正确 token 通过，错误/长度不符/空值拒绝且不抛错', () => {
+  const { tokenEquals } = mini._internal;
+  const want = 'a'.repeat(32);
+  assert.strictEqual(tokenEquals(want, want), true, '相同 token 应通过');
+  assert.strictEqual(tokenEquals('b'.repeat(32), want), false, '同长度不同内容应拒绝');
+  assert.strictEqual(tokenEquals('a'.repeat(31), want), false, '长度差 1 应拒绝');
+  assert.strictEqual(tokenEquals(want + 'a', want), false, '更长前缀匹配应拒绝');
+  assert.strictEqual(tokenEquals('', want), false, '空 provided 应拒绝');
+  assert.strictEqual(tokenEquals(want, ''), false, '空 want 应拒绝');
+  assert.strictEqual(tokenEquals(undefined, want), false, 'undefined provided 不抛错');
+  assert.strictEqual(tokenEquals(null, want), false, 'null provided 不抛错');
+  assert.strictEqual(tokenEquals(want, undefined), false, 'undefined want 不抛错');
+  // 非 ASCII（Unicode token）也不抛错：sha256 输入是字符串即可
+  assert.strictEqual(tokenEquals('令牌'.repeat(8), '令牌'.repeat(8)), true);
+  assert.strictEqual(tokenEquals('令牌'.repeat(8), '令牌'.repeat(7)), false);
+});
+
+test('tokenEquals：长度差异不泄密（不同失败输入的结果仅 false，无异常路径）', () => {
+  const { tokenEquals } = mini._internal;
+  const want = '0123456789abcdef0123456789abcdef';
+  // 各种长度(0..64)的错误输入全部安静地返回 false——不存在因长度触发的 throw
+  for (let n = 0; n <= 64; n++) {
+    assert.strictEqual(tokenEquals('x'.repeat(n), want), false, `长度 ${n} 应安静拒绝`);
+  }
+});
+
+test('maskToken：完整 token 不出现在输出中，前 4 后 4 保留可辨认性', () => {
+  const { maskToken } = mini._internal;
+  const token = 'abcdef1234567890abcdef1234567890';
+  const masked = maskToken(token);
+  assert.ok(!masked.includes(token), '完整 token 不得出现在脱敏输出中');
+  assert.ok(!masked.includes(token.slice(4, -4)), '中段（可爆破余量）不得出现');
+  assert.ok(masked.startsWith('abcd') && masked.endsWith('7890'), '保留前 4 后 4 便于辨认');
+  assert.strictEqual(maskToken('short'), '****', '≤12 位整体打码');
+  assert.strictEqual(maskToken(''), '(not set)', '空 token 明示未配置');
+  assert.strictEqual(maskToken(null), '(not set)', 'null 不抛错');
+  assert.strictEqual(maskToken(undefined), '(not set)', 'undefined 不抛错');
 });
 
 // ---------------------------------------------------------------------------

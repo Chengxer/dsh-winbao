@@ -31,7 +31,7 @@
 // Every registration is wrapped in ctx.effect and routes self-heal on
 // re-registration conflicts, so the super-injector hot reload stays clean.
 
-import { randomUUID, createHmac, timingSafeEqual } from "node:crypto";
+import { randomUUID, createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -151,12 +151,12 @@ function authGuiRequest(req, res, url) {
   // publicMode：取消回环豁免——同机隧道（cloudflared/frp/ngrok）转出的请求 remoteAddress
   // 是回环，若不收紧就会被误判为本机直连而免鉴权（SPEC-v4 §5.1）。
   if (isLoopback(req) && !isPublicMode() && req.headers["x-dsh-mini-gateway"] !== "1") return true;
-  if (hasGuiSession(req)) return true;
-  const want = effectiveToken();
-  if (want && url.searchParams.get("token") === want) {
-    issueGuiSession(res, url);
-    return false; // 已发 302
-  }
+	if (hasGuiSession(req)) return true;
+	const want = effectiveToken();
+	if (want && tokenEquals(url.searchParams.get("token"), want)) {
+		issueGuiSession(res, url);
+		return false; // 已发 302
+	}
   sendText(
     res,
     403,
@@ -172,10 +172,10 @@ function authGuiRequest(req, res, url) {
 function authGuiWs(req, url) {
   if (!isPublicMode() && isExternalHost(req)) return false; // SPEC-v5 §2：关闭外网访问时拒外网来源
   if (isLoopback(req) && !isPublicMode() && req.headers["x-dsh-mini-gateway"] !== "1") return true;
-  if (hasGuiSession(req)) return true;
-  const want = effectiveToken();
-  if (want && url.searchParams.get("token") === want) return true;
-  return false;
+	if (hasGuiSession(req)) return true;
+	const want = effectiveToken();
+	if (want && tokenEquals(url.searchParams.get("token"), want)) return true;
+	return false;
 }
 // 静态文件安全解析：拒绝 .. 穿越
 function safeResolve(root, urlPath) {
@@ -208,6 +208,29 @@ function httpError(status, message) {
 function isLoopback(req) {
   const h = req.socket?.remoteAddress || "";
   return h === "127.0.0.1" || h === "::1" || h === "::ffff:127.0.0.1" || h === "fe80::1";
+}
+
+// ── 鉴权比对与日志脱敏（安全审计 2026-08：token 全生命周期收口）─────────────
+// tokenEquals：恒时比对。先 SHA-256 再 timingSafeEqual，长度差异不提前短路，
+// 避免「长度 / 前缀匹配耗时」作为侧信道逐位恢复 token（LAN 内可测）。
+// 空串（未提供 / 未配置）一律 false，不区分失败原因。
+function tokenEquals(provided, want) {
+  const a = typeof provided === "string" ? provided : "";
+  const b = typeof want === "string" ? want : "";
+  if (a.length === 0 || b.length === 0) return false;
+  const ha = createHash("sha256").update(a).digest();
+  const hb = createHash("sha256").update(b).digest();
+  return timingSafeEqual(ha, hb);
+}
+
+// maskToken：日志/诊断输出只保留可辨认的前 4 位与后 4 位。完整 token 仅在
+// 受鉴权的 /dsh-mini/api/gateway 状态与配对二维码里出现——绝不进内核 stdout
+// （stdout 会落 dsh-web.log，用户手动分享日志时即泄漏 LAN 网关钥匙）。
+function maskToken(token) {
+  const t = String(token || "");
+  if (t.length === 0) return "(not set)";
+  if (t.length <= 12) return "****";
+  return t.slice(0, 4) + "…" + t.slice(-4);
 }
 
 // 真正来自本机的请求（非网关代理转发）。loopback-only 端点必须用它，
@@ -360,7 +383,7 @@ function assertAuth(req, res, url) {
   const auth = req.headers["authorization"] || "";
   let provided = auth.startsWith("Bearer ") ? auth.slice(7).trim() : req.headers["x-dsh-mini-token"] || "";
   if (!provided && url) provided = url.searchParams.get("token") || "";
-  if (provided !== want) {
+  if (!tokenEquals(provided, want)) {
     sendJson(res, 403, { error: "invalid token" });
     return false;
   }
@@ -1403,11 +1426,14 @@ function apply(ctx) {
   }, "dsh-mini: lan gateway");
 
   // 4) Startup log + gateway summary.
+  //    安全审计 2026-08：token 不再明文进 stdout——stdout 会整段落入 dsh-web.log，
+  //    用户分享日志排查问题时会把 LAN 网关钥匙一起送出去。完整 token 只在
+  //    受鉴权的 /dsh-mini/api/gateway 状态与配对二维码里出现。
   const token = ensureToken();
   const gw = gatewayStatus(ctx);
   console.log(`[dsh-mini] v${PLUGIN_VERSION} mounted at ${APP_PREFIX}/ (api: ${API_PREFIX}/)`);
   console.log(`[dsh-mini] webServer bind: ${gw.host}:${gw.port}; LAN gateway ${gw.lanEnabled ? "ENABLED" : "disabled"}; LAN IPs: ${gw.lanIps.join(", ") || "(none)"}`);
-  console.log(`[dsh-mini] bridge token (share with the phone app): ${token}`);
+  console.log(`[dsh-mini] bridge token (masked; full value in the phone pairing QR or GET ${API_PREFIX}/gateway): ${maskToken(token)}`);
   if (gw.gatewayListening) {
     console.log(`[dsh-mini] gateway listening on 0.0.0.0:${gw.gatewayPort}`);
   } else if (gw.bindWarn) {
@@ -1420,4 +1446,8 @@ function apply(ctx) {
   }
 }
 
-export { name, inject, apply };
+// _internal：仅供本包测试（scripts/test/dsh-mini.test.js）导入的纯函数面。
+// 不构成插件间 API——上游升级时随实现一起调整，不承诺兼容。
+const _internal = { tokenEquals, maskToken };
+
+export { name, inject, apply, _internal };
