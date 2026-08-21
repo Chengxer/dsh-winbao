@@ -86,18 +86,45 @@ function loadModules(appDir) {
     desktopBackup: req('scripts/desktop-backup'),
     desktopOrdering: req('scripts/desktop-ordering'),
     desktopValidity: req('scripts/desktop-validity'),
-    updater: req('updater'),
-    sessionWatcher: req('session-watcher'),
+     sessionWatcher: req('session-watcher'),
     pluginGuard: req('plugin-guard'),
   };
 }
 
-/** 造 settings 存取（复用 updater.loadSettings/saveSettings：settingsPath(ctx)=ctx.userDataDir/settings.json）。 */
+/**
+ * settings 存取（原 updater.loadSettings/saveSettings 内联——updater.js
+ * 随 Electron 壳退役已删（6ff0cc8），但 T2 回归测试抓到 sidecar 仍
+ * require 导致 boot 链全断。逻辑逐字保留：原子写+rename+3 次重试。
+ */
+function loadSettingsInline(ctx) {
+  const file = path.join(ctx.userDataDir, 'settings.json');
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch { return {}; }
+}
+function saveSettingsInline(ctx, s) {
+  const file = path.join(ctx.userDataDir, 'settings.json');
+  try { fs.mkdirSync(path.dirname(file), { recursive: true }); } catch {}
+  const tmp = file + '.tmp-' + process.pid;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(s, null, 2) + String.fromCharCode(10));
+      fs.renameSync(tmp, file);
+      return true;
+    } catch (err) {
+      try { fs.rmSync(tmp, { force: true }); } catch {}
+      if (attempt === 2) process.stderr.write('[sidecar] 保存 settings 失败: ' + err.message);
+      return false;
+    }
+  }
+  return false;
+}
+
+/** 造 settings 存取。 */
 function makeSettingsStore(mods, userDataDir) {
   const ctx = { userDataDir };
   return {
-    load: () => mods.updater.loadSettings(ctx),
-    save: (s) => mods.updater.saveSettings(ctx, s),
+    load: () => loadSettingsInline(ctx),
+    save: (s) => saveSettingsInline(ctx, s),
   };
 }
 
