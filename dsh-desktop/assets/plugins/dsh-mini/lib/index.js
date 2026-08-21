@@ -233,6 +233,13 @@ function maskToken(token) {
   return t.slice(0, 4) + "…" + t.slice(-4);
 }
 
+// maskUrlToken：URL 日志形态的掩码（V4 审计发现 URL 行 ?token=<完整128位>
+// 漏修——maskToken 只覆盖了专用 token 行）。保留 query 结构，token 值打
+// 前8后4；无 token 查询串的 URL 原样返回。
+function maskUrlToken(url) {
+  return String(url || "").replace(/([?&]token=)([A-Za-z0-9]{8})[A-Za-z0-9]+([A-Za-z0-9]{4})/g, "$1$2…$3");
+}
+
 // 真正来自本机的请求（非网关代理转发）。loopback-only 端点必须用它，
 // 否则经网关进来的手机请求 remoteAddress 是回环，会绕过限制。
 function isLocalDirect(req) {
@@ -1439,15 +1446,19 @@ function apply(ctx) {
   } else if (gw.bindWarn) {
     console.warn(`[dsh-mini] gateway not listening: ${gw.bindWarn}`);
   }
+  // V4 审计残留泄漏修复：URL 日志行不得带完整 token（历史形态 ?token=<128位>
+  // 曾落入 dsh-web.log——用户分享日志即交出 LAN 钥匙）。日志打掩码形态；
+  // 完整 URL 仅存在于受鉴权的 GET /gateway 状态与配对二维码。
+  const maskedUrl = maskUrlToken(gw.url);
   if (gw.reachable) {
-    console.log(`[dsh-mini] phone connect URL: ${gw.url}`);
+    console.log(`[dsh-mini] phone connect URL (token masked; full URL in GET ${API_PREFIX}/gateway or the pairing QR): ${maskedUrl}`);
   } else {
-    console.log(`[dsh-mini] loopback URL: ${gw.url} (enable the LAN gateway in DSH settings to reach from a phone)`);
+    console.log(`[dsh-mini] loopback URL: ${maskedUrl} (enable the LAN gateway in DSH settings to reach from a phone)`);
   }
 }
 
 // _internal：仅供本包测试（scripts/test/dsh-mini.test.js）导入的纯函数面。
 // 不构成插件间 API——上游升级时随实现一起调整，不承诺兼容。
-const _internal = { tokenEquals, maskToken };
+const _internal = { tokenEquals, maskToken, maskUrlToken };
 
 export { name, inject, apply, _internal };

@@ -743,7 +743,7 @@ impl Supervisor {
                 let _ = tx.send(SupervisorEvent::ZombieSuspect { consecutive: zombie });
                 log_line(&format!("内核假死可疑（端口通、HTTP 无响应）×{zombie}"));
                 if zombie >= 20 {
-                    log_line("内核假死判定成立（连续 15s HTTP 无响应），受控重启");
+                    log_line("内核假死判定成立（连续 60s HTTP 无响应，20×3s 探活），受控重启");
                     this.kill_kernel();
                     this.on_kernel_exit(None, &tx);
                     return;

@@ -67,6 +67,20 @@ test('maskToken：完整 token 不出现在输出中，前 4 后 4 保留可辨�
   assert.strictEqual(maskToken(undefined), '(not set)', 'undefined 不抛错');
 });
 
+test('maskUrlToken：URL 形态日志不泄漏完整 token（V4 审计残留泄漏回归）', () => {
+  const { maskUrlToken } = mini._internal;
+  const token = '432a7fa69db04c58b4d1637e27eadb4f';
+  const url = `http://172.26.120.186:46322/?token=${token}`;
+  const masked = maskUrlToken(url);
+  assert.ok(!masked.includes(token), '完整 token 不得出现在 URL 日志形态');
+  assert.ok(masked.includes('token=432a7fa6…db4f'), '保留前 8 后 4 便于辨认: ' + masked);
+  assert.ok(masked.startsWith('http://172.26.120.186:46322/?'), 'URL 其余部分原样保留');
+  assert.strictEqual(maskUrlToken('http://127.0.0.1:1234/'), 'http://127.0.0.1:1234/', '无 token 查询串原样返回');
+  const amp = maskUrlToken(`http://h/?a=1&token=${token}`);
+  assert.ok(!amp.includes(token), '&token= 形态同样掩码');
+  assert.strictEqual(maskUrlToken(null), 'null', 'null 不抛错（String 形态）');
+});
+
 // ---------------------------------------------------------------------------
 // gui-ws.js（上游 _internal：frame / writeFrame / toolViewFor / lastEventSeq）
 // ---------------------------------------------------------------------------
