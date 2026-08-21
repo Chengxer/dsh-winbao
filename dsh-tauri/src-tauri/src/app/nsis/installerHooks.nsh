@@ -235,8 +235,9 @@ FunctionEnd
       Pop $R0
     ${EndIf}
     ${If} $R0 = 0
-      MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION|MB_TOPMOST|MB_SETFOREGROUND /SD IDCANCEL \
+      MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION|MB_TOPMOST|MB_SETFOREGROUND \
         "检测到 DSH Desktop 正在运行。$\n$\n请先完全退出（托盘右键 → 退出），然后点击「重试」继续升级。$\n选择「取消」将中止安装（不会做任何更改）。" \
+        /SD IDCANCEL \
         IDRETRY TryCloseLegacy IDCANCEL AbortInstallLegacy
       Goto AbortInstallLegacy
     ${EndIf}
