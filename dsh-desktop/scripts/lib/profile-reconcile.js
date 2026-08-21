@@ -23,6 +23,9 @@
 //     让插件树更糟，交由启动防护兜底跳过并告警；
 //   · 缺失核心补齐、配套 bundle 登记追加、源缺失/卸载标记移除、重置后
 //     用户 bundle 恢复（issue #48）等既有语义原样保留；
+//   · 包解析含 pnpm 虚拟仓回落（issue #132）：WSL 模式下 profile 走 UNC 路径、
+//     Windows 侧 node 穿不透 pnpm 的 Linux 符号链接，直查失败时以 .pnpm 仓内
+//     实体目录判定，保证「内核（运行于 WSL 内）能装配的登记不会被误删」；
 //   · 全部写入原子化（writeFileAtomic），健康 manifest 零写入（幂等）。
 //
 // 对账执行时机：壳层每次启动（main.js syncCompanionPlugins）与
@@ -128,6 +131,14 @@ function createEntryListYamlParser() {
  * 与 packageDirUpward（只走祖先 node_modules 链）的区别正是「对账判定必须
  * 与 dsh 实际装配一致」的关键：官方能解析到的登记，对账绝不能判 UNRESOLVABLE
  * 而误删。找不到返回 ''。
+ *
+ * 直查失败时追加 pnpm 虚拟仓回落（issue #132）：WSL 模式下 profile 是 UNC
+ * 路径（\\wsl.localhost\<distro>\...），内核运行在 WSL 内、Linux 侧符号链接
+ * 解析正常，但 Windows 侧 node 无法穿透 pnpm 在 ext4 上创建的 Linux 符号链接
+ * （node_modules/<pkg> → .pnpm/<pkg>@<ver>/node_modules/<pkg>），直查恒 false
+ * → 登记被误判 UNRESOLVABLE 并在每次启动时从 dsh.profile.bundles 移除。回落
+ * 只走真实目录（.pnpm 仓内的包本体是硬链接实体目录，读取不涉及符号链接），
+ * 保证「内核能装配的登记不会被误删」这一对账铁律在 WSL 模式下同样成立。
  * @param {string} anchorFile 锚点文件（dsh 安装 / profile 的 package.json 路径）
  * @param {string} packageName 登记名
  * @returns {string} 包目录绝对路径；找不到返回空串
@@ -144,8 +155,111 @@ function resolveBundleDirLike(anchorFile, packageName) {
     try {
       if (fs.existsSync(path.join(candidate, 'package.json'))) return candidate;
     } catch { /* 不可读按未找到继续 */ }
+    const viaStore = resolveViaPnpmStore(searchPath, packageName);
+    if (viaStore) return viaStore;
   }
   return '';
+}
+
+/**
+ * pnpm 虚拟仓解析回落（issue #132）。只在「直查 package.json 失败」后由
+ * resolveBundleDirLike 调用，因此不会改变任何直查可解析场景的行为。
+ *
+ * 判定与 pnpm 布局事实逐条对齐：
+ *   · 顶层 node_modules 只登记**直接依赖**的符号链接（传递依赖仅存在于 .pnpm
+ *     仓内）——所以「顶层目录项里枚举到该包名」与「Linux 侧 createRequire 能
+ *     解析该包」是同一事实。Windows 侧 readdir 可枚举符号链接名（无法穿透的
+ *     只是链接本体），此门不会把仅存于 .pnpm 的传递依赖误判为可解析；
+ *   · .pnpm 仓条目名为 <name>@<version>（scoped 形如 @scope+name@<ver>，
+ *     pnpm ≥ 5.5 可带 (peer@ver) 同伴后缀），条目内 node_modules/<name> 是
+ *     硬链接实体目录——Windows 侧 UNC 直读无符号链接参与。
+ *
+ * 版本选择（顶层链接不可读时的确定性近似，按精确度递降）：
+ *   1. 读到符号链接目标（Windows 原生 junction / 可读场景）→ 精确直达；
+ *   2. 依赖声明里有精确版本（profile/package.json 的 dependencies 等）→
+ *      命中同名同版仓条目（pnpm 顶层链接指向的就是声明版本）；
+ *   3. 版本号降序取最高可读条目（声明是 range 或缺省时的兜底近似）。
+ * @param {string} nodeModulesDir 搜索路径上的 node_modules 目录
+ * @param {string} packageName 登记名（允许 @scope/name 形态）
+ * @returns {string} .pnpm 仓内包本体目录；判定不成立返回空串
+ */
+function resolveViaPnpmStore(nodeModulesDir, packageName) {
+  // 门 1：包名出现在顶层 node_modules（scoped 包看 scope 子目录的枚举）。
+  const scopeIdx = packageName.indexOf('/');
+  let topDir = nodeModulesDir;
+  let leafName = packageName;
+  if (scopeIdx > 0) {
+    topDir = path.join(nodeModulesDir, packageName.slice(0, scopeIdx));
+    leafName = packageName.slice(scopeIdx + 1);
+  }
+  let names;
+  try { names = fs.readdirSync(topDir); } catch { return ''; }
+  if (!names.includes(leafName)) return '';
+
+  const linkPath = path.join(topDir, leafName);
+  // 精确路径 1：符号链接目标可读（可穿透场景）且指向 .pnpm 仓内实体目录。
+  try {
+    const resolved = path.resolve(path.dirname(linkPath), fs.readlinkSync(linkPath));
+    if (splitPathSegments(resolved).includes('.pnpm') &&
+        fs.existsSync(path.join(resolved, 'package.json'))) {
+      return resolved;
+    }
+  } catch { /* Linux 符号链接（LX reparse）Windows 侧读取失败属预期 → 走版本选择 */ }
+
+  // 门 2：.pnpm 仓存在且有条目。
+  const storeDir = path.join(nodeModulesDir, '.pnpm');
+  let storeEntries;
+  try { storeEntries = fs.readdirSync(storeDir); } catch { return ''; }
+  const storeName = packageName.replace('/', '+');
+  const prefix = storeName + '@';
+  const matches = storeEntries
+    .filter((name) => name === prefix.slice(0, -1) || (name.startsWith(prefix) && name.length > prefix.length))
+    .map((name) => ({ name, version: pnpmEntryVersion(name, prefix) }))
+    .sort((a, b) => b.version.localeCompare(a.version, undefined, { numeric: true }));
+
+  // 精确路径 2：依赖声明精确版本优先（pnpm 顶层链接指向声明版本）。
+  const declared = declaredExactVersion(nodeModulesDir, packageName);
+  if (declared) {
+    const exact = matches.find((m) => m.version === declared);
+    if (exact) {
+      const dir = path.join(storeDir, exact.name, 'node_modules', packageName);
+      if (fs.existsSync(path.join(dir, 'package.json'))) return dir;
+    }
+  }
+
+  // 精确路径 3：版本降序取首个可读条目。
+  for (const m of matches) {
+    const dir = path.join(storeDir, m.name, 'node_modules', packageName);
+    try {
+      if (fs.existsSync(path.join(dir, 'package.json'))) return dir;
+    } catch { /* 不可读试下一个 */ }
+  }
+  return '';
+}
+
+/** 路径分段（跨平台：同时按两种分隔符切，供 .pnpm 判定）。 */
+function splitPathSegments(p) {
+  return p.split(/[\\/]/);
+}
+
+/** 提取 .pnpm 仓条目名里 <name>@ 前缀后的版本串（剥同伴后缀 (peer@ver)）。 */
+function pnpmEntryVersion(entryName, prefix) {
+  const rest = entryName.slice(prefix.length);
+  const parenIdx = rest.indexOf('(');
+  return parenIdx >= 0 ? rest.slice(0, parenIdx) : rest;
+}
+
+/** 读 node_modules 同级 package.json 的依赖声明，取该包的精确版本（非精确
+ *  range 如 ^1.0.0 / latest 返回 null——无法与仓条目版本对齐）。 */
+function declaredExactVersion(nodeModulesDir, packageName) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(nodeModulesDir, '..', 'package.json'), 'utf8'));
+    for (const field of ['dependencies', 'devDependencies', 'optionalDependencies']) {
+      const v = pkg[field] && pkg[field][packageName];
+      if (typeof v === 'string' && /^\d+\.\d+\.\d+/.test(v)) return v;
+    }
+  } catch { /* 读不到 / 非法 JSON 按无声明处理 */ }
+  return null;
 }
 
 /**

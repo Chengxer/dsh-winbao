@@ -321,6 +321,155 @@ test('resolveBundleDirLike: 与官方双锚点语义同构（第一锚点优先�
 });
 
 // ---------------------------------------------------------------------------
+// resolveBundleDirLike：pnpm 虚拟仓回落（issue #132——WSL/UNC 场景）
+//
+// WSL 模式下 profile 是 UNC 路径：pnpm 顶层的 node_modules/<pkg> 是 Linux
+// 符号链接，Windows 侧 node 读不透（package.json 直查恒 false），但内核运行
+// 在 WSL 内、Linux 侧解析正常。以下测试用「空目录占位」模拟不可穿透的符号
+// 链接（目录名可枚举、内容不可直读），.pnpm 仓内放实体包本体。
+// ---------------------------------------------------------------------------
+
+/** 构造 pnpm 布局：顶层空目录占位（模拟不可穿透符号链接）+ .pnpm 仓实体包。 */
+function writePnpmStoreBundle(base, name, version, extra = {}) {
+  const segs = name.split('/');
+  // 顶层占位：只建目录、不写 package.json（= Windows 侧直查失败的链接形态）。
+  fs.mkdirSync(path.join(base, 'node_modules', ...segs), { recursive: true });
+  const storeEntry = name.replace('/', '+') + '@' + version;
+  const dir = path.join(base, 'node_modules', '.pnpm', storeEntry, 'node_modules', ...segs);
+  fs.mkdirSync(path.join(dir, 'lib'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify(Object.assign({
+    name,
+    version,
+    main: 'lib/index.js',
+    dsh: { bundle: { patch: './cordis.patch.yml' } },
+  }, extra), null, 2) + '\n');
+  fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), '[]\n');
+  fs.writeFileSync(path.join(dir, 'lib', 'index.js'), 'export {};\n');
+  return dir;
+}
+
+test('resolveBundleDirLike: pnpm 虚拟仓回落（issue #132）——不可穿透符号链接经 .pnpm 实体目录解析', (t) => {
+  const profileDir = tmpdir(t);
+  fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-web', private: true, dependencies: {},
+  }, null, 2) + '\n');
+  const storeDir = writePnpmStoreBundle(profileDir, 'dsh-vision-router', '1.2.0');
+  const {
+    resolveBundleDirLike,
+  } = require('../../scripts/lib/profile-reconcile');
+  const got = resolveBundleDirLike(path.join(profileDir, 'package.json'), 'dsh-vision-router');
+  assert.equal(got, storeDir, '应命中 .pnpm 仓内实体目录（而非空串）');
+  // 供 validateBundleEntry / inspectBundleDir 消费的完整健康判定
+  const v = validateBundleEntry('dsh-vision-router', {
+    installAnchorDir: '', profileDir, parsePatch: null,
+  });
+  assert.equal(v.ok, true, 'pnpm 布局登记不得判 UNRESOLVABLE');
+  assert.equal(v.packageDir, storeDir);
+});
+
+test('resolveBundleDirLike: pnpm 回落支持 scoped 包（@scope+name 仓条目）', (t) => {
+  const profileDir = tmpdir(t);
+  fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-web', private: true,
+  }, null, 2) + '\n');
+  const storeDir = writePnpmStoreBundle(profileDir, '@linxin666/dsh-web-ui-all', '0.3.1');
+  const { resolveBundleDirLike } = require('../../scripts/lib/profile-reconcile');
+  assert.equal(
+    resolveBundleDirLike(path.join(profileDir, 'package.json'), '@linxin666/dsh-web-ui-all'),
+    storeDir,
+  );
+});
+
+test('resolveBundleDirLike: pnpm 回落——依赖声明精确版本优先于最高版', (t) => {
+  const profileDir = tmpdir(t);
+  fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-web', private: true,
+    dependencies: { 'multi-ver': '1.0.0' },
+  }, null, 2) + '\n');
+  const low = writePnpmStoreBundle(profileDir, 'multi-ver', '1.0.0');
+  writePnpmStoreBundle(profileDir, 'multi-ver', '2.0.0');
+  const { resolveBundleDirLike } = require('../../scripts/lib/profile-reconcile');
+  assert.equal(
+    resolveBundleDirLike(path.join(profileDir, 'package.json'), 'multi-ver'),
+    low,
+    '顶层链接指向声明版本（1.0.0），不是最高版 2.0.0',
+  );
+});
+
+test('resolveBundleDirLike: pnpm 回落——range 声明走版本降序兜底', (t) => {
+  const profileDir = tmpdir(t);
+  fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-web', private: true, dependencies: { 'multi-ver': '^1.0.0' },
+  }, null, 2) + '\n');
+  writePnpmStoreBundle(profileDir, 'multi-ver', '1.0.0');
+  const high = writePnpmStoreBundle(profileDir, 'multi-ver', '2.0.0');
+  const { resolveBundleDirLike } = require('../../scripts/lib/profile-reconcile');
+  assert.equal(
+    resolveBundleDirLike(path.join(profileDir, 'package.json'), 'multi-ver'),
+    high,
+    'range 声明无法精确对齐时取最高版（确定性近似）',
+  );
+});
+
+test('resolveBundleDirLike: pnpm 回落——仅存于 .pnpm 的传递依赖不误判（顶层无登记）', (t) => {
+  const profileDir = tmpdir(t);
+  fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-web', private: true,
+  }, null, 2) + '\n');
+  // 只有仓内实体、顶层 node_modules 无同名目录项（pnpm 传递依赖形态）
+  writePnpmStoreBundle(profileDir, 'transitive-only', '1.0.0');
+  fs.rmSync(path.join(profileDir, 'node_modules', 'transitive-only'), { recursive: true, force: true });
+  const { resolveBundleDirLike } = require('../../scripts/lib/profile-reconcile');
+  assert.equal(
+    resolveBundleDirLike(path.join(profileDir, 'package.json'), 'transitive-only'),
+    '',
+    'Linux 侧 createRequire 同样解析不到（非直接依赖），不得误判可解析',
+  );
+});
+
+test('resolveBundleDirLike: 平铺真实目录优先，.pnpm 仓不干扰既有解析', (t) => {
+  const profileDir = tmpdir(t);
+  fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-web', private: true,
+  }, null, 2) + '\n');
+  const flat = writeHealthyBundle(profileDir, 'flat-pkg');
+  writePnpmStoreBundle(profileDir, 'flat-pkg', '9.9.9');
+  const { resolveBundleDirLike } = require('../../scripts/lib/profile-reconcile');
+  assert.equal(
+    resolveBundleDirLike(path.join(profileDir, 'package.json'), 'flat-pkg'),
+    flat,
+    '直查可解析（自研同步的平铺布局）时不得改走 .pnpm 仓',
+  );
+});
+
+test('reconcile: pnpm 布局登记不被移除（issue #132 端到端——WSL 手装插件保留）', (t) => {
+  const home = tmpdir(t);
+  const profileDir = path.join(home, 'profiles', 'web');
+  fs.mkdirSync(profileDir, { recursive: true });
+  const installDir = tmpdir(t);
+  for (const name of CORES) writeHealthyBundle(installDir, name);
+  const storeDir = writePnpmStoreBundle(profileDir, 'dsh-context', '0.8.0');
+  const before = {
+    name: 'dsh-profile-web', private: true,
+    dependencies: { 'dsh-context': '0.8.0' },
+    dsh: { profile: { bundles: [...CORES, 'dsh-context'] } },
+  };
+  fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify(before, null, 2) + '\n');
+  const logs = [];
+  const r = reconcileProfileBundles(profileDir, {
+    installAnchorDir: installDir,
+    coreNames: CORES,
+    parsePatch: null,
+    log: (m) => logs.push(m),
+  });
+  assert.equal(r.changed, false, 'pnpm 布局登记健康，manifest 应零写入');
+  assert.deepEqual(r.removed, [], '不得判 UNRESOLVABLE 移除');
+  assert.deepEqual(readManifest(profileDir), before, '登记必须原样保留');
+  assert.equal(fs.existsSync(recordFile(profileDir)), false, '不应写隔离记录');
+  assert.ok(storeDir, 'fixture 完整性');
+});
+
+// ---------------------------------------------------------------------------
 // reconcileProfileBundles：健康零写入
 // ---------------------------------------------------------------------------
 
