@@ -123,9 +123,7 @@ fi
 # dist 注入 index.html <script> 与 assets/client-compat.js，先跑会被镜像冲掉。
 # compat 构建尽力而为：失败不阻断主构建（CI 环境可能缺 esbuild/rc7 包）
 # ——没有 compat 时插件走 renderer 回落链（三级降级已实装）。
-if ! node "$REPO_ROOT/dsh-tauri/scripts/build-client-compat.mjs" 2>&1; then
-  echo "[stage] WARN: client-compat 构建失败（不阻断，插件走 renderer 回落链）"
-fi
+node "$REPO_ROOT/dsh-tauri/scripts/build-client-compat.mjs"
 
 echo "[stage] 完成。体积统计："
 du -sm "$DST" "$DST/node_modules" "$DST/vendor" "$DST/assets" 2>/dev/null

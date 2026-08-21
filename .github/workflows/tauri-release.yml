@@ -58,7 +58,7 @@ jobs:
       - name: Download vendor node
         run: |
           mkdir -Force dsh-desktop\vendor\node | Out-Null
-          Invoke-WebRequest -Uri 'https://nodejs.org/dist/v22.14.0/win-x64/node.exe' -OutFile dsh-desktop\vendor\node\node.exe
+          Invoke-WebRequest -Uri 'https://nodejs.org/dist/v24.15.0/win-x64/node.exe' -OutFile dsh-desktop\vendor\node\node.exe
         shell: pwsh
 
       - name: Download vendor npm
@@ -92,41 +92,8 @@ jobs:
           echo "rc7 packages ready"
         shell: bash
 
-      - name: Stage payload (CI simplified)
-        run: |
-          set -e
-          DEST="dsh-tauri/package-payload/dsh-desktop"
-          # 注意：不预建 node_modules（cp -r 会嵌套 node_modules/node_modules）
-          mkdir -p "$DEST"
-          # 根文件
-          cp dsh-desktop/*.js "$DEST/" 2>/dev/null || true
-          cp dsh-desktop/package.json "$DEST/"
-          # scripts + assets
-          cp -r dsh-desktop/scripts "$DEST/scripts"
-          cp -r dsh-desktop/assets "$DEST/assets"
-          # vendor
-          mkdir -p "$DEST/vendor"
-          cp -r dsh-desktop/vendor/node "$DEST/vendor/node"
-          cp -r dsh-desktop/vendor/npm "$DEST/vendor/npm" 2>/dev/null || echo "no vendor/npm"
-          # node_modules：先删再拷（避免嵌套 node_modules/node_modules）
-          rm -rf "$DEST/node_modules"
-          cp -r dsh-desktop/node_modules "$DEST/node_modules"
-          rm -rf "$DEST/node_modules/electron" "$DEST/node_modules/electron-builder" "$DEST/node_modules/electron-winstaller"
-          # rc7 vendor（dist/win-unpacked 已在上一步准备好）
-          if [ -d "dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai" ]; then
-            for pkg in dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai/*/; do
-              name=$(basename "$pkg")
-              if [ ! -d "$DEST/node_modules/@deepseek-ai/$name" ]; then
-                echo "  vendor: $name"
-                cp -r "$pkg" "$DEST/node_modules/@deepseek-ai/$name"
-              fi
-            done
-          fi
-          # client-compat（尽力而为）
-          if ! node dsh-tauri/scripts/build-client-compat.mjs 2>&1; then
-            echo "WARN: compat build failed (non-blocking)"
-          fi
-          echo "Payload staged: $(du -sm "$DEST" | cut -f1)MB"
+      - name: Stage payload (full)
+        run: bash dsh-tauri/scripts/stage-payload.sh
         shell: bash
 
       - name: Run tests (unit only, skip env-dependent integration)
@@ -196,9 +163,9 @@ jobs:
       - name: Download vendor node
         run: |
           mkdir -p dsh-desktop/vendor/node
-          wget -q https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.gz
-          tar -xzf node-v22.14.0-linux-x64.tar.gz
-          cp node-v22.14.0-linux-x64/bin/node dsh-desktop/vendor/node/node
+          wget -q https://nodejs.org/dist/v24.15.0/node-v24.15.0-linux-x64.tar.gz
+          tar -xzf node-v24.15.0-linux-x64.tar.gz
+          cp node-v24.15.0-linux-x64/bin/node dsh-desktop/vendor/node/node
           chmod +x dsh-desktop/vendor/node/node
 
       - name: Download rc7 client packages
@@ -219,29 +186,8 @@ jobs:
           done
           echo "rc7 packages ready"
 
-      - name: Stage payload (CI simplified)
-        run: |
-          set -e
-          DEST="dsh-tauri/package-payload/dsh-desktop"
-          mkdir -p "$DEST"
-          cp dsh-desktop/*.js "$DEST/" 2>/dev/null || true
-          cp dsh-desktop/package.json "$DEST/"
-          cp -r dsh-desktop/scripts "$DEST/scripts"
-          cp -r dsh-desktop/assets "$DEST/assets"
-          mkdir -p "$DEST/vendor"
-          cp -r dsh-desktop/vendor/node "$DEST/vendor/node"
-          cp -r dsh-desktop/vendor/npm "$DEST/vendor/npm" 2>/dev/null || true
-          rm -rf "$DEST/node_modules"
-          cp -r dsh-desktop/node_modules "$DEST/node_modules"
-          rm -rf "$DEST/node_modules/electron" "$DEST/node_modules/electron-builder" "$DEST/node_modules/electron-winstaller"
-          if [ -d "dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai" ]; then
-            for pkg in dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai/*/; do
-              name=$(basename "$pkg")
-              [ -d "$DEST/node_modules/@deepseek-ai/$name" ] || cp -r "$pkg" "$DEST/node_modules/@deepseek-ai/$name"
-            done
-          fi
-          node dsh-tauri/scripts/build-client-compat.mjs 2>&1 || echo "WARN: compat failed (non-blocking)"
-          echo "Payload staged: $(du -sm "$DEST" | cut -f1)MB"
+      - name: Stage payload (full)
+        run: bash dsh-tauri/scripts/stage-payload.sh
 
       - name: Build installer
         run: cd dsh-tauri && npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --target x86_64-unknown-linux-gnu
@@ -285,9 +231,9 @@ jobs:
       - name: Download vendor node
         run: |
           mkdir -p dsh-desktop/vendor/node
-          wget -q https://nodejs.org/dist/v22.14.0/node-v22.14.0-darwin-arm64.tar.gz
-          tar -xzf node-v22.14.0-darwin-arm64.tar.gz
-          cp node-v22.14.0-darwin-arm64/bin/node dsh-desktop/vendor/node/node
+          wget -q https://nodejs.org/dist/v24.15.0/node-v24.15.0-darwin-arm64.tar.gz
+          tar -xzf node-v24.15.0-darwin-arm64.tar.gz
+          cp node-v24.15.0-darwin-arm64/bin/node dsh-desktop/vendor/node/node
           chmod +x dsh-desktop/vendor/node/node
 
       - name: Download rc7 client packages
@@ -308,29 +254,8 @@ jobs:
           done
           echo "rc7 packages ready"
 
-      - name: Stage payload (CI simplified)
-        run: |
-          set -e
-          DEST="dsh-tauri/package-payload/dsh-desktop"
-          mkdir -p "$DEST"
-          cp dsh-desktop/*.js "$DEST/" 2>/dev/null || true
-          cp dsh-desktop/package.json "$DEST/"
-          cp -r dsh-desktop/scripts "$DEST/scripts"
-          cp -r dsh-desktop/assets "$DEST/assets"
-          mkdir -p "$DEST/vendor"
-          cp -r dsh-desktop/vendor/node "$DEST/vendor/node"
-          cp -r dsh-desktop/vendor/npm "$DEST/vendor/npm" 2>/dev/null || true
-          rm -rf "$DEST/node_modules"
-          cp -r dsh-desktop/node_modules "$DEST/node_modules"
-          rm -rf "$DEST/node_modules/electron" "$DEST/node_modules/electron-builder" "$DEST/node_modules/electron-winstaller"
-          if [ -d "dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai" ]; then
-            for pkg in dsh-desktop/dist/win-unpacked/resources/app/node_modules/@deepseek-ai/*/; do
-              name=$(basename "$pkg")
-              [ -d "$DEST/node_modules/@deepseek-ai/$name" ] || cp -r "$pkg" "$DEST/node_modules/@deepseek-ai/$name"
-            done
-          fi
-          node dsh-tauri/scripts/build-client-compat.mjs 2>&1 || echo "WARN: compat failed (non-blocking)"
-          echo "Payload staged: $(du -sm "$DEST" | cut -f1)MB"
+      - name: Stage payload (full)
+        run: bash dsh-tauri/scripts/stage-payload.sh
 
       - name: Build installer
         run: cd dsh-tauri && npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --target aarch64-apple-darwin
