@@ -78,7 +78,7 @@ test('maskUrlToken：URL 形态日志不泄漏完整 token（V4 审计残留泄�
   assert.strictEqual(maskUrlToken('http://127.0.0.1:1234/'), 'http://127.0.0.1:1234/', '无 token 查询串原样返回');
   const amp = maskUrlToken(`http://h/?a=1&token=${token}`);
   assert.ok(!amp.includes(token), '&token= 形态同样掩码');
-  assert.strictEqual(maskUrlToken(null), 'null', 'null 不抛错（String 形态）');
+  assert.strictEqual(maskUrlToken(null), '', 'null 归空串不抛错（url || "" 形态）');
 });
 
 // ---------------------------------------------------------------------------
