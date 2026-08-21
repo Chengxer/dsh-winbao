@@ -8,8 +8,22 @@ export const inject = ['webServer', 'sessions']
 const MAX_BODY_BYTES = 32 * 1024
 const MAX_TITLE_LENGTH = 120
 const MAX_NOTE_LENGTH = 4_000
+// Projected message text cap: longer replies truncate with a marker pointing
+// at the detail view instead of silently cutting mid-sentence.
+const MAX_PROJECTION_LENGTH = 8_000
+const PROJECTION_TRUNCATED_SUFFIX = '\n——…（详情查看全文）'
 const TOPIC_COLORS = ['#0f766e', '#2563eb', '#be123c', '#7c3aed', '#b45309']
 const LOCK_STALE_MS = 60_000
+// Deferred (event-projection) writes coalesce into one save per window, so a
+// burst of session events costs a single full-state write instead of one per
+// event (issue #13: per-event saves pinned the main thread at ~90% CPU).
+const SAVE_DEBOUNCE_MS = 800
+// Growth bounds for the projection store. DSH keeps the full session log;
+// the canvas only needs a bounded tail per thread, so projected messages and
+// folded tool texts are capped instead of growing workspaces.json forever.
+const PROJECTION_THREAD_MESSAGE_LIMIT = 400
+const MAX_PROCESS_TEXT_LENGTH = 4_000
+const PROCESS_TRUNCATED_SUFFIX = '\n——…（已截断）'
 
 /** JSON persistence for the Synapse workspace graph. */
 export class WorkspaceStore {
@@ -22,6 +36,14 @@ export class WorkspaceStore {
     this.lastKnownMtime = null
     this.externalModWarned = false
     this.lockWarned = false
+    this.dirty = false
+    this.flushTimer = null
+    // In-memory projection indexes keyed by the live thread object: applied
+    // sourceSeq set (O(1) duplicate rejection instead of an O(n) scan per
+    // event) and the turn/step → assistant-message fold target. Rebuilt
+    // lazily from thread.messages, dropped whenever messages are trimmed.
+    this.appliedSeqCache = new WeakMap()
+    this.foldTargetCache = new WeakMap()
   }
 
   async list() {
@@ -112,6 +134,12 @@ export class WorkspaceStore {
         workspace.threads = workspace.threads.filter(thread => !blankIds.has(thread.dshSessionId) && !removedIds.has(thread.dshSessionId))
       }
       this.state.workspaces = this.state.workspaces.filter(workspace => workspace.kind !== 'dsh' || workspace.threads.length > 0)
+      // A session DSH confirms as removed can never come back (ids are
+      // UUIDs), so its archive marker is dead weight: prune it to keep
+      // hiddenSessionIds from growing without bound.
+      if (removedIds.size > 0 && this.state.hiddenSessionIds.some(id => removedIds.has(id))) {
+        this.state.hiddenSessionIds = this.state.hiddenSessionIds.filter(id => !removedIds.has(id))
+      }
       for (const item of sessions) {
         if (typeof item?.id !== 'string' || item.id === '' || typeof item.cwd !== 'string' || item.cwd === '') continue
         if (item.blank === true) continue
@@ -127,7 +155,7 @@ export class WorkspaceStore {
         }
       }
       return this.list()
-    })
+    }, { deferred: true })
   }
 
   async addMessage(threadId, text) {
@@ -184,40 +212,99 @@ export class WorkspaceStore {
     })
   }
 
-  /** Replay one live DSH session into the dedicated projection workspace. */
+  /**
+   * Replay one live DSH session into the dedicated projection workspace.
+   *
+   * Replays resume from a persisted per-session watermark
+   * (`thread.lastProjectedSeq`) instead of event 0: a restart used to replay
+   * every committed event of every session, which pegged the main thread for
+   * minutes on multi-million-event sessions. Threads written before the
+   * watermark existed self-heal their cursor from the highest projected
+   * `sourceSeq`, so existing installs skip the one-time full re-replay too.
+   */
   async projectSession(session, replayFrom = 0, workspaceTitle = 'DSH 任务') {
+    let changed = true
     return this.mutate(() => {
-      if (this.state.hiddenSessionIds.includes(session.id)) return null
-      const workspace = this.dshWorkspace(sessionCwd(session), workspaceTitle)
-      const thread = this.dshThread(workspace, session)
-      for (const event of session.events) {
-        if (event.seq >= replayFrom) this.projectEventInto(workspace, thread, event)
+      if (this.state.hiddenSessionIds.includes(session.id)) { changed = false; return null }
+      const cwd = sessionCwd(session)
+      const workspaceExisted = this.state.workspaces.some(item => item.kind === 'dsh' && item.cwd === cwd)
+      const existing = this.state.workspaces.find(item => item.kind === 'dsh' && item.cwd === cwd)
+        ?.threads.find(item => item.dshSessionId === session.id)
+      const previous = existing === undefined ? undefined : {
+        title: existing.title,
+        dshSessionTitle: existing.dshSessionTitle,
+        sourceSeedLength: existing.sourceSeedLength,
+        cursor: this.projectionCursor(existing),
       }
+      const workspace = this.dshWorkspace(cwd, workspaceTitle)
+      const thread = this.dshThread(workspace, session)
+      const from = Math.max(replayFrom, previous?.cursor !== undefined ? previous.cursor + 1 : 0)
+      let cursor = from - 1
+      let applied = 0
+      for (const event of session.events ?? []) {
+        if (!Number.isSafeInteger(event.seq) || event.seq < from) continue
+        applied += 1
+        this.projectEventInto(workspace, thread, event)
+        if (event.seq > cursor) cursor = event.seq
+      }
+      if (cursor > (previous?.cursor ?? -1)) thread.lastProjectedSeq = cursor
+      changed = !workspaceExisted || existing === undefined || applied > 0 || cursor > (previous?.cursor ?? -1)
+        || thread.title !== previous?.title || thread.dshSessionTitle !== previous?.dshSessionTitle
+        || thread.sourceSeedLength !== previous?.sourceSeedLength
       return structuredClone(thread)
-    })
+    }, { deferred: true, persist: () => changed })
   }
 
   /** Project one committed DSH session event. Repeated sequence numbers are ignored. */
   async projectEvent(session, event, workspaceTitle = 'DSH 任务') {
-    return this.mutate(() => {
-      if (this.state.hiddenSessionIds.includes(session.id)) return null
-      const workspace = this.dshWorkspace(sessionCwd(session), workspaceTitle)
-      const thread = this.dshThread(workspace, session)
-      this.projectEventInto(workspace, thread, event)
-      return structuredClone(thread)
-    })
+    return this.projectEvents(session, [event], workspaceTitle)
   }
 
   /** Project a batch of committed events for one session in a single write. */
   async projectEvents(session, events, workspaceTitle = 'DSH 任务') {
     if (events.length === 0) return null
+    let changed = true
     return this.mutate(() => {
-      if (this.state.hiddenSessionIds.includes(session.id)) return null
+      if (this.state.hiddenSessionIds.includes(session.id)) { changed = false; return null }
       const workspace = this.dshWorkspace(sessionCwd(session), workspaceTitle)
+      const existing = workspace.threads.find(item => item.dshSessionId === session.id)
+      const previous = existing === undefined ? undefined : {
+        title: existing.title,
+        dshSessionTitle: existing.dshSessionTitle,
+        sourceSeedLength: existing.sourceSeedLength,
+      }
       const thread = this.dshThread(workspace, session)
-      for (const event of events) this.projectEventInto(workspace, thread, event)
+      const startCursor = this.projectionCursor(thread)
+      let cursor = startCursor
+      let applied = 0
+      for (const event of events) {
+        if (Number.isSafeInteger(event.seq) && event.seq <= cursor) continue
+        applied += 1
+        this.projectEventInto(workspace, thread, event)
+        if (Number.isSafeInteger(event.seq) && event.seq > cursor) cursor = event.seq
+      }
+      if (cursor > startCursor) thread.lastProjectedSeq = cursor
+      changed = existing === undefined || applied > 0 || cursor > startCursor
+        || thread.title !== previous?.title || thread.dshSessionTitle !== previous?.dshSessionTitle
+        || thread.sourceSeedLength !== previous?.sourceSeedLength
       return structuredClone(thread)
-    })
+    }, { deferred: true, persist: () => changed })
+  }
+
+  /**
+   * Highest session seq already projected into this thread. Prefers the
+   * persisted watermark; threads from older versions without one derive it
+   * from the highest projected message `sourceSeq` (re-applying older events
+   * is idempotent — duplicates are rejected by seq and tool folds are keyed
+   * by callId — so deriving instead of replaying from 0 is safe).
+   */
+  projectionCursor(thread) {
+    if (Number.isSafeInteger(thread.lastProjectedSeq)) return thread.lastProjectedSeq
+    let max = -1
+    for (const message of thread.messages) {
+      if (Number.isSafeInteger(message?.sourceSeq) && message.sourceSeq > max) max = message.sourceSeq
+    }
+    return max
   }
 
   async load() {
@@ -234,13 +321,37 @@ export class WorkspaceStore {
     }
   }
 
-  async mutate(action) {
+  async mutate(action, { deferred = false, persist = null } = {}) {
     await this.ready
     const task = this.serial.then(async () => {
       const result = action()
-      await this.save()
+      // `persist` lets no-op replays (everything already projected, thread
+      // unchanged) skip the write entirely instead of rewriting the whole
+      // state file once per session on every startup.
+      if (persist !== null && !persist()) return result
+      if (deferred) this.markDirty()
+      else await this.save()
       return result
     })
+    this.serial = task.catch(() => undefined)
+    return task
+  }
+
+  /** Mark the state dirty and schedule one trailing flush for the window. */
+  markDirty() {
+    this.dirty = true
+    if (this.flushTimer !== null) return
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null
+      void this.flush()
+    }, SAVE_DEBOUNCE_MS)
+  }
+
+  /** Persist the current state when dirty, ordered after in-flight mutations. */
+  flush() {
+    if (!this.dirty) return Promise.resolve()
+    this.dirty = false
+    const task = this.serial.then(() => this.save())
     this.serial = task.catch(() => undefined)
     return task
   }
@@ -261,7 +372,7 @@ export class WorkspaceStore {
     await this.acquireLock()
     try {
       const temporaryFile = `${this.dataFile}.${process.pid}.tmp`
-      await writeFile(temporaryFile, `${JSON.stringify(this.state, null, 2)}\n`, 'utf8')
+      await writeFile(temporaryFile, `${JSON.stringify(this.state)}\n`, 'utf8')
       await rename(temporaryFile, this.dataFile)
       this.lastKnownMtime = (await stat(this.dataFile)).mtimeMs
     } finally {
@@ -368,6 +479,8 @@ export class WorkspaceStore {
       sourceSeedLength: Number.isSafeInteger(session.header?.seedLength) && session.header.seedLength >= 0 ? session.header.seedLength : null,
       dshSessionId: session.id,
       dshSessionTitle: typeof session.title === 'string' ? session.title.slice(0, MAX_TITLE_LENGTH) : null,
+      // Persisted replay watermark: highest session seq already projected.
+      lastProjectedSeq: null,
       color: TOPIC_COLORS[workspace.threads.length % TOPIC_COLORS.length],
       // DSH projection stores only a neutral semantic anchor. The visual map
       // lays out visible cards from the current conversation graph each render,
@@ -401,7 +514,9 @@ export class WorkspaceStore {
       return
     }
     const projection = projectableEvent(event)
-    if (projection === null || thread.messages.some(message => message.sourceSeq === event.seq)) return
+    // O(1) duplicate rejection through the lazily built seq set; the old
+    // `messages.some(...)` scan made replaying a long session quadratic.
+    if (projection === null || this.appliedSeqs(thread).has(event.seq)) return
     const at = new Date(event.time).toISOString()
     const message = {
       id: randomUUID(),
@@ -414,12 +529,40 @@ export class WorkspaceStore {
         : {}),
     }
     thread.messages.push(message)
+    this.trimProjectedHistory(thread)
     thread.updatedAt = at
     workspace.updatedAt = at
     if (thread.dshSessionTitle === null && projection.kind === 'user') {
       thread.title = titleFromText(projection.text)
       thread.dshSessionTitle = thread.title
     }
+  }
+
+  /** Lazily built per-thread set of already projected source sequence numbers. */
+  appliedSeqs(thread) {
+    let set = this.appliedSeqCache.get(thread)
+    if (set === undefined) {
+      set = new Set()
+      for (const message of thread.messages) {
+        if (Number.isSafeInteger(message?.sourceSeq)) set.add(message.sourceSeq)
+      }
+      this.appliedSeqCache.set(thread, set)
+    }
+    return set
+  }
+
+  /**
+   * Keep only a bounded tail of projected messages per thread. DSH keeps the
+   * authoritative session log; without this cap workspaces.json grew without
+   * bound (multi-MB stores made every startup replay and full-state write
+   * progressively slower). Trimming also drops the in-memory indexes so they
+   * rebuild from the surviving messages.
+   */
+  trimProjectedHistory(thread) {
+    if (thread.messages.length <= PROJECTION_THREAD_MESSAGE_LIMIT) return
+    thread.messages = thread.messages.slice(-PROJECTION_THREAD_MESSAGE_LIMIT)
+    this.appliedSeqCache.delete(thread)
+    this.foldTargetCache.delete(thread)
   }
 
   /**
@@ -430,24 +573,21 @@ export class WorkspaceStore {
    */
   foldToolProcess(thread, event) {
     const at = new Date(event.time).toISOString()
-    const target = [...thread.messages].reverse().find(message =>
-      message.kind === 'assistant'
-      && (message.turn === event.data.turn && message.step === event.data.step
-        || message.turn === undefined && message.step === undefined))
+    const target = this.foldTarget(thread, event)
     if (target === undefined) return
     const process = target.process ??= []
     const callId = String(event.type === 'tool/call' ? event.data.callId : event.data.message?.source?.callId ?? '')
     const entry = process.find(item => item.callId === callId)
     if (event.type === 'tool/call') {
       if (entry === undefined) {
-        process.push({ callId, name: event.data.name, arguments: event.data.arguments, result: null, error: null })
+        process.push({ callId, name: event.data.name, arguments: capProcessText(event.data.arguments), result: null, error: null })
       } else {
         entry.name = event.data.name
-        entry.arguments = event.data.arguments
+        entry.arguments = capProcessText(event.data.arguments)
       }
     } else {
-      const outcome = contentText(event.data.message?.content)
-      const error = event.data.error === undefined ? null : `${event.data.error.name}: ${event.data.error.code}`
+      const outcome = capProcessText(contentText(event.data.message?.content))
+      const error = event.data.error === undefined ? null : capProcessText(`${event.data.error.name}: ${event.data.error.code}`)
       if (entry === undefined) {
         process.push({ callId, name: '工具调用', arguments: null, result: outcome, error })
       } else {
@@ -456,6 +596,38 @@ export class WorkspaceStore {
       }
     }
     thread.updatedAt = at
+  }
+
+  /**
+   * Resolve the assistant message a tool event folds into. The turn/step pair
+   * is unique per assistant turn, so the reverse scan result is cached per
+   * thread — the scan used to run for every tool event, making long replays
+   * quadratic in message count. Legacy fallback targets (no turn/step) are
+   * never cached.
+   */
+  foldTarget(thread, event) {
+    const { turn, step } = event.data
+    if (turn === undefined || step === undefined) {
+      return [...thread.messages].reverse().find(message =>
+        message.kind === 'assistant'
+        && (message.turn === event.data.turn && message.step === event.data.step
+          || message.turn === undefined && message.step === undefined))
+    }
+    let byKey = this.foldTargetCache.get(thread)
+    if (byKey === undefined) {
+      byKey = new Map()
+      this.foldTargetCache.set(thread, byKey)
+    }
+    const key = `${turn}:${step}`
+    let target = byKey.get(key)
+    if (target === undefined) {
+      target = [...thread.messages].reverse().find(message =>
+        message.kind === 'assistant'
+        && (message.turn === turn && message.step === step
+          || message.turn === undefined && message.step === undefined))
+      if (target !== undefined && target.turn === turn && target.step === step) byKey.set(key, target)
+    }
+    return target
   }
 
   thread({ title, parentId, dshSessionId, dshSessionTitle, position, color, now, order }) {
@@ -486,7 +658,7 @@ function normalizeState(value) {
   let state
   if ((value?.version === 2 || value?.version === 3 || value?.version === 4) && Array.isArray(value.workspaces)) {
     const hiddenSessionIds = Array.isArray(value.hiddenSessionIds) ? value.hiddenSessionIds.filter(item => typeof item === 'string') : []
-    migrated = value.version !== 3 || !Array.isArray(value.hiddenSessionIds)
+    migrated = value.version < 3 || !Array.isArray(value.hiddenSessionIds)
     const workspaces = value.workspaces.map(workspace => ({
       ...workspace,
       threads: Array.isArray(workspace.threads) ? workspace.threads.map(thread => {
@@ -501,7 +673,7 @@ function normalizeState(value) {
         return { ...rest, messages: notes }
       }) : [],
     }))
-    state = { ...value, version: 3, hiddenSessionIds, workspaces }
+    state = { ...value, version: value.version, hiddenSessionIds, workspaces }
   } else if (value?.version === 1 && Array.isArray(value.workspaces)) {
     const now = typeof value.updatedAt === 'string' ? value.updatedAt : new Date().toISOString()
     state = {
@@ -620,7 +792,16 @@ function projectableEvent(event) {
 
 function noteProjection(kind, text) {
   const normalized = text.trim()
-  return normalized === '' ? null : { kind, text: normalized.slice(0, 1_600) }
+  if (normalized === '') return null
+  if (normalized.length <= MAX_PROJECTION_LENGTH) return { kind, text: normalized }
+  return { kind, text: `${normalized.slice(0, MAX_PROJECTION_LENGTH)}${PROJECTION_TRUNCATED_SUFFIX}` }
+}
+
+/** Folded tool arguments/results are preview text, not storage: bound them. */
+function capProcessText(value) {
+  return typeof value === 'string' && value.length > MAX_PROCESS_TEXT_LENGTH
+    ? `${value.slice(0, MAX_PROCESS_TEXT_LENGTH)}${PROCESS_TRUNCATED_SUFFIX}`
+    : value
 }
 
 function isRuntimeContextText(text) {
@@ -695,6 +876,8 @@ export function apply(ctx, config) {
   const replaySession = session => {
     // Forks inherit their parent's log. The canvas already represents that
     // history through the parent node, so only project the child's live tail.
+    // Everything else resumes from the persisted watermark inside
+    // projectSession — a restart must not replay event 0 of every session.
     const replayFrom = session.header?.parentSession === undefined ? 0 : session.firstLiveSeq
     void store.projectSession(session, replayFrom, projectionWorkspaceTitle).catch(reportProjectionFailure)
   }
@@ -728,8 +911,10 @@ export function apply(ctx, config) {
   // The DSH /api browser-trust fence does not cover /synapse routes, so this
   // handler checks the Host header itself: localhost is allowed by default and
   // additional authorities opt in through config.trustedHosts (mirrors the
-  // fence's DNS-rebinding defense).
-  const trustedHosts = new Set(['localhost', '127.0.0.1', ...[...(config?.trustedHosts ?? [])].map(host => String(host).trim().toLowerCase()).filter(Boolean)])
+  // fence's DNS-rebinding defense). Ports are stripped on both sides — the
+  // request Host header is compared port-less, so an entry kept as "host:port"
+  // would never match.
+  const trustedHosts = new Set(['localhost', '127.0.0.1', ...[...(config?.trustedHosts ?? [])].map(host => String(host).trim().toLowerCase().replace(/:\d+$/, '')).filter(Boolean)])
   const api = async (req, res) => {
     try {
       const hostname = (typeof req.headers.host === 'string' ? req.headers.host : '').replace(/:\d+$/, '').toLowerCase()
