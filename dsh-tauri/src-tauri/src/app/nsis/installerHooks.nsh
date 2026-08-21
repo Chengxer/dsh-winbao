@@ -50,7 +50,7 @@
       Push $R5
       Call LegacyHandleEntry${ROOT}
       Pop $R5
-      StrCmp $R9 "1" 0 LegacyScan_norescan_${ROOT}_${UID}
+      StrCmp $0 "1" 0 LegacyScan_norescan_${ROOT}_${UID}
         ; V4 walkthrough #5 (HIGH): purge deletes keys during enumeration which
         ; shifts subsequent indices (skips keys ~50% in dual-key case). Any key
         ; handled (uninstall/removed) restarts enumeration from index 0.
@@ -89,7 +89,7 @@
         ${EndIf}
       LaeNoLive:
     ${EndIf}
-    StrCpy $R9 ""
+    StrCpy $0 ""
     Goto LaeDone
   ${Else}
     ; purge：键键都清。V4 walkthrough fixes:
@@ -103,7 +103,7 @@
       !if "${ROOT}" == "HKLM"
         DetailPrint "HKLM 机装旧版（键 $R5）：跳过卸载器（避免 UAC 挂死），仅清键"
         DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R5"
-        StrCpy $R9 "1"
+        StrCpy $0 "1"
         Goto LaeDone
       !else
       StrCpy $R6 "$R1" "" -13
@@ -127,17 +127,17 @@
         IntOp $R4 $R4 + 1
         IntCmp $R4 30 LaePollDone LaePoll
       LaePollDone:
-      StrCpy $R9 "1"
+      StrCpy $0 "1"
       Goto LaeDone
       !endif
     ${Else}
       DetailPrint "陈旧键（无卸载器文件）清除：$R5"
       DeleteRegKey ${ROOT} "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R5"
-      StrCpy $R9 "1"
+      StrCpy $0 "1"
       Goto LaeDone
     ${EndIf}
   ${EndIf}
-  StrCpy $R9 ""
+  StrCpy $0 ""
   LaeDone:
 !macroend
 
