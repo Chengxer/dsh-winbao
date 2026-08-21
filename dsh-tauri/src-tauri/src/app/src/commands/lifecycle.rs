@@ -1,5 +1,6 @@
 //! Phase 1 核心生命周期命令：app_init / 剪贴板 / 外部打开 / 页面心跳 /
-//! 当前会话 / 服务重启 / 余额触发 / PoC 回显（ipc-commands.md §2.1）。
+//! 当前会话 / 服务重启 / PoC 回显（ipc-commands.md §2.1）。
+//! （余额触发 balance_refresh 已随余额生产链迁往 [`super::balance`]。）
 
 use std::sync::atomic::Ordering;
 
@@ -160,32 +161,6 @@ pub fn restart_service(app: AppHandle) -> Result<serde_json::Value, BridgeError>
     });
     sv.restart(tx, u16::try_from(preferred).ok());
     Ok(serde_json::json!({ "ok": true }))
-}
-
-#[tauri::command]
-pub fn balance_refresh(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
-    // Electron 语义：触发式（数据经事件推送），不返回值。
-    let state = app.state::<AppState>();
-    let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
-    if let Some(sv) = sv {
-        if let Some(url) = sv.kernel_url() {
-            // 就绪探针式触发（真实余额由内核计算，经 balance-changed 事件下行；
-            // 壳不解析内核鉴权接口——保持单一投递契约）。
-            let base = url.trim_end_matches('/').to_string();
-            std::thread::spawn(move || {
-                let _ = reqwest_probe(&base);
-            });
-        }
-    }
-    Ok(serde_json::Value::Null)
-}
-
-fn reqwest_probe(base: &str) -> Result<(), String> {
-    // 无 HTTP 依赖的轻探活：TCP connect（确认内核在线即可，余额数据由内核主动推）。
-    let host_port = base.trim_start_matches("http://").trim_start_matches("https://");
-    std::net::TcpStream::connect_timeout(&host_port.parse().map_err(|e| format!("{e}"))?, std::time::Duration::from_secs(2))
-        .map(|_| ())
-        .map_err(|e| e.to_string())
 }
 
 /// PoC 专用：JSON 回显（验证参数序列化双向通路）。非契约成员。

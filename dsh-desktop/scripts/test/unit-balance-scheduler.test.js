@@ -343,3 +343,38 @@ test('push 含 warning 时记录日志，成功数据正常出站', async () => 
   assert.strictEqual(calls.logs.length, 1);
   assert.ok(calls.logs[0].includes('http://'));
 });
+
+test('shouldSkipRefresh：非 force 刷新被暂停门拦下（不推进节流时间戳），force 穿透', async () => {
+  // P1-2+A-7（pr-107 移植）：最小化/隐藏暂停门。Rust 编排层（commands/
+  // balance.rs 的可见性判定）与 sidecar 一次性取数不注入本门，但编排器
+  // 语义必须保留——任何长驻宿主注入 shouldSkipRefresh 后即获得同款暂停。
+  let skip = false;
+  const { scheduler, calls } = makeHarness({
+    schedulerOptions: {
+      shouldSkipRefresh: () => skip,
+      throttleMs: 40,
+    },
+  });
+
+  // ① 暂停门开着（skip=true）：maybeRefresh() 直接返回缓存、零请求，
+  //    且不推进 lastAttemptAt（state() 观测口）。
+  skip = true;
+  const before = scheduler.state().lastAttemptAt;
+  await scheduler.maybeRefresh();
+  assert.strictEqual(calls.queryBalance, 0, '暂停期非 force 刷新不得发请求');
+  assert.strictEqual(scheduler.state().lastAttemptAt, before, '暂停期不得推进节流时间戳');
+
+  // ② 暂停解除后：节流窗口形同虚设（时间戳未推进），立即可刷新。
+  skip = false;
+  await scheduler.maybeRefresh();
+  assert.strictEqual(calls.queryBalance, 1, '恢复可见后下一次刷新立即可达');
+  assert.ok(calls.push.length >= 1, '结果正常出站');
+
+  // ③ force 穿透：即使暂停门开着，force=true 也照常刷新。
+  await scheduler.maybeRefresh(true); // 先消耗节流窗口（推进时间戳）
+  skip = true;
+  const callsBeforeForce = calls.queryBalance;
+  await scheduler.maybeRefresh(true);
+  assert.strictEqual(calls.queryBalance, callsBeforeForce + 1, 'force（启动/重试/恢复补刷）穿透暂停门');
+  scheduler.stop();
+});

@@ -191,6 +191,105 @@ test('未知插件卸载：ok:false 而非崩溃', { skip: !HAVE_DEPS }, (t) => 
 });
 
 // ===========================================================================
+// 余额单轮取数（balance-fetch：Electron ensureBalanceScheduler 取数半边的
+// sidecar 化——Rust 编排层 commands/balance.rs 每轮调用本子命令）
+// ===========================================================================
+
+test('balance-fetch：本地 mock 端点 → 与 Electron 同构的事件载荷', { skip: !HAVE_DEPS }, async (t) => {
+  const sb = sandbox(t.name);
+  t.after(() => fs.rmSync(sb.dir, { recursive: true, force: true }));
+  // 本地回环 mock（integration-balance.test.js 同款隔离承诺：不出 127.0.0.1）。
+  // NO_PROXY 显式放行回环——防开发机全局 HTTP_PROXY 劫持测试端点。
+  const http = require('node:http');
+  const { spawn } = require('node:child_process');
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      is_available: true,
+      balance_infos: [{ currency: 'CNY', total_balance: '12.34', granted_balance: '1', topped_up_balance: '11.34' }],
+    }));
+  });
+  await new Promise((res) => server.listen(0, '127.0.0.1', res));
+  try {
+    const env = {
+      ...sb.env,
+      DEEPSEEK_API_KEY: 'k-test',
+      DEEPSEEK_BALANCE_URL: 'http://127.0.0.1:' + server.address().port + '/user/balance',
+      NO_PROXY: '127.0.0.1,localhost',
+    };
+    // 异步 spawn（spawnSync 会冻结本进程事件循环——mock server 无法应答，
+    // 子进程只能等满 15s 超时；余额链路测试必须让事件循环活着）。
+    const r = await new Promise((resolve, reject) => {
+      const p = spawn(NODE, [SIDEAR, 'balance-fetch', '--app-dir', APP_DIR], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = '', stderr = '';
+      p.stdout.on('data', (c) => { stdout += c; });
+      p.stderr.on('data', (c) => { stderr += c; });
+      const timer = setTimeout(() => p.kill(), 120_000);
+      p.on('error', reject);
+      p.on('close', (code) => {
+        clearTimeout(timer);
+        const lastLine = stdout.trimEnd().split('\n').pop() || '';
+        let json = null;
+        try { json = JSON.parse(lastLine); } catch { /* 保持 null */ }
+        resolve({ code, json, stderr, stdout });
+      });
+    });
+    assert.strictEqual(r.code, 0, `stderr: ${r.stderr.slice(-500)}`);
+    // 载荷契约（docs/balance-architecture.md §2，Electron dsh:balance 同构）。
+    assert.strictEqual(r.json.ok, true, JSON.stringify(r.json));
+    assert.strictEqual(r.json.balances[0].total, 12.34);
+    assert.ok(r.json.prices && Number(r.json.prices.cacheMiss) > 0, 'prices 应附加');
+    assert.ok(r.json.priceTable && r.json.priceTable['deepseek-v4-pro'], 'priceTable 应含全模型');
+    assert.strictEqual(typeof r.json.peak, 'boolean', 'peak 应为布尔');
+    assert.strictEqual(typeof r.json.at, 'string', 'at 应为 ISO 串');
+    assert.ok(r.json.model, '默认模型应解析（缺省 v4-pro 兜底）');
+    assert.ok(r.json.opencodeGo && typeof r.json.opencodeGo === 'object', 'opencodeGo 字段应存在（无键=ok:false）');
+    // 密钥不出进程：载荷中不得出现 API Key。
+    assert.ok(!JSON.stringify(r.json).includes('k-test'), '载荷不得携带密钥');
+  } finally {
+    server.close();
+  }
+});
+
+test('balance-fetch：showBalanceDock=false → disabled 载荷（短路，零网络）', { skip: !HAVE_DEPS }, (t) => {
+  const sb = sandbox(t.name);
+  t.after(() => fs.rmSync(sb.dir, { recursive: true, force: true }));
+  // 预置桌面壳 settings（sandbox 的 DSH_TAURI_USERDATA = sb.dir/ud）。
+  fs.mkdirSync(path.join(sb.dir, 'ud'), { recursive: true });
+  fs.writeFileSync(path.join(sb.dir, 'ud', 'settings.json'), JSON.stringify({ showBalanceDock: false }));
+  // 端点指向必失败地址——若未短路会 ok:false/error 且耗 15s 超时。
+  const env = {
+    ...sb.env,
+    DEEPSEEK_API_KEY: 'k-test',
+    DEEPSEEK_BALANCE_URL: 'http://127.0.0.1:1/user/balance',
+    NO_PROXY: '127.0.0.1,localhost',
+  };
+  const r = cli(['balance-fetch'], { env });
+  assert.strictEqual(r.code, 0);
+  assert.strictEqual(r.json.ok, false, JSON.stringify(r.json));
+  assert.strictEqual(r.json.disabled, true, '关闭态须最先判 disabled');
+  assert.deepStrictEqual(r.json.balances, [], '禁用载荷 balances 空');
+  assert.strictEqual(r.json.opencodeGo && r.json.opencodeGo.disabled, true, 'opencodeGo 同步禁用');
+});
+
+test('balance-fetch：无密钥 → ok:false/no-key（不 panic、结构化降级）', { skip: !HAVE_DEPS }, (t) => {
+  const sb = sandbox(t.name);
+  t.after(() => fs.rmSync(sb.dir, { recursive: true, force: true }));
+  const env = {
+    ...sb.env,
+    DEEPSEEK_API_KEY: '',
+    DEEPSEEK_BALANCE_URL: 'http://127.0.0.1:1/user/balance',
+    NO_PROXY: '127.0.0.1,localhost',
+  };
+  delete env.DEEPSEEK_API_KEY;
+  const r = cli(['balance-fetch'], { env });
+  assert.strictEqual(r.code, 0);
+  assert.strictEqual(r.json.ok, false, JSON.stringify(r.json));
+  assert.strictEqual(r.json.error, 'no-key', '无密钥应结构化报 no-key');
+  assert.deepStrictEqual(r.json.balances, []);
+});
+
+// ===========================================================================
 // 升级适配子命令（koffi 预检 / picker 降级 overlay / safe-boot overlay）
 // ===========================================================================
 

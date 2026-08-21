@@ -62,7 +62,7 @@
 | `dsh:file-revert` (3184) | `file_revert` | fence |
 | `dsh:file-open` (3238) | `file_open` | fence |
 | `dsh:image-paste-save` (3036) | `image_paste_save` | bridge（剪贴板） |
-| `dsh:balance-refresh` (3173) | `balance_refresh` | session-watcher |
+| `dsh:balance-refresh` (3173) | `balance_refresh` | app commands/balance（余额生产链：sidecar balance-fetch + 轮询环） |
 | `dsh:diag-run` (3402) | `diag_run` | sidecar-orchestrator |
 | `dsh:backup-export` (3438) | `backup_export` | sidecar-orchestrator |
 | `dsh:backup-restore` (3471) | `backup_restore` | sidecar-orchestrator |

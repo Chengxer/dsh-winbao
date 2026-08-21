@@ -13,11 +13,14 @@
 // 端点：https://api.deepseek.com/user/balance；可用环境变量覆盖：
 //   DEEPSEEK_BALANCE_URL —— 完整端点 URL（自定义代理/镜像）
 //   DEEPSEEK_API_BASE    —— API 基址（自动拼接 /user/balance）
+// 网络代理（P1-2+A-7）：HTTPS_PROXY/HTTP_PROXY/NO_PROXY 环境变量（CONNECT
+// 隧道 / absolute-form，见 proxyFor 与 ConnectProxyAgent）。
 // OpenCode Go 端点：OPENCODE_USAGE_URL（默认 https://opencode.ai/zen/go/v1/usage）。
 // ===========================================================================
 
 const https = require('node:https');
 const http = require('node:http');
+const tls = require('node:tls');
 const fs = require('node:fs');
 const path = require('node:path');
 const { homedir } = require('node:os');
@@ -32,6 +35,27 @@ const DEFAULT_OPENCODE_USAGE_URL = 'https://opencode.ai/zen/go/v1/usage';
 const FETCH_DEFAULT_TIMEOUT_MS = 15000; // 总超时（自请求发出起算，跨重定向共享 deadline）
 const FETCH_MAX_REDIRECTS = 5;          // 重定向上限（超出拒绝）
 const FETCH_MAX_BODY_BYTES = 1024 * 1024; // 响应体上限（按字节计，非字符）
+
+// ---------------------------------------------------------------------------
+// 配置文件 mtime 缓存（P1-2+A-7，pr-107 移植）：每 3 分钟轮询都会
+// readFileSync settings.yaml / .credentials.yaml，最小化场景无意义读盘；
+// mtime+size 未变直接复用上次内容，「改凭证后下轮生效」= mtime 变化触发重读。
+// ---------------------------------------------------------------------------
+const fileTextCache = new Map(); // path -> { mtimeMs, size, text }
+
+function readFileCached(p) {
+  try {
+    const st = fs.statSync(p);
+    const hit = fileTextCache.get(p);
+    if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.text;
+    const text = fs.readFileSync(p, 'utf8');
+    fileTextCache.set(p, { mtimeMs: st.mtimeMs, size: st.size, text });
+    return text;
+  } catch {
+    fileTextCache.delete(p);
+    return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 模型价格（¥/百万 token）。官方定价：
@@ -90,13 +114,15 @@ function escapeRegExp(s) {
  *     故两格缩进匹配不会误读 records 值）。
  * 安全约束：只匹配列 0 或恰好两格缩进的键——更深嵌套段下的同名键一律不读。
  * 值形态支持：无引号标量（行尾 ` #` 视为注释截断）、单/双引号标量。
+ * 文件读取走 readFileCached（mtime+size 复用，P1-2+A-7），「改凭证后下轮生效」。
  * @param {string} dshHome DSH_HOME 目录
  * @param {string} keyName 键名（可含正则元字符，内部已转义）
  * @returns {string} 读取失败/未找到返回空串
  */
 function readCredentialLine(dshHome, keyName) {
   try {
-    const text = fs.readFileSync(path.join(dshHome, '.credentials.yaml'), 'utf8');
+    const text = readFileCached(path.join(dshHome, '.credentials.yaml'));
+    if (text === null) return '';
     // (?:^|  ) 双形态：列 0（旧平铺）或两格缩进（v1 refs: 下）。
     const keyPattern = new RegExp('^(?:("?)' + escapeRegExp(keyName) + '\\1\\s*:\\s*(.*)$|  ("?)' + escapeRegExp(keyName) + '\\3\\s*:\\s*(.*)$)');
     for (const line of text.split(/\r?\n/)) {
@@ -240,10 +266,12 @@ function readApiKey(dshHome) {
  *   1. 只认「行首 agent-default-model 后紧跟冒号」的顶层段（agent-default-model-xxx 不算）；
  *   2. 段内取缩进最浅的 `model:` 行——嵌套更深段下的同名键不优先；
  *   3. 无缩进的下一行结束该段。
+ * 文件读取走 readFileCached（mtime+size 复用，P1-2+A-7），最小化场景不读盘。
  */
 function readActiveModel(dshHome) {
   try {
-    const text = fs.readFileSync(path.join(dshHome, 'settings.yaml'), 'utf8');
+    const text = readFileCached(path.join(dshHome, 'settings.yaml'));
+    if (text === null) return '';
     const lines = text.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
       if (!/^agent-default-model\s*:/.test(lines[i])) continue;
@@ -284,6 +312,78 @@ function parseAmount(value) {
   const n = Number(cleaned);
   if (!Number.isFinite(n)) return null;
   return Math.max(0, n);
+}
+
+// ---------------------------------------------------------------------------
+// 代理支持（P1-2+A-7 增补，pr-107 移植；DEEPSEEK_BALANCE_URL / DEEPSEEK_API_BASE
+// 覆盖保留）：
+//   https URL → HTTPS_PROXY/https_proxy 的 CONNECT 隧道（tls 包装）
+//   http  URL → HTTP_PROXY/http_proxy 的 absolute-form GET
+//   NO_PROXY/no_proxy 命中（精确主机或域名后缀，* 全放行）→ 直连
+// ---------------------------------------------------------------------------
+
+/** 纯函数：为 URL 选择代理 URL（无代理/NO_PROXY 命中/非法 → null）。 */
+function proxyFor(url) {
+  const env = process.env;
+  const isHttps = url.startsWith('https:');
+  const raw = isHttps ? (env.HTTPS_PROXY || env.https_proxy) : (env.HTTP_PROXY || env.http_proxy);
+  if (!raw) return null;
+  let host = '';
+  try { host = new URL(url).hostname.toLowerCase(); } catch { return null; }
+  const noProxy = env.NO_PROXY || env.no_proxy;
+  if (noProxy) {
+    for (const part of String(noProxy).split(',')) {
+      const p = part.trim().toLowerCase();
+      if (!p) continue;
+      if (p === '*' || host === p || host.endsWith('.' + p.replace(/^\./, ''))) return null;
+    }
+  }
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u;
+  } catch { return null; }
+}
+
+/** https.Agent 子类：经代理 CONNECT 隧道建连，再做 TLS 包装（无第三方依赖）。 */
+class ConnectProxyAgent extends https.Agent {
+  constructor(proxy) {
+    super({ keepAlive: false });
+    this.proxy = proxy;
+  }
+  createConnection(options, callback) {
+    const host = options.host || 'localhost';
+    const port = options.port || 443;
+    const proxy = this.proxy;
+    const proxyPort = proxy.port || (proxy.protocol === 'https:' ? 443 : 80);
+    const headers = {};
+    if (proxy.username) {
+      headers['Proxy-Authorization'] = 'Basic ' + Buffer.from(
+        decodeURIComponent(proxy.username) + ':' + decodeURIComponent(proxy.password || '')
+      ).toString('base64');
+    }
+    // https:// 代理需要先对代理自身建立 TLS（两层隧道），否则明文 CONNECT
+    // 发给 TLS 端口会被代理拒绝；http:// 代理则明文直连。
+    const proxyClient = proxy.protocol === 'https:' ? https : http;
+    const proxyReq = proxyClient.request({
+      host: proxy.hostname,
+      port: proxyPort,
+      method: 'CONNECT',
+      path: host + ':' + port,
+      headers,
+    });
+    proxyReq.on('connect', (res, socket) => {
+      if (res.statusCode !== 200) {
+        socket.destroy();
+        callback(new Error('代理 CONNECT 失败: HTTP ' + res.statusCode));
+        return;
+      }
+      const tlsSocket = tls.connect({ socket, servername: host, host, port }, () => callback(null, tlsSocket));
+      tlsSocket.on('error', (err) => callback(err));
+    });
+    proxyReq.on('error', (err) => callback(err));
+    proxyReq.end();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -380,7 +480,7 @@ function fetchJson(url, apiKey, options = {}) {
       settle(reject, err);
     };
 
-    const req = lib.get(url, { headers }, (res) => {
+    const onResponse = (res) => {
       // 跟随 3xx 重定向（CDN 常见）；下一跳共享同一 deadline（总超时）。
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
@@ -428,7 +528,32 @@ function fetchJson(url, apiKey, options = {}) {
           settle(reject, new Error('JSON 解析失败'));
         }
       });
-    });
+    };
+
+    // 代理分派（P1-2+A-7，pr-107 移植）：proxyFor 命中时 https 走 CONNECT
+    // 隧道 agent，http 走手动 absolute-form（node http 模块不读环境代理）。
+    const proxy = proxyFor(url);
+    let req;
+    if (proxy && url.startsWith('https:')) {
+      req = lib.get(url, { headers, agent: new ConnectProxyAgent(proxy) }, onResponse);
+    } else if (proxy) {
+      const proxyHeaders = { ...headers, Host: new URL(url).host };
+      if (proxy.username) {
+        proxyHeaders['Proxy-Authorization'] = 'Basic ' + Buffer.from(
+          decodeURIComponent(proxy.username) + ':' + decodeURIComponent(proxy.password || '')
+        ).toString('base64');
+      }
+      req = http.request({
+        host: proxy.hostname,
+        port: proxy.port || 80,
+        method: 'GET',
+        path: url,
+        headers: proxyHeaders,
+      }, onResponse);
+      req.end();
+    } else {
+      req = lib.get(url, { headers }, onResponse);
+    }
 
     // 总超时：跨重定向共享 deadline，slow-drip 也无法绕过。
     totalTimer = setTimeout(() => fail(new Error('请求超时（总时长 ' + timeoutMs + 'ms）')), remaining);
@@ -504,4 +629,8 @@ module.exports = {
   readApiKey,
   readOpencodeGoKey,
   readCredentialLine,
+  // 代理与缓存（P1-2+A-7，pr-107 移植；单测直接覆盖）
+  readFileCached,
+  proxyFor,
+  ConnectProxyAgent,
 };

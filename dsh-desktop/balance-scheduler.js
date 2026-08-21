@@ -43,6 +43,9 @@ const DEFAULT_MODEL = 'deepseek-v4-pro';
  * @param {number} [options.throttleMs] 节流窗口（测试可缩短）
  * @param {number[]} [options.retryDelaysMs] 退避序列（测试可缩短）
  * @param {number} [options.pollMs] 轮询周期（测试可缩短/置 0 关闭）
+ * @param {() => boolean} [options.shouldSkipRefresh] 非强制刷新暂停门
+ *   （P1-2+A-7：壳层注入最小化/隐藏判定；命中时跳过且不推进节流时间戳，
+ *   force——启动/重试/窗口恢复补刷——穿透本门）
  */
 function createBalanceScheduler(options) {
   const {
@@ -59,6 +62,10 @@ function createBalanceScheduler(options) {
     throttleMs = DEFAULT_THROTTLE_MS,
     retryDelaysMs = DEFAULT_RETRY_DELAYS_MS,
     pollMs = DEFAULT_POLL_MS,
+    // P1-2+A-7（pr-107 移植）：最小化/隐藏判定（壳层注入）。非 force 刷新
+    // （含后台轮询）命中时直接跳过且不推进 lastAttemptAt——恢复可见后
+    // 下一次刷新立即可达。
+    shouldSkipRefresh = null,
   } = options;
 
   let latestSeq = 0;        // 最近一次实际发出的请求序号（latest-sequence 守卫）
@@ -182,6 +189,11 @@ function createBalanceScheduler(options) {
    */
   function maybeRefresh(force = false) {
     if (stopped) return Promise.resolve(cache);
+    // P1-2+A-7（pr-107 移植）：最小化/隐藏暂停。不推进 lastAttemptAt，
+    // 恢复后立即可刷新；force（启动/重试/窗口恢复补刷）穿透本门。
+    if (!force && typeof shouldSkipRefresh === 'function' && shouldSkipRefresh()) {
+      return Promise.resolve(cache);
+    }
     const nowMs = Date.now();
     if (!force && nowMs - lastAttemptAt < throttleMs) return Promise.resolve(cache);
     lastAttemptAt = nowMs;

@@ -21,7 +21,9 @@
  *   node cli.js backup-restore-preview <in-file>
  *   node cli.js backup-restore-apply <in-file> <token>
  *   node cli.js diag-order | diag-order-apply <json> | diag-remove-bundle <names-json>
- *   node cli.js balance-refresh <base-url>        # 探测并回读余额（Phase 3 接事件）
+ *   node cli.js balance-fetch [--app-dir <dsh-desktop>] [--home <~/.dsh>]
+ *                             # 余额单轮取数（stdout 末行 = 事件载荷 JSON；
+ *                             # 轮询编排在 Rust 侧 commands/balance.rs）
  *
  * 环境变量：
  *   DSH_TAURI_APP_DIR  dsh-desktop 目录（默认：脚本位置 ../../../../dsh-desktop）
@@ -940,11 +942,38 @@ async function main() {
         }
         return emit({ ok: false, error: 'guard 无 reportIncident' });
       }
-      case 'balance-refresh': {
-        // 余额探测：GET <base>/api/... 不可靠（需登录态）——真实实现在 Rust 侧
-        // 复用 Electron balance-scheduler 语义（session-watcher crate Phase 3 接）。
-        // 此子命令保留为占位，返回明确的 not-implemented，避免静默错值。
-        return emit({ ok: false, error: 'E_NOT_IMPLEMENTED: 余额刷新由 Rust 侧 supervision 实现' });
+      case 'balance-fetch': {
+        // 余额单轮取数（Electron main.js ensureBalanceScheduler 的取数半边，
+        // 编排半边在 Rust 侧 commands/balance.rs）：复用 payload 的
+        // balance.js + balance-scheduler.js（refresh() 直刷 + pollMs:0 不装
+        // 轮询定时器），组装出与 Electron 完全同构的事件载荷
+        // （ok/balances/prices/priceTable/model/peak/opencodeGo/at，
+        // 契约见 docs/balance-architecture.md §2）。stdout 末行 JSON 即结果；
+        // 密钥不出本进程（Rust 只透传 JSON，见 balance-scheduler 出站模型）。
+        const c = ctx();
+        const balance = require(path.join(c.appDir, 'balance'));
+        const { createBalanceScheduler } = require(path.join(c.appDir, 'balance-scheduler'));
+        const settings = loadSettingsInline({ userDataDir: c.userDataDir });
+        let result = null;
+        const sched = createBalanceScheduler({
+          getHome: () => c.home,
+          getSettings: () => settings,
+          queryBalance: balance.queryBalance,
+          queryOpencodeUsage: balance.queryOpencodeUsage,
+          readActiveModel: balance.readActiveModel,
+          effectivePrice: balance.effectivePrice,
+          priceTable: balance.priceTable,
+          isPeakHour: balance.isPeakHour,
+          push: (r) => { result = r; },
+          log: (topic, msg) => process.stderr.write('[' + topic + '] ' + msg + '\n'),
+          pollMs: 0, // 一次性取数：本进程随取完退出（轮询/退避由 Rust 编排层负责）
+        });
+        try {
+          await sched.refresh(); // 直刷（绕过节流——调用方显式触发）
+        } finally {
+          sched.stop();
+        }
+        return emit(result || { ok: false, error: 'no-result', balances: [] });
       }
       default:
         process.stderr.write('未知子命令: ' + cmd + '\n');

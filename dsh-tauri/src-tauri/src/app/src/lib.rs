@@ -41,6 +41,8 @@ pub struct AppState {
     pub supervisor_tx: Mutex<Option<std::sync::mpsc::Sender<SupervisorEvent>>>,
     /// 内核装配失败原因（supervisor 未建立时恢复页展示；None = 正常）。
     pub boot_error: Mutex<Option<String>>,
+    /// 余额链状态（commands/balance.rs：事件载荷缓存 + in-flight 去重）。
+    pub balance: commands::balance::BalanceState,
 }
 
 impl AppState {
@@ -56,6 +58,7 @@ impl AppState {
             paths: shell_core::DshPaths::resolve(),
             supervisor_tx: Mutex::new(None),
             boot_error: Mutex::new(None),
+            balance: commands::balance::BalanceState::new(),
         }
     }
 }
@@ -373,6 +376,9 @@ fn route_one_event(app: &tauri::AppHandle, ev: SupervisorEvent) {
                 }
                 // renderer 心跳监测（Electron RendererRecovery 语义）：页面挂死自动重载。
                 watch_renderer_heartbeat(app.clone());
+                // 余额轮询环（Electron startBalanceLoop 语义：首刷延迟 500ms +
+                // 3 分钟轮询 + 最小化暂停 + 恢复补刷；幂等重入——代数守卫防线程累积）。
+                commands::balance::start_balance_loop(app.clone());
                 // 诊断探针（DSH_TAURI_DIAG=1）：换页 10s 后抓 dialog/composer/console 状态。
                 inject_diag_probe(app.clone());
             }

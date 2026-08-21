@@ -8,7 +8,8 @@
 //! 3. 已裁撤（内核更新链 guard:action——不注册，垫片报错）。
 //!
 //! 子模块清单：
-//! - [`lifecycle`] —— Phase 1 核心：app_init / 剪贴板 / 外部打开 / 心跳 / 会话 / 重启服务 / 余额触发
+//! - [`lifecycle`] —— Phase 1 核心：app_init / 剪贴板 / 外部打开 / 心跳 / 会话 / 重启服务
+//! - [`balance`]   —— 余额数据生产链：sidecar balance-fetch 轮询环 + balance_refresh 触发
 //! - [`window`]    —— 窗口族：window_control / 浮窗 / 宠物窗 / 赞助
 //! - [`menu`]      —— ⋯ 菜单动作分发 + 设置开关 + npm 版本比对
 //! - [`recovery`]  —— 恢复页四件套
@@ -18,6 +19,9 @@
 //! - [`wsl`]       —— WSL 配置三通道
 //! - [`common`]    —— 共享 OS / 编码 / 时间小工具
 
+// balance 供 lib.rs（AppState 字段与轮询环接线）与 menu.rs（toggle 后触发）
+// 经路径直取，pub(crate)；其余子模块保持私有、只走下方 glob 门面。
+pub(crate) mod balance;
 mod common;
 mod file;
 mod image;
@@ -31,6 +35,7 @@ mod wsl;
 // 注意：必须用 glob re-export。`#[tauri::command]` 会随函数生成隐藏项
 // `__cmd__<name>`（generate_handler! 依赖 `commands::__cmd__*` 路径），
 // 具名 re-export 只带出函数本体，glob 才能把隐藏项一并带出门面。
+pub use balance::*;
 pub use common::*;
 pub use file::*;
 pub use image::*;

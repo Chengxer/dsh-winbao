@@ -1,7 +1,9 @@
 # 余额显示功能架构说明（balance architecture）
 
 本文档描述「余额 / 本轮费用 / OpenCode Go 用量」功能的整体架构、数据契约与安全边界，
-是 `balance.js`、`balance-scheduler.js`、`main.js` 余额段、`assets/plugins/dsh-balance`
+是 `balance.js`、`balance-scheduler.js`、壳层余额接线（Electron 时代 `main.js` 余额段；
+Tauri 线为 `dsh-tauri/src-tauri/src/app/src/commands/balance.rs` + sidecar
+`balance-fetch` 子命令）、`assets/plugins/dsh-balance`
 与 `assets/plugins/dsh-openclaw-bridge/lib/openai-compat.js` 的单一事实来源。
 
 > 本架构按「整体重构而非打补丁」的原则落地：并发仲裁、重试、密钥边界等
@@ -18,21 +20,26 @@
 │   · sessionCost()/hasUsage()/money()/goUsageText()                   │
 │   · 只消费 window "dsh-balance-changed" 事件（单一投递）              │
 └───────────────────────────────▲─────────────────────────────────────┘
-                                │ preload.js：ipcRenderer.on('dsh:balance')
+                                │ Electron：preload.js 转发 'dsh:balance'
+                                │ Tauri：桥垫片监听 emit("balance-changed")
                                 │   → window.dispatchEvent('dsh-balance-changed')
 ┌───────────────────────────────┴─────────────────────────────────────┐
-│ 编排层  balance-scheduler.js（主进程，纯 Node 可单测）                 │
+│ 编排层  balance-scheduler.js（壳层宿主进程，纯 Node 可单测）           │
 │   · 节流（30s）/ 并发仲裁（in-flight 去重 + latest-sequence 守卫）     │
 │   · 失败指数退避重试（30s→1m→2m→5m 封顶，成功清零）                    │
+│   · 最小化/隐藏暂停门 shouldSkipRefresh（P1-2+A-7，force 穿透）        │
 │   · 单一 now 时刻（prices/priceTable/peak/at 同刻一致）               │
 │   · 唯一数据出口：push(result)                                       │
 └───────────────┬─────────────────────────────────────────────────────┘
-                │ main.js 薄接线：注入查询函数 / 设置读取 / push 回调
+                │ Electron：main.js 薄接线（注入查询函数/设置读取/push 回调）
+                │ Tauri：sidecar `balance-fetch` 单轮取数（同款注入，
+                │   pollMs=0 不装轮询定时器）+ Rust 编排层轮询调用
 ┌───────────────▼─────────────────────────────────────────────────────┐
-│ 数据层  balance.js（主进程，纯 Node 可单测）                           │
+│ 数据层  balance.js（壳层宿主进程，纯 Node 可单测）                     │
 │   · queryBalance / queryOpencodeUsage：取数 + 规整                    │
 │   · fetchJson：HTTP 安全边界（见 §4）                                 │
-│   · 凭据/模型/价格/金额解析纯函数                                     │
+│   · 凭据/模型/价格/金额解析纯函数；配置文件 mtime 缓存（P1-2+A-7）      │
+│   · HTTPS_PROXY/HTTP_PROXY/NO_PROXY 代理（CONNECT 隧道/absolute-form） │
 └───────────────┬─────────────────────────────────────────────────────┘
                 │ 只读
         DeepSeek /user/balance、OpenCode Go /zen/go/v1/usage
@@ -40,14 +47,36 @@
 
 设计原则：
 
-1. **密钥不出主进程**：凭据只在数据层读取、只附加在主进程发出的请求上；
-   渲染进程拿到的 `dsh:balance` 载荷不含任何密钥。
-2. **数据只有一条出站通道**：编排层的 `push(result)`。IPC 处理器
-   `dsh:balance-refresh` 只触发刷新、不返回值；客户端不消费 `refreshBalance()`
-   的返回值。同一份数据绝不会经两个通道各投一次。
+1. **密钥不出宿主进程**：凭据只在数据层读取、只附加在宿主进程发出的请求上；
+   页面拿到的载荷（Electron `dsh:balance` / Tauri `balance-changed`）不含任何密钥。
+2. **数据只有一条出站通道**：编排层的 `push(result)`。刷新触发通道
+   （Electron ipc `dsh:balance-refresh` / Tauri command `balance_refresh`）
+   只触发刷新、不返回值；客户端不消费 `refreshBalance()` 的返回值。
+   同一份数据绝不会经两个通道各投一次。
 3. **分层可独立测试**：`balance.js` 与 `balance-scheduler.js` 均为纯 Node
    模块（零 Electron 依赖），注入依赖后可在普通 node 进程完整测试；展示层
-   用仓库自带 Electron 在真实 Chromium + 真实 React 中验证。
+   经 `scripts/test/verify-balance-dock.cjs`（vm + 最小 React mock，逻辑级）
+   与 `edge-client.test.js` 验证。
+
+### 1.1 Tauri 接线（Electron 壳退役后的宿主换位）
+
+分层与契约零变更，宿主从 Electron main.js 换到 Rust 壳 + Node sidecar：
+
+| Electron（main.js） | Tauri 对应物 | 语义 |
+|---------------------|--------------|------|
+| `ensureBalanceScheduler()` 常驻编排 | `commands/balance.rs::start_balance_loop`（KernelReady 后启动，代数守卫防线程累积） | 编排宿主 |
+| `startBalanceLoop()` 首刷延后 500ms（A-10） | `BALANCE_FIRST_FETCH_DELAY_MS = 500` | 首屏稳定后再刷 |
+| 3 分钟轮询（`DEFAULT_POLL_MS`） | `BALANCE_POLL_SECS = 180` | 轮询周期 |
+| `shouldSkipRefresh`（最小化/隐藏暂停） | 轮询环可见性判定（5s 粒度检测） | 暂停不推进节拍 |
+| `win.on('restore')` force 补刷 | 隐藏→可见边沿：先回放缓存再强制刷 | 恢复补刷 |
+| `win.on('show')` 推 `balanceCache` | 恢复边沿回放 `AppState.balance.last` | 页面即时有数 |
+| 取数（main.js 进程内直调） | sidecar `node cli.js balance-fetch --app-dir …`（stdout 末行 JSON） | 单轮取数 |
+| `win.webContents.send('dsh:balance')` | `app.emit("balance-changed")`（垫片转 `dsh-balance-changed`） | 页面推送 |
+| ipc `dsh:balance-refresh` | command `balance_refresh`（回放缓存 + 触发后台刷，返回 Null） | 刷新触发 |
+| 菜单 toggle-balance 后立即刷 | `menu_action` toggle 分支 `trigger_fetch` | 开关即时生效 |
+
+环境变量（`HTTPS_PROXY`/`DSH_HOME`/`DSH_TAURI_USERDATA` 等）由 Rust 侧整表
+继承到 sidecar 子进程——两侧同口径（contracts/data-flow.md §5.1）。
 
 ---
 
@@ -175,13 +204,13 @@ DISJOINT 计数）：
 
 | 触发点 | 入口 | 节流 |
 |--------|------|------|
-| 应用启动 | `start()` | 强制 |
-| 3 分钟轮询 | `maybeRefresh()` | 是 |
-| 窗口显示（托盘恢复） | `maybeRefresh()` | 是 |
-| 会话回合完成 | `maybeRefresh()` | 是 |
-| 页面加载后 dock 挂载（IPC） | `maybeRefresh(true)`（只触发，不返回数据） | 强制 |
-| 菜单「显示余额」开关 | `maybeRefresh(true)` | 强制 |
-| 失败自动重试 | 编排器内部定时器 | 强制 |
+| 应用启动 | Electron `start()` / Tauri 轮询环首刷（延后 500ms） | 强制 |
+| 3 分钟轮询 | Electron `maybeRefresh()` / Tauri 轮询环周期触发 sidecar 取数 | 是 |
+| 窗口显示（托盘恢复） | Electron `maybeRefresh()` / Tauri 恢复边沿（回放缓存 + 强制刷） | 是 |
+| 会话回合完成 | Electron session-watcher `maybeRefresh()`（Tauri 线 session-watcher crate 尚处 Phase 0，暂由 3 分钟轮询覆盖，接入后补挂） | 是 |
+| 页面加载后 dock 挂载（IPC） | `maybeRefresh(true)` / Tauri `balance_refresh`（回放缓存 + 后台刷，只触发不返回数据） | 强制 |
+| 菜单「显示余额」开关 | Electron `maybeRefresh(true)` / Tauri `trigger_fetch` | 强制 |
+| 失败自动重试 | 编排器内部定时器（Tauri 线由下轮轮询覆盖——sidecar 单轮进程无定时器） | 强制 |
 
 ---
 
@@ -254,5 +283,8 @@ DISJOINT 计数）：
 - 新增出站字段：先更新本文档 §2 契约，再改代码；可选项向后兼容。
 - 测试命令（全部隔离，测试只使用临时目录与回环地址，绝不触碰真实 ~/.dsh）：
   `node --test scripts/test/*.test.js scripts/test/*.test.mjs`、
-  `node scripts/test/verify-balance-dock.cjs`、
-  `node scripts/test/verify-balance-renderer.cjs`。
+  `node scripts/test/verify-balance-dock.cjs`；
+  Tauri 侧 `node --test ../dsh-tauri/sidecar/cli.test.js`（balance-fetch 单轮
+  取数）与 `cargo test`（Rust 编排环，commands/balance.rs）。Electron 时代的
+  `verify-balance-renderer.cjs`（依赖 Electron 运行时）已随壳退役删除，
+  渲染层覆盖由 `verify-balance-dock.cjs` / `edge-client.test.js` 承接。
