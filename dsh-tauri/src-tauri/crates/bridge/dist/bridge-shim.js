@@ -306,6 +306,7 @@
     } catch (e2) { return 'dark'; }
   }
   var themeBar = null; // 始终指向当前在场的控制条（自愈重注后自动跟新）
+  var maxGlyphUnsub = null; // 控制条的 maximize 订阅退订器（自愈重注前先退旧，防 listeners.maximize 累积）
   function applyTheme() {
     if (!themeBar) return;
     try { themeBar.setAttribute('data-dsh-theme', detectTheme()); } catch (e2) {}
@@ -463,9 +464,13 @@
       if ((shellBar && shellBar.hasAttribute('data-tauri-drag-region')) || document.getElementById('titlebar')) return;
 
       var head = document.head || document.documentElement;
-      var css = document.createElement('style');
-      css.setAttribute('data-for', CHROME_ID);
-      css.textContent =
+      // 样式幂等：自愈重注只补条本体，<head> 里的样式不动（SPA 反复摘条
+      // 不得在 head 里无限叠 <style>——data-for 与条同 id 查重）。
+      var css = document.querySelector('style[data-for="' + CHROME_ID + '"]');
+      if (!css) {
+        css = document.createElement('style');
+        css.setAttribute('data-for', CHROME_ID);
+        css.textContent =
         // 深色兜底档（Electron CHROME_CSS 同款 fallback 值）；内核
         // --dsw-alias-* 变量在场时全部被变量取代（像素级跟随内核主题）。
         '#' + CHROME_ID + '{position:fixed;top:0;left:0;right:0;height:' + CHROME_H + 'px;z-index:2147483000;' +
@@ -541,12 +546,16 @@
           'color:var(--dsw-alias-label-primary,var(--dch-fg))}' +
         // ⋯ 图形是实心三点：覆盖条按钮的线性 stroke 缺省。
         '#' + CHROME_ID + ' button.dch-menu-btn svg{fill:currentColor;stroke:none}';
-      head.appendChild(css);
+        head.appendChild(css);
+      }
       // 内容区整体下移（对齐 Electron：普通流走 padding，fixed 侧边栏走属性声明）。
-      var layout = document.createElement('style');
-      layout.setAttribute('data-for', CHROME_ID + '-layout');
-      layout.textContent = 'body{box-sizing:border-box!important;padding-top:' + CHROME_H + 'px!important}';
-      head.appendChild(layout);
+      var layout = document.querySelector('style[data-for="' + CHROME_ID + '-layout"]');
+      if (!layout) {
+        layout = document.createElement('style');
+        layout.setAttribute('data-for', CHROME_ID + '-layout');
+        layout.textContent = 'body{box-sizing:border-box!important;padding-top:' + CHROME_H + 'px!important}';
+        head.appendChild(layout);
+      }
       try { document.documentElement.setAttribute('data-dsh-title-bar-height', String(CHROME_H)); } catch (e2) {}
 
       function dragEl(el) { el.setAttribute('data-tauri-drag-region', ''); return el; }
@@ -614,7 +623,10 @@
         } catch (e2) {}
       }
       try { dshDesktop.windowControls.isMaximized().then(setMaxGlyph).catch(function () {}); } catch (e2) {}
-      try { dshDesktop.windowControls.onMaximizeChange(setMaxGlyph); } catch (e2) {}
+      // 自愈重注防累积：旧条的 maximize 订阅先退订（闭包持有已摘除的旧
+      // maxBtn，不退则 listeners.maximize 随重注次数线性增长）。
+      if (maxGlyphUnsub) { try { maxGlyphUnsub(); } catch (e2) {} }
+      try { maxGlyphUnsub = dshDesktop.windowControls.onMaximizeChange(setMaxGlyph); } catch (e2) {}
       // 版本徽章回填（getInfo 失败仅无徽章，不影响条本身）。
       try {
         dshDesktop.getInfo().then(function (info) {

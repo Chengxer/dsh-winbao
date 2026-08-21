@@ -329,4 +329,38 @@ mod window_chrome_tests {
             .expect("toggle 分支");
         assert!(!toggle_seg.contains("closeMenu()"), "toggle 分支应留在菜单重渲染: {toggle_seg}");
     }
+
+    /// 自愈重注防累积（内存泄漏回归锚点）：内核 SPA 反复摘除 body 直接
+    /// 子元素会触发控制条重注，两个累积面必须有守卫——
+    ///   a) <head> 里的两份 <style data-for=…> 只注入一次（重注只补条本体）；
+    ///   b) 每次重注订阅的 onMaximizeChange(setMaxGlyph) 闭包持有旧条
+    ///      maxBtn（已摘除的游离 DOM），旧订阅必须先退订（listeners.maximize
+    ///      不得随重注次数线性增长）。
+    #[test]
+    fn window_chrome_self_heal_does_not_accumulate() {
+        let inject_seg = BRIDGE_SHIM_JS
+            .split("function injectChromeBar()")
+            .nth(1)
+            .and_then(|s| s.split("function onBodyReady").next())
+            .expect("injectChromeBar 函数段");
+        // a) 样式查重：两份样式都必须先 querySelector 再决定 append。
+        assert!(
+            inject_seg.contains("style[data-for=\"' + CHROME_ID + '\"]"),
+            "重注不得重复注入主样式 <style>"
+        );
+        assert!(
+            inject_seg.contains("style[data-for=\"' + CHROME_ID + '-layout\"]"),
+            "重注不得重复注入布局样式 <style>"
+        );
+        // b) maximize 订阅先退旧再挂新。
+        assert!(BRIDGE_SHIM_JS.contains("maxGlyphUnsub"), "缺 maximize 订阅退订器");
+        assert!(
+            inject_seg.contains("maxGlyphUnsub()"),
+            "重注前必须退订旧条的 maximize 订阅"
+        );
+        assert!(
+            inject_seg.contains("maxGlyphUnsub = dshDesktop.windowControls.onMaximizeChange(setMaxGlyph)"),
+            "新订阅的退订器必须落回 maxGlyphUnsub"
+        );
+    }
 }
