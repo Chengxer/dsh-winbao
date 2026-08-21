@@ -273,7 +273,12 @@ test('真实 rc.1 包源锚点命中：三份 node_modules 源首跑 changed、�
     const file = path.join(root, ...parts.slice(0, -1));
     const src = fs.readFileSync(file, 'utf8');
     const first = transform(src, file);
-    assert.equal(first.status, 'changed', `${file} 应命中锚点（rc.1 字节稳定）`);
-    assert.equal(transform(first.src, file).status, 'already', `${file} 复跑应 already`);
+    // dev 仓的 node_modules 会被真实 boot 的补丁机制就地打上本补丁（幂等
+    // marker 在位 → already）；刚 install 的纯净树则是 changed。两种初态
+    // 都合法——关键断言是「锚点/幂等判定有效」而非「必须未打过」。
+    assert.ok(first.status === 'changed' || first.status === 'already',
+      `${file} 应命中锚点或识别已应用（rc.1 字节稳定），实际 ${first.status}: ${first.reason || ''}`);
+    // already 初态无 src 字段（不回写），复跑用原 src；changed 初态用产物 src。
+    assert.equal(transform(first.src ?? src, file).status, 'already', `${file} 复跑应 already`);
   }
 });
