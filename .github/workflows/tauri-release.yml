@@ -5,7 +5,15 @@ name: Tauri Release
 #   手动触发（workflow_dispatch）→ 指定版本号补传
 #
 # 与旧 Electron release.yml 的区别：走 Tauri CLI（非 electron-builder），
-# 产物为 NSIS/AppImage/dmg；依赖 stage-payload.sh 组装内核 payload。
+# 产物为 NSIS/AppImage/dmg + Windows 便携版 zip；依赖 stage-payload.sh 组装内核 payload。
+#
+# 产物命名（统一 DSH-Desktop-[类型]-[版本]-[平台]-[架构] 格式，对齐 Electron 版历史命名）：
+#   Windows x64  NSIS   → DSH-Desktop-Setup-<ver>-win-x64.exe
+#   Windows x64  便携版 → DSH-Desktop-Portable-<ver>-win-x64.zip（解压即用，数据存 exe 旁 data/）
+#   Windows ARM64 NSIS  → DSH-Desktop-Setup-<ver>-win-arm64.exe（实验性，continue-on-error）
+#   macOS ARM64  dmg    → DSH-Desktop-<ver>-macos-arm64.dmg
+#   Linux x64    AppImage → DSH-Desktop-<ver>-linux-x64.AppImage
+#   Linux x64    deb    → dsh-desktop_<ver>_amd64.deb（deb 标准命名）
 #
 # 用法：git tag v0.5.0 && git push origin v0.5.0
 #        gh workflow trigger "Tauri Release" -f version=v0.5.0
@@ -32,6 +40,11 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo '${GITHUB_REF_NAME#v}'; fi)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -121,11 +134,248 @@ jobs:
           }
         shell: bash
 
+      - name: Rename installer
+        shell: bash
+        run: |
+          VERSION=${{ steps.ver.outputs.version }}
+          cd dsh-tauri/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis
+          ls -la
+          cp *_x64-setup.exe "DSH-Desktop-Setup-${VERSION}-win-x64.exe"
+          ls -la
+
+      - name: Upload setup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-x64-setup
+          path: dsh-tauri/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/DSH-Desktop-Setup-*-win-x64.exe
+          if-no-files-found: error
+
+      - name: Upload raw exe artifact (for portable job)
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-x64-bin
+          path: dsh-tauri/src-tauri/target/x86_64-pc-windows-msvc/release/dsh-tauri-app.exe
+          if-no-files-found: error
+
+  # Windows ARM64：交叉编译 aarch64-pc-windows-msvc。
+  # Node v24.15.0 起官方提供 win-arm64 二进制（win-arm64/node.exe，已验证 200 OK）。
+  # 实验性：payload 中 sharp 等原生模块仍为 x64 prebuild，ARM64 设备上靠
+  # Windows 11 x64 模拟（Prism）或自愈链兜底，故 continue-on-error。
+  build-windows-arm64:
+    name: Windows ARM64 (NSIS, experimental)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo '${GITHUB_REF_NAME#v}'; fi)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            dsh-tauri/src-tauri/target
+          key: rust-win-arm64-${{ hashFiles('dsh-tauri/src-tauri/Cargo.lock') }}
+          restore-keys: rust-win-arm64-
+
+      - name: Install dsh-desktop dependencies
+        run: cd dsh-desktop && npm ci --ignore-scripts
+        shell: pwsh
+
+      - name: Download vendor node (win-arm64)
+        run: |
+          mkdir -Force dsh-desktop\vendor\node | Out-Null
+          Invoke-WebRequest -Uri 'https://nodejs.org/dist/v24.15.0/win-arm64/node.exe' -OutFile dsh-desktop\vendor\node\node.exe
+        shell: pwsh
+
+      - name: Download vendor npm
+        run: |
+          $tmp = "$env:TEMP\npm-pkg"
+          mkdir -Force $tmp | Out-Null
+          Invoke-WebRequest -Uri 'https://registry.npmmirror.com/npm/-/npm-10.9.2.tgz' -OutFile "$tmp\npm.tgz"
+          tar -xzf "$tmp\npm.tgz" -C $tmp
+          mkdir -Force dsh-desktop\vendor\npm | Out-Null
+          Copy-Item "$tmp\package\*" dsh-desktop\vendor\npm\ -Recurse -Force
+        shell: pwsh
+
+      - name: Download rc7 client packages (for compat)
+        run: |
+          set -e
+          cd dsh-desktop
+          dest="dist/win-unpacked/resources/app/node_modules/@deepseek-ai"
+          mkdir -p "$dest"
+          for pkg in dsh-client-web-react dsh-client-schema-form dsh-client-ui-primitives dsh-client-ui-slots dsh-client-ui-attachment dsh-client-ui-renderer; do
+            full="@deepseek-ai/$pkg"
+            echo "Downloading $full@0.1.0-rc.7 ..."
+            tgz=$(npm pack "$full@0.1.0-rc.7" 2>&1 | tail -1) || { echo "WARN: $full not found, skipping"; continue; }
+            if [ ! -f "$tgz" ]; then echo "WARN: $full tarball not found ($tgz), skipping"; continue; fi
+            tmp=$(mktemp -d)
+            tar -xzf "$tgz" -C "$tmp"
+            mkdir -p "$dest/$pkg"
+            cp -r "$tmp/package/"* "$dest/$pkg/"
+            rm -f "$tgz"
+            echo "  OK: $pkg"
+          done
+          echo "rc7 packages ready"
+        shell: bash
+
+      - name: Stage payload (full)
+        run: bash dsh-tauri/scripts/stage-payload.sh
+        shell: bash
+
+      - name: Build installer (aarch64 cross)
+        run: |
+          cd dsh-tauri
+          npx --yes @tauri-apps/cli@latest build             --config src-tauri/src/app/tauri.conf.json             --target aarch64-pc-windows-msvc             --verbose 2>&1 || {
+            echo "=== ARM64 BUILD FAILED（实验性，不阻断发布） ==="
+            exit 1
+          }
+        shell: bash
+
+      - name: Rename installer
+        if: always()
+        shell: bash
+        run: |
+          VERSION=${{ steps.ver.outputs.version }}
+          cd dsh-tauri/src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis
+          ls -la || true
+          if ls *_arm64-setup.exe >/dev/null 2>&1; then
+            cp *_arm64-setup.exe "DSH-Desktop-Setup-${VERSION}-win-arm64.exe"
+            ls -la
+          else
+            echo "no arm64 setup produced, skip rename"
+          fi
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-arm64-setup
+          path: dsh-tauri/src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/DSH-Desktop-Setup-*-win-arm64.exe
+          if-no-files-found: ignore
+
+  # Windows x64 便携版 zip：解压到任意目录即用，数据存 exe 旁 data/。
+  # exe 来自 build-windows 产物（win-x64-bin），resources 与安装包同源重新组装。
+  build-portable:
+    name: Windows x64 Portable (zip)
+    runs-on: windows-latest
+    needs: [build-windows]
+    if: needs.build-windows.result == 'success'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo '${GITHUB_REF_NAME#v}'; fi)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Download exe artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: win-x64-bin
+          path: exe-artifact
+
+      # ---- 以下与 build-windows 的 payload 组装完全同源（便携版 resources
+      #      必须与安装包逐字节同源，否则装出来的包与 zip 行为分叉）----
+      - name: Install dsh-desktop dependencies
+        run: cd dsh-desktop && npm ci --ignore-scripts
+        shell: pwsh
+
+      - name: Download vendor node
+        run: |
+          mkdir -Force dsh-desktop\vendor\node | Out-Null
+          Invoke-WebRequest -Uri 'https://nodejs.org/dist/v24.15.0/win-x64/node.exe' -OutFile dsh-desktop\vendor\node\node.exe
+        shell: pwsh
+
+      - name: Download vendor npm
+        run: |
+          $tmp = "$env:TEMP\npm-pkg"
+          mkdir -Force $tmp | Out-Null
+          Invoke-WebRequest -Uri 'https://registry.npmmirror.com/npm/-/npm-10.9.2.tgz' -OutFile "$tmp\npm.tgz"
+          tar -xzf "$tmp\npm.tgz" -C $tmp
+          mkdir -Force dsh-desktop\vendor\npm | Out-Null
+          Copy-Item "$tmp\package\*" dsh-desktop\vendor\npm\ -Recurse -Force
+        shell: pwsh
+
+      - name: Download rc7 client packages (for compat)
+        run: |
+          set -e
+          cd dsh-desktop
+          dest="dist/win-unpacked/resources/app/node_modules/@deepseek-ai"
+          mkdir -p "$dest"
+          for pkg in dsh-client-web-react dsh-client-schema-form dsh-client-ui-primitives dsh-client-ui-slots dsh-client-ui-attachment dsh-client-ui-renderer; do
+            full="@deepseek-ai/$pkg"
+            echo "Downloading $full@0.1.0-rc.7 ..."
+            tgz=$(npm pack "$full@0.1.0-rc.7" 2>&1 | tail -1) || { echo "WARN: $full not found, skipping"; continue; }
+            if [ ! -f "$tgz" ]; then echo "WARN: $full tarball not found ($tgz), skipping"; continue; fi
+            tmp=$(mktemp -d)
+            tar -xzf "$tgz" -C "$tmp"
+            mkdir -p "$dest/$pkg"
+            cp -r "$tmp/package/"* "$dest/$pkg/"
+            rm -f "$tgz"
+            echo "  OK: $pkg"
+          done
+          echo "rc7 packages ready"
+        shell: bash
+
+      - name: Stage payload (full)
+        run: bash dsh-tauri/scripts/stage-payload.sh
+        shell: bash
+
+      # ---- 组装便携版布局（与 NSIS 安装后布局一致）----
+      #   DSH Desktop/DSH Desktop.exe        ← win-x64-bin 产物
+      #   DSH Desktop/portable.marker        ← 便携模式标记（userData → exe 旁 data/）
+      #   DSH Desktop/resources/dsh-desktop|sidecar|ui/
+      - name: Assemble portable layout
+        shell: bash
+        run: |
+          ROOT="portable/DSH Desktop"
+          mkdir -p "$ROOT/resources"
+          cp exe-artifact/dsh-tauri-app.exe "$ROOT/DSH Desktop.exe"
+          printf 'DSH Desktop portable marker\n%s\n' "存在此文件时 DSH Desktop 以便携模式运行：用户数据保存在本目录 data/ 下。删除此文件则恢复常规安装版数据路径。" > "$ROOT/portable.marker"
+          # robocopy 成功码 0-7，≥8 才失败（Git Bash 下 flag 用 // 形式）
+          rc=0; robocopy "dsh-tauri/package-payload/dsh-desktop" "$ROOT/resources/dsh-desktop" //MIR //R:2 //W:1 > /dev/null || rc=$?
+          [ "$rc" -lt 8 ] || { echo "robocopy dsh-desktop failed: $rc"; exit 1; }
+          # Windows 包不带 unix node 二进制（stage-payload 口径；防本机历史残留混入）
+          rm -f "$ROOT/resources/dsh-desktop/vendor/node/node"
+          rc=0; robocopy "dsh-tauri/sidecar" "$ROOT/resources/sidecar" //MIR //R:2 //W:1 > /dev/null || rc=$?
+          [ "$rc" -lt 8 ] || { echo "robocopy sidecar failed: $rc"; exit 1; }
+          rc=0; robocopy "dsh-tauri/ui" "$ROOT/resources/ui" //MIR //R:2 //W:1 > /dev/null || rc=$?
+          [ "$rc" -lt 8 ] || { echo "robocopy ui failed: $rc"; exit 1; }
+          echo "=== 便携版布局 ==="
+          ls -la "$ROOT"
+          du -sm "$ROOT" "$ROOT/resources/dsh-desktop"
+
+      - name: Create portable zip
+        shell: pwsh
+        run: |
+          $VERSION = "${{ steps.ver.outputs.version }}"
+          Compress-Archive -Path "portable/DSH Desktop" -DestinationPath "DSH-Desktop-Portable-$VERSION-win-x64.zip" -Force
+          $mb = [math]::Round((Get-Item "DSH-Desktop-Portable-$VERSION-win-x64.zip").Length / 1MB, 1)
+          Write-Host "portable zip: DSH-Desktop-Portable-$VERSION-win-x64.zip ($mb MB)"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: win-x64
-          path: dsh-tauri/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          name: win-x64-portable
+          path: DSH-Desktop-Portable-*-win-x64.zip
           if-no-files-found: error
 
   build-linux:
@@ -134,6 +384,11 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo '${GITHUB_REF_NAME#v}'; fi)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -192,13 +447,30 @@ jobs:
       - name: Build installer
         run: cd dsh-tauri && npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --target x86_64-unknown-linux-gnu
 
+      - name: Rename artifacts
+        run: |
+          VERSION=${{ steps.ver.outputs.version }}
+          BUNDLE=dsh-tauri/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle
+          ls -la "$BUNDLE/appimage" "$BUNDLE/deb" || true
+          # AppImage → DSH-Desktop-<ver>-linux-x64.AppImage
+          for f in "$BUNDLE"/appimage/*.AppImage; do
+            [ -e "$f" ] || continue
+            cp "$f" "DSH-Desktop-${VERSION}-linux-x64.AppImage"
+          done
+          # deb → dsh-desktop_<ver>_amd64.deb（deb 标准命名，Tauri 默认即此格式，防御性重命名）
+          for f in "$BUNDLE"/deb/*.deb; do
+            [ -e "$f" ] || continue
+            cp "$f" "dsh-desktop_${VERSION}_amd64.deb"
+          done
+          ls -la DSH-Desktop-*-linux-x64.AppImage dsh-desktop_*_amd64.deb
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-x64
           path: |
-            dsh-tauri/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
-            dsh-tauri/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+            DSH-Desktop-*-linux-x64.AppImage
+            dsh-desktop_*_amd64.deb
           if-no-files-found: warn
 
   build-macos:
@@ -207,6 +479,11 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo '${GITHUB_REF_NAME#v}'; fi)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -260,18 +537,29 @@ jobs:
       - name: Build installer
         run: cd dsh-tauri && npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --target aarch64-apple-darwin
 
+      - name: Rename artifacts
+        run: |
+          VERSION=${{ steps.ver.outputs.version }}
+          BUNDLE=dsh-tauri/src-tauri/target/aarch64-apple-darwin/release/bundle
+          ls -la "$BUNDLE/dmg" || true
+          for f in "$BUNDLE"/dmg/*.dmg; do
+            [ -e "$f" ] || continue
+            cp "$f" "DSH-Desktop-${VERSION}-macos-arm64.dmg"
+          done
+          ls -la DSH-Desktop-*-macos-arm64.dmg
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-arm64
-          path: dsh-tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          path: DSH-Desktop-*-macos-arm64.dmg
           if-no-files-found: warn
 
   publish:
     name: Publish Release
-    needs: [build-windows, build-linux, build-macos]
+    needs: [build-windows, build-windows-arm64, build-portable, build-linux, build-macos]
     runs-on: ubuntu-latest
-    if: always() && !cancelled() && (needs.build-windows.result == 'success' || needs.build-linux.result == 'success' || needs.build-macos.result == 'success')
+    if: always() && !cancelled() && (needs.build-windows.result == 'success' || needs.build-portable.result == 'success' || needs.build-linux.result == 'success' || needs.build-macos.result == 'success' || needs.build-windows-arm64.result == 'success')
     steps:
       - uses: actions/checkout@v4
 
@@ -283,7 +571,9 @@ jobs:
       - name: Collect installers
         run: |
           mkdir -p release-assets
-          find artifacts -type f \( -name "*.exe" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.dmg" \) -exec cp {} release-assets/ \;
+          # 全部发布产物（含便携版 zip）；排除中间产物（win-x64-bin 里的裸 exe，
+          # 它只是便携版 job 的原料，不进 Release）
+          find artifacts -type f \( -name "*.exe" -o -name "*.zip" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.dmg" \) ! -name "dsh-tauri-app.exe" -exec cp {} release-assets/ \;
           echo "=== 产物清单 ==="
           ls -lh release-assets/
 
@@ -301,7 +591,9 @@ jobs:
 
           | 平台 | 格式 |
           |------|------|
-          | Windows x64 | NSIS 安装包 (.exe) |
+          | Windows x64 | 安装包 DSH-Desktop-Setup-${VERSION}-win-x64.exe |
+          | Windows x64 | 便携版 DSH-Desktop-Portable-${VERSION}-win-x64.zip（解压即用，数据存 exe 旁 data/ 目录） |
+          | Windows ARM64 | 实验性安装包 DSH-Desktop-Setup-${VERSION}-win-arm64.exe |
           | Linux x64 | AppImage / .deb |
           | macOS ARM64 | .dmg |
 

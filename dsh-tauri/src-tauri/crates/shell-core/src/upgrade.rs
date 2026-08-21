@@ -10,8 +10,10 @@
 //! | 便携版 `data/` | `PORTABLE_EXECUTABLE_DIR` → userData | 同语义重定向（便携版升级后数据随 exe 走） |
 //! | logs / 隔离区 / self-heal-history | userData 下 | 同路径 |
 //!
-//! ## 便携版检测（对齐 main.js:5317）
-//! `PORTABLE_EXECUTABLE_DIR`（portable 运行时注入）存在 → userData = `<该目录>/data`。
+//! ## 便携版检测（对齐 main.js:5317，双通道命中任一）
+//! 1. `PORTABLE_EXECUTABLE_DIR`（portable 启动器运行时注入）存在 → userData = `<该目录>/data`；
+//! 2. exe 同级存在 `portable.marker` 标记文件（zip 便携版无启动器注入环境
+//!    变量，分发 zip 内置该标记）→ userData = `<exe 目录>/data`。
 //! 开发/冒烟重定向统一走 `DSH_TAURI_USERDATA`（data-flow.md §5.1 覆盖通道表；
 //! Electron 线的 `DSH_DESKTOP_USERDATA` 不在本线消费，同名 helper 已随清偿移除）。
 
@@ -41,8 +43,26 @@ pub fn legacy_keys_present(map: &serde_json::Map<String, serde_json::Value>) -> 
 
 /// 便携版 userData 重定向（对齐 Electron main.js 语义）。
 /// 返回 Some(portable_data_dir) 表示应把 userData 整体重定向到该目录。
+///
+/// 双通道检测：环境变量优先（启动器注入）；否则看 exe 同级 `portable.marker`
+/// （zip 便携版：解压即用、无启动器，标记文件即便携身份）。
 pub fn portable_user_data_dir() -> Option<PathBuf> {
-    std::env::var_os("PORTABLE_EXECUTABLE_DIR").map(|d| PathBuf::from(d).join("data"))
+    if let Some(d) = std::env::var_os("PORTABLE_EXECUTABLE_DIR") {
+        return Some(PathBuf::from(d).join("data"));
+    }
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    portable_marker_data_dir(dir)
+}
+
+/// 标记文件检测：`<dir>/portable.marker` 是文件 → 便携 data 目录。
+/// 独立成函数便于单测（不依赖真实 exe 位置）。
+fn portable_marker_data_dir(dir: &std::path::Path) -> Option<PathBuf> {
+    if dir.join("portable.marker").is_file() {
+        Some(dir.join("data"))
+    } else {
+        None
+    }
 }
 
 /// Electron 版窗口状态文件（window-state.json，**不是** settings.json）。
@@ -129,11 +149,38 @@ mod tests {
     fn portable_redirect_env_semantics() {
         // 环境存在性由测试进程控制；这里验证映射语义本身。
         // （真实环境场景由 app 集成测试覆盖。）
+        // 注：zip 便携版通道（exe 同级 portable.marker）在测试二进制旁不存在
+        // 标记文件，故环境变量未设时必须返回 None。
         let dir = portable_user_data_dir();
         if std::env::var_os("PORTABLE_EXECUTABLE_DIR").is_some() {
             assert!(dir.unwrap().ends_with("data"), "便携重定向必须指向 data/");
         } else {
             assert!(dir.is_none());
         }
+    }
+
+    #[test]
+    fn portable_marker_file_triggers_redirect() {
+        // zip 便携版通道：exe 同级存在 portable.marker → userData = <dir>/data。
+        let base = std::env::temp_dir().join(format!("dsh-marker-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // 无标记 → 非便携
+        assert!(portable_marker_data_dir(&base).is_none(), "无 marker 不能误判便携");
+        // 有标记 → 重定向到 data/
+        std::fs::write(base.join("portable.marker"), b"DSH Desktop portable").unwrap();
+        let got = portable_marker_data_dir(&base).expect("marker 存在必须命中");
+        assert_eq!(got, base.join("data"), "重定向必须指向 exe 同级 data/");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn portable_marker_directory_shape_rejected() {
+        // 防误判：同名「目录」不算标记（必须是普通文件）。
+        let base = std::env::temp_dir().join(format!("dsh-marker-dir-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("portable.marker")).unwrap();
+        assert!(portable_marker_data_dir(&base).is_none(), "目录形态的 marker 不算");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
