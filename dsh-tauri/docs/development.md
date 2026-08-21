@@ -76,13 +76,13 @@ npx --yes @tauri-apps/cli build --config src-tauri/src/app/tauri.conf.json \
 1. **契约先行**：`contracts/ipc-commands.md` 映射表加行（Electron 通道 →
    `foo_bar` command，归属 crate）；若页面要消费，`contracts/bridge-api.md`
    同步加方法签名（标注 Tauri command 通道）。
-2. **实现**：命令体放归属 crate（纯逻辑）或 `commands.rs`（接线）；
+2. **实现**：命令体放归属 crate（纯逻辑）或 `src/app/src/commands/`（按领域选子模块，接线）；
    `#[tauri::command] pub fn foo_bar(...)`。
 3. **注册**：`lib.rs` `generate_handler![]` 加 `commands::foo_bar`。
 4. **垫片**（仅页面消费时）：`crates/bridge/dist/bridge-shim.js` 加转发
    （对齐 bridge-api.md 签名；fire-and-forget 用 `send`）。
 5. **测试**：跑 `cargo test`——契约审计测试自动校验注册⊆契约；为命令本身
-   写单测（参考 `commands.rs` tests 模式的沙箱写法）。
+   写单测（参考 `src/app/src/commands/` 各子模块 tests 的沙箱写法）。
 
 > 历史教训：`file_open` 曾注册成 `open_path` 而契约/垫片调 `file_open`——
 > 正是审计测试抓住的漂移。**先改契约再写代码**不是仪式，是流程防线。
