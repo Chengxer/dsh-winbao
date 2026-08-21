@@ -44,12 +44,19 @@ function clamp(text) {
 
 const fileChangesProjectionDefinition = {
   key: "fileChanges",
-  // dsh 0.1.0-rc.6 requires stateVersion (non-negative integer) and a
-  // `view` that shapes the raw state into the schema-validated value.
+  // dsh 0.1.1-rc.1 投影 API v2（session-projection register 契约）：
+  //   schema → stateSchema（校验持久化 state）；
+  //   view   → wire:{viewSchema, view}（可选；缺省则投影不对客户端可见）。
+  // 本投影 view 为恒等函数，viewSchema 复用同一 schema。
+  // （旧 0.1.0-rc.8 的 schema/view 字段在新契约下被静默忽略——stateSchema
+  //   undefined 会在 serve 边界 parse 崩溃，故必须整体平移。）
   stateVersion: 0,
-  schema: fileChangesSchema,
+  stateSchema: fileChangesSchema,
   init: () => ({ changes: [], truncated: false }),
-  view: (state) => state,
+  wire: {
+    viewSchema: fileChangesSchema,
+    view: (state) => state
+  },
   apply: (state, event) => {
     if (event.type !== "tool/result") return state;
     const diffs = event.data?.meta?.diffs;

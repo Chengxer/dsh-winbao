@@ -964,7 +964,9 @@ Content-Length: 0
         std::env::set_var("DSH_HOME", &home);
         std::env::set_var("DSH_TAURI_USERDATA", home.join("ud"));
         let sv: Arc<Supervisor> = Arc::new(Supervisor::new(&root));
-        assert!(sv.kernel_version.starts_with("0.1.0-rc."), "内核版本应可读: {}", sv.kernel_version);
+        // 版本断言放宽到 0.1.x：内核家族从 0.1.0-rc.8 升到 0.1.1-rc.1（K1 适配），
+        // 前缀 0.1. 覆盖两者，防止每次 rc 平移都要改这里。
+        assert!(sv.kernel_version.starts_with("0.1."), "内核版本应可读: {}", sv.kernel_version);
         let (tx, rx) = std::sync::mpsc::channel();
         sv.spawn_boot(tx, None);
         // boot（~4s）+ 内核就绪（~6s），150s 兜底；先到的 BootStep 逐条核对。
