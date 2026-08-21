@@ -17,7 +17,7 @@ mod supervisor;
 // pub 供 tests/sponsor_window.rs 集成测试走生产同款建窗路径（mock runtime）。
 pub mod windows;
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use supervisor::{Supervisor, SupervisorEvent};
@@ -675,7 +675,17 @@ fn upgrade_first_run_report(state: &AppState) {
 /// renderer 心跳监测（Electron RendererRecovery 语义）：换页后 60s 宽限
 ///（页面加载），此后可见主窗连续 ~40s 心跳零增长 → location.reload()。
 /// 覆盖「内核活着但页面白屏/JS 死循环」——dsh 可用优先于页面完美。
+///
+/// 内存审计（2026-08）：KernelReady 事件在每次内核重启（自动重启 / 假死受控
+/// 重启 / restart_service / 恢复页重试）都会触发——且单次 boot 会发两回
+/// （stdout 就绪行线程 + 瀑布 on_boot_success）。旧实现每次都 spawn 一个
+/// 「永不退出」的监测线程（仅主窗销毁才退），随重启次数只增不减（每次
+/// 崩溃环 5 次重启 = 累积 10 线程，各持 AppHandle 每 10s 轮询）。
+/// 修法：代数号交替——新监测线程上岗即令旧线程（≤10s 内）自行退出，
+/// 任一时刻至多一个活跃监测线程。
+static HEARTBEAT_WATCHER_GEN: AtomicU64 = AtomicU64::new(0);
 fn watch_renderer_heartbeat(app: tauri::AppHandle) {
+    let gen = HEARTBEAT_WATCHER_GEN.fetch_add(1, Ordering::Relaxed) + 1;
     std::thread::spawn(move || {
         // 宽限：等第一条心跳到达（或 60s 超时进入持续监测）。
         let baseline = app
@@ -698,6 +708,10 @@ fn watch_renderer_heartbeat(app: tauri::AppHandle) {
         let mut stall: u32 = 0;
         loop {
             std::thread::sleep(std::time::Duration::from_secs(10));
+            // 代数交替：有更晚的监测线程接岗 → 本线程退出（防重启循环下线程只增不减）。
+            if HEARTBEAT_WATCHER_GEN.load(Ordering::Relaxed) != gen {
+                return;
+            }
             let Some(state) = app.try_state::<AppState>() else { return };
             let Some(win) = app.get_webview_window("main") else { return };
             // 不可见窗口定时器被节流（与 Electron 判定口径一致）——不计失联。
@@ -783,6 +797,31 @@ fn inject_diag_probe(app: tauri::AppHandle) {
         // 双通道才是回传路径），回读分支恒走 else 输出「页面脚本可能未执行」
         // 误导日志，且污染窗口标题语义。fetch 通道自 R2 起带 CORS 头真实可用。
     });
+}
+
+#[cfg(test)]
+mod heartbeat_watcher_tests {
+    /// 形态锚点（内存审计 2026-08）：心跳监测线程必须带代数交替退出路径
+    /// ——KernelReady 每次内核重启都会触发（且单次 boot 发两回），无守卫时
+    /// 监测线程随重启次数只增不减（各持 AppHandle 永久 10s 轮询）。
+    #[test]
+    fn heartbeat_watcher_has_generation_guard_shape() {
+        let src = include_str!("lib.rs");
+        let seg = src
+            .split("fn watch_renderer_heartbeat")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n\n/// 诊断探针").next())
+            .expect("watch_renderer_heartbeat 函数体");
+        assert!(src.contains("static HEARTBEAT_WATCHER_GEN"), "必须有全局代数号");
+        assert!(
+            seg.contains("HEARTBEAT_WATCHER_GEN.fetch_add"),
+            "新监测线程上岗必须递增代数号（令旧线程失效）: {seg}"
+        );
+        assert!(
+            seg.contains("HEARTBEAT_WATCHER_GEN.load") && seg.contains("return;"),
+            "监测循环必须校验代数号并退出旧线程: {seg}"
+        );
+    }
 }
 
 #[cfg(test)]
