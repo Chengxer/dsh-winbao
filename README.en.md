@@ -14,6 +14,9 @@ Ships the full dsh runtime and official plugins — no Node.js install required,
 
 [Gitee mirror](https://gitee.com/my-yang-yunfan/dsh_desktop) · [![中文](https://img.shields.io/badge/%E4%B8%AD%E6%96%87-4D6BFE?style=for-the-badge&logo=translate)](README.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
 
+> [!TIP]
+> 🧩 **Recommended: [dsh-hotplug-hub](https://github.com/ARFCON/dsh-hotplug-hub)** — our recommended dsh launcher manager.
+
 ---
 
 ## ✨ Features

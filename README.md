@@ -14,6 +14,9 @@
 
 [Gitee 镜像](https://gitee.com/my-yang-yunfan/dsh_desktop) · [![English](https://img.shields.io/badge/English-4D6BFE?style=for-the-badge&logo=translate)](README.en.md) · [宣发落地页](landing/index.html)
 
+> [!TIP]
+> 🧩 **推介：[dsh-hotplug-hub](https://github.com/ARFCON/dsh-hotplug-hub)** —— 我们推介的 dsh 启动管理器。
+
 ---
 
 ## ✨ 特性
