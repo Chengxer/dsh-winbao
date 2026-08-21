@@ -1076,12 +1076,16 @@ jobs:
         #  3) 上传失败不吞错（旧版 || echo WARN 会静默丢资产）。
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # publish job 无 checkout（无 git 上下文）——gh 必须显式知道仓库，
+          # 否则 create 走「从本地 git 推断」路径直接 fatal（v0.5.1 第三跑
+          # 实证：六资产校验全过、create 崩在 not a git repository）。
+          GH_REPO: myYangyunfan/dsh_desktop
         run: |
           set -euo pipefail
           TAG='${{ steps.ver.outputs.tag }}'
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             echo "release $TAG 不存在——创建（仅此一次触碰 release 元数据）"
-            gh release create "$TAG" --title "DSH Desktop $TAG" --notes-file release-notes.md
+            gh release create "$TAG" --title "DSH Desktop $TAG" --notes-file release-notes.md --prerelease
           fi
           for f in release-assets/*; do
             name=$(basename "$f")
@@ -1098,6 +1102,7 @@ jobs:
         # 大小与本地一致且非零。另列出 release 全部资产供人工核对重复。
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: myYangyunfan/dsh_desktop
         run: |
           set -euo pipefail
           TAG='${{ steps.ver.outputs.tag }}'
