@@ -84,8 +84,8 @@ rc() { mirror_dir "$1" "$2"; }
 mirror_dir "$SRC/scripts" "$DST/scripts"
 mirror_dir "$SRC/assets" "$DST/assets"
 
-# ---- vendor：node.exe（win）+ npm 全量（插件安装/更新链用到）----
-cp -f "$SRC/vendor/node/node.exe" "$DST/vendor/node/node.exe"
+# ---- vendor：node 二进制（$NODE_BIN——win 为 node.exe，unix 为 node）+ npm 全量（插件安装/更新链用到）----
+cp -f "$SRC/vendor/node/$NODE_BIN" "$DST/vendor/node/$NODE_BIN"
 mirror_dir "$SRC/vendor/npm" "$DST/vendor/npm"
 
 # ---- node_modules：生产依赖全量（排除 devDeps 三件；/XD 按目录名精确匹配，
@@ -127,7 +127,7 @@ fi
 # dist 注入 index.html <script> 与 assets/client-compat.js，先跑会被镜像冲掉。
 # compat 构建尽力而为：失败不阻断主构建（CI 环境可能缺 esbuild/rc7 包）
 # ——没有 compat 时插件走 renderer 回落链（三级降级已实装）。
-node "$REPO_ROOT/dsh-tauri/scripts/build-client-compat.mjs"
+node "$REPO_ROOT/dsh-tauri/scripts/build-client-compat.mjs" 2>&1 || echo "[stage] WARN: client-compat 构建失败（非阻断——插件走 renderer 三级回落链）"
 
 echo "[stage] 完成。体积统计："
 du -sm "$DST" "$DST/node_modules" "$DST/vendor" "$DST/assets" 2>/dev/null
