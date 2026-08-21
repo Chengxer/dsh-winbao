@@ -32,14 +32,45 @@ const FE_DIST = path.join(
   'node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist',
 );
 
-// rc.8 seed 表全集（external require 命中 seed 的部分；closure 包走各自的
-// load() 注册，两条路在页面端都合法）。
+// rc.8/0.1.1-rc.1 seed 表全集（external require 命中 seed 的部分；closure 包
+// 走各自的 load() 注册，两条路在页面端都合法）。C1 对 0.1.1-rc.1 复核：
+// 种子函数仍为同 7 项（index-ClqxG24t.js），零漂移。
 const RC8_SEED = new Set([
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client',
   '@deepseek-ai/cordis',
   '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-ui-primitives',
 ]);
+
+// 构建期种子守卫（C1 建议）：读当前 FE 主 bundle 文本，校验
+//   a) 全部 seed 键名仍在 bundle 中（内核漏供某个 seed → 页面崩）；
+//   b) ROOTS 两个 id 不在 bundle 中（进入图行/种子 → arrive() 跳过拉取，
+//      预注册顶死图行条目 → invalid plugin 横幅）。
+// 把未来 rc.2+ 的静默漂移变成构建错误。索引文件为 hash 命名，通配读取。
+function assertSeedGuard() {
+  const assetsDir = path.join(FE_DIST, 'assets');
+  let idxName;
+  try {
+    idxName = fs.readdirSync(assetsDir).find((f) => /^index-[\w-]+\.js$/.test(f));
+  } catch { /* payload 未就位时 stage-payload 流程会先镜像 —— 跳过守卫 */ }
+  if (!idxName) {
+    console.warn('[compat] 种子守卫：FE bundle 未找到（payload 未就位？），跳过');
+    return;
+  }
+  const bundle = fs.readFileSync(path.join(assetsDir, idxName), 'utf8');
+  // seed 键两种形态：带引号（scoped 名/含斜杠）或裸标识符对象键（react 等）。
+  const seedIn = (k) => bundle.includes(JSON.stringify(k))
+    || new RegExp(`[{,]\\s*${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:`).test(bundle);
+  const missingSeed = [...RC8_SEED].filter((k) => !seedIn(k));
+  if (missingSeed.length > 0) {
+    throw new Error(`[compat] 种子守卫失败：FE bundle 缺失 seed 键 ${missingSeed.join(', ')} —— 内核 seed 表漂移，需人工复核 RC8_SEED 与 ROOTS`);
+  }
+  const collide = ROOTS.filter((id) => bundle.includes(`"${id}"`));
+  if (collide.length > 0) {
+    throw new Error(`[compat] 种子守卫失败：ROOTS 包 ${collide.join(', ')} 出现在 FE bundle（图行/种子回潮）—— 预注册将顶死图行条目，需从 ROOTS 移除或改锚`);
+  }
+  console.log(`[compat] 种子守卫通过：${idxName}（7 seed 键在位，ROOTS 零撞车）`);
+}
 
 // 根：rc.8 前端 seed 缺失且被插件 require 的包。**必须同时不在 rc.8 boot
 // graph 行里**——arrive() 见 factories.has(id) 会跳过该行 bundle 拉取
@@ -130,6 +161,8 @@ function bundleRoot(id) {
   }
   return out;
 }
+
+assertSeedGuard(); // rc.2+ 漂移 fail-fast（在 bundleRoot 产出前拦住）
 
 const parts = [];
 parts.push(
