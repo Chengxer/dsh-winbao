@@ -82,9 +82,13 @@ function escapeRegExp(s) {
 }
 
 /**
- * 从 .credentials.yaml 读取「顶层键」的值（`KEY: value`，值可带引号）。
- * 安全约束：只匹配行首（列 0）的键——任意嵌套段下的同名键一律不读，
- * 避免读到插件 config 等其它段下的同名值。
+ * 从 .credentials.yaml 读取「顶层引用键」的值（`KEY: value`，值可带引号）。
+ * 兼容两种布局（dsh-credentials-local 的迁移语义）：
+ *   · 旧平铺（pre-release）：`KEY: value` 列 0；
+ *   · v1 嵌套：`version: 1` + 原 行原样缩进两格进 `refs:`（records: 段的键
+ *     形如 `provider/id` 含 `/`，与 POSIX 标识符键名（无 `/`）不可能同名，
+ *     故两格缩进匹配不会误读 records 值）。
+ * 安全约束：只匹配列 0 或恰好两格缩进的键——更深嵌套段下的同名键一律不读。
  * 值形态支持：无引号标量（行尾 ` #` 视为注释截断）、单/双引号标量。
  * @param {string} dshHome DSH_HOME 目录
  * @param {string} keyName 键名（可含正则元字符，内部已转义）
@@ -93,11 +97,12 @@ function escapeRegExp(s) {
 function readCredentialLine(dshHome, keyName) {
   try {
     const text = fs.readFileSync(path.join(dshHome, '.credentials.yaml'), 'utf8');
-    const keyPattern = new RegExp('^("?)' + escapeRegExp(keyName) + '\\1\\s*:\\s*(.*)$');
+    // (?:^|  ) 双形态：列 0（旧平铺）或两格缩进（v1 refs: 下）。
+    const keyPattern = new RegExp('^(?:("?)' + escapeRegExp(keyName) + '\\1\\s*:\\s*(.*)$|  ("?)' + escapeRegExp(keyName) + '\\3\\s*:\\s*(.*)$)');
     for (const line of text.split(/\r?\n/)) {
       const m = keyPattern.exec(line);
       if (!m) continue;
-      const raw = m[2];
+      const raw = m[2] !== undefined ? m[2] : m[4];
       const quoted = /^"((?:[^"\\]|\\.)*)"/.exec(raw) || /^'([^']*)'/.exec(raw);
       let value;
       if (quoted) {
