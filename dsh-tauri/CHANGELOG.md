@@ -1,6 +1,54 @@
 # Changelog — DSH Desktop（Tauri 版，`tauri/modular` 分支）
 
-## [未发布]（v0.5.0 tag 之后主干追加，随下版发布）
+## [0.5.1] — 2026-08-21 本地打包（预览版，不发布）
+
+> 紧随 v0.5.0 的收敛版：内核家族随官方 deepseek-harness 1.1rc 平移，
+> 并根治 v0.5.0 实测暴露的赞助窗、WSL、测试基建与假死误杀问题。
+> **本版仅本地打包验证，不对外发布**（release notes 草稿见
+> `docs/release-notes/v0.5.1-draft.md`）。
+
+### 内核家族平移：0.1.0-rc.8 → 0.1.1-rc.1
+
+对齐官方 release（github.com/deepseek-ai/deepseek-harness 1.1rc）：
+`dsh-desktop/package.json` 的 19 个 `@deepseek-ai/dsh-*` 依赖整体平移。
+
+- **dsh-file-changes 伴随插件适配投影 API v2**：`schema` → `stateSchema`、
+  `view` → `wire:{viewSchema,view}`（内核投影契约变更，插件侧同步改写）。
+- **supervisor 版本断言放宽**：`starts_with("0.1.")`——rc 通道内小版本
+  迭代不再阻断启动（此前精确锚定单一 rc 版本，平移即拒启）。
+- **已知降级（有意接受）**：billion-context 插件的 contextPressure 快照
+  优化依赖的键在 rc.1 compaction 中已被移除；插件自身有 `typeof` 守卫，
+  会优雅降级（不崩溃、不报错，仅失去「剩余上下文预估值」这一层优化）。
+
+### 赞助窗三零依赖根治（eefc787）
+
+「无图 / 卡死 / 关不掉」三症同源修复：`WebviewUrl::App` 编译期内嵌资产
+（**零 file://、零本地端口、零磁盘写**——不再向 `%TEMP%\dsh-sponsor\` 落盘，
+也不再借本地静态服务），独立线程建窗（避开主线程装配时序），
+`initialization_script` 注入 data URI 二维码，无 `on_window_event`
+（默认关闭即 destroy，规避 CloseRequested 内 destroy 的 UI 线程死锁）。
+顺带根治 tauri 上游 #13419（测试 exe manifest 崩溃）在本项目的触发路径。
+
+### WSL 双修
+
+- **#132 pnpm 结构误判**（7f95f6b/c6c3b7c）：`resolveViaPnpmStore` 回落 +
+  `realpathSync` 解析 + WSL UNC 路径 unverifiable 时登记防误删（解析受限
+  保留 + 告警，不再当 UNRESOLVABLE 隔离）+ 历史误隔离自愈。
+- **WSL 后端「假开关」根治**（061a8ba）：Tauri 版暂未实装 WSL 后端，
+  设置项诚实提示「暂未实装」，不再呈现可切换的假状态。
+
+### 测试基建修复（2f8bd5d）
+
+T1 发现的 4 处测试基建 bug：smoke wait 死等（无超时）、shell.pid 取
+winpid 口径错误、edge-client 沙箱 setTimeout 误用、两个过时 Electron
+测试改锚（对齐壳退役后的现状）。
+
+### 假死探活阈值 15s → 60s（8d19404）
+
+上下文压缩（compaction）期间内核事件循环被占 20-30s 属正常形态，
+15s 阈值会把正在工作的内核误判假死并杀掉重启——放宽至 60s。
+
+### v0.5.0 tag 之后主干追加（随本版出包）
 
 - **安装器卡死残余根治（$R9 双角色冲突）**：用户对 v0.5.0 安装包再次实测
   「安装卡住」——`$R9` 同时承担「模式（choose/purge）」与「信号（重扫/继续）」
@@ -8,6 +56,11 @@
   修：信号改用 `$0`（`$R9` 专职模式，仅 ProcessLegacyDSH 写入）。
   makensis 编译 rc=0 验证通过。
 - CI：Linux/macOS 构建修复（icon.png + 宠物窗 transparent() 平台条件编译）。
+
+### 版本链
+
+`tauri.conf.json` / Cargo workspace / `dsh-desktop/package.json` 统一
+0.5.1；安装包产物 `DSH.Desktop_0.5.1_x64-setup.exe`（本地打包，不发布）。
 
 ## [0.5.0] — 2026-08-19 定稿 / 2026-08-21 发布 —— 首个 Tauri 对外测试版
 

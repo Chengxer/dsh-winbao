@@ -7,6 +7,9 @@
 > **状态（2026-08-21）**：Phase 0-4 全部 ✅ + 两遍 review + 功能测试补强 +
 > Electron→Tauri 无痛升级适配 + 实测缺陷扫荡 + 万无一失检测 5/5 全过，
 > **v0.5.0 已发布**（GitHub Release，CI 流水线产出 win-x64 NSIS 安装包）。
+> 随后 **v0.5.1 本地打包（预览版，不发布）**：内核家族平移至
+> 0.1.1-rc.1（deepseek-harness 1.1rc，19 个 @deepseek-ai/dsh-* 依赖）+
+> 赞助窗三零依赖根治 + WSL #132 误判修复与假开关根治 + 假死探活阈值放宽。
 > 证据链见 `../CHANGELOG.md`。
 
 ## 总架构（一句话）
@@ -72,18 +75,18 @@ Rust 壳（7 个单向依赖的 crate）+ Node sidecar（复用 `dsh-desktop/scr
 | 本文档 | D1/D2 决策与分期落地 |
 
 
-## 实装状态总览（2026-08-21，v0.5.0 发布后更新）
+## 实装状态总览（2026-08-21，v0.5.1 本地打包后更新）
 
 | Phase | 计划 | 状态 |
 |-------|------|------|
 | 0 骨架+契约+PoC | 见下表 | ✅ 全过（PoC-C 5.6s / PoC-A+B 10 项） |
-| 1 核心生命周期 | supervisor / 换页 / 恢复页 / 窗口记忆 / 导航围栏 | ✅ 实装实测（端到端截图 + 端口稳定化 63283 两轮一致） |
-| 2 sidecar 全链路 | boot 时序 / 插件六通道 / 探活 | ✅ 实装实测（boot 3.2s、37 插件、set-enabled 可逆往返） |
-| 3 周边窗与诊断 | 托盘 / 通知 / 浮窗 / 宠物窗 / fence / WSL 简版 | ✅ 实装（赞助窗 file:// 直载终修；WSL 为配置+探活简版，完整托管待后续） |
-| 4 打包与分发 | bundle 配置 / updater / 卸载策略 | ✅ **已发布**——v0.5.0（2026-08-21）经 tauri-release.yml CI 流水线产出 win-x64 NSIS 并上线 Release；updater 签名链就绪（endpoint 待发版配置） |
+| 1 核心生命周期 | supervisor / 换页 / 恢复页 / 窗口记忆 / 导航围栏 | ✅ 实装实测（端到端截图 + 端口稳定化 63283 两轮一致）；v0.5.1 假死探活阈值 15s→60s（compaction 期间事件循环被占 20-30s 属正常形态，15s 误杀） |
+| 2 sidecar 全链路 | boot 时序 / 插件六通道 / 探活 | ✅ 实装实测（boot 3.2s、37 插件、set-enabled 可逆往返）；v0.5.1 内核家族平移 0.1.0-rc.8→0.1.1-rc.1（19 个 dsh-* 依赖 + dsh-file-changes 投影 API v2 适配 + supervisor 断言放宽 starts_with("0.1.")） |
+| 3 周边窗与诊断 | 托盘 / 通知 / 浮窗 / 宠物窗 / fence / WSL 简版 | ✅ 实装；v0.5.1 赞助窗三零依赖根治（WebviewUrl::App 编译期内嵌，零 file://、零本地端口、零磁盘写）；WSL #132 pnpm 误判修复 + 假开关根治（诚实提示暂未实装），完整托管待后续 |
+| 4 打包与分发 | bundle 配置 / updater / 卸载策略 | ✅ **已发布**——v0.5.0（2026-08-21）经 tauri-release.yml CI 流水线产出 win-x64 NSIS 并上线 Release；updater 签名链就绪（endpoint 待发版配置）；v0.5.1 本地打包（不发布） |
 | Review ×2 | 功能契约 + 安全边界 | ✅ 修 7 项真缺陷（file_open 漂移 / cmd 注入 / sidecar 竞写 / 单实例死锁 / 强杀孤儿内核 等，详见 CHANGELOG） |
-| 实测缺陷扫荡 | issue #98-#134 多轮（T/D/V/U/H/S 系列走查与实测） | ✅ 安装器卡死 NSIS 三重修 / 启动受阻三修+看门狗 / 赞助窗终修 / 高级设置三级回落链（详见 CHANGELOG 0.5.0 节） |
-| 万无一失检测 | 发版闸门 5 路验证管线 | ✅ 5/5 全过（Rust 142/0 · sidecar 13/13 · 共享 899 · makensis 0 错 0 警 · 安装态冒烟 PASS） |
+| 实测缺陷扫荡 | issue #98-#134 多轮（T/D/V/U/H/S 系列走查与实测） | ✅ 安装器卡死 NSIS 三重修（v0.5.1 追加 $R9 双角色冲突根治）/ 启动受阻三修+看门狗 / 高级设置三级回落链（详见 CHANGELOG 0.5.0/0.5.1 节） |
+| 万无一失检测 | 发版闸门 5 路验证管线 | ✅ 5/5 全过（Rust 142/0 · sidecar 13/13 · 共享 899 · makensis 0 错 0 警 · 安装态冒烟 PASS）；v0.5.1 修复 4 处测试基建 bug（smoke wait 死等 / shell.pid winpid / edge-client 沙箱 setTimeout / 过时 Electron 测试改锚） |
 
 ### 启动稳定性保证（2026-08-20 追加）
 
@@ -96,15 +99,21 @@ Rust 壳（7 个单向依赖的 crate）+ Node sidecar（复用 `dsh-desktop/scr
 | 页面白屏/JS 死循环（内核活着） | renderer 心跳监测 → 自动 reload | 实现 + 逻辑链（GUI 场景待真实回归） |
 | 强杀壳进程（孤儿内核） | Job Object KILL_ON_JOB_CLOSE | 实测端口零残留 ✓ |
 
-### 遗留细目（v0.5.0 发布后更新，不阻塞日用，按需迭代）
+### 遗留细目（v0.5.1 本地打包后更新，不阻塞日用，按需迭代）
 - ~~image_paste_save（剪贴板位图）→ E_NOT_IMPLEMENTED~~ → **已实装**（v0.5.0）
 - ~~正式出包~~ → **已发布**（v0.5.0，CI 流水线）；updater latest.json /
   DSH_UPDATER_ENDPOINT 发版注入待配（签名链 fail-closed 已就绪）
 - Linux / macOS 产物与便携版 / MSI 形态（CI 已接，随后续版本产出）
 - 备份/诊断导出的系统对话框 → 接 tauri-plugin-dialog（当前固定目录）
-- WSL 完整托管（wsl-backend.js 复用）
+- WSL 完整托管（wsl-backend.js 复用）——v0.5.1 起设置项诚实提示「暂未实装」
+  （假开关已根治，061a8ba）；#132 pnpm 结构误判已修（resolveViaPnpmStore
+  回落 + WSL UNC 防误删 + 历史隔离自愈）
 - agent 更新完整下载/替换链（当前为菜单版本比对）
-- 共享脚本 unit 套件 3 挂（Electron 壳退役后壳文件引用残留，测试债清理）
+- 共享脚本 unit 套件 3 挂（Electron 壳退役后壳文件引用残留，测试债清理；
+  v0.5.1 已改锚其中 2 个过时用例）
+- 内核 0.1.1-rc.1 已知降级：billion-context 插件 contextPressure 快照优化
+  失效（rc.1 compaction 移除该键，插件 typeof 守卫优雅降级，仅失去预估值
+  优化，不崩溃）
 
 ## Phase 1 —— 核心生命周期（app 可日用替代 loading 页）
 

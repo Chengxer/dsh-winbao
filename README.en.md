@@ -39,7 +39,7 @@ Ships the full dsh runtime and official plugins — no Node.js install required,
 - **Guardian waterfall** — the kernel boot chain self-heals level by level: broken plugins auto-repair, corrupt configs rebuild, crash loops restart in place; no incompatible state ever exits the app (core v0.5.0 Tauri feature)
 - **Crash self-healing** — renderer freezes detected via heartbeat and auto-reload; the supervisor probes the kernel and relaunches with backoff
 - **History compatibility** — session event vocabulary is patched automatically so third-party plugin events never break history loading
-- **Dual-source updates** — official dsh agent updates + client self-update (GitHub / Gitee sources, split-part auto-merge, in-place replace, upgrades reinstall to the old location with zero config loss)
+- **Dual-source updates** — agent version check (in-menu comparison against npm registry latest) + client self-update (tauri-plugin-updater, minisign-signed, fail-closed); upgrades reinstall to the old location with zero config loss
 - **Shortcut self-healing** — desktop and Start Menu shortcuts are recreated automatically when missing
 
 ## 📸 App Preview
@@ -55,18 +55,20 @@ Ships the full dsh runtime and official plugins — no Node.js install required,
 | Sessions | Archive only | Archive / restore / delete |
 | Balance | None | Live "this turn cost · balance" + OpenCode Go |
 | Desktop | None | Tray / notifications / pet / side popup |
-| Updates | Manual | Auto-update (Windows) · part auto-merge |
+| Updates | Manual | Agent version check + signed client update chain (minisign, fail-closed) |
 
 ## 🚀 Quick Start
 
-**Requirements**: Windows 10 / 11 (x64 / arm64) or macOS 12+ (Intel / Apple Silicon). No pre-installed Node.js or any other runtime. On ARM devices (e.g. Surface Pro X), grab the arm64 build.
+**Requirements**: Windows 10 / 11 (x64). No pre-installed Node.js or any other runtime. (Linux / macOS builds and the portable flavor arrive in later versions — the CI pipeline is already wired up.)
 
 > [!NOTE]
-> The table below points to **pre-v0.5.0 Electron builds** (the last Electron line was 0.4.x). **From v0.5.0 the app switches to the Tauri architecture** — grab the latest Tauri installer from the [Releases](https://github.com/myYangyunfan/dsh_desktop/releases) page once published; the legacy builds below keep working, and installing over them migrates data automatically.
+> **The table below points to pre-v0.5.0 Electron builds** (the last Electron line was 0.4.x). **From v0.5.0 the app runs on the Tauri architecture** — v0.5.0 (released 2026-08-21) ships a Windows x64 NSIS installer:
+> [`DSH.Desktop_0.5.0_x64-setup.exe`](https://github.com/myYangyunfan/dsh_desktop/releases/download/v0.5.0/DSH.Desktop_0.5.0_x64-setup.exe) (~87 MB, `currentUser` mode needs no admin, WebView2 bootstrapper embedded).
+> Installing it over any legacy Electron build (0.1.x–0.4.x) relocates to the old directory, keeps all data, and requires zero manual migration (see the [upgrade guide](dsh-tauri/docs/upgrade-guide.md)).
 
 ### International users (GitHub)
 
-[GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases) hosts the complete single-file installers (Portable + Setup + blockmap) with no size limit — download directly.
+[GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases) hosts the complete single-file installers with no size limit — download directly.
 
 > [!IMPORTANT]
 > **Read before you download — the answer is in the file name:**
@@ -91,18 +93,12 @@ xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"
 
 ### China users (Gitee)
 
-> Gitee caps files at 100 MB, so installers are split into 3 parts. Download all parts, then double-click `merge.bat` to merge them automatically.
->
-> **Gitee parts keep the legacy naming** (no `win-` prefix, e.g. `...-portable-x64.exe.part1`) — different from the new GitHub naming, but merging works the same.
->
-> macOS installers are not mirrored to Gitee yet — download them from [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases).
+> [!NOTE]
+> The Gitee mirror currently tops out at **Electron v0.4.1** — the v0.5.0 (Tauri) installer is not mirrored there yet; please download from [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases) for now.
 
-| Flavor | Parts |
-| --- | --- |
-| **Portable** (no install, double-click to run) | [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.9/DSH-Desktop-0.3.9-portable-x64.exe.part1) · [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.9/DSH-Desktop-0.3.9-portable-x64.exe.part2) · [part3](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.9/DSH-Desktop-0.3.9-portable-x64.exe.part3) |
-| **Setup** (creates shortcuts) | [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.9/DSH-Desktop-Setup-0.3.9-x64.exe.part1) · [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.9/DSH-Desktop-Setup-0.3.9-x64.exe.part2) · [part3](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.9/DSH-Desktop-Setup-0.3.9-x64.exe.part3) |
+Gitee caps files at 100 MB, so Electron installers are split into parts (`.part1/.part2/...`). Download all parts, then double-click the `merge.bat` attached to that release to merge them automatically, and verify with `SHA256SUMS`. Pick your version on the [Gitee Releases](https://gitee.com/my-yang-yunfan/dsh_desktop/releases) page.
 
-Merge tool: [merge.bat](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.9/merge.bat) · Checksums: [SHA256SUMS](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.9/SHA256SUMS)
+**Gitee parts keep the legacy naming** (no `win-` prefix, e.g. `...-portable-x64.exe.part1`) — different from the GitHub naming, but merging works the same. macOS installers are not mirrored to Gitee — download them from [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases).
 
 **Data location**: Windows portable keeps data in `data\` next to the exe; the installer uses `%APPDATA%\DSH Desktop\`; macOS uses `~/Library/Application Support/DSH Desktop/`. Set the `DSH_HOME` environment variable to override the dsh config directory.
 
@@ -136,7 +132,7 @@ See the [development manual §6](dsh-tauri/docs/development.md) for the full flo
 
 ## 🤖 Releases
 
-After the v0.5.0 architecture migration, the Electron-era cloud release pipeline (auto-building three-platform Electron packages on `v*` tags) was retired along with the architecture. Current release flow: local packaging (see above) + installed-layout smoke test, then manual upload to Releases; a Tauri GitHub Actions pipeline is on the roadmap.
+From v0.5.0, releases go through the **Tauri GitHub Actions cloud pipeline** ([`tauri-release.yml`](.github/workflows/tauri-release.yml)): pushing a `v*` tag triggers three-platform builds (unified vendor node v24.15.0 + full `stage-payload.sh` + fail-fast compat build), then collects the artifacts into a Release automatically. **v0.5.0 was published by this pipeline** (2026-08-21; this round shipped the Windows x64 NSIS installer — Linux / macOS outputs are wired up and arrive in later versions). The Electron-era `release.yml` pipeline was retired along with the architecture. For manual local packaging outside CI, see [Build from Source](#-build-from-source) above (stage-payload → tauri build → installed-layout smoke, three steps).
 
 ### 📦 Installer formats the Tauri architecture can export
 
@@ -144,11 +140,11 @@ Controlled by `bundle.targets` in `tauri.conf.json` — add or remove entries to
 
 | Platform | Format | Status |
 | --- | --- | --- |
-| Windows x64 | **NSIS installer** (`*-setup.exe`) — LZMA-compressed, ~79 MiB measured; `currentUser` mode needs no admin rights; WebView2 bootstrapper embedded so offline machines can install too | ✅ Implemented, passes installed-layout smoke test |
+| Windows x64 | **NSIS installer** (`DSH.Desktop_<version>_x64-setup.exe`) — LZMA-compressed, ~87 MB measured; `currentUser` mode needs no admin rights; WebView2 bootstrapper embedded so offline machines can install too; upgrade chain reinstalls into the old directory, keeping data | ✅ **Shipped in v0.5.0** (CI-built, passes installed-layout smoke test) |
 | Windows arm64 | NSIS installer (cross-build with `--target aarch64-pc-windows-msvc`) | 🔜 Natively supported by Tauri, not yet validated |
 | Windows | MSI (WiX toolchain, add `"msi"` to `targets`) | 🔜 Natively supported by Tauri, not yet enabled |
-| macOS (Intel / Apple Silicon) | `.app` / `.dmg` disk images | 🔜 Requires extending the payload's unix node side |
-| Linux | `.AppImage` (single-file portable) / `.deb` / `.rpm` | 🔜 Natively supported by Tauri, enable on demand |
+| Linux x64 | `.AppImage` / `.deb` | 🔶 CI wired up (`x86_64-unknown-linux-gnu`); not produced in v0.5.0, later versions |
+| macOS (Apple Silicon) | `.app` / `.dmg` disk images | 🔶 CI wired up (`aarch64-apple-darwin`); not produced in v0.5.0, later versions |
 
 > A no-install portable build is not a built-in Tauri target — the Tauri line defaults to the NSIS `currentUser` installer, and a standalone portable package is planned for a later release.
 
@@ -199,7 +195,7 @@ Shipped with the installer (full third-party inventory: [THIRD_PARTY_NOTICES.md]
             Native window loads Web UI (localhost only)
 ```
 
-Layering rules: crates never depend on the tauri runtime and are independently unit-tested (109 Rust tests green); the assembly root only wires things up; kernel-side Node logic lives in `dsh-desktop/scripts/`. See the [development manual](dsh-tauri/docs/development.md).
+Layering rules: crates never depend on the tauri runtime and are independently unit-tested (142 Rust tests green; CI skips 4 environment-dependent integration cases → 138; plus 13 sidecar Node tests and 899 shared-script unit tests); the assembly root only wires things up; kernel-side Node logic lives in `dsh-desktop/scripts/`. See the [development manual](dsh-tauri/docs/development.md).
 
 ## 📄 License
 

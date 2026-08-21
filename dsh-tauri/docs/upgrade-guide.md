@@ -57,5 +57,7 @@
 
 - 极旧版本（0.4.0 及更早）卸载器无 `/KEEP_APP_DATA` 参数识别：静默卸载默认仍保留
   用户数据（更新场景），但建议此类用户先用 Electron 版内置更新到 0.4.1+ 再升 Tauri；
-- WSL 托管模式用户：Tauri 版当前为「配置存取 + 探活」简版，完整托管在
-  roadmap Phase 3 后续——此类用户升级前见 roadmap 说明。
+- WSL 托管模式用户：Tauri 版暂未实装 WSL 后端，v0.5.1 起设置项**诚实提示
+  「暂未实装」**（不再呈现可切换的假开关）；#132 pnpm 结构误判已修
+  （resolveViaPnpmStore 回落 + WSL UNC 防误删 + 历史误隔离自愈）。完整托管
+  见 roadmap 遗留细目。

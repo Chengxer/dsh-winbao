@@ -3,6 +3,10 @@
 DeepSeek Harness 桌面客户端的 Tauri 2 重构。**v0.5.0 起为仓库主线架构**——Electron 壳已退役
 （壳文件与打包链于 2026-08 清理，内核侧 `dsh-desktop/scripts` 作为 payload 源保留复用）；
 契约先行，Phase 0-4 全量实装，**v0.5.0 已发布**（2026-08-21，CI 流水线产出 win-x64 NSIS）。
+**v0.5.1（2026-08-21）本地打包、不发布**：内核家族平移 0.1.0-rc.8 → 0.1.1-rc.1
+（deepseek-harness 1.1rc）+ 赞助窗三零依赖根治 + WSL #132/假开关双修 + 假死探活
+阈值放宽（详见 [CHANGELOG.md](CHANGELOG.md)，release notes 草稿见
+[docs/release-notes/v0.5.1-draft.md](docs/release-notes/v0.5.1-draft.md)）。
 
 > **开发手册（统一入口）**：[`docs/development.md`](docs/development.md) ——
 > 架构地图 / 接口索引与防漂移机制 / 加命令五步 / 加插件 / 打包冒烟 / 调试开关。
