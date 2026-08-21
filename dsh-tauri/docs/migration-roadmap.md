@@ -1,10 +1,13 @@
 # DSH Desktop — Electron → Tauri 迁移路线图
 
-> 分支 `tauri/modular`（自 main 切出）。Electron 线（`dsh-desktop/`）零改动，
-> main / kernel/dsh-rc8 照常演进；回退 = 弃分支。
+> 分支 `tauri/modular`（自 main 切出，现为仓库主线架构）。Electron 壳已于
+> 2026-08 退役（壳文件清理，`dsh-desktop/` 保留 scripts/ assets/ vendor/
+> 作为共享脚本层与内核 payload 源）；回退 = 弃架构。
 >
-> **状态（2026-08-19）：Phase 0-4 已全量实装并通过两遍 review + 功能测试补强 +
-> Electron→Tauri 无痛升级适配**（docs/upgrade-guide.md）。证据链见 `../CHANGELOG.md`。
+> **状态（2026-08-21）**：Phase 0-4 全部 ✅ + 两遍 review + 功能测试补强 +
+> Electron→Tauri 无痛升级适配 + 实测缺陷扫荡 + 万无一失检测 5/5 全过，
+> **v0.5.0 已发布**（GitHub Release，CI 流水线产出 win-x64 NSIS 安装包）。
+> 证据链见 `../CHANGELOG.md`。
 
 ## 总架构（一句话）
 
@@ -19,7 +22,7 @@ Rust 壳（7 个单向依赖的 crate）+ Node sidecar（复用 `dsh-desktop/scr
 | Electron 触点（main.js 行号） | 处置 |
 |------------------------------|------|
 | `updater.js` 的 overlay 布局 / checkLatest / applyUpdate / rollback / overlayBinPath / overlayVersion | 不移植 |
-| `runUpdateFlow`（2614-2742） | 不移植；菜单 `check-agent-update` 返回 `E_CUT_FEATURE` |
+| `runUpdateFlow`（2614-2742） | 不移植；菜单 `check-agent-update` 为**最简版本比对**（本地内核版本 vs npm registry latest 双源镜像，语义化比较防降级误报，就地展示 hasUpdate；完整下载/替换链后续迭代） |
 | 定时触发器（4675-4770 一带） | 不移植 |
 | skipVersion / 更新确认状态（settings） | 键读取时忽略（`shell_core::upgrade::LEGACY_IGNORED_KEYS`，经 `legacy_keys_present` 消费） |
 | overlay 三副本布局（patch-target-resolver） | Tauri 版补丁布局天然两副本（profile fallback + appDir），无 overlay 更新副本 |
@@ -69,16 +72,18 @@ Rust 壳（7 个单向依赖的 crate）+ Node sidecar（复用 `dsh-desktop/scr
 | 本文档 | D1/D2 决策与分期落地 |
 
 
-## 实装状态总览（2026-08-19，Phase 0-4 完成后）
+## 实装状态总览（2026-08-21，v0.5.0 发布后更新）
 
 | Phase | 计划 | 状态 |
 |-------|------|------|
 | 0 骨架+契约+PoC | 见下表 | ✅ 全过（PoC-C 5.6s / PoC-A+B 10 项） |
 | 1 核心生命周期 | supervisor / 换页 / 恢复页 / 窗口记忆 / 导航围栏 | ✅ 实装实测（端到端截图 + 端口稳定化 63283 两轮一致） |
 | 2 sidecar 全链路 | boot 时序 / 插件六通道 / 探活 | ✅ 实装实测（boot 3.2s、37 插件、set-enabled 可逆往返） |
-| 3 周边窗与诊断 | 托盘 / 通知 / 浮窗 / 宠物窗 / fence / WSL 简版 | ✅ 实装（宠物窗透明窗为本机未单独截图项；WSL 为配置+探活简版，完整托管待后续） |
-| 4 打包与分发 | bundle 配置 / updater / 卸载策略 | ✅ 配置与代码就绪（出包需 tauri-cli+密钥，流程 docs/release-keys.md） |
+| 3 周边窗与诊断 | 托盘 / 通知 / 浮窗 / 宠物窗 / fence / WSL 简版 | ✅ 实装（赞助窗 file:// 直载终修；WSL 为配置+探活简版，完整托管待后续） |
+| 4 打包与分发 | bundle 配置 / updater / 卸载策略 | ✅ **已发布**——v0.5.0（2026-08-21）经 tauri-release.yml CI 流水线产出 win-x64 NSIS 并上线 Release；updater 签名链就绪（endpoint 待发版配置） |
 | Review ×2 | 功能契约 + 安全边界 | ✅ 修 7 项真缺陷（file_open 漂移 / cmd 注入 / sidecar 竞写 / 单实例死锁 / 强杀孤儿内核 等，详见 CHANGELOG） |
+| 实测缺陷扫荡 | issue #98-#134 多轮（T/D/V/U/H/S 系列走查与实测） | ✅ 安装器卡死 NSIS 三重修 / 启动受阻三修+看门狗 / 赞助窗终修 / 高级设置三级回落链（详见 CHANGELOG 0.5.0 节） |
+| 万无一失检测 | 发版闸门 5 路验证管线 | ✅ 5/5 全过（Rust 142/0 · sidecar 13/13 · 共享 899 · makensis 0 错 0 警 · 安装态冒烟 PASS） |
 
 ### 启动稳定性保证（2026-08-20 追加）
 
@@ -91,11 +96,15 @@ Rust 壳（7 个单向依赖的 crate）+ Node sidecar（复用 `dsh-desktop/scr
 | 页面白屏/JS 死循环（内核活着） | renderer 心跳监测 → 自动 reload | 实现 + 逻辑链（GUI 场景待真实回归） |
 | 强杀壳进程（孤儿内核） | Job Object KILL_ON_JOB_CLOSE | 实测端口零残留 ✓ |
 
-### 遗留细目（不阻塞日用，按需迭代）
-- image_paste_save（剪贴板位图）→ E_NOT_IMPLEMENTED
+### 遗留细目（v0.5.0 发布后更新，不阻塞日用，按需迭代）
+- ~~image_paste_save（剪贴板位图）→ E_NOT_IMPLEMENTED~~ → **已实装**（v0.5.0）
+- ~~正式出包~~ → **已发布**（v0.5.0，CI 流水线）；updater latest.json /
+  DSH_UPDATER_ENDPOINT 发版注入待配（签名链 fail-closed 已就绪）
+- Linux / macOS 产物与便携版 / MSI 形态（CI 已接，随后续版本产出）
 - 备份/诊断导出的系统对话框 → 接 tauri-plugin-dialog（当前固定目录）
 - WSL 完整托管（wsl-backend.js 复用）
-- 正式出包 + latest.json CI 链
+- agent 更新完整下载/替换链（当前为菜单版本比对）
+- 共享脚本 unit 套件 3 挂（Electron 壳退役后壳文件引用残留，测试债清理）
 
 ## Phase 1 —— 核心生命周期（app 可日用替代 loading 页）
 

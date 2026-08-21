@@ -39,7 +39,7 @@
 - **守护瀑布** — 内核 boot 链逐级自愈：坏插件自动修复、坏配置自动重建、内核崩溃环原地重启，任何不兼容形态都不退出（v0.5.0 Tauri 架构核心特性）
 - **崩溃自愈** — 渲染层假死心跳检测自动重载；内核由 supervisor 探活 + 指数退避拉起
 - **历史兼容** — 自动修补会话事件词汇表，第三方插件写入的事件不破坏会话历史
-- **双源更新** — 官方 agent 更新 + 客户端自更新（GitHub / Gitee 双源，分片自动合并、原地替换，升级装回旧位置零配置丢失）
+- **双源更新** — agent 版本检查（菜单就地比对 npm registry latest）+ 客户端自更新（tauri-plugin-updater，minisign 签名链 fail-closed）；升级安装自动装回旧位置，零配置丢失
 - **快捷方式自愈** — 桌面与开始菜单快捷方式缺失即自动补建
 
 ## 📸 界面一览
@@ -55,48 +55,31 @@
 | 会话管理 | 仅归档 | 归档 / 恢复 / 删除 |
 | 余额 | 无 | 实时「本轮费用 · 余额」+ OpenCode Go |
 | 桌面能力 | 无 | 托盘常驻 / 完成通知 / 桌面宠物 / 侧边浮窗 |
-| 更新 | 手动 | 自动更新（Windows 版）· 分片自动合并 |
+| 更新 | 手动 | agent 版本检查 + 客户端签名更新链（minisign fail-closed） |
 
 ## 🚀 快速开始
 
-**系统要求**：Windows 10 / 11（x64 / arm64）或 macOS 12+（Intel / Apple Silicon），无需预装 Node.js。ARM 设备（如 Surface Pro X）请下载 arm64 版本。
+**系统要求**：Windows 10 / 11（x64），无需预装 Node.js。
 
-> [!NOTE]
-> 下表为 **v0.5.0 之前的 Electron 版**（末代 Electron 版为 0.4.x）。**v0.5.0 起切换为 Tauri 架构**，新版本发布后请从 [Releases](https://github.com/myYangyunfan/dsh_desktop/releases) 页获取最新 Tauri 安装包；下表旧版仍可下载使用，覆盖安装即自动迁移数据。
+### 下载 v0.5.0（Tauri 架构，2026-08-21 已发布）
+
+| 平台 | 下载 |
+| --- | --- |
+| 💻 Windows x64 | [`DSH.Desktop_0.5.0_x64-setup.exe`](https://github.com/myYangyunfan/dsh_desktop/releases/download/v0.5.0/DSH.Desktop_0.5.0_x64-setup.exe)（NSIS 安装包，约 87 MB，`currentUser` 模式免管理员，内嵌 WebView2 引导器） |
+
+- v0.5.0 由 [Tauri 发布流水线](https://github.com/myYangyunfan/dsh_desktop/actions/workflows/tauri-release.yml) 云端构建发布，本轮上线 Windows x64；Linux / macOS 产物与便携版将随后续版本陆续产出（见[发布](#-发布)）。
+- 从任意旧版（Electron 0.1.x–0.4.x）覆盖安装 v0.5.0：自动定位旧目录、静默卸载保数据、**装回原位置**，用户数据零迁移（详见[迁移指南](dsh-tauri/docs/upgrade-guide.md)）。
 
 ### 国内用户（Gitee）
 
-> Gitee 单文件限制 100 MB，安装包拆为 3 个分片，全部下载后双击 `merge.bat` 自动合并。
->
-> **分片沿用旧命名**（不含 `win-` 前缀，如 `...-portable-x64.exe.part1`），与 GitHub 新命名格式不同，不影响合并使用。
->
-> macOS 安装包暂未同步到 Gitee，请从 [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases) 下载。
+> [!NOTE]
+> Gitee 镜像当前最新为 **Electron 版 v0.4.1**——v0.5.0（Tauri）安装包暂未同步，请先从 [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases) 下载。
 
-| 版本 | 分片下载 |
-| --- | --- |
-| **便携版**（免安装，双击即用） | [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.9/DSH-Desktop-0.3.9-portable-x64.exe.part1) · [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.9/DSH-Desktop-0.3.9-portable-x64.exe.part2) · [part3](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.9/DSH-Desktop-0.3.9-portable-x64.exe.part3) |
-| **安装版**（创建快捷方式） | [part1](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.9/DSH-Desktop-Setup-0.3.9-x64.exe.part1) · [part2](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.9/DSH-Desktop-Setup-0.3.9-x64.exe.part2) · [part3](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.9/DSH-Desktop-Setup-0.3.9-x64.exe.part3) |
+Gitee 单文件限制 100 MB，Electron 安装包拆为分片（`.part1/.part2/...`），全部下载后双击该版本附件中的 `merge.bat` 自动合并，`SHA256SUMS` 校验。请到 [Gitee Releases](https://gitee.com/my-yang-yunfan/dsh_desktop/releases) 页选择版本下载。
 
-合并工具：[merge.bat](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.9/merge.bat) · 校验：[SHA256SUMS](https://gitee.com/my-yang-yunfan/dsh_desktop/releases/download/v0.3.9/SHA256SUMS)
+### 旧版下载（Electron 0.4.x 及更早）
 
-### 国际用户（GitHub）
-
-[GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases) 提供完整单文件安装包（便携版 + 安装版 + blockmap），无大小限制，直接下载。
-
-> [!IMPORTANT]
-> **下载前必看 —— 安装包名字里就写着答案：**
->
-> - **`win-` = Windows，`macos-` = macOS**（`.exe` 一定是 Windows，`.dmg` / `.zip` 一定是 macOS）；
-> - **`x64` = Intel/AMD 芯片，`arm64` = ARM 芯片**（Windows ARM 设备如 Surface Pro X、Apple Silicon Mac 选 arm64，其余一律选 x64）。
->
-> 按你的设备直接挑：
-
-| 你的设备 | 下载 |
-| --- | --- |
-| 💻 Windows 电脑（绝大多数 Intel/AMD） | `DSH-Desktop-<版本>-win-portable-x64.exe`（免安装，双击即用）或 `-win-setup-x64.exe`（安装版，建快捷方式） |
-| 🪟 Windows ARM（如 Surface Pro X） | `DSH-Desktop-<版本>-win-portable-arm64.exe` |
-| 🍎 Mac Intel | `DSH-Desktop-<版本>-macos-x64.dmg` |
-| 🍏 Mac Apple Silicon（M1/M2/M3/M4） | `DSH-Desktop-<版本>-macos-arm64.dmg` |
+[GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases) 保留全部历史版本。旧版命名规则：**`win-` = Windows，`macos-` = macOS**（`.exe` 一定是 Windows，`.dmg` / `.zip` 一定是 macOS）；**`x64` = Intel/AMD，`arm64` = ARM 芯片**（Windows ARM 设备如 Surface Pro X、Apple Silicon Mac 选 arm64）。形态含 `portable`（免安装便携版）与 `setup`（安装版）。
 
 macOS 版暂未签名，Apple Silicon 首次打开会提示「无法验证开发者」——请**右键点击 App → 打开**，或终端执行：
 
@@ -117,10 +100,11 @@ xattr -dr com.apple.quarantine "/Applications/DSH Desktop.app"
 v0.5.0（Tauri 架构）——前置：[Rust 工具链](https://rustup.rs/) + `dsh-desktop/` 已 `npm install`（内核 payload 源）：
 
 ```bash
-# 测试（Rust 全量 + sidecar）
+# 测试（Rust 全量 + sidecar + 共享脚本）
 cd dsh-tauri
-cargo test --manifest-path src-tauri/Cargo.toml
-node --test sidecar/cli.test.js
+cargo test --manifest-path src-tauri/Cargo.toml   # Rust 142 例（CI 跳 4 集成例 → 138）
+node --test sidecar/cli.test.js                    # sidecar 13 例
+cd ../dsh-desktop && node --test scripts/test/unit-*.test.js  # 共享脚本回归
 
 # 开发运行
 cd src-tauri/src/app && cargo run
@@ -136,7 +120,7 @@ bash dsh-tauri/scripts/smoke-installed.sh
 
 ## 🤖 发布
 
-v0.5.0 架构迁移后，Electron 时代的云端发布流水线（推 `v*` tag 自动构建三平台 Electron 包）已随架构退役。当前发布方式：本地打包（见上）+ 安装态冒烟通过后手动上传 Release；Tauri 的 GitHub Actions 云端流水线在规划中。
+v0.5.0 起发布走 **Tauri GitHub Actions 云端流水线**（[`tauri-release.yml`](.github/workflows/tauri-release.yml)）：推 `v*` tag → 三平台构建（统一 vendor node v24.15.0 + 完整 `stage-payload.sh` + compat 构建 fail-fast）→ 自动汇总产物发布 Release。**v0.5.0 已由此流水线发布**（2026-08-21，本轮上线 Windows x64 NSIS 安装包；Linux / macOS 产物流水线已接，待后续版本产出）。Electron 时代的 `release.yml` 流水线随架构退役。CI 之外的手动本地打包路径见上方[从源码构建](#-从源码构建)（stage-payload → tauri build → 安装态冒烟三步）。
 
 ### 📦 Tauri 架构可导出的安装包形式
 
@@ -144,11 +128,11 @@ v0.5.0 架构迁移后，Electron 时代的云端发布流水线（推 `v*` tag 
 
 | 平台 | 安装包形式 | 状态 |
 | --- | --- | --- |
-| Windows x64 | **NSIS 安装包**（`*-setup.exe`）——LZMA 压缩实测 ~79 MiB；`currentUser` 模式免管理员安装；WebView2 引导器内嵌，离线机器也能装 | ✅ 已实装，过安装态冒烟 |
+| Windows x64 | **NSIS 安装包**（`DSH.Desktop_<版本>_x64-setup.exe`）——LZMA 压缩实测 ~87 MB；`currentUser` 模式免管理员安装；WebView2 引导器内嵌，离线机器也能装；升级链自动装回旧目录保数据 | ✅ **v0.5.0 已发布**（CI 产出，过安装态冒烟） |
 | Windows arm64 | NSIS 安装包（`--target aarch64-pc-windows-msvc` 交叉构建） | 🔜 Tauri 原生支持，待实测 |
 | Windows | MSI（WiX 工具链，`targets` 加 `"msi"`） | 🔜 Tauri 原生支持，待开启 |
-| macOS（Intel / Apple Silicon） | `.app` / `.dmg` 磁盘映像 | 🔜 需扩展 payload 的 unix node 侧 |
-| Linux | `.AppImage`（单文件绿色）/ `.deb` / `.rpm` | 🔜 Tauri 原生支持，按需开启 |
+| Linux x64 | `.AppImage` / `.deb` | 🔶 CI 已接（`x86_64-unknown-linux-gnu`），v0.5.0 未产出，待后续版本 |
+| macOS（Apple Silicon） | `.app` / `.dmg` 磁盘映像 | 🔶 CI 已接（`aarch64-apple-darwin`），v0.5.0 未产出，待后续版本 |
 
 > 便携版（免安装、可放 U 盘）不是 Tauri 内置 target——Tauri 版以 NSIS `currentUser` 安装为默认形态，独立便携包规划中以后续版本提供。
 
@@ -194,7 +178,7 @@ v0.5.0 架构迁移后，Electron 时代的云端发布流水线（推 `v*` tag 
             原生窗口加载 Web UI（仅本机回环访问）
 ```
 
-分层铁律：crates 不依赖 tauri 运行时、可独立单测（Rust 109 例全绿）；装配根只接线不实现；内核侧 Node 逻辑全部活在 `dsh-desktop/scripts/`。开发手册见 [`dsh-tauri/docs/development.md`](dsh-tauri/docs/development.md)。
+分层铁律：crates 不依赖 tauri 运行时、可独立单测（Rust 142 例全绿，CI 环境跳过 4 个本机集成用例后 138 例；sidecar Node 13 例 + 共享脚本 unit 69 文件 899 例）；装配根只接线不实现；内核侧 Node 逻辑全部活在 `dsh-desktop/scripts/`。开发手册见 [`dsh-tauri/docs/development.md`](dsh-tauri/docs/development.md)。
 
 ## 📄 License
 

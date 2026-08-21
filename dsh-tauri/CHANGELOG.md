@@ -1,6 +1,15 @@
 # Changelog — DSH Desktop（Tauri 版，`tauri/modular` 分支）
 
-## [0.5.0] — 2026-08-19 —— 首个 Tauri 对外测试版
+## [未发布]（v0.5.0 tag 之后主干追加，随下版发布）
+
+- **安装器卡死残余根治（$R9 双角色冲突）**：用户对 v0.5.0 安装包再次实测
+  「安装卡住」——`$R9` 同时承担「模式（choose/purge）」与「信号（重扫/继续）」
+  两个角色，第一个键处理完后两者互相覆盖 → choose/purge 逻辑互串空转死循环。
+  修：信号改用 `$0`（`$R9` 专职模式，仅 ProcessLegacyDSH 写入）。
+  makensis 编译 rc=0 验证通过。
+- CI：Linux/macOS 构建修复（icon.png + 宠物窗 transparent() 平台条件编译）。
+
+## [0.5.0] — 2026-08-19 定稿 / 2026-08-21 发布 —— 首个 Tauri 对外测试版
 
 0.1.0 的全部能力（Phase 0-4 实装 + 两轮 Review + 升级适配 + 启动稳定性 +
 NSIS 打包链）之上，本轮聚焦实测缺陷根治与体验收敛：
@@ -25,6 +34,84 @@ NSIS 打包链）之上，本轮聚焦实测缺陷根治与体验收敛：
 - 版本链对齐：`tauri.conf.json` 与 Cargo workspace 统一 0.5.0
   （安装包产物 `DSH Desktop_0.5.0_x64-setup.exe`；sidecar
   DSH_TAURI_VERSION 兜底同步 0.5.0-tauri）。
+- **实测缺陷扫荡（issue #98/#104/#116/#124/#125/#128/#131/#134 等）**：
+  agent 更新检查实装（exit→close + 重试 + npm registry latest 语义化比对，
+  防镜像滞后降级误报）；image_paste_save 实装（剪贴板位图，U2 缺口）；
+  插件更新流双修（registry 环境变量 + dsh.plugin.json 更新后丢失自愈）；
+  farm 预设挂载失败去材料化；会话地图双层壳根治（iframe 守卫拦截壳注入）；
+  内核页窗口控制条注入（拖拽/缩放/最大最小关全恢复）；内核假死探活
+  （端口通、HTTP 无响应的 zombie 形态）；boot 步骤异常分级（「启动受阻」
+  横幅根因之一）；会话删不掉双根因（ACL 端口通配 + 原生 dialog polyfill）。
+
+### 发布链落地与 v0.5.0 发布
+
+- **Electron 壳退役**：纯 Electron 壳文件（main.js / preload.js / updater.js /
+  electron-builder 配置等）全面清理，仓库主线全面转向 Tauri 架构；
+  `dsh-desktop/` 保留 scripts/ assets/ vendor/ 作为共享脚本层与内核 payload 源
+  （sidecar 零重写复用）。
+- **Tauri 三平台发布流水线**（`.github/workflows/tauri-release.yml`）：推 `v*`
+  tag → 云端构建（Windows NSIS / Linux AppImage+deb / macOS dmg）→ 自动汇总
+  发布 Release。关键纪律：三平台 vendor node 统一 v24.15.0、走完整
+  stage-payload.sh（fail-fast 校验）、client-compat 构建失败即断（不再 WARN
+  放行）。
+- **v0.5.0 已发布**（2026-08-21，GitHub Release）：CI 产出
+  `DSH.Desktop_0.5.0_x64-setup.exe`（win-x64 NSIS，LZMA ~87 MB）。Linux /
+  macOS 产物流水线已接、本轮未产出，待后续版本。Gitee 镜像暂停留在
+  Electron v0.4.1，Tauri 包暂未同步。
+
+### 发布前四缺陷根治（实测驱动）
+
+1. **安装器卡死（NSIS 三重修）**：
+   - D1 代码走查（#134「卡在开始不动」，3 人复现）：LegacyHandleEntry
+     出入口 Push/Pop 序列 off-by-one——Pop 恢复的是字符串而非索引 → 索引
+     重置同键无限重扫（纯 CPU 空转无弹窗无进度）。修：彻底弃栈传值，
+     改全局寄存器信号（每次迭代前清零）。
+   - T3 实测复现（12 分钟真实安装器挂起取证）三修：LegacyStripQuotes
+     「取尾字符」bug（`StrCpy $R3 $R3 1 -1` → `-1`）；handler 内误清模式
+     变量致 choose 扫描全部执行 purge 逻辑；MessageBox 补 `/SD IDCANCEL`
+     静默防御（/S 静默安装时 NSIS 默认返回 IDRETRY → 无限重试无 UI）。
+   - V3 全量编译验证：`/SD` 参数必须在 MessageBox 文本串**之后**（NSIS
+     语法），此前位置导致 makensis 编译阻断——修复后 makensis 完整编译
+     （全宏展开 + 双 handler + 扫描循环）**0 错误 0 警告**。
+2. **启动受阻（三修）**：① CI vendor node 版本漂移（v22.14 vs 本地 v24.15）
+   → 三平台统一 v24.15.0；② client-compat 构建失败曾被 WARN 放行 → CI
+   产物无 compat → 插件全灭——改 fail-fast；③ **P0 阻断回归**：updater.js
+   随 Electron 壳退役删除后 sidecar 仍 require 致 boot 全断——sidecar 容错
+   兜底。另加 **boot 链 5 分钟看门狗**：vendor node 被 AV/SmartScreen 拦到
+   半死时 boot 线程永挂 loading 页（连恢复页都不出现）——超时且状态仍非
+   Ready/Recovery 则转恢复页。
+3. **赞助窗终修（关闭卡死 + 无图双根因）**：关闭卡死 = CloseRequested 回调
+   内调 destroy() 导致 UI 线程死锁——移除自定义关闭处理器（默认关闭即
+   destroy）；无图 = file:// 页引相对路径图片被 WebView2 拦、整页 data URL
+   导航又受限——改「HTML 内联 data URI 图片写 `%TEMP%\dsh-sponsor\` 后
+   file:// 加载」组合方案。原生标题栏（decorations+closable）+ 单例复用。
+4. **高级设置栏目空白（三级回落链）**：根因链 = rc8 renderer 只导出
+   apply/inject + 插件解构 undefined 不进 catch（回落是死代码）→
+   useScope(undefined) 抛错 → 条目退位 → dead cell（「栏目在、点开空白」）。
+   修：六插件三级回落 `renderer.useSyncExternalStoreWithSelector →
+   web-react.bindSnapshotSelector → react 原生 useSyncExternalStore`；compat
+   补 `--define:process.env.NODE_ENV=production`（静态消除 process 分支）+
+   具名 re-export。浏览器实证（用户完整 profile 镜像）：自定义提示词
+   0→153 字符、思考强度 0→328、识图 0→471，console 零错误。
+
+### 万无一失检测（发版闸门，5/5 全过）
+
+| # | 检测路 | 结果 |
+|---|--------|------|
+| 1 | Rust 全量 `cargo test --workspace`（18 套件，含瀑布破坏性实测与契约审计） | 142/142 ✅ |
+| 2 | sidecar `node --test sidecar/cli.test.js`（沙箱 home 真机流程） | 13/13 ✅ |
+| 3 | 共享 Node 脚本回归 `scripts/test/unit-*`（69 文件；3 挂为 Electron 壳退役后壳文件引用残留，非 Tauri 线缺陷） | 899 过 ✅ |
+| 4 | NSIS 钩子 makensis 全量编译（全宏展开 + 双 handler + 扫描循环，安装器卡死类缺陷的静态防线） | 0 错 0 警 ✅ |
+| 5 | 安装态冒烟 `smoke-installed.sh`（手拼安装布局 + 环境隔离 + 监听 PID 差集 + Job Object 零残留） | PASS ✅ |
+
+### 验证
+
+- Rust：**18 套件 142 过 0 挂 0 警告**（CI 环境跳过 4 个环境依赖集成用例后 138）
+- sidecar：**13/13**（120s，沙箱 home 真机流程）
+- 共享脚本：**unit 69 文件 899 过 3 挂**（3 挂均为 Electron 线壳文件引用测试，
+  待随壳退役清理）
+- 万无一失检测：**5/5 全过**（见上表）
+- 端到端：loading → boot → 内核就绪换页真实 Web UI；端口稳定化两轮一致
 
 ## [0.1.0] — 2026-08-19
 
@@ -195,10 +282,21 @@ NSIS 打包链）之上，本轮聚焦实测缺陷根治与体验收敛：
   用例）；冒烟 PASS 判据 = 隔离 profile 建立 + preview+内核双监听 + 杀壳
   零残留。
 
-### 已知限制（后续迭代）
+### 已知限制（v0.5.0 发布后，2026-08-21 更新）
+
+- 平台覆盖：v0.5.0 仅产出 Windows x64 NSIS 安装包；Linux / macOS 产物与
+  便携版、MSI 等形态随后续版本产出（CI 流水线已接，见 tauri-release.yml）
+- Gitee 镜像仍为 Electron v0.4.1，Tauri 包暂未同步（国内用户暂走 GitHub）
+- 客户端自更新（tauri-plugin-updater）：签名链已就绪（fail-closed），但
+  更新源 endpoint（DSH_UPDATER_ENDPOINT/PUBKEY）尚未随发版配置注入——
+  菜单「检查客户端更新」当前明确报 E_UPDATER_CONFIG 而非静默失败
+- agent 更新：菜单为最简版本比对（本地 vs npm registry latest，就地展示
+  hasUpdate），完整下载/替换链后续迭代
 - backup-export 2MB 上限为上游 desktop-backup.js 原生行为（与 Electron 版一致）
-- image_paste_save 返回 E_NOT_IMPLEMENTED（剪贴板位图）
 - balance_refresh 为探活触发（数据仍由内核事件下行——单一投递契约保持）
 - WSL 完整托管后续；当前三通道为配置存取 + 探活
 - 备份/诊断导出为固定目录（文档/日志），系统对话框待接 tauri-plugin-dialog
-- 打包出包需 tauri-cli + 签名密钥（配置与流程已就绪，docs/release-keys.md）
+- macOS 版未签名：Apple Silicon 首次打开需右键→打开或 `xattr -dr
+  com.apple.quarantine`（与 Electron 线一致）
+- 共享脚本 unit 套件 3 挂（Electron 壳退役后 preload.js/package.json 壳文件
+  引用残留），属 Electron 线测试债待清理，不影响 Tauri 线

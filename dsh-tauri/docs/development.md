@@ -50,9 +50,9 @@ dsh-tauri/
 export PATH="$PATH:$USERPROFILE/.cargo/bin"   # cargo
 
 # 测试（改任何代码后的最低门槛）
-cd dsh-tauri/src-tauri && cargo test --workspace        # Rust 全量（~127 例，以实际输出为准）
-cd dsh-tauri && node --test sidecar/cli.test.js         # sidecar（12 例）
-cd dsh-desktop && node --test scripts/test/unit-compat-companion.test.js  # 共享脚本回归
+cd dsh-tauri/src-tauri && cargo test --workspace        # Rust 全量（18 套件 142 例；CI 跳 4 集成例 → 138，以实际输出为准）
+cd dsh-tauri && node --test sidecar/cli.test.js         # sidecar（13 例）
+cd dsh-desktop && node --test scripts/test/unit-*.test.js  # 共享脚本回归（69 文件；Electron 线同源）
 
 # 开发运行（debug）
 cd dsh-tauri/src-tauri/src/app && cargo run
@@ -102,23 +102,47 @@ npx --yes @tauri-apps/cli build --config src-tauri/src/app/tauri.conf.json \
 ## 6. 打包与验证（win-x64）
 
 ```bash
-bash dsh-tauri/scripts/stage-payload.sh    # ① 内核 payload 暂存（~500MB，fail-fast 校验）
-npx --yes @tauri-apps/cli build \
+bash dsh-tauri/scripts/stage-payload.sh    # ① 内核 payload 暂存（~500MB，fail-fast 校验；compat 构建失败即断）
+cd dsh-tauri && npx --yes @tauri-apps/cli build \
   --config src-tauri/src/app/tauri.conf.json \
-  --target x86_64-pc-windows-msvc           # ② NSIS 安装包（LZMA ~79MiB）
+  --target x86_64-pc-windows-msvc           # ② NSIS 安装包（LZMA ~87 MB）
 bash dsh-tauri/scripts/smoke-installed.sh  # ③ 安装布局冒烟（绝不跑真安装器！）
 ```
 
 - 产物：`src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe`
+  （v0.5.0 实发产物名 `DSH.Desktop_0.5.0_x64-setup.exe`）
 - 升级链（installerHooks.nsh）：旧版进程检测 → 注册表定位（捕获
   InstallLocation）→ `/S /KEEP_APP_DATA --updated` 静默卸载 → **装回旧位置**
   （可写性试探，Program Files 无权则回退默认）→ 数据全程不动。
+- **NSIS 钩子改动必须过 makensis 编译验证**（宏展开/栈平衡/`/SD` 参数位置
+  都是曾致安装器卡死或编译阻断的坑，见 CHANGELOG「安装器卡死三重修」）。
 - **冒烟为什么手拼布局**：真安装器的 PREINSTALL 会静默卸载本机真实
   Electron 版——开发机上绝不允许。
 - 冒烟判据：preview+内核双新增监听 + 隔离 profile 建立 + 杀壳 Job Object
   零残留（监听 PID 差集法，防本机正式版 node.exe 污染）。
+- **发版（CI）**：推 `v*` tag 触发 `tauri-release.yml` 三平台流水线
+  （Windows NSIS / Linux AppImage+deb / macOS dmg → 自动发布 Release）。
+  v0.5.0 即由此链发布（本轮上线 win-x64）。CI 侧纪律：三平台 vendor node
+  统一 v24.15.0、完整 stage-payload、compat fail-fast；本地出包则以上面
+  三步为准。
 
-## 7. 稳定性三条原则（评审时的默认立场）
+## 7. 万无一失检测（发版闸门——5 路验证管线）
+
+v0.5.0 起发版前的固定验证管线，**5/5 全过才允许出包**（任一红即阻断）：
+
+| # | 检测路 | 命令 | 覆盖什么 | v0.5.0 实测 |
+|---|--------|------|----------|-------------|
+| 1 | Rust 全量 | `cargo test --workspace` | 契约审计（注册⊆契约）/ 瀑布破坏性实测 / 围栏与围栏逃逸 / 崩溃环状态机 | 18 套件 142/0（CI 跳 4 集成例 → 138） |
+| 2 | sidecar 真机 | `node --test sidecar/cli.test.js` | boot 顺序契约 / 插件六通道 / 诊断备份 roundtrip（沙箱 home） | 13/13 |
+| 3 | 共享脚本回归 | `node --test scripts/test/unit-*.test.js`（dsh-desktop） | Electron 线同源的补丁引擎 / 伴随插件同步 / compat 行为契约 | 69 文件 899 过（3 挂为壳退役后壳文件引用残留，Electron 线测试债） |
+| 4 | NSIS 钩子编译 | `makensis` 全量编译 installerHooks.nsh | 安装器卡死类缺陷的静态防线（宏展开 / 栈平衡 / MessageBox 语法） | 0 错误 0 警告 |
+| 5 | 安装态冒烟 | `smoke-installed.sh` | 手拼安装布局：boot 全链真跑 + 端口监听 PID 差集 + Job Object 零残留 | PASS |
+
+> 教训来源：v0.5.0 发布前安装器卡死（#134）与启动受阻两类缺陷全部逃过了
+> 单一测试路——T3 实测复现（12 分钟真实安装器取证）+ D1/D2 代码走查/CI
+> 诊断 + V3 全量编译验证组合后才根治。5 路管线把这组手段固化为发版闸门。
+
+## 8. 稳定性三条原则（评审时的默认立场）
 
 1. **客户端必须能打开**：任何装配失败终态恢复页，绝不退出（含静态页服务
    失败降级 data: 页）。见 data-flow.md §3.2。
@@ -127,17 +151,18 @@ bash dsh-tauri/scripts/smoke-installed.sh  # ③ 安装布局冒烟（绝不跑�
 3. **用户数据不动**：升级/重装/冒烟全链路不触碰 `%APPDATA%\dsh-desktop`
    与 `~/.dsh` 内容；冒烟必须走 DSH_HOME/DSH_TAURI_USERDATA 隔离。
 
-## 8. 测试矩阵速查
+## 9. 测试矩阵速查
 
-| 层 | 命令 | 规模 |
+| 层 | 命令 | 规模（v0.5.0 实测） |
 |----|------|------|
-| Rust 全量（crates+app，含契约审计/瀑布破坏性实测） | `cargo test --workspace` | ~127 |
-| sidecar（boot 顺序/插件通道/诊断） | `node --test sidecar/cli.test.js` | 12 |
-| 共享 Node 脚本（Electron 线同源回归） | `node --test scripts/test/unit-*.test.js` | dsh-desktop 侧 |
+| Rust 全量（crates+app，含契约审计/瀑布破坏性实测） | `cargo test --workspace` | 142（CI 跳 4 集成例 → 138） |
+| sidecar（boot 顺序/插件通道/诊断） | `node --test sidecar/cli.test.js` | 13 |
+| 共享 Node 脚本（Electron 线同源回归） | `node --test scripts/test/unit-*.test.js` | 69 文件 899 过（3 挂为壳退役残留） |
+| NSIS 钩子编译 | makensis 全量编译 | 0 错 0 警 |
 | 安装布局冒烟 | `smoke-installed.sh` | PASS/FAIL |
 | 静态检查 | `cargo build --workspace`（零警告纪律） | — |
 
-## 9. 相关文档
+## 10. 相关文档
 
 - `docs/migration-roadmap.md`——重构决策与 Phase 0-4 状态矩阵
 - `docs/upgrade-guide.md`——Electron→Tauri 升级与数据兼容

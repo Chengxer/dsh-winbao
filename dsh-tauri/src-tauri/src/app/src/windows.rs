@@ -204,20 +204,21 @@ pub fn open_pet_window(app: &tauri::AppHandle, kernel_url: &str) -> Result<serde
     }
     let url = kernel_url.trim_end_matches('/').to_string();
     let _seq = PET_SEQ.fetch_add(1, Ordering::Relaxed);
-    let win = tauri::webview::WebviewWindowBuilder::new(
+    let b = tauri::webview::WebviewWindowBuilder::new(
         app,
         "pet",
         WebviewUrl::External(parse_url(&url)?),
     )
     .title("DSH 宠物")
     .inner_size(PET_W, PET_H)
-    .decorations(false)
+    .decorations(false);
     // 透明窗口需要平台特定 feature（macos-private-api / linux transparent），
     // 非 Windows 平台降级为不透明（宠物窗有实底色）。
     #[cfg(target_os = "windows")]
-    .transparent(true)
+    let b = b.transparent(true);
     #[cfg(not(target_os = "windows"))]
-    .transparent(false)
+    let b = b.transparent(false);
+    let b = b
     .always_on_top(true)
     .skip_taskbar(true)
     .resizable(false)
@@ -228,7 +229,7 @@ pub fn open_pet_window(app: &tauri::AppHandle, kernel_url: &str) -> Result<serde
     .on_navigation(|url| url.as_str().starts_with("http://127.0.0.1"))
     .build()
     .map_err(|e| BridgeError::internal(format!("宠物窗创建（WebView2 透明窗已知风险）: {e}")))?;
-    let _ = win.show();
+    let _ = b.show();
     let _ = app.emit("pet-state", serde_json::json!({ "open": true }));
     Ok(serde_json::json!({ "ok": true, "open": true }))
 }
