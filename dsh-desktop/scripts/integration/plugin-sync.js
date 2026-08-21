@@ -267,7 +267,15 @@ function createPluginSync(ctx) {
   }
 
   function sync() {
-    if (process.platform !== 'win32') return;
+    // 平台门已放开（v0.5.1，K2 清查 #14）：Electron 时代仅发 Windows 故加此门；
+    // Tauri 线发全平台后，非 Windows 上此门导致伴随插件完全不安装（boot 仍报
+    // ok:true 的静默降级）。本函数体（heal→sync→reconcile→register）为纯
+    // fs/path 操作：symlink farm 在非 Windows 退化为普通 symlink（语义等价，
+    // profile-module-heal 的 realpath 判定兼容）。macOS/Linux 首启真机回归
+    // 待验证，出现异常时日志（log 通道）会落 boot 步骤 warning。
+    if (process.platform !== 'win32') {
+      log('plugin-sync: 非 Windows 平台（' + process.platform + '）首次启用伴随插件同步（预览）');
+    }
     try {
       healProfilePatch();
       const home = getHome();
