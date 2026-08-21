@@ -535,12 +535,14 @@ jobs:
         # --bundles 覆盖 tauri.conf.json 的 targets:["nsis"]（Windows 专用，
         # 在 Linux/macOS 上不会产出任何 bundle——历史 run 因此从未真正打过
         # Linux/macOS 安装包，旧 upload 用 warn 级别静默吞掉了）。
-        # deb 先行（必须成功）；AppImage 的 linuxdeploy 在 CI 偶发失败，
-        # 单独跑且非阻断——有 deb 兜底。
+        # 第二个 --config 内联覆盖 productName 去空格："DSH Desktop"（含空格）
+        # 是 linuxdeploy/AppImage 打包失败的已知根因（deb 不受影响）；产物
+        # 最终文件名由 Rename 步骤统一，与 productName 无耦合。
+        # deb 先行（必须成功）；AppImage 单独跑且非阻断——有 deb 兜底。
         run: |
           cd dsh-tauri
-          npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --target x86_64-unknown-linux-gnu --bundles deb
-          npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --target x86_64-unknown-linux-gnu --bundles appimage || echo "::warning::AppImage bundling failed (deb still published)"
+          npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --config '{"productName":"DSH-Desktop"}' --target x86_64-unknown-linux-gnu --bundles deb
+          npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --config '{"productName":"DSH-Desktop"}' --target x86_64-unknown-linux-gnu --bundles appimage || echo "::warning::AppImage bundling failed (deb still published)"
 
       - name: Rename artifacts
         run: |
