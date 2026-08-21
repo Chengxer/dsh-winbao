@@ -683,7 +683,10 @@ impl Supervisor {
         std::thread::spawn(move || {
             // 就绪后失联分两形态（#122 假死定性）：
             //   a) TCP 连不上（进程死/端口死）→ 连续 3 次按退出处理（原语义）；
-            //   b) TCP 通但 HTTP 连续无响应 → 假死，连续 5 次（~15s）受控重启，
+            //   b) TCP 通但 HTTP 连续无响应 → 假死，连续 20 次（~60s）受控重启。
+            //      阈值从 5(15s) 提到 20(60s)：用户实测内核做上下文压缩/LSTM 推理
+            //      时事件循环被占 20-30s——15s 会误杀正在工作的内核（导致
+            //      "signal time out" + "中断不了" + 频繁压缩的恶性循环）。
             //      走 on_kernel_exit 的崩溃环窗口限次（天然防死循环）。
             let mut consecutive = 0usize;
             let mut zombie = 0usize;
@@ -724,7 +727,7 @@ impl Supervisor {
                 zombie += 1;
                 let _ = tx.send(SupervisorEvent::ZombieSuspect { consecutive: zombie });
                 log_line(&format!("内核假死可疑（端口通、HTTP 无响应）×{zombie}"));
-                if zombie >= 5 {
+                if zombie >= 20 {
                     log_line("内核假死判定成立（连续 15s HTTP 无响应），受控重启");
                     this.kill_kernel();
                     this.on_kernel_exit(None, &tx);
