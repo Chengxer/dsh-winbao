@@ -152,14 +152,30 @@ pub fn restart_service(app: AppHandle) -> Result<serde_json::Value, BridgeError>
     let state = app.state::<AppState>();
     let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
     let sv = sv.ok_or_else(|| BridgeError::internal("supervisor 未初始化"))?;
-    let (tx, rx) = std::sync::mpsc::channel();
     let preferred = state.last_port.load(Ordering::Relaxed);
-    std::thread::spawn(move || {
-        while let Ok(ev) = rx.recv() {
-            let _ = ev;
+    // 事件路由复用（v0.5.1「重启后白屏」回归根治）：必须走 AppState 里
+    // route_events 消费的那条通道（supervisor_tx），KernelReady/CrashLoop/
+    // BootStep 才有人路由——此前这里新建通道并把事件全部 drain 掉，重启
+    // 成功后无人换页（真机复现：内核已就绪且稳定落定，页面永远停在
+    // loading「正在启动」，白屏形态）。
+    let tx = state
+        .supervisor_tx
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    match tx {
+        Some(tx) => sv.restart(tx, u16::try_from(preferred).ok()),
+        None => {
+            // 兜底（理论不可达：supervisor 在场则装配通道必在）：drain 防阻塞。
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                while let Ok(ev) = rx.recv() {
+                    let _ = ev;
+                }
+            });
+            sv.restart(tx, u16::try_from(preferred).ok());
         }
-    });
-    sv.restart(tx, u16::try_from(preferred).ok());
+    }
     Ok(serde_json::json!({ "ok": true }))
 }
 
@@ -171,6 +187,22 @@ pub fn poc_echo_json(payload: serde_json::Value) -> Result<serde_json::Value, Br
 
 #[cfg(test)]
 mod tests {
+    /// restart_service 必须复用 supervisor_tx 装配通道（v0.5.1「重启后白屏」
+    /// 回归锚点）：此前新建通道 + drain 线程把 KernelReady/CrashLoop 全部
+    /// 吞掉——重启成功无人换页（真机复现：内核就绪且稳定落定，页面永远停在
+    /// loading「正在启动」）。事件必须走 route_events 消费的那条通道。
+    #[test]
+    fn restart_service_reuses_supervisor_tx_shape() {
+        let src = include_str!("lifecycle.rs").replace("\r\n", "\n");
+        let seg = src
+            .split("pub fn restart_service")
+            .nth(1)
+            .and_then(|s| s.split("pub fn poc_echo_json").next())
+            .expect("restart_service 段");
+        assert!(seg.contains("supervisor_tx"), "必须复用装配通道 supervisor_tx: {seg}");
+        assert!(seg.contains("sv.restart(tx,"), "restart 必须走复用通道");
+    }
+
     /// copy_text 平台三分支形态锚点（include_str! 形态断言法）：非 Windows
     /// 不得再 spawn powershell（此前 mac/linux 上复制功能全坏——spawn 直接
     /// Err）；macOS 走 pbcopy、Linux 走 xclip/xsel/wl-copy 尝试链。

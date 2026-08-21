@@ -74,6 +74,9 @@ struct Inner {
     pending_good: Option<String>,
     /// restart_service 的代际号：旧世代的异步任务看到代际变了就自杀。
     generation: u64,
+    /// 探活环令牌：每次就绪布防递增，旧探活环看到令牌不符自行退出
+    /// （同代际下崩溃自动重启换内核后，旧环不得继续探活/误杀新内核）。
+    probe_gen: u64,
     stopping: bool,
 }
 
@@ -138,6 +141,7 @@ impl Supervisor {
                 ready_tx: None,
                 pending_good: None,
                 generation: 0,
+                probe_gen: 0,
                 stopping: false,
             })),
         }
@@ -195,13 +199,19 @@ impl Supervisor {
 
     /// boot 看门狗线程：`timeout` 后仍在「未完成」态 → 转恢复页。
     /// 超时参数化仅为测试注入短超时（生产恒 BOOT_WATCHDOG_TIMEOUT），
-    /// 对外行为零变更。
+    /// 对外行为零变更。代际感知（v0.5.1 频繁重启回归修复）：restart 每次
+    /// 都会再挂一个看门狗，旧看门狗若不校验代际，会在新一次 boot 进行中
+    /// 超时开火，把正在启动的内核打入恢复页（慢机上表现为反复重启）。
     fn spawn_boot_watchdog(this: &Arc<Self>, tx: Sender<SupervisorEvent>, timeout: Duration) {
         let wd_tx = tx;
         let this_wd = Arc::clone(this);
+        let gen = this.inner.lock().unwrap_or_else(|p| p.into_inner()).generation;
         std::thread::spawn(move || {
             std::thread::sleep(timeout);
             let g = this_wd.inner.lock().unwrap_or_else(|p| p.into_inner());
+            if g.generation != gen {
+                return; // 旧世代的看门狗：新 boot 已接手，本犬退休。
+            }
             if Self::watchdog_should_fire(g.stopping, g.state) {
                 drop(g);
                 eprintln!("[supervisor] 看门狗：boot 链 5 分钟超时，转恢复页");
@@ -263,7 +273,7 @@ impl Supervisor {
 
             // ---- [3] 首次拉起（有界等待 120s，对齐 Electron waitUntilUp）----
             match Arc::clone(&this).spawn_and_wait_ready(port, &tx, Duration::from_secs(120)) {
-                Ok(url) => return this.on_boot_success(&tx, url, port, gen, boot_snap),
+                Ok(url) => return this.on_boot_success(url, port, gen, boot_snap),
                 Err(first) => {
                     log_line(&format!("守护瀑布：首次拉起失败（{first}），进入体检修复"));
                 }
@@ -289,7 +299,7 @@ impl Supervisor {
             match Arc::clone(&this).spawn_and_wait_ready(port2, &tx, Duration::from_secs(90)) {
                 Ok(url) => {
                     this.guard_incident("boot-recovered", &format!("首次启动失败，体检修复后恢复。修复项：{applied:?}"));
-                    return this.on_boot_success(&tx, url, port2, gen, boot_snap);
+                    return this.on_boot_success(url, port2, gen, boot_snap);
                 }
                 Err(second) => log_line(&format!("守护瀑布：修复后仍失败（{second}），进入回滚")),
             }
@@ -310,7 +320,7 @@ impl Supervisor {
                     match Arc::clone(&this).spawn_and_wait_ready(port3, &tx, Duration::from_secs(90)) {
                         Ok(url) => {
                             this.guard_incident("rollback-recovered", &format!("回滚到快照 {id} 后恢复启动"));
-                            return this.on_boot_success(&tx, url, port3, gen, None);
+                            return this.on_boot_success(url, port3, gen, None);
                         }
                         Err(final_err) => {
                             this.guard_incident("boot-failed", &format!("回滚到 {id} 后仍无法启动：{final_err}"));
@@ -326,27 +336,20 @@ impl Supervisor {
         }
     }
 
-    /// 就绪成功路径：换页事件 + 待落定快照 + 稳定落定线程（45s 后 markGood，
+    /// 就绪成功路径：待落定快照 + 稳定落定线程（45s 后 markGood，
     /// Electron armStabilityWatch 语义：稳定存活即成为「最后良好」回滚锚点）。
-    fn on_boot_success(self: &Arc<Self>, tx: &Sender<SupervisorEvent>, url: String, port: u16, gen: u64, snap: Option<String>) {
+    ///
+    /// 换页（KernelReady）与探活布防不在此处：就绪行线程是唯一换页源
+    ///（含 HTTP 热探），瀑布/自动重启两条路径统一走它——此前这里再发一次
+    /// KernelReady 构成双发（双 navigate / 双心跳监测 / 双诊断探针，M1 审计
+    /// 遗留；真机日志可见 t0/probe 输出全双份）。
+    fn on_boot_success(self: &Arc<Self>, url: String, port: u16, gen: u64, snap: Option<String>) {
+        let _ = (url, port);
         {
             let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             g.pending_good = snap;
         }
         self.set_state(RunState::Ready);
-        // HTTP 热探（用户实测「Failed to fetch 闪现」根治）：ready 行只表示
-        // 内核进程打出就绪日志，HTTP 监听可能有 ~100ms 窗口尚未接受请求——
-        // 换页前先确认 HTTP 层真正可响应，消除页面首次 API 调的闪败。
-        for i in 0..50 {
-            if Self::http_alive(port) {
-                break;
-            }
-            if i == 49 {
-                log_line("HTTP 热探超时（5s），换页继续（可能首次闪败）");
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let _ = tx.send(SupervisorEvent::KernelReady { url, port });
         let this = Arc::clone(self);
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(SERVICE_STABLE_SECS));
@@ -362,7 +365,6 @@ impl Supervisor {
                 log_line(&format!("守护瀑布：服务稳定存活，快照 {id} 落定为最后良好"));
             }
         });
-        self.probe_loop(port, tx.clone(), gen);
     }
 
     fn cancelled(&self, gen: u64) -> bool {
@@ -633,7 +635,29 @@ impl Supervisor {
                         let rtx = { let mut g = this.inner.lock().unwrap_or_else(|p| p.into_inner()); g.kernel_url = Some(u.clone()); g.ready_tx.take() };
                         if let Some(rtx) = rtx { let _ = rtx.send(Ok(u.clone())); }
                         this.set_state(RunState::Ready);
+                        // HTTP 热探（用户实测「Failed to fetch 闪现」根治）：ready 行
+                        // 只表示内核进程打出就绪日志，HTTP 监听可能有 ~100ms 窗口
+                        // 尚未接受请求。本线程是 KernelReady 的唯一发送源（瀑布
+                        // on_boot_success 与崩溃自动重启两条路径统一在此换页）——
+                        // 此前自动重启路径无热探，就绪行早于 bind 时换页 → WebView2
+                        // 错误页（白屏形态之一；且错误页上垫片照常发心跳，渲染层
+                        // 心跳监测判定「页面健康」永不自愈）。
+                        for i in 0..50 {
+                            if Self::http_alive(port) { break; }
+                            if i == 49 { log_line("HTTP 热探超时（5s），换页继续（可能首次闪败）"); }
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
                         let _ = tx2.send(SupervisorEvent::KernelReady { url: u, port });
+                        // 探活布防（唯一位置）：就绪行线程对每次内核就绪都布防——
+                        // 覆盖瀑布路径与崩溃自动重启路径（此前只在 on_boot_success
+                        // 布防，自动重启后的内核处于无探活状态）。probe_gen 令牌
+                        // 递增令上一代探活环自行退出（同代际换内核不得双探活）。
+                        let (probe_gen, live_gen) = {
+                            let mut g = this.inner.lock().unwrap_or_else(|p| p.into_inner());
+                            g.probe_gen += 1;
+                            (g.probe_gen, g.generation)
+                        };
+                        this.probe_loop(port, tx2.clone(), live_gen, probe_gen);
                     }
                 }
             }
@@ -690,9 +714,14 @@ impl Supervisor {
         log_line(&format!("内核退出 code={code:?} 第 {crashes} 次"));
         let _ = tx.send(SupervisorEvent::KernelExit { code, crashed: true });
         match verdict {
-            Verdict::Tripped => self.enter_recovery_tx(tx, "崩溃环触发"),
-            _ => {
+            // 崩溃环触发后冷却期内的后续崩溃：维持恢复页，不再自动拉起——
+            // 此前 Cooldown 落在 `_` 兜底臂继续自动重启，恢复页背后内核反复
+            // 拉起/退出（用户侧「频繁重启」的主机），且任一次走到就绪行还会
+            // 经 KernelReady 把页面从恢复页拉回内核页（页面反复横跳）。
+            Verdict::Tripped | Verdict::Cooldown => self.enter_recovery_tx(tx, "崩溃环触发"),
+            Verdict::Ok => {
                 // 未成环：自动重启一次（Electron watchServerProc 语义：异常退出自动拉起）。
+                // 探活/换页不在此布防：新内核的就绪行线程统一负责（probe_gen 令牌）。
                 let port = self.inner.lock().unwrap_or_else(|p| p.into_inner()).port;
                 let gen = self.inner.lock().unwrap_or_else(|p| p.into_inner()).generation;
                 let this = Arc::clone(self);
@@ -734,7 +763,7 @@ impl Supervisor {
         matches!(s.read(&mut buf), Ok(n) if n > 0)
     }
 
-    fn probe_loop(self: &Arc<Self>, port: u16, tx: Sender<SupervisorEvent>, gen: u64) {
+    fn probe_loop(self: &Arc<Self>, port: u16, tx: Sender<SupervisorEvent>, gen: u64, probe_gen: u64) {
         let this = Arc::clone(self);
         std::thread::spawn(move || {
             // 就绪后失联分两形态（#122 假死定性）：
@@ -744,16 +773,22 @@ impl Supervisor {
             //      时事件循环被占 20-30s——15s 会误杀正在工作的内核（导致
             //      "signal time out" + "中断不了" + 频繁压缩的恶性循环）。
             //      走 on_kernel_exit 的崩溃环窗口限次（天然防死循环）。
+            //
+            // 退出条件（v0.5.1 频繁重启回归修复）：
+            //   - probe_gen 令牌不符（新一代内核已布防，本环属上一代内核）；
+            //   - 状态进 CrashLoop/Recovery：崩溃环/恢复页期间不得继续探活——
+            //     此前探活环在恢复页期间继续探死端口，3 次失联后 on_kernel_exit
+            //     会把崩溃自动重启刚拉起的新内核一并杀掉（复活-再杀循环）。
             let mut consecutive = 0usize;
             let mut zombie = 0usize;
             loop {
                 std::thread::sleep(Duration::from_secs(3));
                 {
                     let g = this.inner.lock().unwrap_or_else(|p| p.into_inner());
-                    if g.stopping || g.generation != gen {
+                    if g.stopping || g.generation != gen || g.probe_gen != probe_gen {
                         return;
                     }
-                    if g.state == RunState::Recovery {
+                    if g.state == RunState::Recovery || g.state == RunState::CrashLoop {
                         return;
                     }
                 }
@@ -773,8 +808,17 @@ impl Supervisor {
                     let _ = tx.send(SupervisorEvent::ProbeFailed { consecutive });
                     if consecutive >= 3 {
                         // 端口连续失联但进程可能还活着：杀掉按退出处理。
-                        this.kill_kernel();
-                        this.on_kernel_exit(None, &tx);
+                        // 内核已不在（退出处理链已接管：自动重启或恢复页）时
+                        // 不得再记一次崩溃——那会把后续自动重启的新内核当作
+                        // 本次失败连带处理。
+                        let kernel_present = {
+                            let g = this.inner.lock().unwrap_or_else(|p| p.into_inner());
+                            g.kernel.is_some()
+                        };
+                        if kernel_present {
+                            this.kill_kernel();
+                            this.on_kernel_exit(None, &tx);
+                        }
                         return;
                     }
                     continue;
@@ -812,17 +856,31 @@ impl Supervisor {
     }
     fn enter_recovery_tx(&self, tx: &Sender<SupervisorEvent>, reason: &str) {
         self.kill_kernel();
+        // 幂等：已在崩溃环态（冷却期内后续崩溃）不再重发 CrashLoop 事件——
+        // 事件会再导航恢复页 + 弹系统通知，崩溃连环下发会刷屏。
+        let already = self.state() == RunState::CrashLoop;
         self.set_state(RunState::CrashLoop);
         {
             let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             g.last_error = Some(reason.to_string());
         }
+        if already {
+            log_line(&format!("崩溃环冷却期内再次崩溃，维持恢复页（{reason}）"));
+            return;
+        }
+        log_line(&format!("崩溃环触发，转恢复页（{reason}）"));
         let crashes = self.inner.lock().unwrap_or_else(|p| p.into_inner()).crash_count;
         let _ = tx.send(SupervisorEvent::CrashLoop { crashes });
     }
 
     /// 恢复页「重启」：手动复位崩溃环。
     pub fn recovery_restart(self: &Arc<Self>, tx: Sender<SupervisorEvent>) {
+        self.recovery_restart_with_port(tx, None);
+    }
+
+    /// 恢复页「重启」（带优先端口）：复位崩溃环 + 全链重启。
+    /// preferred 传上次内核端口（origin 稳定，SPA localStorage 偏好不丢）。
+    pub fn recovery_restart_with_port(self: &Arc<Self>, tx: Sender<SupervisorEvent>, preferred_port: Option<u16>) {
         {
             let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             g.crash.record_recovery();
@@ -830,7 +888,7 @@ impl Supervisor {
             g.last_error = None;
         }
         self.set_state(RunState::Recovery);
-        self.restart(tx, None);
+        self.restart(tx, preferred_port);
     }
 
     /// 杀内核整树（restart / 恢复页 / 探活失败 / 应用退出共用）。
@@ -1116,6 +1174,85 @@ Content-Length: 0
         for s in [Boot, Spawn, Ready, CrashLoop] {
             assert!(!Supervisor::watchdog_should_fire(true, s), "stopping={s:?} 退出路径压制看门狗");
         }
+    }
+
+    /// v0.5.1「频繁重启 + 白屏」回归锚点组（真机复现定案的四个断流/复活面）。
+    /// 形态断言法（include_str!），防回退：
+    ///   ① KernelReady 单源 + 热探：全文件只允许一处 send(KernelReady)——
+    ///      在就绪行线程内且前置 http_alive 热探（自动重启路径换页不再竞速
+    ///      HTTP bind → 不再产 chrome-error 白页）；on_boot_success 不得再发。
+    ///   ② 崩溃环 Cooldown 不得自动重启（此前 `_` 兜底臂把恢复页背后的内核
+    ///      反复拉起，页面在恢复页/内核页横跳 = 用户侧「频繁重启」）。
+    ///   ③ 探活环令牌 + CrashLoop/Recovery 退出 + 内核不在不补刀（防旧环
+    ///      复活/误杀自动重启的新内核）。
+    ///   ④ 看门狗代际感知（restart 叠犬不得打断新 boot）。
+    #[test]
+    fn regression_v051_restart_whitescreen_anchors() {
+        let src = include_str!("supervisor.rs").replace("\r\n", "\n");
+        // ① KernelReady 单源（拼接构串避免测试字面量自匹配 include_str! 文本）。
+        let send_tx2 = ["tx2", ".send(", "SupervisorEvent::KernelReady"].concat();
+        let send_tx = ["tx", ".send(", "SupervisorEvent::KernelReady"].concat();
+        let sends = src.matches(&send_tx2).count() + src.matches(&send_tx).count();
+        assert_eq!(sends, 1, "KernelReady 只允许就绪行线程单点发送（双发=双 navigate/双心跳监测/双诊断探针）: {sends}");
+        let ready_seg = src
+            .split("if url.is_none() {")
+            .nth(1)
+            .and_then(|s| s.split("// stdout EOF").next())
+            .expect("就绪行线程段");
+        let probe_pos = ready_seg.find("Self::http_alive(port)").expect("就绪换页前必须 HTTP 热探");
+        let send_pos = ready_seg.find(&send_tx2).expect("就绪换页发送");
+        assert!(probe_pos < send_pos, "热探必须先于 KernelReady（防就绪行早于 HTTP bind 的白页竞速）");
+        let boot_seg = src
+            .split("fn on_boot_success")
+            .nth(1)
+            .and_then(|s| s.split("fn cancelled").next())
+            .expect("on_boot_success 段");
+        assert!(!boot_seg.contains("KernelReady"), "on_boot_success 不得再发 KernelReady（单源在就绪行线程）");
+        assert!(!boot_seg.contains("probe_loop"), "探活布防不在此处（就绪行线程统一布防，覆盖自动重启路径）");
+        // ② Cooldown 不自动重启。
+        let exit_seg = src
+            .split("fn on_kernel_exit")
+            .nth(1)
+            .and_then(|s| s.split("/// 探活循环").next())
+            .expect("on_kernel_exit 段");
+        assert!(
+            exit_seg.contains("Verdict::Tripped | Verdict::Cooldown =>"),
+            "Cooldown 必须与 Tripped 同路进恢复页（不得落自动重启）"
+        );
+        assert!(exit_seg.contains("Verdict::Ok =>"), "仅 Ok 判定可自动重启");
+        assert!(!exit_seg.contains("_ =>"), "不得有兜底臂吞掉 Cooldown");
+        // ③ 探活环守卫。
+        let probe_seg = src
+            .split("fn probe_loop")
+            .nth(1)
+            .and_then(|s| s.split("/// 原地重启").next())
+            .expect("probe_loop 段");
+        assert!(probe_seg.contains("g.probe_gen != probe_gen"), "探活环必须校验令牌（同代际换内核不得双环）");
+        assert!(probe_seg.contains("RunState::CrashLoop"), "崩溃环态必须退出探活（防恢复页期间复活内核）");
+        assert!(probe_seg.contains("kernel_present"), "内核已不在时不得补刀记崩溃（防连带杀掉自动重启的新内核）");
+        // ④ 看门狗代际。
+        let wd_seg = src
+            .split("fn spawn_boot_watchdog")
+            .nth(1)
+            .and_then(|s| s.split("/// 看门狗触发判定").next())
+            .expect("spawn_boot_watchdog 段");
+        assert!(wd_seg.contains("g.generation != gen"), "看门狗必须代际感知（restart 叠犬不得打断新 boot）");
+    }
+
+    /// enter_recovery_tx 幂等锚点：冷却期内后续崩溃不得重发 CrashLoop 事件
+    /// （事件会再导航恢复页 + 弹系统通知，连环崩溃下发会刷屏）。
+    #[test]
+    fn enter_recovery_is_idempotent_while_in_crashloop() {
+        let src = include_str!("supervisor.rs").replace("\r\n", "\n");
+        let seg = src
+            .split("fn enter_recovery_tx")
+            .nth(1)
+            .and_then(|s| s.split("/// 恢复页「重启」").next())
+            .expect("enter_recovery_tx 段");
+        assert!(seg.contains("already"), "必须判定已在崩溃环态");
+        let already_pos = seg.find("if already").expect("already 分支");
+        let send_pos = seg.find("tx.send(SupervisorEvent::CrashLoop").expect("CrashLoop 事件发送");
+        assert!(already_pos < send_pos, "already 分支必须先于事件发送 return");
     }
 
     /// 看门狗端到端（短超时注入，生产 300s 参数化）：boot 永挂（卡 Boot 态）

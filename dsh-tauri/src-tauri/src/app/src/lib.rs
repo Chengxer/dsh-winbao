@@ -385,7 +385,9 @@ fn route_one_event(app: &tauri::AppHandle, ev: SupervisorEvent) {
             SupervisorEvent::KernelExit { code, .. } => {
                 eprintln!("[route] 内核退出 code={code:?}");
             }
-            SupervisorEvent::CrashLoop { .. } => {
+            SupervisorEvent::CrashLoop { crashes } => {
+                // 崩溃环路由此前零日志：真机排障时「频繁重启」在日志里不可见。
+                eprintln!("[route] 崩溃环触发（累计 {crashes} 次），主窗转恢复页");
                 let _ = app.emit("kernel-fail", serde_json::json!({ "reason": "内核反复异常退出" }));
                 if let Some(state) = app.try_state::<AppState>() {
                     let recovery = state.recovery_url.lock().unwrap_or_else(|p| p.into_inner()).clone();

@@ -54,8 +54,24 @@ pub fn recovery_restart(app: AppHandle) -> Result<serde_json::Value, BridgeError
     let state = app.state::<AppState>();
     let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
     if let Some(sv) = sv {
-        let (tx, _rx) = std::sync::mpsc::channel();
-        sv.recovery_restart(tx);
+        // 事件路由复用（v0.5.1「恢复页重启后白屏」回归根治）：走 route_events
+        // 消费的 supervisor_tx 通道——此前新建通道且 rx 即刻丢弃，重启成功后
+        // KernelReady 无人路由、失败后 CrashLoop 无人路由，页面永远停在
+        // loading 页（真机复现：内核 3s 就绪 + 稳定落定，页面零进度卡死）。
+        // 端口优先复用上次内核端口（origin 稳定，SPA localStorage 偏好不丢）。
+        let preferred = state.last_port.load(std::sync::atomic::Ordering::Relaxed);
+        let tx = state
+            .supervisor_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        match tx {
+            Some(tx) => sv.recovery_restart_with_port(tx, u16::try_from(preferred).ok()),
+            None => {
+                let (tx, _rx) = std::sync::mpsc::channel();
+                sv.recovery_restart_with_port(tx, u16::try_from(preferred).ok());
+            }
+        }
     } else {
         // 内核从未装配：恢复页「重启内核」= 重新装配（如用户刚补齐安装产物）。
         crate::start_supervisor(app.clone()).map_err(BridgeError::internal)?;
@@ -65,8 +81,28 @@ pub fn recovery_restart(app: AppHandle) -> Result<serde_json::Value, BridgeError
 }
 
 #[tauri::command]
-pub fn recovery_open_logs() -> Result<serde_json::Value, BridgeError> {
+pub fn recovery_open_logs(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
     let dir = shell_core::DshPaths::resolve().logs;
     let _ = std::fs::create_dir_all(&dir);
     open_in_explorer(&dir)
+}
+
+#[cfg(test)]
+mod tests {
+    /// 恢复页「重启内核」必须复用 supervisor_tx 装配通道（v0.5.1「恢复页
+    /// 重启后白屏」回归锚点，真机复现定案）：此前新建通道且 rx 即刻丢弃，
+    /// KernelReady 无人路由 → 页面永远停在 loading 页（内核其实已就绪）；
+    /// 失败路径 CrashLoop 也无人路由 → 无法回到恢复页。
+    #[test]
+    fn recovery_restart_reuses_supervisor_tx_shape() {
+        let src = include_str!("recovery.rs").replace("\r\n", "\n");
+        let seg = src
+            .split("pub fn recovery_restart")
+            .nth(1)
+            .and_then(|s| s.split("pub fn recovery_open_logs").next())
+            .expect("recovery_restart 段");
+        assert!(seg.contains("supervisor_tx"), "必须复用装配通道 supervisor_tx: {seg}");
+        assert!(seg.contains("recovery_restart_with_port"), "必须走带优先端口的重启入口");
+        assert!(seg.contains("last_port"), "优先复用上次内核端口（origin 稳定）");
+    }
 }
