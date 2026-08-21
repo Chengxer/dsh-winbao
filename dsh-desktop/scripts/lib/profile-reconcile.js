@@ -26,6 +26,9 @@
 //   · 包解析含 pnpm 虚拟仓回落（issue #132）：WSL 模式下 profile 走 UNC 路径、
 //     Windows 侧 node 穿不透 pnpm 的 Linux 符号链接，直查失败时以 .pnpm 仓内
 //     实体目录判定，保证「内核（运行于 WSL 内）能装配的登记不会被误删」；
+//   · UNRESOLVABLE 判定含 WSL UNC 防误删保护（issue #132）：锚点位于
+//     \\wsl$ / \\wsl.localhost 时 Windows 侧存在性检查不可靠（解析不到 ≠
+//     缺失），此类登记保留 + 告警（unverifiable），绝不移除 / 隔离；
 //   · 全部写入原子化（writeFileAtomic），健康 manifest 零写入（幂等）。
 //
 // 对账执行时机：壳层每次启动（main.js syncCompanionPlugins）与
@@ -155,10 +158,31 @@ function resolveBundleDirLike(anchorFile, packageName) {
     try {
       if (fs.existsSync(path.join(candidate, 'package.json'))) return candidate;
     } catch { /* 不可读按未找到继续 */ }
+    // pnpm 符号链接结构（issue #132）：直查失败时先用 realpathSync 解出真实
+    // 路径再校验——校验（existsSync 与后续 inspectBundleDir 的读文件）落在
+    // 实体目录上，不依赖符号链接可穿透。覆盖 Windows 原生 junction / 可穿透
+    // 符号链接场景；WSL UNC 上的 Linux 符号链接 realpath 失败 → 走仓回落。
+    const realCandidate = realpathOrNull(candidate);
+    if (realCandidate && realCandidate !== candidate) {
+      try {
+        if (fs.existsSync(path.join(realCandidate, 'package.json'))) return realCandidate;
+      } catch { /* 不可读按未找到继续 */ }
+    }
     const viaStore = resolveViaPnpmStore(searchPath, packageName);
     if (viaStore) return viaStore;
   }
   return '';
+}
+
+/**
+ * fs.realpathSync 包装（issue #132）：把符号链接 / junction 解析成最终实体
+ * 路径；目标不可达（WSL UNC 上 Windows 侧无法穿透的 Linux 符号链接等）时
+ * 返回 null，调用方按「解析不出」继续走其它回落。
+ * @param {string} p 待解析路径
+ * @returns {string|null}
+ */
+function realpathOrNull(p) {
+  try { return fs.realpathSync(p); } catch { return null; }
 }
 
 /**
@@ -197,14 +221,20 @@ function resolveViaPnpmStore(nodeModulesDir, packageName) {
   if (!names.includes(leafName)) return '';
 
   const linkPath = path.join(topDir, leafName);
-  // 精确路径 1：符号链接目标可读（可穿透场景）且指向 .pnpm 仓内实体目录。
-  try {
-    const resolved = path.resolve(path.dirname(linkPath), fs.readlinkSync(linkPath));
-    if (splitPathSegments(resolved).includes('.pnpm') &&
-        fs.existsSync(path.join(resolved, 'package.json'))) {
-      return resolved;
-    }
-  } catch { /* Linux 符号链接（LX reparse）Windows 侧读取失败属预期 → 走版本选择 */ }
+  // 精确路径 1：符号链接目标可解析（realpathSync 全链解析优先——issue #132
+  // 任务 a；readlinkSync 单级兜底）且指向 .pnpm 仓内实体目录。
+  for (const resolveLink of [
+    () => fs.realpathSync(linkPath),
+    () => path.resolve(path.dirname(linkPath), fs.readlinkSync(linkPath)),
+  ]) {
+    try {
+      const resolved = resolveLink();
+      if (splitPathSegments(resolved).includes('.pnpm') &&
+          fs.existsSync(path.join(resolved, 'package.json'))) {
+        return resolved;
+      }
+    } catch { /* Linux 符号链接（LX reparse）Windows 侧解析失败属预期 → 走版本选择 */ }
+  }
 
   // 门 2：.pnpm 仓存在且有条目。
   const storeDir = path.join(nodeModulesDir, '.pnpm');
@@ -263,6 +293,21 @@ function declaredExactVersion(nodeModulesDir, packageName) {
 }
 
 /**
+ * 判定路径是否 WSL 发行版的 UNC 形态（\\wsl$\<distro> / \\wsl.localhost\<distro>，
+ * 同时容忍正斜杠写法；issue #132）。WSL 模式下 profile 与 dsh 安装都在 WSL
+ * 文件系统内，Windows 侧 node 经 9P 协议访问：真实目录可读写，但 pnpm 在
+ * ext4 上创建的 Linux 符号链接不可穿透——该环境下**一切存在性检查的 false
+ * 结果都不构成「缺失」的证据**，解析失败只能按「无法确认」处理。
+ * @param {string} p 任意路径（空串 / 非字符串按非 WSL 处理）
+ * @returns {boolean}
+ */
+function isWslUncPath(p) {
+  if (typeof p !== 'string' || p === '') return false;
+  const norm = p.replace(/\//g, '\\').toLowerCase();
+  return norm.startsWith('\\\\wsl$\\') || norm.startsWith('\\\\wsl.localhost\\');
+}
+
+/**
  * 判定核心 bundles 是否全部可解析（决定能否安全预写 / 重建 manifest）。
  * 与 validateBundleEntry 共用同一解析实现（resolveBundleDirLike，含 NODE_PATH
  * / 全局 node_modules）——核心解析判定与登记校验必须一致，否则会出现
@@ -293,7 +338,9 @@ function resolvableCoreNames(coreNames, installAnchorDir) {
  * @param {(content: string) => unknown|{load: (content: string) => unknown}} [opts.parsePatch]
  *   entry-list 方言解析器：接受函数或 { load(content) } 对象（main.js
  *   loadDshYamlDialect 返回值形态）；缺省 / 其它值跳过补丁层可解析性检查
- * @returns {{ ok: boolean, code: string, reason: string, packageDir?: string, patchPath?: string }}
+ * @returns {{ ok: boolean, code: string, reason: string, unverifiable?: boolean, packageDir?: string, patchPath?: string }}
+ *   unverifiable=true 仅出现在 UNRESOLVABLE 且锚点为 WSL UNC 路径时：解析
+ *   环境受限、无法确证缺失，调用方必须保留登记仅告警（不得移除 / 隔离）。
  */
 function validateBundleEntry(packageName, opts) {
   const { installAnchorDir, profileDir, parsePatch } = opts;
@@ -310,12 +357,21 @@ function validateBundleEntry(packageName, opts) {
   const dir = (installAnchorDir && resolveBundleDirLike(path.join(installAnchorDir, 'package.json'), packageName))
     || (profileDir && resolveBundleDirLike(path.join(profileDir, 'package.json'), packageName));
   if (!dir) {
+    // WSL UNC 防误删保护（issue #132 任务 b/c）：锚点位于 \\wsl$ /
+    // \\wsl.localhost 时，Windows 侧的存在性检查不可靠（pnpm 的 Linux 符号
+    // 链接穿不透），「解析不到」≠「缺失」——判 unverifiable 交由调用方
+    // 保留登记仅告警；内核运行在 WSL 内、Linux 侧解析正常即照常装配。
+    // 非 WSL 路径的检查可靠，unverifiable 恒 false，维持既有移除语义。
+    const unverifiable = isWslUncPath(installAnchorDir) || isWslUncPath(profileDir);
     return {
       ok: false,
       code: BUNDLE_CHECK_CODES.UNRESOLVABLE,
-      reason: installAnchorDir
-        ? '包未安装（dsh 安装与 profile node_modules 均解析不到）'
-        : '包未安装（profile node_modules 解析不到）',
+      unverifiable,
+      reason: unverifiable
+        ? '解析受限（dsh 安装 / profile 位于 WSL UNC 路径，Windows 侧无法可靠校验 pnpm 符号链接结构；内核在 WSL 内解析正常时将照常装配）'
+        : installAnchorDir
+          ? '包未安装（dsh 安装与 profile node_modules 均解析不到）'
+          : '包未安装（profile node_modules 解析不到）',
     };
   }
   const check = inspectBundleDir(dir, patchParserOf(parsePatch));
@@ -380,6 +436,9 @@ function patchParserOf(parsePatch) {
  *   quarantined: string[],       // 本次新记入隔离记录的名字（同 code+reason
  *                                //   的既有条目不重写，保留首次 removedAt）
  *   unquarantined: string[],     // 本次从隔离记录清除的名字（恢复健康，同轮生效）
+ *   unverifiable: string[],      // WSL UNC 解析受限而保留的登记（issue #132：
+ *                                //   解析不到 ≠ 缺失，仅告警不移除、不隔离，
+ *                                //   同时清除旧版本误判留下的隔离记录）
  * }}
  */
 function reconcileProfileBundles(profileDir, opts) {
@@ -415,6 +474,7 @@ function reconcileProfileBundles(profileDir, opts) {
     deduped: [],
     quarantined: [],
     unquarantined: [],
+    unverifiable: [],       // WSL UNC 解析受限而保留的登记（issue #132，不移除）
   };
 
   // --- 读取 + 损坏重建（备份原文，绝不静默丢弃用户数据） ---
@@ -534,6 +594,19 @@ function reconcileProfileBundles(profileDir, opts) {
         }
         continue;
       }
+      // WSL UNC 解析受限（issue #132）：解析不到 ≠ 缺失——保留登记仅告警，
+      // 不移除、不隔离；同时清掉旧版本误判留下的隔离记录（自愈既有损伤）。
+      if (check.unverifiable) {
+        kept.push(name);
+        result.unverifiable.push(name);
+        if (Object.prototype.hasOwnProperty.call(recordNext.entries, name)) {
+          delete recordNext.entries[name];
+          recordDirty = true;
+          result.unquarantined.push(name);
+        }
+        log('profile bundle 无法从 Windows 侧可靠校验（WSL UNC 路径），保留登记仅告警: ' + name + ' —— ' + check.reason);
+        continue;
+      }
       if (coreNames.includes(name)) {
         kept.push(name);
         log('核心 bundle 登记异常（保留，启动防护兜底跳过）: ' + name + ' —— ' + check.reason);
@@ -580,6 +653,13 @@ function reconcileProfileBundles(profileDir, opts) {
       if (bundles.includes(name)) continue;
       const check = validateBundleEntry(name, { installAnchorDir, profileDir, parsePatch });
       if (!check.ok) {
+        // WSL UNC 解析受限（issue #132）：无法确证健康时保守不登记，但绝不
+        // 隔离（配套 bundle 由壳层平铺同步，正常场景可直查解析，此分支只在
+        // WSL 路径整体不可达时出现）。
+        if (check.unverifiable) {
+          log('配套 bundle 无法从 Windows 侧可靠校验（WSL UNC 路径），本次不登记仅告警: ' + name + ' —— ' + check.reason);
+          continue;
+        }
         result.removed.push({ name, code: check.code, reason: check.reason });
         if (quarantineEntry(name, check.code, check.reason)) result.quarantined.push(name);
         // manifest 未被改动（该名从未被登记）：不置 changed，避免对健康
@@ -629,6 +709,19 @@ function reconcileProfileBundles(profileDir, opts) {
         for (const name of recovered) {
           const check = validateBundleEntry(name, { installAnchorDir, profileDir, parsePatch });
           if (check.ok) { kept.push(name); continue; }
+          // WSL UNC 解析受限（issue #132）：恢复的登记来自磁盘扫描（磁盘上
+          // 实际存在），解析不到只是 Windows 侧校验受限——保留不弃。
+          if (check.unverifiable) {
+            kept.push(name);
+            result.unverifiable.push(name);
+            if (Object.prototype.hasOwnProperty.call(recordNext.entries, name)) {
+              delete recordNext.entries[name];
+              recordDirty = true;
+              result.unquarantined.push(name);
+            }
+            log('恢复的 bundle 无法从 Windows 侧可靠校验（WSL UNC 路径），保留登记仅告警: ' + name + ' —— ' + check.reason);
+            continue;
+          }
           dropped.push(name);
           result.removed.push({ name, code: check.code, reason: check.reason });
           if (quarantineEntry(name, check.code, check.reason)) result.quarantined.push(name);
@@ -695,6 +788,7 @@ module.exports = {
   createEntryListYamlParser,
   readBrokenBundlesRecord,
   writeBrokenBundlesRecord,
+  isWslUncPath,
   resolveBundleDirLike,
   resolvableCoreNames,
   validateBundleEntry,

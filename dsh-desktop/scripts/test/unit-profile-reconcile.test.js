@@ -9,7 +9,10 @@
 //     解析时不落盘空骨架）；
 //   · 真实 dsh-app-boot 复现：无效登记在官方 loadProfile 下必崩（用户反馈的
 //     "declares no dsh.bundle" 原始错误），对账后正常装配（仓库 node_modules
-//     已安装时执行）。
+//     已安装时执行）；
+//   · issue #132：pnpm 虚拟仓回落（不可穿透符号链接 / scoped / 版本选择 /
+//     传递依赖门 / junction）与 WSL UNC 防误删保护（解析受限 unverifiable →
+//     保留登记仅告警、清除历史误判隔离记录；本地路径确证缺失语义不变）。
 // 用法：node --test scripts/test/unit-profile-reconcile.test.js
 
 const test = require('node:test');
@@ -27,6 +30,7 @@ const { CORE_BUNDLE_NAMES } = require('../../profile-manifest');
 const {
   BROKEN_BUNDLES_RECORD_FILENAME,
   createEntryListYamlParser,
+  isWslUncPath,
   readBrokenBundlesRecord,
   validateBundleEntry,
   reconcileProfileBundles,
@@ -467,6 +471,147 @@ test('reconcile: pnpm 布局登记不被移除（issue #132 端到端——WSL �
   assert.deepEqual(readManifest(profileDir), before, '登记必须原样保留');
   assert.equal(fs.existsSync(recordFile(profileDir)), false, '不应写隔离记录');
   assert.ok(storeDir, 'fixture 完整性');
+});
+
+// ---------------------------------------------------------------------------
+// WSL UNC 防误删保护（issue #132 任务 b/c）
+//
+// 即便 pnpm 仓回落也解析不到（如 .pnpm 布局不可读 / 包管理器形态变化），
+// 锚点是 \\wsl$ / \\wsl.localhost 时 Windows 侧检查不可靠：解析不到 ≠ 缺失。
+// 此类登记必须保留 + 告警（unverifiable），绝不判 UNRESOLVABLE 移除 / 隔离。
+// ---------------------------------------------------------------------------
+
+test('isWslUncPath: 识别 \\wsl$ / \\wsl.localhost（含正斜杠与大小写），本地路径为 false', () => {
+  assert.equal(isWslUncPath('\\\\wsl.localhost\\kali-linux\\root\\.dsh\\profiles\\web'), true);
+  assert.equal(isWslUncPath('\\\\wsl$\\Ubuntu-22.04\\home\\u\\.dsh'), true);
+  assert.equal(isWslUncPath('//wsl.localhost/kali-linux/root'), true, '正斜杠 UNC 写法同样识别');
+  assert.equal(isWslUncPath('\\\\WSL.LOCALHOST\\Kali-Linux\\root'), true, '大小写不敏感');
+  assert.equal(isWslUncPath('C:\\Users\\x\\.dsh\\profiles\\web'), false);
+  assert.equal(isWslUncPath('/home/x/.dsh/profiles/web'), false);
+  assert.equal(isWslUncPath('\\\\server\\share\\.dsh'), false, '普通 SMB UNC 不是 WSL');
+  assert.equal(isWslUncPath(''), false);
+  assert.equal(isWslUncPath(null), false);
+});
+
+test('validateBundleEntry: WSL UNC 锚点解析不到 → UNRESOLVABLE + unverifiable（解析受限 ≠ 缺失）', (t) => {
+  const local = tmpdir(t);
+  // 对照：本地（可可靠检查的）路径解析不到 → 确证缺失，维持既有移除语义
+  const localMiss = validateBundleEntry('dsh-vision-router', {
+    installAnchorDir: local, profileDir: local, parsePatch: null,
+  });
+  assert.equal(localMiss.code, BUNDLE_CHECK_CODES.UNRESOLVABLE);
+  assert.equal(localMiss.unverifiable, false, '本地路径检查可靠，不触发保护');
+  // WSL UNC 锚点（不存在的发行版——解析必然落空）→ 只能判「无法确认」
+  const wslProfile = '\\\\wsl.localhost\\no-such-distro-xyz\\root\\.dsh\\profiles\\web';
+  const wslMiss = validateBundleEntry('dsh-vision-router', {
+    installAnchorDir: '', profileDir: wslProfile, parsePatch: null,
+  });
+  assert.equal(wslMiss.code, BUNDLE_CHECK_CODES.UNRESOLVABLE);
+  assert.equal(wslMiss.unverifiable, true, 'WSL UNC 解析受限必须带 unverifiable 标记');
+  assert.notEqual(wslMiss.reason, localMiss.reason, '提示语必须区分「确证缺失」与「解析受限」');
+  assert.ok(wslMiss.reason.includes('WSL'), '提示语应说明 WSL 校验受限的成因');
+});
+
+test('reconcile: WSL UNC 锚点解析不到 → 登记保留仅告警，且清除旧版本误判的隔离记录（issue #132）', (t) => {
+  const home = tmpdir(t);
+  const profileDir = path.join(home, 'profiles', 'web');
+  fs.mkdirSync(profileDir, { recursive: true });
+  const before = {
+    name: 'dsh-profile-web', private: true,
+    dsh: { profile: { bundles: [...CORES, 'dsh-vision-router'] } },
+  };
+  fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify(before, null, 2) + '\n');
+  // 旧版本误判留下的隔离记录 → 本轮保留登记时必须自愈清除
+  fs.writeFileSync(recordFile(profileDir), JSON.stringify({
+    v: 1,
+    entries: {
+      'dsh-vision-router': {
+        code: 'UNRESOLVABLE',
+        reason: '包未安装（dsh 安装与 profile node_modules 均解析不到）',
+        removedAt: '2026-01-01T00:00:00.000Z',
+      },
+    },
+  }, null, 2) + '\n');
+  const logs = [];
+  const r = reconcileProfileBundles(profileDir, {
+    // WSL UNC 安装锚点（不存在的发行版）：Windows 侧存在性检查不可靠
+    installAnchorDir: '\\\\wsl.localhost\\no-such-distro-xyz\\root\\.dsh',
+    coreNames: CORES,
+    parsePatch: null,
+    log: (m) => logs.push(m),
+  });
+  assert.deepEqual(r.removed, [], '解析受限不得按 UNRESOLVABLE 移除');
+  assert.deepEqual(r.quarantined, [], '解析受限不得写入隔离记录');
+  assert.ok(r.unverifiable.includes('dsh-vision-router'), '保留的登记应在 unverifiable 中上报');
+  assert.equal(r.changed, false, '保留登记不产生 manifest 写入');
+  assert.deepEqual(readManifest(profileDir), before, '登记必须原样保留（bundles 不被清空）');
+  const rec = readBrokenBundlesRecord(recordFile(profileDir));
+  assert.equal(rec && rec.entries['dsh-vision-router'], undefined, '历史误判记录应被清除');
+  assert.ok(r.unquarantined.includes('dsh-vision-router'));
+  assert.ok(logs.some((m) => m.includes('dsh-vision-router') && m.includes('保留登记')), '必须告警而非静默');
+
+  // 对照：同样的「解析不到」发生在本地（可可靠检查的）路径上 → 既有移除 + 隔离语义不变
+  const localHome = tmpdir(t);
+  const localProfile = path.join(localHome, 'profiles', 'web');
+  fs.mkdirSync(localProfile, { recursive: true });
+  const localInstall = tmpdir(t);
+  for (const name of CORES) writeHealthyBundle(localInstall, name);
+  fs.writeFileSync(path.join(localProfile, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-web', private: true,
+    dsh: { profile: { bundles: [...CORES, 'ghost-pkg'] } },
+  }, null, 2) + '\n');
+  const r2 = reconcileProfileBundles(localProfile, {
+    installAnchorDir: localInstall,
+    coreNames: CORES,
+    parsePatch: null,
+    log: () => {},
+  });
+  assert.deepEqual(r2.unverifiable, [], '本地路径解析不到不触发保护');
+  assert.deepEqual(r2.removed.map((x) => x.name), ['ghost-pkg'], '确证缺失仍按既有语义移除');
+  assert.deepEqual(r2.quarantined, ['ghost-pkg']);
+  assert.ok(r2.changed);
+});
+
+test('reconcile: WSL UNC 锚点下 addNames 校验受限 → 不登记仅告警（不隔离）', (t) => {
+  const home = tmpdir(t);
+  const profileDir = path.join(home, 'profiles', 'web');
+  fs.mkdirSync(profileDir, { recursive: true });
+  fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-web', private: true,
+    dsh: { profile: { bundles: [...CORES] } },
+  }, null, 2) + '\n');
+  const logs = [];
+  const r = reconcileProfileBundles(profileDir, {
+    installAnchorDir: '\\\\wsl$\\no-such-distro-xyz\\root\\.dsh',
+    coreNames: CORES,
+    addNames: new Set(['dsh-context']),
+    parsePatch: null,
+    log: (m) => logs.push(m),
+  });
+  assert.deepEqual(r.added, [], '无法确认健康时不登记');
+  assert.deepEqual(r.removed, []);
+  assert.deepEqual(r.quarantined, [], '解析受限绝不隔离');
+  assert.ok(logs.some((m) => m.includes('dsh-context') && m.includes('不登记')), '必须告警而非静默');
+});
+
+test('resolveBundleDirLike: Windows 原生 junction 形态的 pnpm 布局可解析（realpath 与直查均可达）', (t) => {
+  if (process.platform !== 'win32') return t.skip('junction 布局仅 Windows');
+  const profileDir = tmpdir(t);
+  fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-web', private: true,
+  }, null, 2) + '\n');
+  const storeDir = writePnpmStoreBundle(profileDir, 'junction-pkg', '1.0.0');
+  // 顶层改成指向 .pnpm 仓内实体目录的 junction（Windows pnpm 安装的真实形态）
+  const linkPath = path.join(profileDir, 'node_modules', 'junction-pkg');
+  fs.rmSync(linkPath, { recursive: true, force: true });
+  fs.symlinkSync(storeDir, linkPath, 'junction');
+  const { resolveBundleDirLike } = require('../../scripts/lib/profile-reconcile');
+  const got = resolveBundleDirLike(path.join(profileDir, 'package.json'), 'junction-pkg');
+  assert.notEqual(got, '', 'junction 链接必须可解析');
+  assert.equal(fs.existsSync(path.join(got, 'package.json')), true);
+  assert.equal(fs.realpathSync(got), fs.realpathSync(storeDir), '解析结果与 .pnpm 实体目录同源');
+  const v = validateBundleEntry('junction-pkg', { installAnchorDir: '', profileDir, parsePatch: null });
+  assert.equal(v.ok, true, 'junction 形态登记不得判 UNRESOLVABLE');
 });
 
 // ---------------------------------------------------------------------------
