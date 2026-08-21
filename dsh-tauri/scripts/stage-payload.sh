@@ -38,6 +38,16 @@ mirror_dir() {
 
 echo "[stage] 源: $SRC"
 echo "[stage] 目标: $DST"
+
+# 前置校验：缺任何一项，装出来的包必然起不来（fail-fast 优于装完才发现）。
+# Windows（含 Git Bash/MINGW/MSYS）用 node.exe，其余用 node
+# 注：NODE_BIN 必须在 DEBUG 输出前定义——set -u 下引用未定义变量直接
+# 退出（CI 五平台全灭的根因：DEBUG 行先于定义被引入）。
+NODE_BIN="node"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*|Windows*) NODE_BIN="node.exe" ;;
+esac
+
 echo "[stage] DEBUG: uname=$(uname -s) NODE_BIN=$NODE_BIN"
 echo "[stage] DEBUG: node exists: $(ls -la "$SRC/vendor/node/$NODE_BIN" 2>&1)"
 echo "[stage] DEBUG: bin.js exists: $(ls "$SRC/node_modules/@deepseek-ai/dsh/lib/bin.js" 2>&1)"
@@ -45,12 +55,6 @@ echo "[stage] DEBUG: package.json exists: $(ls "$SRC/package.json" 2>&1)"
 echo "[stage] DEBUG: assets/plugins exists: $(ls -d "$SRC/assets/plugins" 2>&1)"
 echo "[stage] DEBUG: node_modules count: $(ls "$SRC/node_modules" 2>/dev/null | wc -l)"
 
-# 前置校验：缺任何一项，装出来的包必然起不来（fail-fast 优于装完才发现）。
-# Windows（含 Git Bash/MINGW/MSYS）用 node.exe，其余用 node
-NODE_BIN="node"
-case "$(uname -s)" in
-  MINGW*|MSYS*|CYGWIN*|Windows*) NODE_BIN="node.exe" ;;
-esac
 for f in package.json "vendor/node/$NODE_BIN" \
          node_modules/@deepseek-ai/dsh/lib/bin.js \
          scripts/lib/companion-profile.js assets/plugins; do
