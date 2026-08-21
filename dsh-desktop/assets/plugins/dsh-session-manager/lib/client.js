@@ -324,6 +324,11 @@ window.__ModuleLoader__.load({
 		exports.inject = ["slots", "settingsScope", "workspaces", "sessions", "connection"];
 		// 纯函数导出：仅供 node 单测与插件自检（runtime 只消费 apply/inject）。
 		exports.focusGuard = { shouldRestoreFocusAfterRemoval, restoreComposerFocus };
+		// issue #122/#129 回归锚点：「signal timed out」类裸 DOMException 的人
+		// 话化 + 壳层受监管重启出口——选择框/会话操作在后端假死时 30s 超时后
+		// 的唯一用户可见恢复路径，必须有单测钉住（timeoutGuard 命名对齐
+		// focusGuard 先例）。
+		exports.timeoutGuard = { isTimeoutError, reportActionError };
 		return module.exports;
 	}
 });
