@@ -14,7 +14,8 @@ mod commands;
 mod pages;
 mod poc_page;
 mod supervisor;
-mod windows;
+// pub 供 tests/sponsor_window.rs 集成测试走生产同款建窗路径（mock runtime）。
+pub mod windows;
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};

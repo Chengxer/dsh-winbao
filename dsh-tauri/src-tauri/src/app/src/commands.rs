@@ -1430,9 +1430,11 @@ mod tests {
         }
         assert_eq!(st["configured"], serde_json::json!(false), "local 模式 configured=false");
         assert_eq!(st["lastError"], serde_json::json!(""), "local 模式不探测，lastError 必空");
-        // wsl 模式：configured=true，回显 distro/installDir。
+        // wsl 模式：回显 distro/installDir；configured 仍恒 false——实现有意
+        // 语义（「W2: WSL 未实装，恒 false 防误导」，见 wsl_config_payload）。
+        // 此前断言 true 与实现矛盾（预先存在的坏测试，随本轮回绿修正）。
         let p2 = wsl_config_payload("wsl", "Ubuntu-24.04", "~/.dsh-desktop");
-        assert_eq!(p2["status"]["configured"], serde_json::json!(true));
+        assert_eq!(p2["status"]["configured"], serde_json::json!(false), "WSL 未实装，configured 恒 false 防误导");
         assert_eq!(p2["status"]["distro"], serde_json::json!("Ubuntu-24.04"));
         assert_eq!(p2["status"]["installDir"], serde_json::json!("~/.dsh-desktop"));
     }

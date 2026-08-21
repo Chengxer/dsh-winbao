@@ -8,6 +8,8 @@ authors.workspace = true
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# Windows 测试 exe 嵌 manifest（tauri #13419 workaround，见 build.rs）。
+embed-resource = "3"
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
@@ -22,6 +24,10 @@ shell-core = { path = "../../crates/shell-core" }
 fence = { path = "../../crates/fence" }
 session-watcher = { path = "../../crates/session-watcher" }
 tauri-plugin-single-instance = "2.4.3"
+
+[dev-dependencies]
+# 集成测试（tests/sponsor_window.rs）用 mock runtime 走生产同款建窗路径。
+tauri = { version = "2", features = ["test"] }
 
 [features]
 default = []
