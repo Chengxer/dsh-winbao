@@ -59,20 +59,21 @@ dsh web 进程（读合成后的叠加树）
 app 启动
  ├─ [0] 单实例锁 + run-state + panic hook                      （shell-core/lib）
  ├─ [1] repair：损坏 manifest/home patch 自愈                  （sidecar boot 步骤①）
- ├─ [2] sync：伴随插件同步 + presets                            （sidecar boot 步骤②）
- ├─ [3] patches：22 个文本手术（幂等）                          （sidecar boot 步骤③）
- ├─ [4] preflight：补丁就绪 + koffi 预检 → 降级 overlay         （sidecar 步骤④）
- ├─ [5] guard-snapshot（boot 前快照，GUARD_FILES 四配置文件）
- ├─ [6] spawn：vendor-node bin.js web --no-open（120s 有界等待）
- ├─ [7] ready-line 解析 → 主窗换页（loading → Web UI）
- └─ [8] supervision：探活 + 崩溃环 + 45s 稳定落定 markGood
+ ├─ [2] sync：伴随插件同步                                      （sidecar boot 步骤②）
+ ├─ [3] presets：8 个壳层内置预设对账进 dsh 包                  （sidecar boot 步骤③，v0.5.1 迁移）
+ ├─ [4] patches：22 个文本手术（幂等）                          （sidecar boot 步骤④）
+ ├─ [5] preflight：补丁就绪 + koffi 预检 → 降级 overlay         （sidecar 步骤⑤）
+ ├─ [6] guard-snapshot（boot 前快照，GUARD_FILES 四配置文件）
+ ├─ [7] spawn：vendor-node bin.js web --no-open（120s 有界等待）
+ ├─ [8] ready-line 解析 → 主窗换页（loading → Web UI）
+ └─ [9] supervision：探活 + 崩溃环 + 45s 稳定落定 markGood
 ```
 
 ### 3.1 守护瀑布（「坏插件也永远能打开 dsh」——三层重试）
 
 ```
-[6] 首次拉起(120s) ─成功→ 换页 + 稳定落定
-      └失败→ 重跑 [1]-[4]（sync 为自愈主力：坏插件文件靠重新同步覆盖）
+[7] 首次拉起(120s) ─成功→ 换页 + 稳定落定
+      └失败→ 重跑 [1]-[5]（sync 为自愈主力：坏插件文件靠重新同步覆盖）
              + guard-repair + safe-overlay 禁用失败插件
              → 二次拉起(90s) ─成功→ 事故报告 boot-recovered + 换页
                    └失败→ guard-restore 回滚最后良好快照（markGood 锚点）

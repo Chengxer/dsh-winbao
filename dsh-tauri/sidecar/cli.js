@@ -93,6 +93,7 @@ function loadModules(appDir) {
   const req = (rel) => require(path.join(appDir, rel));
   return {
     integration: req('scripts/integration'),
+    presetInstaller: req('scripts/install-minimal-win-preset'),
     pluginManagerPatch: req('scripts/plugin-manager-patch'),
     pluginManagerUpdate: req('scripts/plugin-manager-update'),
     companionPlugins: req('scripts/lib/companion-plugins'),
@@ -607,13 +608,22 @@ async function cmdBoot(args, ctx) {
     return ok;
   };
   // 对齐 main.js boot 链（local 模式）：repair → sync → presets → patches → preflight。
-  // presets 同步在 Electron 是 main.js 内联（syncLocalAgentPresets）——sidecar 用
-  // installBuiltinPresets 的既有脚本面（scripts/install-minimal-win-preset.js）不可直接
-  // 调用；此处先以 integration 的 sync 覆盖（plugin-sync 内部已含预设对账），并如实
-  // 记录步骤边界。Phase 3 若发现预设漂移再补独立入口。
+  // presets 步（v0.5.1 迁移）：Electron 时代有三条预设同步路径（after-pack 预装 /
+  // main.js 内联 syncLocalAgentPresets / WSL UNC 半边），Tauri 此前全缺——旧注释
+  // 「plugin-sync 内部已含预设对账」经核实为错误陈述（plugin-sync 不碰 agent-presets）。
+  // 现复用 payload 自带的 install-minimal-win-preset.js（幂等，mtime/size 跳过），
+  // 目标为当前生效的 @deepseek-ai/dsh 包（Tauri 无 overlay updater，即 payload 副本；
+  // 将来若迁移 overlay 更新链，需带回 Electron 的「overlay 优先」选择逻辑）。
+  // 步骤语义照抄 sidecar 容忍策略：失败告警不阻断启动（Electron 侧同款 try/catch）。
   let ok = true;
   ok = (await step('repair', () => integration.healBeforeServer())) && ok;
   ok = (await step('sync', () => integration.syncPlugins())) && ok;
+  ok = (await step('presets', () => {
+    const dshDir = mods.presetInstaller.installedDshPackageDir();
+    const dests = mods.presetInstaller.installBuiltinPresets(dshDir);
+    log('presets: ' + dests.length + ' 个内置预设对账完成（minimal-win/router-standard/anchored 系/whoami/warmupbetter 系等）→ ' + dshDir);
+    return { ok: true, count: dests.length };
+  })) && ok;
   ok = (await step('patches', () => integration.applyPatches())) && ok;
   ok = (await step('preflight', () => integration.preflightHealth())) && ok;
   return { ok, totalMs: Date.now() - t0, steps };

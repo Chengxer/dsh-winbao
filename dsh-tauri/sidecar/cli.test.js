@@ -65,7 +65,7 @@ test('boot：沙箱 home 四步全过并建档', { skip: !HAVE_DEPS }, (t) => {
   assert.strictEqual(r.code, 0, `stderr: ${r.stderr.slice(-500)}`);
   assert.strictEqual(r.json.ok, true, JSON.stringify(r.json));
   // 固定顺序契约（data-flow.md §3）。
-  assert.deepStrictEqual(r.json.steps.map((s) => s.name), ['repair', 'sync', 'patches', 'preflight']);
+  assert.deepStrictEqual(r.json.steps.map((s) => s.name), ['repair', 'sync', 'presets', 'patches', 'preflight']);
   // 沙箱建档：web profile + patch 清单落盘。
   assert.ok(fs.existsSync(path.join(sb.dir, 'profiles', 'web', 'cordis.patch.yml')), 'profile patch 应建档');
   assert.ok(fs.existsSync(path.join(sb.dir, 'profiles', 'web', 'package.json')), 'profile package 应建档');

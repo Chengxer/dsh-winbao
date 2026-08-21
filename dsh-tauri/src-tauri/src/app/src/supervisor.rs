@@ -2,7 +2,7 @@
 //!
 //! 数据流契约（contracts/data-flow.md §3）：
 //! ```text
-//! sidecar boot（repair→sync→patches→preflight）
+//! sidecar boot（repair→sync→presets→patches→preflight）
 //!   → choose_stable_port（优先上次端口）
 //!   → spawn vendor-node（环境白名单 + DSH_DESKTOP_SUPERVISED=1）
 //!   → ReadyLineParser → kernel-ready → 主窗换页
@@ -1035,8 +1035,8 @@ Content-Length: 0
         std::env::remove_var("DSH_TAURI_USERDATA");
         assert!(result.is_ok(), "sidecar boot 应成功: {result:?}");
         // 步骤事件按固定顺序全部转发（data-flow.md §3）。
-        let names: Vec<String> = rx.iter().map(|e| match e { SupervisorEvent::BootStep { name, .. } => name, _ => String::new() }).take(4).collect();
-        assert_eq!(names, vec!["repair", "sync", "patches", "preflight"], "boot 步骤顺序契约");
+        let names: Vec<String> = rx.iter().map(|e| match e { SupervisorEvent::BootStep { name, .. } => name, _ => String::new() }).take(5).collect();
+        assert_eq!(names, vec!["repair", "sync", "presets", "patches", "preflight"], "boot 步骤顺序契约");
         // 沙箱 home 上 profile 结构确已建立（同步器落盘）。
         assert!(home.join("profiles").join("web").join("cordis.patch.yml").exists(), "profile patch 应已建立");
         let _ = std::fs::remove_dir_all(&home);
@@ -1076,7 +1076,7 @@ Content-Length: 0
                 Err(_) => panic!("150s 内未就绪（boot_steps={boot_steps:?}）"),
             }
         };
-        assert_eq!(boot_steps, vec!["repair", "sync", "patches", "preflight"]);
+        assert_eq!(boot_steps, vec!["repair", "sync", "presets", "patches", "preflight"]);
         assert!(url.starts_with("http://127.0.0.1:"), "就绪 URL 形态: {url}");
         assert_eq!(sv.state(), RunState::Ready);
         assert!(sv.kernel_url().is_some());
