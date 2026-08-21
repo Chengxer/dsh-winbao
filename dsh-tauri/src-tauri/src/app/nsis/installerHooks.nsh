@@ -195,7 +195,6 @@ Function LegacyHandleEntryHKCU
   Push $R2
   Call LegacyStripQuotes
   Pop $R2
-  StrCpy $R9 ""
   !insertmacro LegacyActOnEntry HKCU
 FunctionEnd
 
@@ -209,7 +208,6 @@ Function LegacyHandleEntryHKLM
   Push $R2
   Call LegacyStripQuotes
   Pop $R2
-  StrCpy $R9 ""
   !insertmacro LegacyActOnEntry HKLM
 FunctionEnd
 
@@ -221,7 +219,7 @@ Function LegacyStripQuotes
     StrCpy $R3 $R3 "" 1
     StrCpy $R7 $R3 1 -1
     StrCmp $R7 '"' 0 LsqDone
-      StrCpy $R3 $R3 1 -1
+      StrCpy $R3 $R3 -1
   LsqDone:
   Exch $R3
 FunctionEnd
@@ -237,7 +235,7 @@ FunctionEnd
       Pop $R0
     ${EndIf}
     ${If} $R0 = 0
-      MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION \
+      MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION|MB_TOPMOST|MB_SETFOREGROUND /SD IDCANCEL \
         "检测到 DSH Desktop 正在运行。$\n$\n请先完全退出（托盘右键 → 退出），然后点击「重试」继续升级。$\n选择「取消」将中止安装（不会做任何更改）。" \
         IDRETRY TryCloseLegacy IDCANCEL AbortInstallLegacy
       Goto AbortInstallLegacy
