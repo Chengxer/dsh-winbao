@@ -212,12 +212,12 @@ pub fn open_pet_window(app: &tauri::AppHandle, kernel_url: &str) -> Result<serde
     .title("DSH 宠物")
     .inner_size(PET_W, PET_H)
     .decorations(false);
-    // 透明窗口需要平台特定 feature（macos-private-api / linux transparent），
-    // 非 Windows 平台降级为不透明（宠物窗有实底色）。
+    // 透明窗口需要平台特定支持：Windows 直接开透明；macOS 上 transparent()
+    // 方法仅 macos-private-api feature 才存在（未启用，调用即编译失败），
+    // Linux 虽有该方法但需 webkit 特定配置——非 Windows 统一不调用，
+    // 默认即不透明（宠物窗有实底色，视觉降级可接受）。
     #[cfg(target_os = "windows")]
     let b = b.transparent(true);
-    #[cfg(not(target_os = "windows"))]
-    let b = b.transparent(false);
     let b = b
     .always_on_top(true)
     .skip_taskbar(true)
