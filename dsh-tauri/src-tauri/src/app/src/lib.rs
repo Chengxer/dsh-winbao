@@ -484,10 +484,11 @@ fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
                 }
             }
             "logs" => {
+                // 跨平台开启器（explorer/open/xdg-open）——此前仅 Windows 拉
+                // explorer，mac/linux 托盘「打开日志」点了没反应。
                 let dir = shell_core::DshPaths::resolve().logs;
                 let _ = std::fs::create_dir_all(&dir);
-                #[cfg(windows)]
-                let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                let _ = commands::open_in_explorer(&dir);
             }
             "quit" => {
                 if let Some(state) = app.try_state::<AppState>() {

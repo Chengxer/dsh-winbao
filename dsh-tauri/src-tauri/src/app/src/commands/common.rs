@@ -26,23 +26,28 @@ pub fn open_http_url(url: &str) -> Result<serde_json::Value, BridgeError> {
             .spawn()
             .map_err(BridgeError::from)?;
     }
-    #[cfg(not(windows))]
+    // 非 Windows 三分（与 file_open 同款）：macOS 无 xdg-open，open 才是
+    // 系统开启器——此前 mac 上 open-browser/open_external 全静默失败。
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn().map_err(BridgeError::from)?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         std::process::Command::new("xdg-open").arg(url).spawn().map_err(BridgeError::from)?;
     }
     Ok(serde_json::Value::Null)
 }
 
-/// explorer 打开目录（非 Windows 仅日志）。
+/// explorer/Finder/xdg-open 打开目录（⋯ 菜单 open-logs / 恢复页 / 托盘共用）。
 pub fn open_in_explorer(dir: &std::path::Path) -> Result<serde_json::Value, BridgeError> {
     #[cfg(windows)]
-    {
-        std::process::Command::new("explorer").arg(dir).spawn().map_err(BridgeError::from)?;
-    }
-    #[cfg(not(windows))]
-    {
-        eprintln!("[open logs] {}", dir.display());
-    }
+    let prog = "explorer";
+    #[cfg(target_os = "macos")]
+    let prog = "open";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let prog = "xdg-open";
+    std::process::Command::new(prog).arg(dir).spawn().map_err(BridgeError::from)?;
     Ok(serde_json::Value::Null)
 }
 
@@ -60,11 +65,12 @@ pub fn atomic_write(path: &std::path::Path, content: &str) -> std::io::Result<()
     std::fs::rename(&tmp, path)
 }
 
-/// 「文档」目录（备份导出落点）。
+/// 「文档」目录（备份导出落点）。USERPROFILE（Windows）/ HOME（unix）双取，
+/// 均缺时退当前目录——unix 无 USERPROFILE，此前恒落 "."（备份甩进 GUI cwd）。
 pub fn dirs_docs() -> std::path::PathBuf {
     std::env::var_os("USERPROFILE")
-        .map(std::path::PathBuf::from)
-        .map(|h| h.join("Documents"))
+        .or_else(|| std::env::var_os("HOME"))
+        .map(|h| std::path::PathBuf::from(h).join("Documents"))
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
@@ -216,5 +222,42 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "中文 v2");
         assert!(!f.with_extension("revert-tmp").exists(), "临时文件应被 rename 消费");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 跨平台开启器三分支形态锚点（WebviewWindow 无法在单测构造，沿用
+    /// include_str! 形态断言法）：open_http_url 与 open_in_explorer 在
+    /// macOS 必须走 `open`（xdg-open 不存在）、Linux 必须走 xdg-open——
+    /// 此前 mac 上两者分别静默失败 / 仅打日志。
+    #[test]
+    fn openers_have_platform_branches_shape() {
+        let src = include_str!("common.rs");
+        for fname in ["pub fn open_http_url", "pub fn open_in_explorer"] {
+            let seg = src
+                .split(fname)
+                .nth(1)
+                .and_then(|s| s.split("\n}").next())
+                .unwrap_or("");
+            assert!(seg.contains(r#"#[cfg(target_os = "macos")]"#), "{fname} 缺 macOS 分支");
+            assert!(seg.contains(r#"#[cfg(all(unix, not(target_os = "macos")))]"#), "{fname} 缺 Linux 分支");
+            assert!(seg.contains(r#""open""#), "{fname} macOS 须用 open");
+            assert!(seg.contains(r#""xdg-open""#), "{fname} Linux 须用 xdg-open");
+        }
+        // 非微 Windows 平台的 open_in_explorer 不得再是「仅日志」no-op。
+        let seg = src.split("pub fn open_in_explorer").nth(1).and_then(|s| s.split("\n}").next()).unwrap_or("");
+        assert!(!seg.contains("eprintln"), "打开目录不得降级为仅日志（mac/linux 用户可感知失效）");
+    }
+
+    /// 备份导出落点：HOME 兜底（unix 无 USERPROFILE 时不得恒落 "."）。
+    #[test]
+    fn dirs_docs_prefers_home_when_userprofile_missing() {
+        let docs = dirs_docs();
+        let home_like = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+        match home_like {
+            Some(h) => {
+                let expected = std::path::PathBuf::from(h).join("Documents");
+                assert_eq!(docs, expected, "有 home 环境变量时必须落在 <home>/Documents");
+            }
+            None => assert_eq!(docs, std::path::PathBuf::from("."), "无 home 时保持当前目录降级"),
+        }
     }
 }

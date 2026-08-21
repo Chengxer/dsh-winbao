@@ -21,7 +21,15 @@ const path = require('node:path');
 
 const SIDEAR = path.join(__dirname, 'cli.js');
 const APP_DIR = path.resolve(__dirname, '..', '..', 'dsh-desktop');
-const NODE = path.join(APP_DIR, 'vendor', 'node', 'node.exe');
+// vendor node 双平台二进制：按平台选名（win32 node.exe / 其余 node），
+// 缺失时互为兜底——测试在非 Windows 检出上也能驱动同一链路。
+const NODE = (() => {
+  const dir = path.join(APP_DIR, 'vendor', 'node');
+  const primary = path.join(dir, process.platform === 'win32' ? 'node.exe' : 'node');
+  if (fs.existsSync(primary)) return primary;
+  const alt = path.join(dir, process.platform === 'win32' ? 'node' : 'node.exe');
+  return fs.existsSync(alt) ? alt : primary;
+})();
 const HAVE_DEPS = fs.existsSync(NODE) && fs.existsSync(path.join(APP_DIR, 'node_modules', '@deepseek-ai', 'dsh'));
 
 /** 沙箱环境（每个测试独立 home/userData）。 */

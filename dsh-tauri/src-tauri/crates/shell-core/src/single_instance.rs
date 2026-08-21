@@ -91,7 +91,22 @@ fn pid_alive(pid: u32) -> bool {
     }
 }
 
-#[cfg(not(windows))]
+/// macOS 无 /proc：`ps -p <pid>` 探测（退出码 0 = 存在）。查询失败按存活
+/// （保守，与 Windows 分支同口径）——此前非 Windows 一律查 /proc，mac 上
+/// 恒 false → 活锁被当陈锁回收，单实例失效（双实例并发）。
+#[cfg(target_os = "macos")]
+fn pid_alive(pid: u32) -> bool {
+    match std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "pid="])
+        .output()
+    {
+        Ok(o) => o.status.success(),
+        Err(_) => true, // 查询失败按存活处理（保守：不删活锁）
+    }
+}
+
+/// Linux：/proc/<pid> 存在性（零子进程开销）。
+#[cfg(all(unix, not(target_os = "macos")))]
 fn pid_alive(pid: u32) -> bool {
     std::path::Path::new("/proc").join(pid.to_string()).exists()
 }

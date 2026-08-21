@@ -61,13 +61,27 @@ impl DshPaths {
             .or_else(|| home("USERPROFILE").or_else(|| home("HOME")))
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
+        // appdata 回退链：APPDATA（Windows）→ XDG_CONFIG_HOME（Linux 惯例，
+        // 与 sidecar cli.js resolveUserData 同链）→ USERPROFILE/HOME 推导
+        // （macOS: ~/Library/Application Support；其余: ~/.config）。
+        // 此前 unix 无 APPDATA/USERPROFILE 时回退空串 → app_data 落相对路径
+        // "dsh-desktop"（随 GUI cwd 漂移），settings/日志/锁全错位。
         let appdata_dir = test_appdata
             .clone()
             .or_else(|| appdata("APPDATA"))
-            .unwrap_or_else(|| home("USERPROFILE").unwrap_or_default());
+            .or_else(|| appdata("XDG_CONFIG_HOME"))
+            .or_else(|| {
+                home("USERPROFILE")
+                    .or_else(|| home("HOME"))
+                    .map(|h| default_data_root(PathBuf::from(h)).into_os_string())
+            })
+            .unwrap_or_else(|| std::ffi::OsString::from("."));
+        // tmp 回退链：TEMP/TMP（Windows）→ TMPDIR（unix 惯例）→
+        // std::env::temp_dir()（OS 级兜底；此前 unix 恒空串 → paste_tmp 落
+        // 相对路径 "dsh-paste"）。
         let tmp_dir = test_tmp
-            .or_else(|| tmp("TEMP").or_else(|| tmp("TMP")))
-            .unwrap_or_else(|| tmp("TEMP").unwrap_or_default());
+            .or_else(|| tmp("TEMP").or_else(|| tmp("TMP")).or_else(|| tmp("TMPDIR")))
+            .unwrap_or_else(|| env::temp_dir().into_os_string());
 
         // 生产覆盖通道（sidecar resolveHome/resolveUserData 逐字对齐）：
         // DSH_HOME / DSH_TAURI_USERDATA 都是「根目录直接替换」——DSH_HOME 即
@@ -90,6 +104,17 @@ impl DshPaths {
             app_data,
         }
     }
+}
+
+/// 无 APPDATA/XDG 时的数据根推导（Electron appData 惯例）：
+/// macOS ~/Library/Application Support，其余 unix ~/.config。
+#[cfg(target_os = "macos")]
+fn default_data_root(home: PathBuf) -> PathBuf {
+    home.join("Library").join("Application Support")
+}
+#[cfg(not(target_os = "macos"))]
+fn default_data_root(home: PathBuf) -> PathBuf {
+    home.join(".config")
 }
 
 #[cfg(test)]
@@ -128,6 +153,59 @@ mod tests {
         let p = paths("/home/u", "/home/u/.config", "/tmp");
         assert_eq!(p.app_data, PathBuf::from("/home/u/.config/dsh-desktop"));
         assert!(p.settings.starts_with(&p.app_data));
+    }
+
+    /// unix 布局（无 APPDATA/USERPROFILE，HOME + TMPDIR）：appdata 落
+    /// HOME 下的平台数据根（非 macOS 编译断言 ~/.config，macOS 断言
+    /// ~/Library/Application Support），tmp 落 TMPDIR——此前分别回退空串，
+    /// app_data/paste_tmp 恒为相对路径（随 GUI cwd 漂移的错位根因）。
+    #[test]
+    fn unix_layout_home_fallback_not_relative() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let p = DshPaths::resolve_with(
+            |k| (k == "HOME").then(|| OsString::from("/home/u")),
+            |_| None, // 无 APPDATA / XDG_CONFIG_HOME
+            |k| (k == "TMPDIR").then(|| OsString::from("/tmp/uid")),
+        );
+        let expect_root = if cfg!(target_os = "macos") {
+            PathBuf::from("/home/u/Library/Application Support")
+        } else {
+            PathBuf::from("/home/u/.config")
+        };
+        assert_eq!(p.app_data, expect_root.join("dsh-desktop"), "unix 不得落相对路径");
+        // 组件级断言（Windows 宿主上 "/home/u" 无盘符不算 is_absolute，
+        // 不能用 is_absolute 判——用与期望根的 starts_with 锚定）。
+        assert!(p.settings.starts_with(&expect_root), "settings 必须落在数据根下: {:?}", p.settings);
+        assert_eq!(p.paste_tmp, PathBuf::from("/tmp/uid/dsh-paste"), "TMPDIR 惯例优先");
+        assert_eq!(p.dsh_home, PathBuf::from("/home/u/.dsh"));
+    }
+
+    /// XDG_CONFIG_HOME 优先于 HOME 推导（Linux 惯例；与 sidecar
+    /// resolveUserData 的回退链逐字对齐——两侧不一致会造成 settings 双写）。
+    #[test]
+    fn xdg_config_home_wins_over_home_derivation() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let p = DshPaths::resolve_with(
+            |k| (k == "HOME").then(|| OsString::from("/home/u")),
+            |k| (k == "XDG_CONFIG_HOME").then(|| OsString::from("/xdg/cfg")),
+            |k| (k == "TMPDIR").then(|| OsString::from("/tmp")),
+        );
+        assert_eq!(p.app_data, PathBuf::from("/xdg/cfg/dsh-desktop"), "XDG_CONFIG_HOME 存在时必须优先");
+    }
+
+    /// 全缺兜底：tmp 走 std::env::temp_dir()（非空、绝对），app_data 落
+    /// HOME 数据根——绝不允许退成相对路径（GUI cwd 不可控）。
+    #[test]
+    fn all_env_missing_still_absolute_tmp() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let p = DshPaths::resolve_with(
+            |k| (k == "HOME").then(|| OsString::from("/home/u")),
+            |_| None,
+            |_| None,
+        );
+        let tmp_root = p.paste_tmp.parent().expect("paste_tmp 必有父目录").to_path_buf();
+        assert!(tmp_root.is_absolute(), "tmp 兜底必须绝对路径: {:?}", tmp_root);
+        assert_ne!(tmp_root, PathBuf::new(), "不得退空串");
     }
 
     /// 生产覆盖通道（DSH_HOME / DSH_TAURI_USERDATA）：直接替换根目录，

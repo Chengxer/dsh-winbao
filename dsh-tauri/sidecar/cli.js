@@ -52,12 +52,30 @@ function resolveHome(explicit) {
 
 function resolveUserData() {
   if (process.env.DSH_TAURI_USERDATA) return path.resolve(process.env.DSH_TAURI_USERDATA);
-  const appdata = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
-  return path.join(appdata, 'dsh-desktop');
+  // 与 Rust shell-core paths.rs 的回退链逐字对齐（两侧不一致 = settings 双写）：
+  // APPDATA（win32）→ XDG_CONFIG_HOME → HOME 平台数据根
+  // （darwin: ~/Library/Application Support；其余 unix: ~/.config）。
+  // 此前非 Windows 恒落 ~/AppData/Roaming（虚构路径）。
+  if (process.platform === 'win32') {
+    const appdata = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+    return path.join(appdata, 'dsh-desktop');
+  }
+  if (process.env.XDG_CONFIG_HOME) return path.join(process.env.XDG_CONFIG_HOME, 'dsh-desktop');
+  const home = os.homedir();
+  const root = process.platform === 'darwin'
+    ? path.join(home, 'Library', 'Application Support')
+    : path.join(home, '.config');
+  return path.join(root, 'dsh-desktop');
 }
 
 function mods_node(appDir) {
-  return path.join(appDir, 'vendor', 'node', 'node.exe');
+  // vendor 目录按平台分发双二进制（node.exe / node）；按平台选主名，缺失时
+  // 另一名兜底——此前硬编码 node.exe，非 Windows 上 koffi 预检必 ENOENT。
+  const dir = path.join(appDir, 'vendor', 'node');
+  const primary = path.join(dir, process.platform === 'win32' ? 'node.exe' : 'node');
+  if (fs.existsSync(primary)) return primary;
+  const alt = path.join(dir, process.platform === 'win32' ? 'node' : 'node.exe');
+  return fs.existsSync(alt) ? alt : primary;
 }
 
 const log = (msg) => process.stderr.write('[sidecar] ' + msg + '\n');
@@ -503,11 +521,17 @@ function createPluginManager(mods, { appDir, home }) {
         // 最小 tgz 解包：gzip → tar 条目流（只处理文件条目）。
         extractTarGz(buf, tmp);
       } else {
-        // zip：交由 PowerShell Expand-Archive（Windows 兜底）。
+        // zip：Windows 走 PowerShell Expand-Archive；其余平台 unzip（macOS 系统
+        // 自带，多数 Linux 发行版预装——缺失时报可读错误，不再静默 ENOENT）。
         const { execFileSync } = require('node:child_process');
         const zipPath = path.join(tmp, 'dl.zip');
         fs.writeFileSync(zipPath, buf);
-        execFileSync('powershell', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${path.join(tmp, 'x')}' -Force`], { stdio: 'ignore' });
+        const dest = path.join(tmp, 'x');
+        if (process.platform === 'win32') {
+          execFileSync('powershell', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${dest}' -Force`], { stdio: 'ignore' });
+        } else {
+          execFileSync('unzip', ['-o', zipPath, '-d', dest], { stdio: 'ignore' });
+        }
       }
       const root = findPackageRoot(tmp);
       if (!root) return { ok: false, error: '归档中未找到包根' };

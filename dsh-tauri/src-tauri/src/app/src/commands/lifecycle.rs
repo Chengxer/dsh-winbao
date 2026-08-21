@@ -51,7 +51,16 @@ pub fn copy_text(text: String) -> Result<serde_json::Value, BridgeError> {
     if text.len() > 1_000_000 {
         return Err(BridgeError::invalid_arg("文本过长"));
     }
-    // PowerShell Set-Clipboard：单引号包裹 + 内部单引号翻倍（防注入）。
+    set_clipboard_text(&text)?;
+    Ok(serde_json::Value::Null)
+}
+
+/// 剪贴板写入（平台三分支）：Windows PowerShell Set-Clipboard（单引号包裹 +
+/// 内部单引号翻倍防注入）；macOS pbcopy；Linux xclip/xsel/wl-copy 尝试链
+/// （发行版/会话各异，均缺则报可读错误）——此前无平台分支，非 Windows 上
+/// spawn powershell 直接失败，复制功能全坏。
+#[cfg(windows)]
+fn set_clipboard_text(text: &str) -> Result<(), BridgeError> {
     let escaped = text.replace('\'', "''");
     let status = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", &format!("Set-Clipboard -Value '{escaped}'")])
@@ -61,7 +70,52 @@ pub fn copy_text(text: String) -> Result<serde_json::Value, BridgeError> {
     if !status.status.success() {
         return Err(BridgeError::internal("剪贴板写入失败"));
     }
-    Ok(serde_json::Value::Null)
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn set_clipboard_text(text: &str) -> Result<(), BridgeError> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(BridgeError::from)?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes()).map_err(BridgeError::from)?;
+    }
+    let status = child.wait().map_err(BridgeError::from)?;
+    if !status.success() {
+        return Err(BridgeError::internal("剪贴板写入失败"));
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn set_clipboard_text(text: &str) -> Result<(), BridgeError> {
+    use std::io::Write;
+    let candidates: &[(&str, &[&str])] = &[
+        ("xclip", &["-selection", "clipboard"]),
+        ("xsel", &["--clipboard", "--input"]),
+        ("wl-copy", &[]),
+    ];
+    for (tool, args) in candidates {
+        let Ok(mut child) = std::process::Command::new(tool)
+            .args(*args)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        else {
+            continue; // 未安装：试下一个
+        };
+        let mut write_ok = true;
+        if let Some(mut stdin) = child.stdin.take() {
+            write_ok = stdin.write_all(text.as_bytes()).is_ok();
+        }
+        match child.wait() {
+            Ok(st) if st.success() && write_ok => return Ok(()),
+            _ => continue, // 写入/退出失败：试下一个工具
+        }
+    }
+    Err(BridgeError::internal("剪贴板写入失败（未找到可用的 xclip/xsel/wl-copy）"))
 }
 
 #[tauri::command]
@@ -138,4 +192,36 @@ fn reqwest_probe(base: &str) -> Result<(), String> {
 #[tauri::command]
 pub fn poc_echo_json(payload: serde_json::Value) -> Result<serde_json::Value, BridgeError> {
     Ok(payload)
+}
+
+#[cfg(test)]
+mod tests {
+    /// copy_text 平台三分支形态锚点（include_str! 形态断言法）：非 Windows
+    /// 不得再 spawn powershell（此前 mac/linux 上复制功能全坏——spawn 直接
+    /// Err）；macOS 走 pbcopy、Linux 走 xclip/xsel/wl-copy 尝试链。
+    #[test]
+    fn copy_text_has_platform_branches_shape() {
+        let src = include_str!("lifecycle.rs");
+        let seg = src
+            .split("#[cfg(windows)]\nfn set_clipboard_text")
+            .nth(1)
+            .and_then(|s| s.split("#[cfg(target_os = \"macos\")]").next())
+            .expect("windows set_clipboard_text 分支");
+        assert!(seg.contains("Set-Clipboard"), "Windows 保持 PowerShell 语义");
+        let mac = src
+            .split("#[cfg(target_os = \"macos\")]\nfn set_clipboard_text")
+            .nth(1)
+            .and_then(|s| s.split("#[cfg(all(unix, not(target_os = \"macos\")))]").next())
+            .expect("macOS set_clipboard_text 分支");
+        assert!(mac.contains("pbcopy"), "macOS 须用 pbcopy: {mac}");
+        let linux = src
+            .split("#[cfg(all(unix, not(target_os = \"macos\")))]\nfn set_clipboard_text")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n\n#[cfg(test)]").next())
+            .expect("Linux set_clipboard_text 分支");
+        assert!(linux.contains("xclip") && linux.contains("xsel") && linux.contains("wl-copy"), "Linux 尝试链须齐: {linux}");
+        // 命令主体不得残留平台外的 powershell 直调（防回退到单一实现）。
+        let cmd_seg = src.split("pub fn copy_text").nth(1).and_then(|s| s.split("\n}").next()).unwrap_or("");
+        assert!(!cmd_seg.contains("powershell"), "copy_text 主体须委托 set_clipboard_text: {cmd_seg}");
+    }
 }

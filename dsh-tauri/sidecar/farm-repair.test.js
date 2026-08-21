@@ -25,7 +25,14 @@ const path = require('node:path');
 
 const SCRIPT = path.join(__dirname, 'farm-repair.js');
 const APP_DIR = path.resolve(__dirname, '..', '..', 'dsh-desktop');
-const NODE = path.join(APP_DIR, 'vendor', 'node', 'node.exe');
+// vendor node 双平台二进制（win32 node.exe / 其余 node），与 cli.test.js 同款探测。
+const NODE = (() => {
+  const dir = path.join(APP_DIR, 'vendor', 'node');
+  const primary = path.join(dir, process.platform === 'win32' ? 'node.exe' : 'node');
+  if (fs.existsSync(primary)) return primary;
+  const alt = path.join(dir, process.platform === 'win32' ? 'node' : 'node.exe');
+  return fs.existsSync(alt) ? alt : primary;
+})();
 const HAVE_DEPS = fs.existsSync(NODE) && fs.existsSync(path.join(APP_DIR, 'node_modules', 'koffi'));
 
 /** 驱动 farm-repair.js（与 supervisor.run_farm_repair 同参数形态：app-dir 走 argv）。 */

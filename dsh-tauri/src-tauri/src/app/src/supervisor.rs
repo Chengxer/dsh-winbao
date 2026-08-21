@@ -81,6 +81,30 @@ struct Inner {
 /// 带超时的 .output()——D2 诊断「永挂形态」根治：vendor node 调用在
 /// 用户机上可能被 AV/SmartScreen 拦到半死，无超时则 boot 线程永挂
 /// loading 页（连恢复页都不出现）。超时按失败处理，进瀑布/恢复页。
+/// vendor node 可执行名：Windows node.exe，其余平台 node（vendor 目录按
+/// 平台分发双二进制——mac 检出内 node 为 Mach-O；此前硬编码 node.exe，
+/// mac 上内核 spawn 必失败、boot 瀑布终转恢复页）。
+#[cfg(windows)]
+const VENDOR_NODE_NAME: &str = "node.exe";
+#[cfg(not(windows))]
+const VENDOR_NODE_NAME: &str = "node";
+
+/// vendor node 路径解析：按平台选主名，缺失时另一名兜底（检出形态可能只
+/// 带其一；都不在时返回主名，spawn 报错走既有恢复页路径）。
+fn vendor_node_exe(app_dir: &std::path::Path) -> PathBuf {
+    let dir = app_dir.join("vendor").join("node");
+    let primary = dir.join(VENDOR_NODE_NAME);
+    if primary.exists() {
+        return primary;
+    }
+    let alt_name = if cfg!(windows) { "node" } else { "node.exe" };
+    let alt = dir.join(alt_name);
+    if alt.exists() {
+        return alt;
+    }
+    primary
+}
+
 impl Supervisor {
     pub fn new(repo_root: &std::path::Path) -> Self {
         let app_dir = repo_root.join("dsh-desktop");
@@ -98,7 +122,7 @@ impl Supervisor {
         };
         Self {
             sidecar_cli,
-            node_exe: app_dir.join("vendor").join("node").join("node.exe"),
+            node_exe: vendor_node_exe(&app_dir),
             bin_js: app_dir.join("node_modules").join("@deepseek-ai").join("dsh").join("lib").join("bin.js"),
             kernel_version: read_kernel_version(&app_dir),
             app_dir,
@@ -471,6 +495,7 @@ impl Supervisor {
     /// koffi 预检：失败时启用 picker-browse 降级 overlay（Electron runKoffiPreflight
     /// + enablePickerBrowseOverlay 的合并语义；缓存简化为 settings 布尔——每次
     /// 冒烟 ~100ms 级，签名级缓存随出包验证再评估）。
+    #[cfg(windows)]
     fn run_koffi_preflight(&self) {
         let settings = shell_core::SettingsStore::new(shell_core::DshPaths::resolve().settings);
         let cached = settings.get("koffiPreflightOk").ok().flatten().and_then(|v| v.as_bool());
@@ -518,6 +543,15 @@ impl Supervisor {
         } else {
             log_line("koffi 预检通过");
         }
+    }
+
+    /// 非 Windows：koffi 预检跳过。预检的故障模式是 win32-x64 预编译二进制
+    /// 在 koffi.load() 处访问违例（koffi-preflight.cjs 探测的正是 kernel32.dll）
+    /// ——非 Windows 无此故障面；若照跑只会恒失败，导致目录选择器被永久
+    /// 降级到 browse 后端（静默功能损失）。
+    #[cfg(not(windows))]
+    fn run_koffi_preflight(&self) {
+        log_line("koffi 预检仅 Windows 需要（本平台跳过）");
     }
 
     /// 刷新 safe-boot overlay（崩溃自动重启前）：解析 dsh-web.log 失败插件 → 禁用。
@@ -952,6 +986,37 @@ Content-Length: 0
         assert_eq!(read_kernel_version(&bad), "unknown");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&bad);
+    }
+
+    /// vendor node 平台名选择（P0 回归锚点）：本平台主名优先；主名缺失时
+    /// 另一名兜底（检出只带单平台的形态）；两者皆缺返回主名（spawn 报错
+    /// 走既有恢复页路径，不 panic）。
+    #[test]
+    fn vendor_node_exe_prefers_platform_name_with_fallback() {
+        let dir = sandbox("vn");
+        let vdir = dir.join("vendor").join("node");
+        std::fs::create_dir_all(&vdir).unwrap();
+        let primary = if cfg!(windows) { "node.exe" } else { "node" };
+        let alt = if cfg!(windows) { "node" } else { "node.exe" };
+        // 只放主名：命中主名。
+        std::fs::write(vdir.join(primary), b"").unwrap();
+        assert_eq!(vendor_node_exe(&dir), vdir.join(primary));
+        // 主名 + 备名都在：仍主名。
+        std::fs::write(vdir.join(alt), b"").unwrap();
+        assert_eq!(vendor_node_exe(&dir), vdir.join(primary));
+        // 只放备名（单平台检出形态）：备名兜底，不再拼死主名。
+        let dir2 = sandbox("vn2");
+        let vdir2 = dir2.join("vendor").join("node");
+        std::fs::create_dir_all(&vdir2).unwrap();
+        std::fs::write(vdir2.join(alt), b"").unwrap();
+        assert_eq!(vendor_node_exe(&dir2), vdir2.join(alt), "主名缺失须兜底另一平台名");
+        // 全缺：返回主名路径（调用方 spawn 失败转恢复页）。
+        let dir3 = sandbox("vn3");
+        std::fs::create_dir_all(dir3.join("vendor").join("node")).unwrap();
+        assert_eq!(vendor_node_exe(&dir3), dir3.join("vendor").join("node").join(primary));
+        for d in [&dir, &dir2, &dir3] {
+            let _ = std::fs::remove_dir_all(d);
+        }
     }
 
     /// 功能集成：真机 boot 链（sidecar 四步）在沙箱 home 上执行。
