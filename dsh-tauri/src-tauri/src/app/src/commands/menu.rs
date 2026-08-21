@@ -115,7 +115,15 @@ pub async fn menu_action(action: String, payload: Option<serde_json::Value>, app
             use tauri_plugin_updater::UpdaterExt;
             let updater = app.updater().map_err(|e| BridgeError::updater_network(e.to_string()))?;
             if std::env::var("DSH_UPDATER_ENDPOINT").ok().is_none() {
-                return Err(BridgeError::updater_config("更新通道未配置（DSH_UPDATER_ENDPOINT/DSH_UPDATER_PUBKEY），发版 CI 注入"));
+                // R5 triage：更新通道尚未开通（CI 从不注入该变量）——报错误
+                // 码会让用户看到「更新通道未配置（DSH_UPDATER_ENDPOINT…）」
+                // 这种面向开发者的文案。诚实化：正常返回结构化未开通态 +
+                // 可操作指引（去 Releases 手动下载覆盖安装）。
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "channel": "none",
+                    "message": "应用内更新暂未开放：请到 GitHub Releases（myYangyunfan/dsh_desktop）下载新版本安装包，完全退出应用后覆盖安装（会话数据不受影响）。"
+                }));
             }
             let update = updater.check().await.map_err(|e| BridgeError::updater_network(e.to_string()))?;
             match update {
@@ -425,8 +433,9 @@ mod tests {
 
     /// check/install-client-update 源码形态锚点（Tauri updater 命令依赖
     /// AppHandle，无法在单测构造——沿用 include_str! 形态断言法）：
-    /// · check-client-update：未配置 DSH_UPDATER_ENDPOINT 必须先拒绝
-    ///   （updater_config），防发版前点了菜单走默认通道拿不可预期更新；
+    /// · check-client-update：未配置 DSH_UPDATER_ENDPOINT 必须先拦截并返回
+    ///   结构化「channel:"none"+指引」（v0.5.1 诚实化：不再抛面向开发者的
+    ///   updater_config 错误文案），防发版前点了菜单走默认通道拿不可预期更新；
     /// · install-client-update：必须 check() 到 Some 才 download_and_install
     ///   （不得跳过校验直装），下载/签名失败归一 updater_signature。
     #[test]
@@ -437,10 +446,11 @@ mod tests {
             .nth(1)
             .and_then(|s| s.split("\"install-client-update\" =>").next())
             .expect("check-client-update 分支");
-        let cfg = check.find("updater_config").expect("未配置通道必须 updater_config 拒绝");
+        let cfg = check.find("DSH_UPDATER_ENDPOINT").expect("必须先查通道环境变量");
         let net = check.find("updater.check()").expect("必须联网 check");
         assert!(cfg < net, "先查配置再联网（省一次无效网络往返）");
-        assert!(check.contains("DSH_UPDATER_ENDPOINT"), "通道环境变量锚点");
+        assert!(check.contains("\"channel\": \"none\""), "未开通返回结构化 channel:none");
+        assert!(check.contains("Releases"), "未开通须给出手动下载指引");
         assert!(check.contains("\"upToDate\": true"), "无更新返回 upToDate:true");
         let install = src
             .split("\"install-client-update\" =>")
