@@ -40,12 +40,19 @@ function lockFile(file, holdMs = 15000) {
     "$f = [System.IO.File]::Open('" + psFile + "', [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None);" +
     "[System.IO.File]::WriteAllText('" + psMarker + "', '1');" +
     "Start-Sleep -Seconds " + Math.ceil(holdMs / 1000);
-  const child = cp.spawn('powershell', ['-NoProfile', '-Command', script], { stdio: 'ignore' });
+  const child = cp.spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const errChunks = [];
+  if (child.stderr) child.stderr.on('data', (d) => errChunks.push(d));
   return {
     child,
     async ready() {
-      for (let i = 0; i < 400; i += 1) {
+      // 就绪预算 40s：GitHub runner 的 PowerShell 冷启动在多测试并行 IO 抢占
+      // 下可超 10s（CI 实测 I1(d) 在旧 10s 预算内 marker 未现误判锁失败）。
+      for (let i = 0; i < 1600; i += 1) {
         if (fs.existsSync(marker)) return true;
+        if (child.exitCode !== null) {
+          throw new Error(`锁进程提前退出(${child.exitCode})：${Buffer.concat(errChunks).toString('utf8').slice(0, 500)}`);
+        }
         await sleep(25);
       }
       return fs.existsSync(marker);
