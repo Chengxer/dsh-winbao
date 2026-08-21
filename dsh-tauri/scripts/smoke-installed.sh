@@ -177,12 +177,22 @@ if [ -f "$SMOKE/shell.pid" ]; then
 fi
 taskkill //IM "dsh-tauri-app.exe" //F //T > /dev/null 2>&1
 sleep 3
-NEW_AFTER=$(listening_pids | comm -13 <(echo "$PRE_PIDS") - | grep -c . )
-echo "[smoke] 杀壳后新增监听者残留: ${NEW_AFTER}（预期 0）"
+# 残留判定收紧到「本应用家属进程」：裸 PID 差集在真实用户机上会被窗口期内
+# 新开的浏览器/后台服务端口污染（实测 bilibili/wps 等随机命中 → 冒烟误报
+# FAIL）。只有 dsh-tauri-app.exe / node.exe 持有的新增监听才算泄漏。
+RESIDUAL=$(listening_pids | comm -13 <(echo "$PRE_PIDS") - | while read -r p; do
+  [ -n "$p" ] || continue
+  img=$(tasklist //FI "PID eq $p" //FO CSV //NH 2>/dev/null | cut -d',' -f1 | tr -d '"')
+  case "$img" in
+    dsh-tauri-app.exe|node.exe) echo "$p($img)";;
+  esac
+done)
+NEW_AFTER=$(echo "$RESIDUAL" | grep -c . )
+echo "[smoke] 杀壳后应用家属进程监听残留: ${NEW_AFTER}（预期 0）${RESIDUAL:+  ← $RESIDUAL}"
 
 if [ -n "$ok" ] && [ "${NEW_AFTER:-1}" -eq 0 ]; then
   echo "[smoke] === PASS ==="
 else
-  echo "[smoke] === FAIL（boot=$ok 残留监听=${NEW_AFTER:-?}）==="
+  echo "[smoke] === FAIL（boot=$ok 应用残留监听=${NEW_AFTER:-?}）==="
   exit 1
 fi
