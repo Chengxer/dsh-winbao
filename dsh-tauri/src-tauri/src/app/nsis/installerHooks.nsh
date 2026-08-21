@@ -49,8 +49,8 @@
     StrCmp $R6 "DSH Desktop" 0 LegacyScan_next_${ROOT}_${UID}
       Push $R5
       Call LegacyHandleEntry${ROOT}
-      Pop $R6
-      StrCmp $R6 "1" 0 LegacyScan_norescan_${ROOT}_${UID}
+      Pop $R5
+      StrCmp $R9 "1" 0 LegacyScan_norescan_${ROOT}_${UID}
         ; V4 walkthrough #5 (HIGH): purge deletes keys during enumeration which
         ; shifts subsequent indices (skips keys ~50% in dual-key case). Any key
         ; handled (uninstall/removed) restarts enumeration from index 0.
@@ -89,7 +89,7 @@
         ${EndIf}
       LaeNoLive:
     ${EndIf}
-    Push ""
+    StrCpy $R9 ""
     Goto LaeDone
   ${Else}
     ; purge：键键都清。V4 walkthrough fixes:
@@ -103,7 +103,7 @@
       !if "${ROOT}" == "HKLM"
         DetailPrint "HKLM 机装旧版（键 $R5）：跳过卸载器（避免 UAC 挂死），仅清键"
         DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R5"
-        Push "1"
+        StrCpy $R9 "1"
         Goto LaeDone
       !else
       StrCpy $R6 "$R1" "" -13
@@ -127,17 +127,17 @@
         IntOp $R4 $R4 + 1
         IntCmp $R4 30 LaePollDone LaePoll
       LaePollDone:
-      Push "1"
+      StrCpy $R9 "1"
       Goto LaeDone
       !endif
     ${Else}
       DetailPrint "陈旧键（无卸载器文件）清除：$R5"
       DeleteRegKey ${ROOT} "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R5"
-      Push "1"
+      StrCpy $R9 "1"
       Goto LaeDone
     ${EndIf}
   ${EndIf}
-  Push ""
+  StrCpy $R9 ""
   LaeDone:
 !macroend
 
@@ -186,14 +186,7 @@ Function ProcessLegacyDSH
 FunctionEnd
 
 Function LegacyHandleEntryHKCU
-  Exch $R5   ; 子键名
-  Push $R0
-  Push $R1
-  Push $R2
-  Push $R3
-  Push $R4
-  Push $R6
-  Push $R7
+  Exch $R5   ; 子键名（消费栈顶）
   ReadRegStr $R1 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R5" "UninstallString"
   ReadRegStr $R2 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R5" "InstallLocation"
   Push $R1
@@ -202,26 +195,12 @@ Function LegacyHandleEntryHKCU
   Push $R2
   Call LegacyStripQuotes
   Pop $R2
+  StrCpy $R9 ""
   !insertmacro LegacyActOnEntry HKCU
-  Pop $R7
-  Pop $R6
-  Pop $R4
-  Pop $R3
-  Pop $R2
-  Pop $R1
-  Pop $R0
-  Pop $R5
 FunctionEnd
 
 Function LegacyHandleEntryHKLM
-  Exch $R5   ; 子键名
-  Push $R0
-  Push $R1
-  Push $R2
-  Push $R3
-  Push $R4
-  Push $R6
-  Push $R7
+  Exch $R5   ; 子键名（消费栈顶）
   ReadRegStr $R1 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R5" "UninstallString"
   ReadRegStr $R2 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\$R5" "InstallLocation"
   Push $R1
@@ -230,15 +209,8 @@ Function LegacyHandleEntryHKLM
   Push $R2
   Call LegacyStripQuotes
   Pop $R2
+  StrCpy $R9 ""
   !insertmacro LegacyActOnEntry HKLM
-  Pop $R7
-  Pop $R6
-  Pop $R4
-  Pop $R3
-  Pop $R2
-  Pop $R1
-  Pop $R0
-  Pop $R5
 FunctionEnd
 
 ; 去首尾引号（InstallLocation/UninstallString 实测带引号；无引号不动）。
