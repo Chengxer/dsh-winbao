@@ -111,7 +111,7 @@ pub fn open_float_window(app: &tauri::AppHandle, kernel_url: &str, session_id: &
     }
     let floats = app.webview_windows().keys().filter(|k| k.starts_with("float-")).count();
     if floats >= FLOAT_MAX {
-        return Err(BridgeError::new("E_NOT_FOUND", format!("浮窗已达上限 {FLOAT_MAX}")));
+        return Err(BridgeError::not_found(format!("浮窗已达上限 {FLOAT_MAX}")));
     }
     let url = kernel_url.trim_end_matches('/').to_string();
     let mode_script = format!(

@@ -7,9 +7,13 @@ use bridge::BridgeError;
 
 use super::common::b64_decode;
 
+/// 错误码：图片粘贴域自用码，尚未登记 contracts/error-codes.md（见模块
+/// 审查报告）——常量化但码值保持原样，防跨进程行为变更。
+const E_IMAGE_PASTE: &str = "E_IMAGE_PASTE";
+
 #[tauri::command]
 pub fn image_paste_save(payload: serde_json::Value) -> Result<serde_json::Value, BridgeError> {
-    image_paste_save_impl(&payload).map_err(|e| BridgeError::new("E_IMAGE_PASTE", &e))
+    image_paste_save_impl(&payload).map_err(|e| BridgeError::new(E_IMAGE_PASTE, &e))
 }
 
 fn image_paste_save_impl(payload: &serde_json::Value) -> Result<serde_json::Value, String> {

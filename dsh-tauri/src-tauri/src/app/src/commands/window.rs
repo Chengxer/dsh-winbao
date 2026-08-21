@@ -42,15 +42,15 @@ pub fn window_control(window: WebviewWindow, action: String) -> Result<serde_jso
 #[tauri::command]
 pub fn float_window(action: String, session_id: Option<String>, app: AppHandle, window: WebviewWindow) -> Result<serde_json::Value, BridgeError> {
     if window.label() != "main" {
-        return Err(BridgeError::new("E_NOT_FOUND", "仅主窗可开浮窗"));
+        return Err(BridgeError::not_found("仅主窗可开浮窗"));
     }
     match action.as_str() {
         "open" => {
             let sid = session_id.filter(|s| !s.is_empty()).ok_or_else(|| BridgeError::invalid_arg("bad-session"))?;
             let state = app.state::<AppState>();
             let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
-            let sv = sv.ok_or_else(|| BridgeError::new("E_KERNEL_NOT_READY", "内核未就绪"))?;
-            let url = sv.kernel_url().ok_or_else(|| BridgeError::new("E_KERNEL_NOT_READY", "内核未就绪"))?;
+            let sv = sv.ok_or_else(|| BridgeError::kernel_not_ready("内核未就绪"))?;
+            let url = sv.kernel_url().ok_or_else(|| BridgeError::kernel_not_ready("内核未就绪"))?;
             crate::windows::open_float_window(&app, &url, &sid)
         }
         other => Err(BridgeError::invalid_arg(format!("bad-action: {other}"))),
@@ -68,7 +68,7 @@ pub fn float_close(window: WebviewWindow) -> Result<serde_json::Value, BridgeErr
 #[tauri::command]
 pub fn pet_window(action: String, app: AppHandle, window: WebviewWindow) -> Result<serde_json::Value, BridgeError> {
     if window.label() != "main" {
-        return Err(BridgeError::new("E_NOT_FOUND", "仅主窗可控制宠物窗"));
+        return Err(BridgeError::not_found("仅主窗可控制宠物窗"));
     }
     match action.as_str() {
         "state" => Ok(serde_json::json!({ "ok": true, "open": app.get_webview_window("pet").is_some() })),
@@ -86,8 +86,8 @@ pub fn pet_window(action: String, app: AppHandle, window: WebviewWindow) -> Resu
             }
             let state = app.state::<AppState>();
             let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
-            let sv = sv.ok_or_else(|| BridgeError::new("E_KERNEL_NOT_READY", "内核未就绪"))?;
-            let url = sv.kernel_url().ok_or_else(|| BridgeError::new("E_KERNEL_NOT_READY", "内核未就绪"))?;
+            let sv = sv.ok_or_else(|| BridgeError::kernel_not_ready("内核未就绪"))?;
+            let url = sv.kernel_url().ok_or_else(|| BridgeError::kernel_not_ready("内核未就绪"))?;
             crate::windows::open_pet_window(&app, &url)
         }
         other => Err(BridgeError::invalid_arg(format!("bad-action: {other}"))),

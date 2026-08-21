@@ -16,7 +16,7 @@ pub fn file_open(path: String, app: AppHandle) -> Result<serde_json::Value, Brid
     // 围栏：只允许 dsh home 下的路径（contracts/error-codes.md E_FENCE_ROOT）。
     let home = shell_core::DshPaths::resolve().dsh_home;
     let fence = fence::Fence::new([home]);
-    let cleaned = fence.ensure(std::path::Path::new(&path)).map_err(|e| BridgeError::new("E_FENCE_ROOT", e.to_string()))?;
+    let cleaned = fence.ensure(std::path::Path::new(&path)).map_err(|e| BridgeError::fence_root(e.to_string()))?;
     let _ = &app;
     #[cfg(windows)]
     {

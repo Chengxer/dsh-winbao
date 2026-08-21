@@ -113,11 +113,11 @@ pub async fn menu_action(action: String, payload: Option<serde_json::Value>, app
         }
         "check-client-update" => {
             use tauri_plugin_updater::UpdaterExt;
-            let updater = app.updater().map_err(|e| BridgeError::new("E_UPDATER_NETWORK", e.to_string()))?;
+            let updater = app.updater().map_err(|e| BridgeError::updater_network(e.to_string()))?;
             if std::env::var("DSH_UPDATER_ENDPOINT").ok().is_none() {
-                return Err(BridgeError::new("E_UPDATER_CONFIG", "更新通道未配置（DSH_UPDATER_ENDPOINT/DSH_UPDATER_PUBKEY），发版 CI 注入"));
+                return Err(BridgeError::updater_config("更新通道未配置（DSH_UPDATER_ENDPOINT/DSH_UPDATER_PUBKEY），发版 CI 注入"));
             }
-            let update = updater.check().await.map_err(|e| BridgeError::new("E_UPDATER_NETWORK", e.to_string()))?;
+            let update = updater.check().await.map_err(|e| BridgeError::updater_network(e.to_string()))?;
             match update {
                 Some(u) => Ok(serde_json::json!({ "ok": true, "version": u.version, "notes": u.body, "downloadAndInstall": "经 dshDesktop.menu.action('install-client-update')" })),
                 None => Ok(serde_json::json!({ "ok": true, "upToDate": true })),
@@ -125,10 +125,10 @@ pub async fn menu_action(action: String, payload: Option<serde_json::Value>, app
         }
         "install-client-update" => {
             use tauri_plugin_updater::UpdaterExt;
-            let updater = app.updater().map_err(|e| BridgeError::new("E_UPDATER_NETWORK", e.to_string()))?;
-            let update = updater.check().await.map_err(|e| BridgeError::new("E_UPDATER_NETWORK", e.to_string()))?
+            let updater = app.updater().map_err(|e| BridgeError::updater_network(e.to_string()))?;
+            let update = updater.check().await.map_err(|e| BridgeError::updater_network(e.to_string()))?
                 .ok_or_else(|| BridgeError::not_found("已是最新版本"))?;
-            update.download_and_install(|_, _| {}, || {}).await.map_err(|e| BridgeError::new("E_UPDATER_SIGNATURE", e.to_string()))?;
+            update.download_and_install(|_, _| {}, || {}).await.map_err(|e| BridgeError::updater_signature(e.to_string()))?;
             Ok(serde_json::json!({ "ok": true, "installed": update.version }))
         }
         other => Err(BridgeError::invalid_arg(format!("未知菜单动作：{other}"))),
@@ -163,6 +163,11 @@ fn toggle_setting(store: &shell_core::SettingsStore, key: &str) -> Result<bool, 
 
 /// npm registry latest 版本查询（无 HTTP 依赖：子进程拉取；npmmirror 优先、
 /// npmjs 兜底——Electron 更新链双源同思路，国内网络优先镜像）。
+///
+/// `E_AGENT_UPDATE_NETWORK`：agent 更新链自用码，尚未登记
+/// contracts/error-codes.md（见模块审查报告）——码值保持原样防行为变更。
+const E_AGENT_UPDATE_NETWORK: &str = "E_AGENT_UPDATE_NETWORK";
+
 fn npm_latest_version(pkg: &str) -> Result<String, BridgeError> {
     for host in ["registry.npmmirror.com", "registry.npmjs.org"] {
         let url = format!("https://{host}/{pkg}/latest");
@@ -170,7 +175,7 @@ fn npm_latest_version(pkg: &str) -> Result<String, BridgeError> {
             return Ok(v);
         }
     }
-    Err(BridgeError::new("E_AGENT_UPDATE_NETWORK", "npm registry 查询失败（npmmirror/npmjs 均不可达）"))
+    Err(BridgeError::new(E_AGENT_UPDATE_NETWORK, "npm registry 查询失败（npmmirror/npmjs 均不可达）"))
 }
 
 /// 单源查询：Windows 走 PowerShell Invoke-RestMethod（壳内既定子进程模式，
