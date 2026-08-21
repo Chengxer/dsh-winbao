@@ -394,4 +394,63 @@ mod tests {
         assert!(!seg.contains("BridgeError::cut"), "不得再返回 E_CUT_FEATURE");
         assert!(seg.contains("\"hasUpdate\""), "返回契约必须带 hasUpdate");
     }
+
+    /// 版本比较器边界补强（「打开后各种 bug」防御轮）：
+    /// · rc(高段) > release(低段)：0.1.0 → 0.1.1-rc.1 的真实升级路径不得漏报；
+    /// · 完全相等（含同 rc 串）；
+    /// · 坏格式（空串/纯文本 unknown/空段）不 panic、语义稳定——
+    ///   read_kernel_version 失败回 "unknown"、网络提取失败回 "" 都真实存在。
+    #[test]
+    fn compare_versions_edges_rc_release_equal_and_malformed() {
+        use std::cmp::Ordering::*;
+        // rc(更高段) > release(更低段)：内置 0.1.0 → npm latest 0.1.1-rc.1 必须报可更新。
+        assert_eq!(compare_versions("0.1.1-rc.1", "0.1.0"), Greater, "高段 rc 不得被漏报为无更新");
+        assert_eq!(compare_versions("0.1.0", "0.1.1-rc.1"), Less);
+        // 同号对照（既有语义）：release > rc。
+        assert_eq!(compare_versions("0.1.1", "0.1.1-rc.1"), Greater);
+        // 完全相等：同串、同 rc 串、v 前缀。
+        assert_eq!(compare_versions("0.5.1", "0.5.1"), Equal);
+        assert_eq!(compare_versions("0.1.1-rc.1", "0.1.1-rc.1"), Equal);
+        assert_eq!(compare_versions("v0.5.1", "0.5.1"), Equal);
+        // 坏格式：空串 vs 空串 / unknown vs unknown → 相等（无更新，不误报）。
+        assert_eq!(compare_versions("", ""), Equal);
+        assert_eq!(compare_versions("unknown", "unknown"), Equal);
+        // 数字段 vs 坏格式：真实版本永远大于 "unknown"/""（不会把垃圾判成可更新）。
+        assert_eq!(compare_versions("unknown", "0.1.0"), Less);
+        assert_eq!(compare_versions("", "0.1.0"), Less);
+        assert_eq!(compare_versions("0.1.0", "unknown"), Greater);
+        // 空段（"0..1"）按文本段处理：文本段 < 数字段（既有语义锚定，不 panic）。
+        assert_eq!(compare_versions("0..1", "0.0.1"), Less);
+    }
+
+    /// check/install-client-update 源码形态锚点（Tauri updater 命令依赖
+    /// AppHandle，无法在单测构造——沿用 include_str! 形态断言法）：
+    /// · check-client-update：未配置 DSH_UPDATER_ENDPOINT 必须先拒绝
+    ///   （updater_config），防发版前点了菜单走默认通道拿不可预期更新；
+    /// · install-client-update：必须 check() 到 Some 才 download_and_install
+    ///   （不得跳过校验直装），下载/签名失败归一 updater_signature。
+    #[test]
+    fn client_update_commands_shape_guards() {
+        let src = include_str!("menu.rs");
+        let check = src
+            .split("\"check-client-update\" =>")
+            .nth(1)
+            .and_then(|s| s.split("\"install-client-update\" =>").next())
+            .expect("check-client-update 分支");
+        let cfg = check.find("updater_config").expect("未配置通道必须 updater_config 拒绝");
+        let net = check.find("updater.check()").expect("必须联网 check");
+        assert!(cfg < net, "先查配置再联网（省一次无效网络往返）");
+        assert!(check.contains("DSH_UPDATER_ENDPOINT"), "通道环境变量锚点");
+        assert!(check.contains("\"upToDate\": true"), "无更新返回 upToDate:true");
+        let install = src
+            .split("\"install-client-update\" =>")
+            .nth(1)
+            .and_then(|s| s.split("other =>").next())
+            .expect("install-client-update 分支");
+        let chk = install.find("updater.check()").expect("必须先 check");
+        let dl = install.find("download_and_install").expect("必须走 download_and_install");
+        assert!(chk < dl, "先 check 后下载安装（不得跳过更新检测直装）");
+        assert!(install.contains("ok_or_else(|| BridgeError::not_found(\"已是最新版本\"))"), "无更新时明确报错而非空装");
+        assert!(install.contains("updater_signature"), "下载/签名失败归一 updater_signature");
+    }
 }

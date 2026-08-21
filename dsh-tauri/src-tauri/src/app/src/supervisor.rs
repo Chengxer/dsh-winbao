@@ -22,6 +22,8 @@ use kernel_process::crash_loop::Verdict;
 /// 稳定落定窗口（Electron SERVICE_STABLE_MS 同语义：就绪后稳定存活此时长，
 /// 启动快照才成为「最后良好」回滚锚点）。
 const SERVICE_STABLE_SECS: u64 = 45;
+/// boot 看门狗上限（D2「永挂形态」根治）：boot 全链有界 5 分钟。
+const BOOT_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(300);
 
 use shell_core::RunState;
 
@@ -151,17 +153,7 @@ impl Supervisor {
         std::thread::spawn(move || {
             // 看门狗（D2 永挂形态根治）：boot 全链有界 5 分钟，超时进恢复页
             // ——防 vendor node 被 AV 拦到半死导致 loading 永挂。
-            let wd_tx = tx.clone();
-            let this_wd = Arc::clone(&this);
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_secs(300));
-                let g = this_wd.inner.lock().unwrap_or_else(|p| p.into_inner());
-                if !g.stopping && g.state != RunState::Ready && g.state != RunState::Recovery {
-                    drop(g);
-                    eprintln!("[supervisor] 看门狗：boot 链 5 分钟超时，转恢复页");
-                    this_wd.enter_recovery_tx(&wd_tx, "boot 链超时（5 分钟看门狗）");
-                }
-            });
+            Self::spawn_boot_watchdog(&this, tx.clone(), BOOT_WATCHDOG_TIMEOUT);
             // panic 隔离：瀑布任何一环意外 panic（兼容性场景的兜底）→ 落恢复页，
             // 客户端继续运行（全局 panic hook 已另行落盘 panics.log）。
             let this2 = Arc::clone(&this);
@@ -173,6 +165,29 @@ impl Supervisor {
                 this2.enter_recovery_tx(&tx2, &format!("boot 线程异常（已捕获，客户端继续运行）: {msg}"));
             }
         });
+    }
+
+    /// boot 看门狗线程：`timeout` 后仍在「未完成」态 → 转恢复页。
+    /// 超时参数化仅为测试注入短超时（生产恒 BOOT_WATCHDOG_TIMEOUT），
+    /// 对外行为零变更。
+    fn spawn_boot_watchdog(this: &Arc<Self>, tx: Sender<SupervisorEvent>, timeout: Duration) {
+        let wd_tx = tx;
+        let this_wd = Arc::clone(this);
+        std::thread::spawn(move || {
+            std::thread::sleep(timeout);
+            let g = this_wd.inner.lock().unwrap_or_else(|p| p.into_inner());
+            if Self::watchdog_should_fire(g.stopping, g.state) {
+                drop(g);
+                eprintln!("[supervisor] 看门狗：boot 链 5 分钟超时，转恢复页");
+                this_wd.enter_recovery_tx(&wd_tx, "boot 链超时（5 分钟看门狗）");
+            }
+        });
+    }
+
+    /// 看门狗触发判定（纯函数，可单测）：超时时刻未在退出、且尚未到达
+    /// Ready（正常就绪，哪怕迟到）或 Recovery（瀑布已自愈转恢复页）才触发。
+    fn watchdog_should_fire(stopping: bool, state: RunState) -> bool {
+        !stopping && state != RunState::Ready && state != RunState::Recovery
     }
 
     /// 守护瀑布主体（boot 线程内执行；panic 由 spawn_boot 捕获兜底）。
@@ -1012,6 +1027,48 @@ Content-Length: 0
         sv.shutdown();
         assert!(sv.inner.lock().unwrap_or_else(|p| p.into_inner()).stopping);
         let _ = Ordering::Relaxed;
+    }
+
+    /// 看门狗判定表（纯函数全态枚举）：boot 进行态（Boot/Repair/Sync/Patch/
+    /// Spawn）触发转恢复页；Ready（迟到的正常就绪）与 Recovery（瀑布已自愈）
+    /// 不触发；stopping（退出路径）压制一切——防退出时误发恢复页事件。
+    #[test]
+    fn watchdog_decision_table_all_states() {
+        use RunState::*;
+        for s in [Boot, Repair, Sync, Patch, Spawn, CrashLoop] {
+            assert!(Supervisor::watchdog_should_fire(false, s), "{s:?} 仍卡 boot 链应触发看门狗");
+        }
+        assert!(!Supervisor::watchdog_should_fire(false, Ready), "迟到的正常就绪不得被看门狗误杀");
+        assert!(!Supervisor::watchdog_should_fire(false, Recovery), "已进恢复页不得重复触发");
+        for s in [Boot, Spawn, Ready, CrashLoop] {
+            assert!(!Supervisor::watchdog_should_fire(true, s), "stopping={s:?} 退出路径压制看门狗");
+        }
+    }
+
+    /// 看门狗端到端（短超时注入，生产 300s 参数化）：boot 永挂（卡 Boot 态）
+    /// → 超时 → CrashLoop 事件 + last_error 带「看门狗」+ 状态落 CrashLoop
+    /// （恢复页路径）；对照组：已 Ready 的 supervisor 超时后零事件。
+    #[test]
+    fn watchdog_short_timeout_routes_stuck_boot_to_recovery() {
+        let Some(root) = repo_root() else { eprintln!("[skip] 仓库检出不含 dsh-desktop"); return; };
+        // ① 卡 Boot：不跑瀑布，仅让 supervisor 停在初始态。
+        let sv: Arc<Supervisor> = Arc::new(Supervisor::new(&root));
+        assert_eq!(sv.state(), RunState::Boot);
+        let (tx, rx) = std::sync::mpsc::channel();
+        Supervisor::spawn_boot_watchdog(&sv, tx, Duration::from_millis(150));
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(SupervisorEvent::CrashLoop { .. }) => {}
+            other => panic!("boot 永挂应收到 CrashLoop（恢复页路径），得到 {other:?}"),
+        }
+        assert!(sv.last_error().as_deref().unwrap_or("").contains("看门狗"), "last_error 应指明看门狗超时: {:?}", sv.last_error());
+        assert_eq!(sv.state(), RunState::CrashLoop, "状态应落 CrashLoop（换恢复页的壳侧锚点）");
+        // ② 已 Ready：超时不打扰（迟到的正常就绪）。
+        let sv2: Arc<Supervisor> = Arc::new(Supervisor::new(&root));
+        sv2.set_state_for_test(RunState::Ready);
+        let (tx2, rx2) = std::sync::mpsc::channel();
+        Supervisor::spawn_boot_watchdog(&sv2, tx2, Duration::from_millis(150));
+        assert!(rx2.recv_timeout(Duration::from_secs(1)).is_err(), "Ready 态超时后不得有任何事件");
+        assert_eq!(sv2.state(), RunState::Ready);
     }
 }
 
