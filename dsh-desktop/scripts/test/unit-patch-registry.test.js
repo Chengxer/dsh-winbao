@@ -90,19 +90,19 @@ test('防护类补丁与包级补丁均已登记（无遗漏 apply*）', () => {
     'profile-patch-guard', 'profile-bundle-guard-appboot', 'profile-bundle-guard-profileboot',
     'settings-section-guard', 'workspace-search-rail-fix', 'plugin-inventory-tab-merge',
     'web-search-baseurl', 'menu-viewport', 'session-manage', 'open-project-dir',
-    'session-persistence', 'tool-source-compat',
+    'session-persistence', 'tool-source-compat', 'pi-ai-opencode-go-models',
   ];
   for (const id of expected) assert.ok(ids.has(id), `遗漏补丁 ${id}`);
 });
 
-test('getSpecsByCli：返回 10 个 cli:true 补丁（8 runtime + session-persistence + tool-source-compat）', () => {
+test('getSpecsByCli：返回 11 个 cli:true 补丁（8 runtime + 3 数据完整性）', () => {
   const specs = getSpecsByCli();
-  assert.equal(specs.length, 10, 'cli 清单应恰为 10 项');
+  assert.equal(specs.length, 11, 'cli 清单应恰为 11 项');
   const expected = new Set([
     'slot-legacy-key', 'slot-unkeyed-compat', 'slot-error-isolation',
     'runtime-flash-fix', 'prompt-expose-fix', 'shell-description-compat',
     'code-mode-compat', 'attachment-mime-trust', 'session-persistence',
-    'tool-source-compat',
+    'tool-source-compat', 'pi-ai-opencode-go-models',
   ]);
   assert.deepEqual(new Set(specs.map((s) => s.id)), expected, 'cli 清单 id 集合不符');
   for (const s of specs) assert.equal(s.cli, true, `${s.id} 应标记 cli:true`);
@@ -137,6 +137,7 @@ test('getSpecsByCli：每个 spec 的 transform/apply 与 patch-adapters 导出�
   const rootApplyMap = {
     'session-persistence': adapters.rootAppliers.patchSessionPersistence,
     'tool-source-compat': adapters.rootAppliers.patchToolSourceCompat,
+    'pi-ai-opencode-go-models': adapters.rootAppliers.patchPiAiOpencodeGoModels,
   };
   for (const spec of getSpecsByCli()) {
     if (spec.kind === 'root') {

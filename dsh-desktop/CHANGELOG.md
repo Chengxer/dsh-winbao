@@ -60,6 +60,9 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
   `plugin-supervision-zombie-cap`（假活判定 → 守护重启 → 配额耗尽停止自动重启）；
   `plugin-auto-isolation` 扩展「会话内重新启用 → 热更新路径再次隔离」闭环断言。
 
+### 修复
+- **模型设置读取不到 opencode-go 的 DeepSeek V4 Flash Vision Exp（`deepseek-v4-flash-vision-exp`）**：设置页「模型」对该源「获取可用模型」与模型选择器都经 pi-ai 内置 catalog 作答（`dsh-llm-pi-ai` 的 discovery 对 catalog 命中源不访问端点），而 pi-ai 的 `opencode-go` catalog 落后于端点——线上 `https://opencode.ai/zen/go/v1/models` 实际返回该型号（唯一 vision/exp 变体，`opencode` zen/v1 源无此型号、`deepseek-official` 源本就内置），本地目录缺失 → 全链路看不到。修复（新增 `scripts/patch-pi-ai-opencode-go-models.js`，幂等、锚点失配自动跳过）：向 `@earendil-works/pi-ai/dist/providers/data/opencode-go.json` 的 openai-completions 分组克隆同族基型 `deepseek-v4-flash` 条目并追加 image 输入（容量/计费/compat/thinkingLevelMap 沿用基型，与 `dsh-llm-deepseek` 官方目录的登记方式一致；上游重新生成 catalog 收录后经「已存在即跳过」自然退役）；以 `pi-ai-opencode-go-models` 规格登记进 patch-registry（`nm-roots` 布局 + cli:true，桌面壳启动 / CLI 同步覆盖全部运行副本），并接入 patch-deps（postinstall dev node_modules）与 check-syntax 语法门。端点另有 glm-5.3 / qwen3.8-max / mimo-v2-omni 等目录缺失型号，因 /models 列表不含容量与计费、无法安全推导而有意不自动补齐（可在设置页手工录入）。新增 `unit-patch-pi-ai-opencode-go-models`（8 项：克隆形态/幂等/上游自然退役/锚点缺失与非法 JSON 字节级不损坏/目录缺失静默/dry-run/stats 计数），registry 计数断言同步 10→11。
+
 ## [0.4.1] — 2026-08-19
 
 > 热修复版：插件市场装插件后「服务意外退出」崩溃事故根治（三层防线）+ 空 tool-call 存量会话打不开修复。

@@ -49,6 +49,8 @@ const { patchSessionManage } = require('../patch-session-manage');
 const { patchOpenProjectDir } = require('../patch-open-project-dir');
 const { patchSessionPersistence } = require('../patch-session-persistence');
 const { patchToolSourceCompat } = require('./tool-source-patch');
+// pi-ai opencode-go 模型目录补丁（opencode-go.json 纯数据补充）。
+const { patchPiAiOpencodeGoModels } = require('../patch-pi-ai-opencode-go-models');
 
 // ---------------------------------------------------------------------------
 // 文本模型自动识图补丁（原 main.js applyImageSendFix 内联 transform）。
@@ -468,6 +470,7 @@ module.exports = {
     patchOpenProjectDir,
     patchSessionPersistence,
     patchToolSourceCompat,
+    patchPiAiOpencodeGoModels,
   },
   // 幂等 marker（单一数据源）：registry 与 transform 的 already 判定引用同一常量，
   // 杜绝「marker 跨模块复制漂移」。slot 系 marker 来自 runtime-patches（与 slot

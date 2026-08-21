@@ -28,9 +28,10 @@
 //              供 preflight 只读体检复用；
 //   requires   宿主能力依赖（见 host-capabilities.js）；
 //   cli        CLI 同步期（sync-companion-plugins.js --with-patches）是否也应用；
-//              cli:true 共 9 项（= 8 个 HEAD 原有补丁 + 1 个 slot-error-isolation，
-//              第一轮 review 有意补漏的第三层错误隔离安全网）；image-send/vision-key
-//              与 guard 组为 false，仅桌面壳运行时应用；
+//              cli:true 共 11 项（= 8 个 HEAD 原有补丁 + slot-error-isolation
+//              + session-persistence + tool-source-compat / pi-ai-opencode-go-models
+//              两个数据完整性补丁）；image-send/vision-key 与 guard 组为 false，
+//              仅桌面壳运行时应用；
 //   failPolicy 'warn'（失配告警跳过，多数现状）| 'degrade'（失配降级 +
 //              升级提示）| 'fatal'（仅 build 期保留）；作用于规格级异常
 //              （applyAll 的 catch 分支），逐文件/逐根异常由下层吸收并计入
@@ -679,6 +680,28 @@ const PATCH_SPECS = [
     cli: true,
     successLog: (root) => 'tool source 容错补丁: 已应用到 ' + root,
     failLog: (root, err) => 'tool source 容错补丁失败(' + root + '): ' + err.message,
+  },
+  // -------------------------------------------------------------------------
+  // pi-ai opencode-go 模型目录补丁：内置 catalog 落后于端点，缺
+  // deepseek-v4-flash-vision-exp（设置页「获取可用模型」与模型选择器都经
+  // 内置 catalog 作答，故看不到该型号）。向 opencode-go.json 克隆同族基型
+  // deepseek-v4-flash 条目并追加 image 输入；上游重新生成 catalog 收录后经
+  // 「已存在即跳过」自然退役。见 scripts/patch-pi-ai-opencode-go-models.js。
+  // -------------------------------------------------------------------------
+  {
+    id: 'pi-ai-opencode-go-models',
+    group: 'package',
+    order: 230,
+    kind: 'root',
+    layout: 'nm-roots',
+    wslLayout: 'nm-roots',
+    apply: rootAppliers.patchPiAiOpencodeGoModels,
+    marker: null,
+    requires: [],
+    failPolicy: 'warn',
+    cli: true,
+    successLog: (root) => 'opencode-go 模型目录补丁: 已应用到 ' + root,
+    failLog: (root, err) => 'opencode-go 模型目录补丁失败(' + root + '): ' + err.message,
   },
 ];
 

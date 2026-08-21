@@ -113,3 +113,15 @@ try {
 } catch (err) {
   console.log('[patch-deps] keyed slot 兼容补丁跳过: ' + (err && err.message ? err.message : err));
 }
+
+// pi-ai opencode-go 内置模型目录落后于端点：设置页「获取可用模型」对 catalog
+// 命中源以内置 catalog 作答（不访问端点），deepseek-v4-flash-vision-exp 缺失。
+// 开发模式（npm start / postinstall）直接打 dev node_modules；运行副本由
+// patch-registry（桌面壳启动 + CLI 同步）覆盖（幂等，锚点不匹配只告警不中断）。
+try {
+  const { patchPiAiOpencodeGoModels } = require('./patch-pi-ai-opencode-go-models');
+  const n = patchPiAiOpencodeGoModels(path.join(root, 'node_modules'), (m) => console.log('[patch-deps] ' + m));
+  if (n > 0) console.log('[patch-deps] opencode-go 模型目录补丁已应用（dev node_modules）');
+} catch (err) {
+  console.log('[patch-deps] opencode-go 模型目录补丁跳过: ' + (err && err.message ? err.message : err));
+}

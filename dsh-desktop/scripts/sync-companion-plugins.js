@@ -300,11 +300,14 @@ function syncPlugins(home, dryRun, dshPkgDir) {
 // ---------------------------------------------------------------------------
 // 运行时补丁：复用 patch-runner 的 applyAll + patch-registry 的 getSpecsByCli()，
 // 由 registry 的 cli:true 字段单一驱动（CLI 与 main.js 不再各持一份手写清单，
-// 杜绝漂移）。CLI 同步期仅应用 cli:true 的 9 个补丁（= 8 个 HEAD 原有补丁 +
-// 1 个 slot-error-isolation：第一轮 review 有意补漏的第三层错误隔离安全网）：
+// 杜绝漂移）。CLI 同步期仅应用 cli:true 的 11 个补丁（= 8 个 HEAD 原有补丁 +
+// slot-error-isolation：第一轮 review 有意补漏的第三层错误隔离安全网；
+// session-persistence / tool-source-compat / pi-ai-opencode-go-models 三个
+// 数据完整性补丁）：
 //   slot-legacy-key / slot-unkeyed-compat / slot-error-isolation /
 //   runtime-flash-fix / prompt-expose-fix / shell-description-compat /
-//   code-mode-compat / attachment-mime-trust / session-persistence。
+//   code-mode-compat / attachment-mime-trust / session-persistence /
+//   tool-source-compat / pi-ai-opencode-go-models。
 // image-send / vision-key（宿主侧识图能力，仅桌面壳经 main.js 应用）与
 // guard 组 / 其余 package 组补丁 cli:false，不在同步期应用。
 //
