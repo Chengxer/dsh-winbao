@@ -37,3 +37,9 @@ _float-diag.js
 .trae/
 .zcode/
 
+
+# 临时脚本/日志（CI/调试产物，防止再堆积）
+.tmp-*
+_*.js
+_*.diff
+.qoder/
