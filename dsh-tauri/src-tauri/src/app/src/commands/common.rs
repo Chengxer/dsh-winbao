@@ -1,0 +1,243 @@
+//! 共享小工具：错误转换 / OS 打开 / 原子写 / base64 / 无依赖时间戳。
+//!
+//! 被 commands 其余子模块共用；不承载任何单一命令领域逻辑。
+
+use bridge::BridgeError;
+use tauri::{AppHandle, Manager};
+
+/// tauri::Error → BridgeError（bridge crate 不依赖 tauri，转换放装配层）。
+pub fn terr(e: tauri::Error) -> BridgeError {
+    BridgeError::internal(e.to_string())
+}
+
+/// 系统浏览器打开 http(s) URL。
+pub fn open_http_url(url: &str) -> Result<serde_json::Value, BridgeError> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(BridgeError::invalid_arg(format!("仅允许 http/https：{url}")));
+    }
+    #[cfg(windows)]
+    {
+        // Review#2：不用 cmd /C start（& | ^ " 注入面）——PowerShell 单引号包裹，
+        // 内部单引号翻倍（与 copy_text 同口径）。
+        let escaped = url.replace(char::from(0x27), "''");
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &format!("Start-Process '{escaped}'")])
+            .creation_flags_no_window()
+            .spawn()
+            .map_err(BridgeError::from)?;
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("xdg-open").arg(url).spawn().map_err(BridgeError::from)?;
+    }
+    Ok(serde_json::Value::Null)
+}
+
+/// explorer 打开目录（非 Windows 仅日志）。
+pub fn open_in_explorer(dir: &std::path::Path) -> Result<serde_json::Value, BridgeError> {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer").arg(dir).spawn().map_err(BridgeError::from)?;
+    }
+    #[cfg(not(windows))]
+    {
+        eprintln!("[open logs] {}", dir.display());
+    }
+    Ok(serde_json::Value::Null)
+}
+
+/// 主窗导航（evaluate_script location.href——万金油且可靠）。
+pub fn navigate_main(app: &AppHandle, url: &str) -> Result<(), BridgeError> {
+    let win = app.get_webview_window("main").ok_or_else(|| BridgeError::not_found("主窗不存在"))?;
+    let js = format!("try{{location.href={}}}catch(e){{}}", serde_json::to_string(url).unwrap_or_else(|_| "\"\"".into()));
+    win.eval(&js).map_err(terr)
+}
+
+/// 原子写：tmp + rename。
+pub fn atomic_write(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("revert-tmp");
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// 「文档」目录（备份导出落点）。
+pub fn dirs_docs() -> std::path::PathBuf {
+    std::env::var_os("USERPROFILE")
+        .map(std::path::PathBuf::from)
+        .map(|h| h.join("Documents"))
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// 无依赖 UTC 时间戳 `YYYYMMDD-HHMMSS`（本地时区经 PowerShell 太重；
+/// UTC 稳定可排序，命名用途足够）。
+pub fn chrono_now() -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = now.as_secs();
+    let days = secs / 86400;
+    let (y, mo, d) = civil_from_days(days as i64);
+    format!("{y:04}{mo:02}{d:02}-{:02}{:02}{:02}", (secs % 86400) / 3600, (secs % 3600) / 60, secs % 60)
+}
+
+/// days since epoch → (年, 月, 日)（Howard Hinnant civil_from_days 算法）。
+pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// 标准 base64 编码（无依赖实现）。
+pub fn b64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+/// 标准 base64 解码（无依赖实现，容错空白与缺省 padding）。
+pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let cleaned: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    let mut out = Vec::with_capacity(cleaned.len() / 4 * 3);
+    let mut chunk = [0u8; 4];
+    let mut n = 0usize;
+    for &b in &cleaned {
+        if b == b'=' {
+            break;
+        }
+        chunk[n] = val(b)?;
+        n += 1;
+        if n == 4 {
+            let v = (u32::from(chunk[0]) << 18) | (u32::from(chunk[1]) << 12) | (u32::from(chunk[2]) << 6) | (u32::from(chunk[3]));
+            out.push((v >> 16) as u8);
+            out.push((v >> 8) as u8);
+            out.push(v as u8);
+            n = 0;
+        }
+    }
+    match n {
+        0 => Some(out),
+        1 => None, // 单字符不成组
+        2 => {
+            let v = (u32::from(chunk[0]) << 18) | (u32::from(chunk[1]) << 12);
+            out.push((v >> 16) as u8);
+            Some(out)
+        }
+        3 => {
+            let v = (u32::from(chunk[0]) << 18) | (u32::from(chunk[1]) << 12) | (u32::from(chunk[2]) << 6);
+            out.push((v >> 16) as u8);
+            out.push((v >> 8) as u8);
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+/// GUI 进程起 console 子进程必须抑制终端窗（0.5.0 实测修复：
+/// 无旗则每个桥命令/sidecar 调用都闪终端窗）。
+#[cfg(windows)]
+pub trait NoWindow {
+    fn creation_flags_no_window(&mut self) -> &mut Self;
+}
+#[cfg(windows)]
+impl NoWindow for std::process::Command {
+    fn creation_flags_no_window(&mut self) -> &mut Self {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        self.creation_flags(CREATE_NO_WINDOW)
+    }
+}
+#[cfg(not(windows))]
+pub trait NoWindow {
+    fn creation_flags_no_window(&mut self) -> &mut Self;
+}
+#[cfg(not(windows))]
+impl NoWindow for std::process::Command {
+    fn creation_flags_no_window(&mut self) -> &mut Self {
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn b64_known_vectors() {
+        assert_eq!(b64(b""), "");
+        assert_eq!(b64(b"f"), "Zg==");
+        assert_eq!(b64(b"fo"), "Zm8=");
+        assert_eq!(b64(b"foo"), "Zm9v");
+        assert_eq!(b64(b"foobar"), "Zm9vYmFy");
+        // 二进制安全（RFC 4648：3 字节无填充）。
+        assert_eq!(b64(&[0xffu8; 2]), "//8=");
+        assert_eq!(b64(&[0xffu8; 3]), "////");
+    }
+
+    #[test]
+    fn b64_decode_roundtrip_and_padding() {
+        // 与 b64 编码器互逆（含 1/2/3 字节尾组与无 padding 形态）。
+        for data in [b"" as &[u8], b"a", b"ab", b"abc", b"abcd", b"foobarbaz!"] {
+            let enc = b64(data);
+            assert_eq!(b64_decode(&enc).as_deref(), Some(data), "roundtrip {data:?}");
+        }
+        assert_eq!(b64_decode("aGVsbG8=").as_deref(), Some(b"hello".as_slice()));
+        assert_eq!(b64_decode("aGVsbG8").as_deref(), Some(b"hello".as_slice())); // 缺省 padding
+        // 空白容错：base64 文本内嵌空白/换行应被忽略（"YWJj" → 字节 "abc"）。
+        assert_eq!(b64_decode("YW J j\n").as_deref(), Some(b"abc".as_slice()));
+        assert!(b64_decode("!!!").is_none());
+        assert!(b64_decode("A").is_none()); // 单字符不成组
+    }
+
+    #[test]
+    fn civil_from_days_epoch_and_known_dates() {
+        // 1970-01-01 = day 0。
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        // 2026-07-19 = day 20653（node: new Date(20653*86400e3) 校准）。
+        assert_eq!(civil_from_days(20653), (2026, 7, 19));
+    }
+
+    #[test]
+    fn chrono_now_shape() {
+        let s = chrono_now();
+        assert_eq!(s.len(), 15, "YYYYMMDD-HHMMSS：{s}");
+        assert_eq!(s.as_bytes()[8], b'-');
+        assert!(s.starts_with("20"), "{s}");
+    }
+
+    #[test]
+    fn atomic_write_replaces_and_cleans_tmp() {
+        let dir = std::env::temp_dir().join(format!("dsh-cmd-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.txt");
+        atomic_write(&f, "v1").unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "v1");
+        atomic_write(&f, "中文 v2").unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "中文 v2");
+        assert!(!f.with_extension("revert-tmp").exists(), "临时文件应被 rename 消费");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
