@@ -957,7 +957,9 @@ jobs:
             exit 1
           fi
           cp "${dmgs[0]}" "DSH-Desktop-${VERSION}-macos-arm64.dmg"
-          size=$(stat -c%s "DSH-Desktop-${VERSION}-macos-arm64.dmg")
+          # BSD stat（macOS）无 -c——用 wc -c 全平台可移植（此行是 v0.5.1
+          # 第三跑才暴露的陈年坑：此前从未活到这一步）。
+          size=$(wc -c < "DSH-Desktop-${VERSION}-macos-arm64.dmg" | tr -d ' ')
           if [ "$size" -lt 52428800 ]; then
             echo "::error::DMG 体积异常（${size} 字节 < 50MB；v0.5.0 参考：~117MB）"
             exit 1
