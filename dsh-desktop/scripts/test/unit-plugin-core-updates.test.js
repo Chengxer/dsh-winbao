@@ -15,6 +15,11 @@ const {
   downloadHttps, fetchNpmLatest, listArchive, validateArchiveEntryName, assertArchiveSafe,
   treeHasLinks, updatePlugin, checkUpdatesAvailable,
 } = require('../plugin-core/lib/updates');
+
+// npm 运行器注入 npm_config_registry（Windows 大小写不敏感撞生产
+// NPM_CONFIG_REGISTRY 覆盖通道）→ 双源回退断言假失败。对齐直跑行为。
+delete process.env.NPM_CONFIG_REGISTRY;
+delete process.env.npm_config_registry;
 const { scanDir } = require('../plugin-core/lib/scan');
 const { PLUGIN_IPC_ACTIONS, authorize, CONFIRM_MESSAGES } = require('../plugin-core/lib/capability');
 const { parseMarkers, createMarkerAccumulator } = require('../plugin-core/lib/markers');

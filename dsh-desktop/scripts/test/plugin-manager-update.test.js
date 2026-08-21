@@ -15,6 +15,12 @@ const {
   findPackageRoot,
 } = require('../plugin-manager-update');
 
+// npm 运行器会给子进程注入 npm_config_registry（Windows 环境变量大小写
+// 不敏感 → 生产代码的 NPM_CONFIG_REGISTRY 覆盖通道被误激活，双源 URL 三
+// 测假失败）。经 npm test 与 node --test 直跑行为必须一致：清掉注入。
+delete process.env.NPM_CONFIG_REGISTRY;
+delete process.env.npm_config_registry;
+
 test('版本比较：数值分段（0.12.2 > 0.2.1）', () => {
   assert.ok(compareVersions('0.12.2', '0.2.1') > 0);
   assert.ok(compareVersions('0.2.1', '0.12.2') < 0);

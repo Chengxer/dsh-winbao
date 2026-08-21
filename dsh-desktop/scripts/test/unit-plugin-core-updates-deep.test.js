@@ -19,6 +19,12 @@ const {
   validateArchiveEntryName, assertArchiveSafe, updatePlugin, cleanupStaleUpdateBackups,
 } = require('../plugin-core/lib/updates');
 
+// npm 运行器注入 npm_config_registry（Windows 大小写不敏感撞生产
+// NPM_CONFIG_REGISTRY 覆盖通道）→ fetchNpmLatest 直连注入源、双源断言假
+// 失败。与 node --test 直跑行为对齐：清掉注入。
+delete process.env.NPM_CONFIG_REGISTRY;
+delete process.env.npm_config_registry;
+
 const tmp = (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-upd-deep-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
