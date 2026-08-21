@@ -70,6 +70,11 @@ const sandbox = {
   document: { querySelector: () => null, createElement: () => ({ dataset: {}, textContent: '' }), head: { appendChild: () => {} } },
   CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init && init.detail; } },
   console,
+  // client.js 桥推送 4s 超时降级合法使用 setTimeout——vm 沙箱默认无定时器
+  // → ReferenceError（与 edge-client.test.js 同款测试床缺口，CI 独立校验器
+  // 在此步骤崩掉即 main CI 变红的真因）。unref：不阻塞进程退出。
+  setTimeout: (fn, ms, ...args) => { const t = setTimeout(fn, ms, ...args); if (t.unref) t.unref(); return t; },
+  clearTimeout,
 };
 vm.createContext(sandbox);
 vm.runInContext(src, sandbox, { filename: 'client.js' });
