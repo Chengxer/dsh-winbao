@@ -894,32 +894,51 @@ jobs:
         # 回退显式重签并重打 DMG——绝不再发出无签名 mac 包。
         run: |
           set -e
-          APP="dsh-tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/DSH Desktop.app"
+          # 注意：Tauri 打完 DMG 会「Cleaning」删掉 bundle/macos/ 下的 .app
+          # （v0.5.1 首跑实测：验已被清理的路径必假失败）——改为挂载 DMG 验
+          # 内层 app；失败才解包重签重打。
           DMG_DIR="dsh-tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg"
-          echo "=== codesign -dv ==="
+          DMG="$(ls "$DMG_DIR"/*.dmg | head -1)"
+          [ -f "$DMG" ] || { echo "::error::未找到 DMG 产物（构建失败？）"; ls -la "$DMG_DIR" || true; exit 1; }
+          MNT="$(mktemp -d)/dshd"
+          hdiutil attach "$DMG" -mountpoint "$MNT" -nobrowse -readonly -quiet
+          APP="$MNT/DSH Desktop.app"
+          echo "=== codesign -dv（DMG 内层）==="
           codesign -dv "$APP" 2>&1 || true
           if codesign --verify --deep --strict "$APP"; then
-            echo "OK: app bundle 签名有效（ad-hoc 密封完整）"
+            echo "OK: DMG 内 app bundle 签名有效（ad-hoc 密封完整）"
           else
-            echo "::warning::Tauri 签名缺失/无效——回退显式 ad-hoc 重签并重打 DMG"
-            xattr -cr "$APP" || true
-            codesign --force --deep --sign - "$APP"
-            codesign --verify --deep --strict "$APP"
+            echo "::warning::签名缺失/无效——解包重签并重打 DMG"
+            WORK="$(mktemp -d)"
+            cp -R "$APP" "$WORK/DSH Desktop.app"
+            hdiutil detach "$MNT" -quiet || true
+            xattr -cr "$WORK/DSH Desktop.app" || true
+            codesign --force --deep --sign - "$WORK/DSH Desktop.app"
+            codesign --verify --deep --strict "$WORK/DSH Desktop.app"
             rm -f "$DMG_DIR"/*.dmg
-            hdiutil create -volname "DSH Desktop" -srcfolder "$APP" -ov -format UDZO "$DMG_DIR/resigned.dmg"
+            hdiutil create -volname "DSH Desktop" -srcfolder "$WORK/DSH Desktop.app" -ov -format UDZO "$DMG_DIR/resigned.dmg"
+            MNT="$(mktemp -d)/dshd2"
+            hdiutil attach "$DMG_DIR/resigned.dmg" -mountpoint "$MNT" -nobrowse -readonly -quiet
+            APP="$MNT/DSH Desktop.app"
           fi
           echo "=== spctl 评估（ad-hoc 必然 rejected，仅留痕）==="
           spctl -a -t execute "$APP" 2>&1 || true
+          hdiutil detach "$MNT" -quiet || true
 
       - name: Rename artifacts (assert version + size)
         run: |
           set -euo pipefail
           VERSION=${{ steps.ver.outputs.version }}
-          APP="dsh-tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/DSH Desktop.app"
           BUNDLE=dsh-tauri/src-tauri/target/aarch64-apple-darwin/release/bundle
           # 版本混装防线③（v0.5.0 事故的直接防线）：DMG 内 Info.plist 的
-          # CFBundleShortVersionString 必须等于期望版本
-          plist_ver=$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")
+          # CFBundleShortVersionString 必须等于期望版本。.app 已被 Tauri 打
+          # DMG 后清理——挂载 DMG 读内层 plist（与签名校验步骤同款姿势）。
+          DMG="$(ls "$BUNDLE"/dmg/*.dmg | head -1)"
+          [ -f "$DMG" ] || { echo "::error::未找到 DMG 产物"; exit 1; }
+          MNT="$(mktemp -d)/dshd"
+          hdiutil attach "$DMG" -mountpoint "$MNT" -nobrowse -readonly -quiet
+          plist_ver=$(plutil -extract CFBundleShortVersionString raw "$MNT/DSH Desktop.app/Contents/Info.plist")
+          hdiutil detach "$MNT" -quiet || true
           echo "Info.plist CFBundleShortVersionString = ${plist_ver}"
           if [ "$plist_ver" != "$VERSION" ]; then
             echo "::error::DMG 内 Info.plist 版本 ${plist_ver} != 期望 ${VERSION}（版本混装）"

@@ -201,7 +201,9 @@ mod tests {
     /// Err）；macOS 走 pbcopy、Linux 走 xclip/xsel/wl-copy 尝试链。
     #[test]
     fn copy_text_has_platform_branches_shape() {
-        let src = include_str!("lifecycle.rs");
+        // 行尾归一（CI Windows runner 检出可能 CRLF，本地 LF——\n 切分模式
+        // 对行尾敏感，实测 CI 首跑即挂）。
+        let src = include_str!("lifecycle.rs").replace("\r\n", "\n");
         let seg = src
             .split("#[cfg(windows)]\nfn set_clipboard_text")
             .nth(1)
