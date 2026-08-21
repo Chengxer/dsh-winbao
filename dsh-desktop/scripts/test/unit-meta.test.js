@@ -27,7 +27,10 @@ test('package.json description 为正确 UTF-8 文案（无 GBK 乱码）', () =
 test('package.json 关键字段完整（版本/入口/私有标记）', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'));
   assert.strictEqual(pkg.name, 'dsh-desktop');
-  assert.strictEqual(pkg.main, 'main.js');
+  // Electron 壳退役（ee7e420）后不再有 main.js 入口；main 字段移除即正确形态，
+  // 残留反而会误导按入口找 Electron 壳的工具链。dsh-desktop 现作为共享库被
+  // Tauri 线（dsh-tauri）与 CLI（sync-companion-plugins）消费。
+  assert.strictEqual(pkg.main, undefined, 'Electron main 入口应已移除');
   assert.strictEqual(pkg.private, true);
   assert.ok(/^\d+\.\d+\.\d+$/.test(String(pkg.version)), 'version 应为 x.y.z 形式');
 });

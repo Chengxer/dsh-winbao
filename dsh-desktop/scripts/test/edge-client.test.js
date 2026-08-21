@@ -42,6 +42,11 @@ function loadClient(bridgeOverrides) {
     document: { querySelector: () => null, createElement: () => ({ dataset: {}, textContent: '' }), head: { appendChild: () => {} } },
     CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init && init.detail; } },
     console,
+    // client.js 的桥推送超时降级（setTimeout 4s 兜底）在浏览器合法，但 vm
+    // 沙箱默认无定时器 → ReferenceError（T1 实测「单一投递」两用例恒红）。
+    // unref：不清理的挂起定时器不阻塞测试进程退出。
+    setTimeout: (fn, ms, ...args) => { const t = setTimeout(fn, ms, ...args); if (t.unref) t.unref(); return t; },
+    clearTimeout,
   };
   vm.createContext(sandbox);
   vm.runInContext(SRC, sandbox, { filename: 'client.js' });

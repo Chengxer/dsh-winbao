@@ -138,18 +138,21 @@ test('#98 EOF 位置注入同样命中', () => {
   assert.ok(detachedHits(eof).length >= 1);
 });
 
-// ---------- 真实 preload.js 保留率硬指标（失明防回归，PR #102 增量） ----------
+// ---------- 真实生产文件保留率硬指标（失明防回归，PR #102 增量；v0.5.1 改锚） ----------
+// 原锚 preload.js 已随 Electron 壳退役（ee7e420）删除——改锚扫描器的真实
+// 生产目标（check-syntax.js entryFiles）：wsl-backend.js（正则/字符串密集，
+// 实测基线保留率 ~47.6%，31 个 function 全存活）。
 
-test('#98 真实 preload.js 剥离后保留率与 function 存活（失明复发即失败）', () => {
+test('#98 真实 wsl-backend.js 剥离后保留率与 function 存活（失明复发即失败）', () => {
   const fs = require('node:fs');
   const path = require('node:path');
-  const pre = fs.readFileSync(path.join(__dirname, '..', '..', 'preload.js'), 'utf8');
+  const pre = fs.readFileSync(path.join(__dirname, '..', '..', 'wsl-backend.js'), 'utf8');
   const scanned = stripStringsAndBlockComments(pre);
   const ns0 = (pre.match(/[^\s]/g) || []).length;
   const ns1 = (scanned.match(/[^\s]/g) || []).length;
   const pct = (ns1 / ns0) * 100;
-  // 正常基线 ~29%（preload.js 字符串/注释/正则天然占 ~70%）；失明复发时 ~23% 且 function 成批被吞
-  assert.ok(pct > 25, `preload.js 保留率 ${pct.toFixed(1)}% ≤ 25%（失明复发，应 >25%）`);
+  // 正常基线 ~47.6%（字符串/注释/正则天然占过半）；失明复发时真实代码被成批涂掉
+  assert.ok(pct > 40, `wsl-backend.js 保留率 ${pct.toFixed(1)}% ≤ 40%（失明复发，应 >40%）`);
   const fn0 = (pre.match(/function\b/g) || []).length;
   const fn1 = (scanned.match(/function\b/g) || []).length;
   // 只允许字符串字面量内的 function 文本被涂；失明复发时真实声明会被成批吞掉

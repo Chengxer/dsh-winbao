@@ -115,7 +115,10 @@ DSH_HOME="$(cygpath -w "$SMOKE/home")" \
 DSH_TAURI_USERDATA="$(cygpath -w "$SMOKE/ud")" \
   "$(cygpath -w "$SMOKE/dsh-tauri-app.exe")" > "$SMOKE/app.log" 2>&1 &
 SHELL_PID=$!
-echo "$SHELL_PID" > "$SMOKE/shell.pid"
+# $! 是 Git Bash(MSYS) 内部 PID，taskkill 不认；/proc/<pid>/winpid 才是
+# Windows PID（T1 实测：不转换则收尾 //PID 必失败，退化为 //IM 全杀）。
+WINPID=$(cat "/proc/$SHELL_PID/winpid" 2>/dev/null || echo "$SHELL_PID")
+echo "$WINPID" > "$SMOKE/shell.pid"
 
 ok=""
 for i in $(seq 1 36); do
@@ -156,9 +159,12 @@ if [ -n "$KPORT" ] && curl -s -o /dev/null -m 2 "http://127.0.0.1:$KPORT/"; then
 " "http://127.0.0.1:$KPORT$ep"
   done
   echo "[smoke] --- 轻压测（20 并发 GET /） ---"
+  # 只等这 20 个 curl：裸 wait 会连 line 116 的 app 本体（永不退出）一起等，
+  # 成功路径必卡死（T1 实测 PASS 不可达）。
+  stress_pids=""
   for i in $(seq 1 20); do curl -s -o /dev/null -m 5 -w "%{http_code}
-" "http://127.0.0.1:$KPORT/" & done > "$SMOKE/stress.txt"
-  wait
+" "http://127.0.0.1:$KPORT/" & stress_pids="$stress_pids $!"; done > "$SMOKE/stress.txt"
+  wait $stress_pids
   echo "  200 应答：$(grep -c '^200$' "$SMOKE/stress.txt")/20"
 else
   echo "[smoke] （内核端口未就绪或已收尾，跳过端点抽检）"
