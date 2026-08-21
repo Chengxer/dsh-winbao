@@ -26,9 +26,12 @@ DST="$REPO_ROOT/dsh-tauri/package-payload/dsh-desktop"
 mirror_dir() {
   local src="$1" dst="$2"
   if command -v robocopy >/dev/null 2>&1; then
-    robocopy "$src" "$dst" //MIR //R:2 //W:1 > /dev/null
-    local rc=$?
-    [ $rc -lt 8 ] || { echo "[stage] robocopy 失败($rc): $src" >&2; return 1; }
+    # robocopy 退出码 0-7 全是成功（1=有复制…）——set -e 会把 1-7 当失败
+    # 直接杀脚本（v0.5.1 实测：node_modules 有变更即 rc=3 全链夭折且无输出），
+    # 必须用 || 接住再判定；额外参数（如 //XD 排除）原样转发。
+    local rc=0
+    robocopy "$src" "$dst" //MIR //R:2 //W:1 "${@:3}" > /dev/null || rc=$?
+    [ "$rc" -lt 8 ] || { echo "[stage] robocopy 失败($rc): $src" >&2; return 1; }
   else
     rm -rf "$dst"
     mkdir -p "$(dirname "$dst")"
