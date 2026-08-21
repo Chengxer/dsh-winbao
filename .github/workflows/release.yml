@@ -1,5 +1,17 @@
 name: Release Build
 
+# ============================================================================
+# 【已退役·存档】Electron 发布线——现行发布走 tauri-release.yml（Tauri 2），
+# 发版步骤见 .github/RELEASE_RUNBOOK.md。本文件仅保留 workflow_dispatch 入口
+# 供考古/应急，所有 job 以 if: false 彻底短路。
+#
+# 历史教训：旧写法 `false && A || B` 因 && 优先级高于 ||，实际等价于
+# `false || B`——workflow_dispatch 默认输入（arch=both）下两个 Windows job
+# 仍会真实执行 Electron 构建，「已短路」只是注释里的一厢情愿。
+# 如需临时复活：把 job 的 if 改回原条件并加括号——`false && (A || B)` 才是
+# 真短路；或直接删掉 false 前缀。
+# ============================================================================
+
 # 三平台发布流水线（Windows x64/arm64 + macOS x64/arm64 + Linux x64）：
 #   · 推 v* tag（如 v0.4.0）时自动在云端构建 Windows、macOS 与 Linux 全部
 #     架构安装包，一并上传到对应 GitHub Release；
@@ -26,8 +38,9 @@ name: Release Build
 # 进制），vendor/node 本地复制；打包为 AppImage 单文件，架构用 file -b
 # 校验 ELF "x86-64"。
 on:
-  # Electron 发布流水线已退役（架构迁移 Tauri）——推 v* tag 不再自动构建 Electron 包。
-  # 手动触发入口保留但所有 job 已 if: false 短路。Tauri 发布流水线后续另建。
+  # Electron 发布流水线已退役（架构迁移 Tauri）——推 v* tag / push 分支均不再
+  # 触发本文件（旧版 push tag 触发在 tauri 分支演进期产生过大量 0 秒失败噪音）。
+  # 手动入口保留但所有 job 已 if: false 彻底短路（优先级坑已修，见文件头）。
   workflow_dispatch:
     inputs:
       tag:
@@ -54,11 +67,9 @@ jobs:
   build-x64:
     name: build-x64
     # 手动触发时按输入裁剪；推 tag 恒为双架构。
-    if: >-
-      false && # Electron 发布流水线已退役（Tauri 迁移）——勿启用，Tauri 流水线另建
-      github.event_name == 'push' ||
-      inputs.arch == 'both' ||
-      inputs.arch == 'x64'
+    # 已退役·真短路。原条件（复活时去掉 false 即可）：
+    #   github.event_name == 'push' || inputs.arch == 'both' || inputs.arch == 'x64'
+    if: false
     runs-on: windows-latest
     defaults:
       run:
@@ -286,11 +297,9 @@ jobs:
 
   build-arm64:
     name: build-arm64
-    if: >-
-      false && # Electron 发布流水线已退役（Tauri 迁移）——勿启用，Tauri 流水线另建
-      github.event_name == 'push' ||
-      inputs.arch == 'both' ||
-      inputs.arch == 'arm64'
+    # 已退役·真短路。原条件（复活时去掉 false 即可）：
+    #   github.event_name == 'push' || inputs.arch == 'both' || inputs.arch == 'arm64'
+    if: false
     runs-on: windows-latest
     defaults:
       run:
@@ -532,10 +541,9 @@ jobs:
   build-linux-x64:
     name: build-linux-x64
     # 手动触发时按输入裁剪；推 tag 恒构建 Linux x64。
-    if: >-
-      false && # Electron 发布流水线已退役（Tauri 迁移）——勿启用，Tauri 流水线另建
-      github.event_name == 'push' ||
-      inputs.linux == 'yes'
+    # 已退役·真短路。原条件（复活时去掉 false 即可）：
+    #   github.event_name == 'push' || inputs.linux == 'yes'
+    if: false
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -761,11 +769,9 @@ jobs:
 
   build-mac-x64:
     name: build-mac-x64
-    if: >-
-      false && # Electron 发布流水线已退役（Tauri 迁移）——勿启用，Tauri 流水线另建
-      github.event_name == 'push' ||
-      inputs.mac == 'both' ||
-      inputs.mac == 'x64'
+    # 已退役·真短路。原条件（复活时去掉 false 即可）：
+    #   github.event_name == 'push' || inputs.mac == 'both' || inputs.mac == 'x64'
+    if: false
     runs-on: macos-14
     defaults:
       run:
@@ -948,11 +954,9 @@ jobs:
 
   build-mac-arm64:
     name: build-mac-arm64
-    if: >-
-      false && # Electron 发布流水线已退役（Tauri 迁移）——勿启用，Tauri 流水线另建
-      github.event_name == 'push' ||
-      inputs.mac == 'both' ||
-      inputs.mac == 'arm64'
+    # 已退役·真短路。原条件（复活时去掉 false 即可）：
+    #   github.event_name == 'push' || inputs.mac == 'both' || inputs.mac == 'arm64'
+    if: false
     runs-on: macos-14
     defaults:
       run:

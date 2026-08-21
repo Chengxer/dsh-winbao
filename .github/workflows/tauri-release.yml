@@ -15,8 +15,16 @@ name: Tauri Release
 #   Linux x64    AppImage → DSH-Desktop-<ver>-linux-x64.AppImage
 #   Linux x64    deb    → dsh-desktop_<ver>_amd64.deb（deb 标准命名）
 #
-# 用法：git tag v0.5.0 && git push origin v0.5.0
-#        gh workflow trigger "Tauri Release" -f version=v0.5.0
+# 用法：git tag v0.5.1 && git push origin v0.5.1   ← 正式发版唯一入口
+#        手动 dispatch 仅用于给【已存在的 tag】补传/重建资产：流水线会强制
+#        checkout refs/tags/v<版本>，绝不从分支头构建——v0.5.0 事故中分支头
+#        已 bump 到 0.5.1，从分支头重建产出了「文件名 0.5.0 / 内嵌 0.5.1」
+#        的版本混装资产。版本一致性的四道闸（逐级收口）：
+#          ① checkout 强制 tag ref（本文件每个 build job）
+#          ② tauri.conf.json version == tag 版本 fail-fast（每个 build job）
+#          ③ 产物文件名内嵌版本断言（NSIS/deb/AppImage/dmg + Info.plist）
+#          ④ publish 汇总断言：所有资产文件名含版本 + 体积 >50MB + 上传核对
+#        完整发版步骤见 .github/RELEASE_RUNBOOK.md
 
 on:
   push:
@@ -24,12 +32,16 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release tag (e.g. v0.5.0)'
+        description: '目标 release tag（如 v0.5.1；tag 必须已存在——将强制检出该 tag 构建）'
         required: true
-        default: 'v0.5.0'
 
 permissions:
   contents: write
+
+# 同一 ref 的发布构建串行排队、不互相取消（发布中途中砍产物得不偿失）
+concurrency:
+  group: tauri-release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -38,13 +50,47 @@ jobs:
   build-windows:
     name: Windows x64 (NSIS)
     runs-on: windows-latest
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Resolve version
+      - name: Resolve version and ref
+        # workflow_dispatch 补传必须构建 tag 对应提交——分支头往往已 bump 到
+        # 下一版本，从分支头重建曾产出「文件名 v0.5.0、Info.plist 0.5.1」的
+        # 混装资产。tag push 时 github.ref 本就指向 tag，行为不变。
         id: ver
         shell: bash
-        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo "${GITHUB_REF_NAME#v}"; fi)" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag='${{ github.event.inputs.version }}'
+            case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+            echo "ref=refs/tags/$tag" >> "$GITHUB_OUTPUT"
+          else
+            tag='${{ github.ref_name }}'
+            echo "ref=${GITHUB_REF}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ver.outputs.ref }}
+
+      - name: Assert tauri.conf.json version == tag version
+        # 版本一致性第二道闸：安装包内嵌版本唯一来源是 tauri.conf.json 的
+        # version 字段，与期望不符立即 fail-fast。
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED='${{ steps.ver.outputs.version }}'
+          ACTUAL=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' dsh-tauri/src-tauri/src/app/tauri.conf.json | head -1)
+          if [ -z "$ACTUAL" ]; then
+            echo "::error::无法从 dsh-tauri/src-tauri/src/app/tauri.conf.json 解析 version 字段"
+            exit 1
+          fi
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::版本混装防线：期望 ${EXPECTED}，但检出的 tauri.conf.json version=${ACTUAL}——请在 tag 对应提交上修正版本后重打 tag，或更正 dispatch 输入"
+            exit 1
+          fi
+          echo "OK: tauri.conf.json version=${ACTUAL} == 期望 ${EXPECTED}"
 
       - uses: actions/setup-node@v4
         with:
@@ -148,22 +194,39 @@ jobs:
           ls -la ui/index.html
           ls package-payload/dsh-desktop/package.json
           echo "=== Building ==="
-          npx --yes @tauri-apps/cli@latest build             --config src-tauri/src/app/tauri.conf.json             --target x86_64-pc-windows-msvc             --verbose 2>&1 || {
+          # 不加 --verbose：rustc 全量 verbose 日志极大，失败时下方兜底分支会
+          # 单独重跑 cargo build 取尾部错误，诊断信息不丢。
+          npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --target x86_64-pc-windows-msvc 2>&1 || {
             echo "=== BUILD FAILED ==="
             echo "=== Checking cargo build separately ==="
-            cd src-tauri && cargo build --release --target x86_64-pc-windows-msvc -p dsh-tauri-app 2>&1 | tail -10
+            cd src-tauri && cargo build --release --target x86_64-pc-windows-msvc -p dsh-tauri-app 2>&1 | tail -30
             echo "=== Exe exists: $(ls target/x86_64-pc-windows-msvc/release/dsh-tauri-app.exe 2>/dev/null) ==="
             exit 1
           }
         shell: bash
 
-      - name: Rename installer
+      - name: Rename installer (assert version + size)
         shell: bash
         run: |
+          set -euo pipefail
           VERSION=${{ steps.ver.outputs.version }}
           cd dsh-tauri/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis
           ls -la
-          cp *_x64-setup.exe "DSH-Desktop-Setup-${VERSION}-win-x64.exe"
+          # 版本混装防线③：Tauri NSIS 产物名内嵌 tauri.conf.json 的版本
+          # （<productName>_<ver>_x64-setup.exe）——期望版本不符时 glob 落空即失败
+          shopt -s nullglob
+          src=( *_"${VERSION}"_x64-setup.exe )
+          if [ ${#src[@]} -eq 0 ]; then
+            echo "::error::未找到 *_${VERSION}_x64-setup.exe——NSIS 内嵌版本与期望不符（见上方目录清单）"
+            exit 1
+          fi
+          cp "${src[0]}" "DSH-Desktop-Setup-${VERSION}-win-x64.exe"
+          size=$(stat -c%s "DSH-Desktop-Setup-${VERSION}-win-x64.exe")
+          if [ "$size" -lt 52428800 ]; then
+            echo "::error::安装包体积异常（${size} 字节 < 50MB）——疑似 payload 缺失（v0.5.0 参考：~72MB）"
+            exit 1
+          fi
+          echo "OK: DSH-Desktop-Setup-${VERSION}-win-x64.exe ($size bytes)"
           ls -la
 
       - name: Upload setup artifact
@@ -187,14 +250,44 @@ jobs:
   build-windows-arm64:
     name: Windows ARM64 (NSIS, experimental)
     runs-on: windows-latest
+    timeout-minutes: 90
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Resolve version
+      - name: Resolve version and ref
+        # 同 build-windows：dispatch 强制 checkout tag（版本混装防线①）
         id: ver
         shell: bash
-        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo "${GITHUB_REF_NAME#v}"; fi)" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag='${{ github.event.inputs.version }}'
+            case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+            echo "ref=refs/tags/$tag" >> "$GITHUB_OUTPUT"
+          else
+            tag='${{ github.ref_name }}'
+            echo "ref=${GITHUB_REF}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ver.outputs.ref }}
+
+      - name: Assert tauri.conf.json version == tag version
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED='${{ steps.ver.outputs.version }}'
+          ACTUAL=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' dsh-tauri/src-tauri/src/app/tauri.conf.json | head -1)
+          if [ -z "$ACTUAL" ]; then
+            echo "::error::无法从 dsh-tauri/src-tauri/src/app/tauri.conf.json 解析 version 字段"
+            exit 1
+          fi
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::版本混装防线：期望 ${EXPECTED}，但检出的 tauri.conf.json version=${ACTUAL}"
+            exit 1
+          fi
+          echo "OK: tauri.conf.json version=${ACTUAL} == 期望 ${EXPECTED}"
 
       - uses: actions/setup-node@v4
         with:
@@ -285,27 +378,35 @@ jobs:
       - name: Build installer (aarch64 cross)
         run: |
           cd dsh-tauri
-          npx --yes @tauri-apps/cli@latest build             --config src-tauri/src/app/tauri.conf.json             --target aarch64-pc-windows-msvc             --verbose 2>&1 || {
+          npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --target aarch64-pc-windows-msvc 2>&1 || {
             echo "=== ARM64 BUILD FAILED（实验性，不阻断发布） ==="
             exit 1
           }
         shell: bash
 
-      - name: Rename installer
+      - name: Rename installer (assert version + size)
         if: always()
         shell: bash
         run: |
+          set -euo pipefail
           VERSION=${{ steps.ver.outputs.version }}
           NSIS_DIR="dsh-tauri/src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis"
           if [ ! -d "$NSIS_DIR" ]; then echo "no nsis bundle dir (build failed?), skip rename"; exit 0; fi
           cd "$NSIS_DIR"
           ls -la
-          if ls *_arm64-setup.exe >/dev/null 2>&1; then
-            cp *_arm64-setup.exe "DSH-Desktop-Setup-${VERSION}-win-arm64.exe"
-            ls -la
-          else
-            echo "no arm64 setup produced, skip rename"
+          shopt -s nullglob
+          src=( *_"${VERSION}"_arm64-setup.exe )
+          if [ ${#src[@]} -eq 0 ]; then
+            echo "::error::未找到 *_${VERSION}_arm64-setup.exe——NSIS 内嵌版本与期望不符（实验线也不允许版本混装；见上方目录清单）"
+            exit 1
           fi
+          cp "${src[0]}" "DSH-Desktop-Setup-${VERSION}-win-arm64.exe"
+          size=$(stat -c%s "DSH-Desktop-Setup-${VERSION}-win-arm64.exe")
+          if [ "$size" -lt 52428800 ]; then
+            echo "::error::安装包体积异常（${size} 字节 < 50MB；v0.5.0 参考：~68MB）"
+            exit 1
+          fi
+          echo "OK: DSH-Desktop-Setup-${VERSION}-win-arm64.exe ($size bytes)"
 
       - name: Upload artifact
         if: always()
@@ -320,15 +421,46 @@ jobs:
   build-portable:
     name: Windows x64 Portable (zip)
     runs-on: windows-latest
+    timeout-minutes: 45
     needs: [build-windows]
     if: needs.build-windows.result == 'success'
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Resolve version
+      - name: Resolve version and ref
+        # 同 build-windows：dispatch 强制 checkout tag——便携版 resources（scripts/
+        # sidecar/ui/payload 组装脚本）必须与安装包同源同版本。
         id: ver
         shell: bash
-        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo "${GITHUB_REF_NAME#v}"; fi)" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag='${{ github.event.inputs.version }}'
+            case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+            echo "ref=refs/tags/$tag" >> "$GITHUB_OUTPUT"
+          else
+            tag='${{ github.ref_name }}'
+            echo "ref=${GITHUB_REF}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ver.outputs.ref }}
+
+      - name: Assert tauri.conf.json version == tag version
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED='${{ steps.ver.outputs.version }}'
+          ACTUAL=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' dsh-tauri/src-tauri/src/app/tauri.conf.json | head -1)
+          if [ -z "$ACTUAL" ]; then
+            echo "::error::无法从 dsh-tauri/src-tauri/src/app/tauri.conf.json 解析 version 字段"
+            exit 1
+          fi
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::版本混装防线：期望 ${EXPECTED}，但检出的 tauri.conf.json version=${ACTUAL}"
+            exit 1
+          fi
+          echo "OK: tauri.conf.json version=${ACTUAL} == 期望 ${EXPECTED}"
 
       - uses: actions/setup-node@v4
         with:
@@ -442,6 +574,22 @@ jobs:
           $mb = [math]::Round((Get-Item "DSH-Desktop-Portable-$VERSION-win-x64.zip").Length / 1MB, 1)
           Write-Host "portable zip: DSH-Desktop-Portable-$VERSION-win-x64.zip ($mb MB)"
 
+      - name: Verify portable zip (version + size)
+        # 版本混装防线③：zip 内 exe 来自 build-windows（其 NSIS 名已断言版本），
+        # 此处断言 zip 本身存在、文件名版本正确、体积 >50MB（v0.5.0 参考：~102MB）。
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=${{ steps.ver.outputs.version }}
+          f="DSH-Desktop-Portable-${VERSION}-win-x64.zip"
+          [ -f "$f" ] || { echo "::error::便携版 zip 缺失: $f"; exit 1; }
+          size=$(stat -c%s "$f")
+          if [ "$size" -lt 52428800 ]; then
+            echo "::error::便携版体积异常（${size} 字节 < 50MB）——疑似 resources 组装缺失"
+            exit 1
+          fi
+          echo "OK: $f ($size bytes)"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -452,14 +600,44 @@ jobs:
   build-linux:
     name: Linux x64 (AppImage + deb)
     runs-on: ubuntu-22.04
+    timeout-minutes: 75
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Resolve version
+      - name: Resolve version and ref
+        # 同 build-windows：dispatch 强制 checkout tag（版本混装防线①）
         id: ver
         shell: bash
-        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo "${GITHUB_REF_NAME#v}"; fi)" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag='${{ github.event.inputs.version }}'
+            case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+            echo "ref=refs/tags/$tag" >> "$GITHUB_OUTPUT"
+          else
+            tag='${{ github.ref_name }}'
+            echo "ref=${GITHUB_REF}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ver.outputs.ref }}
+
+      - name: Assert tauri.conf.json version == tag version
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED='${{ steps.ver.outputs.version }}'
+          ACTUAL=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' dsh-tauri/src-tauri/src/app/tauri.conf.json | head -1)
+          if [ -z "$ACTUAL" ]; then
+            echo "::error::无法从 dsh-tauri/src-tauri/src/app/tauri.conf.json 解析 version 字段"
+            exit 1
+          fi
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::版本混装防线：期望 ${EXPECTED}，但检出的 tauri.conf.json version=${ACTUAL}"
+            exit 1
+          fi
+          echo "OK: tauri.conf.json version=${ACTUAL} == 期望 ${EXPECTED}"
 
       - uses: actions/setup-node@v4
         with:
@@ -551,28 +729,41 @@ jobs:
           cd dsh-tauri
           npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --config '{"productName":"DSH-Desktop"}' --target x86_64-unknown-linux-gnu --bundles deb
           export APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=1
-          npx --yes @tauri-apps/cli@latest build --verbose --config src-tauri/src/app/tauri.conf.json --config '{"productName":"DSH-Desktop"}' --target x86_64-unknown-linux-gnu --bundles appimage || echo "::warning::AppImage bundling failed (deb still published)"
+          npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --config '{"productName":"DSH-Desktop"}' --target x86_64-unknown-linux-gnu --bundles appimage || echo "::warning::AppImage bundling failed (deb still published)"
 
-      - name: Rename artifacts
+      - name: Rename artifacts (assert version + size)
         run: |
+          set -euo pipefail
           VERSION=${{ steps.ver.outputs.version }}
           BUNDLE=dsh-tauri/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle
           ls -la "$BUNDLE/appimage" "$BUNDLE/deb" || true
-          # deb → dsh-desktop_<ver>_amd64.deb（deb 标准命名，Tauri 默认即此格式，防御性重命名）
-          for f in "$BUNDLE"/deb/*.deb; do
-            [ -e "$f" ] || continue
-            cp "$f" "dsh-desktop_${VERSION}_amd64.deb"
-          done
-          # AppImage → DSH-Desktop-<ver>-linux-x64.AppImage（可选——linuxdeploy 偶发失败有 deb 兜底）
-          for f in "$BUNDLE"/appimage/*.AppImage; do
-            [ -e "$f" ] || continue
-            cp "$f" "DSH-Desktop-${VERSION}-linux-x64.AppImage"
-          done
-          # deb 必须有（本 job 的底线产物）；AppImage 缺失仅告警
-          if [ ! -f "dsh-desktop_${VERSION}_amd64.deb" ]; then
-            echo "::error::deb 产物缺失——Linux 构建异常"; exit 1
+          shopt -s nullglob
+          # deb（底线产物）：产物名内嵌 tauri.conf.json 版本（<name>_<ver>_amd64.deb）
+          debs=( "$BUNDLE"/deb/*_"${VERSION}"_amd64.deb )
+          if [ ${#debs[@]} -eq 0 ]; then
+            echo "::error::未找到 *_${VERSION}_amd64.deb——deb 内嵌版本与期望不符（见上方目录清单）"
+            exit 1
           fi
-          [ -f "DSH-Desktop-${VERSION}-linux-x64.AppImage" ] || echo "::warning::AppImage 未产出（仅 deb 发布）"
+          cp "${debs[0]}" "dsh-desktop_${VERSION}_amd64.deb"
+          size=$(stat -c%s "dsh-desktop_${VERSION}_amd64.deb")
+          if [ "$size" -lt 52428800 ]; then
+            echo "::error::deb 体积异常（${size} 字节 < 50MB；v0.5.0 参考：~122MB）"
+            exit 1
+          fi
+          echo "OK: dsh-desktop_${VERSION}_amd64.deb ($size bytes)"
+          # AppImage（可选——linuxdeploy 偶发失败有 deb 兜底）：产出时同样断言版本
+          appimages=( "$BUNDLE"/appimage/*_"${VERSION}"_*.AppImage )
+          if [ ${#appimages[@]} -gt 0 ]; then
+            cp "${appimages[0]}" "DSH-Desktop-${VERSION}-linux-x64.AppImage"
+            asize=$(stat -c%s "DSH-Desktop-${VERSION}-linux-x64.AppImage")
+            if [ "$asize" -lt 52428800 ]; then
+              echo "::error::AppImage 体积异常（${asize} 字节 < 50MB；v0.5.0 参考：~190MB）"
+              exit 1
+            fi
+            echo "OK: DSH-Desktop-${VERSION}-linux-x64.AppImage ($asize bytes)"
+          else
+            echo "::warning::AppImage 未产出（仅 deb 发布）"
+          fi
           ls -la dsh-desktop_*_amd64.deb DSH-Desktop-*-linux-x64.AppImage 2>/dev/null || true
 
       - name: Upload artifact
@@ -587,14 +778,44 @@ jobs:
   build-macos:
     name: macOS ARM64 (dmg)
     runs-on: macos-14
+    timeout-minutes: 75
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Resolve version
+      - name: Resolve version and ref
+        # 同 build-windows：dispatch 强制 checkout tag（版本混装防线①）
         id: ver
         shell: bash
-        run: echo "version=$(if [ -n '${{ github.event.inputs.version }}' ]; then echo '${{ github.event.inputs.version }}' | sed 's/^v//'; else echo "${GITHUB_REF_NAME#v}"; fi)" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag='${{ github.event.inputs.version }}'
+            case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+            echo "ref=refs/tags/$tag" >> "$GITHUB_OUTPUT"
+          else
+            tag='${{ github.ref_name }}'
+            echo "ref=${GITHUB_REF}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ver.outputs.ref }}
+
+      - name: Assert tauri.conf.json version == tag version
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED='${{ steps.ver.outputs.version }}'
+          ACTUAL=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' dsh-tauri/src-tauri/src/app/tauri.conf.json | head -1)
+          if [ -z "$ACTUAL" ]; then
+            echo "::error::无法从 dsh-tauri/src-tauri/src/app/tauri.conf.json 解析 version 字段"
+            exit 1
+          fi
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::版本混装防线：期望 ${EXPECTED}，但检出的 tauri.conf.json version=${ACTUAL}"
+            exit 1
+          fi
+          echo "OK: tauri.conf.json version=${ACTUAL} == 期望 ${EXPECTED}"
 
       - uses: actions/setup-node@v4
         with:
@@ -690,15 +911,39 @@ jobs:
           echo "=== spctl 评估（ad-hoc 必然 rejected，仅留痕）==="
           spctl -a -t execute "$APP" 2>&1 || true
 
-      - name: Rename artifacts
+      - name: Rename artifacts (assert version + size)
         run: |
+          set -euo pipefail
           VERSION=${{ steps.ver.outputs.version }}
+          APP="dsh-tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/DSH Desktop.app"
           BUNDLE=dsh-tauri/src-tauri/target/aarch64-apple-darwin/release/bundle
+          # 版本混装防线③（v0.5.0 事故的直接防线）：DMG 内 Info.plist 的
+          # CFBundleShortVersionString 必须等于期望版本
+          plist_ver=$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")
+          echo "Info.plist CFBundleShortVersionString = ${plist_ver}"
+          if [ "$plist_ver" != "$VERSION" ]; then
+            echo "::error::DMG 内 Info.plist 版本 ${plist_ver} != 期望 ${VERSION}（版本混装）"
+            exit 1
+          fi
           ls -la "$BUNDLE/dmg" || true
-          for f in "$BUNDLE"/dmg/*.dmg; do
-            [ -e "$f" ] || continue
-            cp "$f" "DSH-Desktop-${VERSION}-macos-arm64.dmg"
-          done
+          shopt -s nullglob
+          dmgs=( "$BUNDLE"/dmg/*_"${VERSION}"_*.dmg )
+          # 签名回退路径重打的 DMG 文件名不带版本（resigned.dmg）——内容版本
+          # 已由上方 Info.plist 断言覆盖，允许兜底匹配
+          if [ ${#dmgs[@]} -eq 0 ] && [ -f "$BUNDLE/dmg/resigned.dmg" ]; then
+            dmgs=( "$BUNDLE/dmg/resigned.dmg" )
+          fi
+          if [ ${#dmgs[@]} -eq 0 ]; then
+            echo "::error::未找到 *_${VERSION}_*.dmg——DMG 文件名版本与期望不符（见上方目录清单）"
+            exit 1
+          fi
+          cp "${dmgs[0]}" "DSH-Desktop-${VERSION}-macos-arm64.dmg"
+          size=$(stat -c%s "DSH-Desktop-${VERSION}-macos-arm64.dmg")
+          if [ "$size" -lt 52428800 ]; then
+            echo "::error::DMG 体积异常（${size} 字节 < 50MB；v0.5.0 参考：~117MB）"
+            exit 1
+          fi
+          echo "OK: DSH-Desktop-${VERSION}-macos-arm64.dmg ($size bytes)"
           ls -la DSH-Desktop-*-macos-arm64.dmg
 
       - name: Upload artifact
@@ -712,10 +957,9 @@ jobs:
     name: Publish Release
     needs: [build-windows, build-windows-arm64, build-portable, build-linux, build-macos]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: always() && !cancelled() && (needs.build-windows.result == 'success' || needs.build-portable.result == 'success' || needs.build-linux.result == 'success' || needs.build-macos.result == 'success' || needs.build-windows-arm64.result == 'success')
     steps:
-      - uses: actions/checkout@v4
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -723,6 +967,7 @@ jobs:
 
       - name: Collect installers
         run: |
+          set -euo pipefail
           mkdir -p release-assets
           # 全部发布产物（含便携版 zip）；排除中间产物（win-x64-bin 里的裸 exe，
           # 它只是便携版 job 的原料，不进 Release）
@@ -731,16 +976,48 @@ jobs:
             echo "::error::没有任何构建产物被收集（所有 build job 均失败？）——中止发布"
             exit 1
           fi
-          echo "=== 产物清单 ==="
-          ls -lh release-assets/
 
-      - name: Extract version
+      - name: Resolve release tag/version
         id: ver
-        run: echo "version=${{ github.event.inputs.version || github.ref_name }}" >> $GITHUB_OUTPUT
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            tag='${{ github.event.inputs.version }}'
+            case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+          else
+            tag='${{ github.ref_name }}'
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify assets (版本一致 + 体积下限)
+        # 版本混装防线④（最后一道闸）：每个资产文件名必须内嵌期望版本号、
+        # 体积必须 >50MB。任一不满足即拒绝发布——上游 job 有 continue-on-error，
+        # 不能全信，publish 是资产出仓前的总闸。
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.ver.outputs.version }}'
+          echo "=== 产物清单（期望版本 ${VERSION}）==="
+          fail=0
+          for f in release-assets/*; do
+            name=$(basename "$f")
+            case "$name" in
+              *"$VERSION"*) ;;
+              *) echo "::error::资产文件名未包含期望版本 ${VERSION}: $name（版本混装？拒绝发布）"; fail=1 ;;
+            esac
+            size=$(stat -c%s "$f")
+            if [ "$size" -lt 52428800 ]; then
+              echo "::error::资产体积异常（<50MB）: $name（${size} 字节）"
+              fail=1
+            fi
+            printf '%-48s %12d bytes\n' "$name" "$size"
+          done
+          [ "$fail" -eq 0 ] || exit 1
+          echo "OK: $(ls release-assets | wc -l) 个资产全部通过版本/体积校验"
 
       - name: Generate release notes
         run: |
-          VERSION=${{ steps.ver.outputs.version }}
+          TAG='${{ steps.ver.outputs.tag }}'
+          VERSION='${{ steps.ver.outputs.version }}'
           cat > release-notes.md << EOF
           # DSH Desktop ${VERSION} — Tauri 2
 
@@ -766,14 +1043,58 @@ jobs:
           见 [CHANGELOG.md](https://github.com/myYangyunfan/dsh_desktop/blob/tauri/modular/dsh-tauri/CHANGELOG.md)
           EOF
 
-      - name: Upload artifacts to Release (不覆盖已有设置)
-        run: |
-          # 只上传产物，不修改 release 的 title/body/prerelease/draft 状态
-          # ——此前 softprops/action-gh-release 每次运行都会把 Pre-release
-          #   和预览版标题冲掉（draft:false + prerelease:false 是写死的）。
-          for f in release-assets/*; do
-            echo "上传: $f"
-            gh release upload "${{ steps.ver.outputs.version }}" "$f" --clobber || echo "WARN: $f 上传失败"
-          done
+      - name: Upload assets to Release
+        # 上传纪律：
+        #  1) release 不存在时才创建；已存在时绝不触碰 title/body/prerelease/draft
+        #     ——此前 softprops/action-gh-release 每次运行都会把 Pre-release 和
+        #     预览版标题冲掉（draft:false + prerelease:false 写死）。
+        #  2) 同名资产先 delete-asset 再上传（而非 fail-fast）：「给已发布版本
+        #     补传/重建资产」正是 workflow_dispatch 的第一用途，fail-fast 会让
+        #     该用途无法执行；显式删除后重传是幂等重建，且下一步会逐个核对
+        #     存在性与大小，不留旧内容残影、不会出现重复资产。
+        #  3) 上传失败不吞错（旧版 || echo WARN 会静默丢资产）。
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.ver.outputs.tag }}'
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG 不存在——创建（仅此一次触碰 release 元数据）"
+            gh release create "$TAG" --title "DSH Desktop $TAG" --notes-file release-notes.md
+          fi
+          for f in release-assets/*; do
+            name=$(basename "$f")
+            if gh release view "$TAG" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+              echo "删除已存在的同名资产: $name"
+              gh release delete-asset "$TAG" "$name" --yes
+            fi
+            echo "上传: $f"
+            gh release upload "$TAG" "$f"
+          done
+
+      - name: Verify uploaded assets
+        # 上传后校验（资产去重纪律的收口）：每个资产都在 release 上存在、
+        # 大小与本地一致且非零。另列出 release 全部资产供人工核对重复。
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.ver.outputs.tag }}'
+          gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)\t\(.size)"' > remote-assets.tsv
+          echo "=== release 现有资产（共 $(wc -l < remote-assets.tsv) 个）==="
+          cat remote-assets.tsv
+          for f in release-assets/*; do
+            name=$(basename "$f")
+            size=$(stat -c%s "$f")
+            remote=$(awk -F'\t' -v n="$name" '$1==n {print $2}' remote-assets.tsv)
+            if [ -z "$remote" ]; then
+              echo "::error::资产未出现在 release 上: $name"
+              exit 1
+            fi
+            if [ "$remote" != "$size" ]; then
+              echo "::error::资产大小不一致: $name local=$size remote=$remote"
+              exit 1
+            fi
+            echo "OK: $name ($size bytes)"
+          done
+          echo "=== 全部资产上传并核对通过 ==="

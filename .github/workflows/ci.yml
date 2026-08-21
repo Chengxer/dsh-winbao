@@ -8,10 +8,16 @@ on:
   push:
     branches: [main]
 
+# PR 上新 push 取消旧 run（省额度）；main 上的 run 不互相取消（保留完整记录）
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: check-syntax + unit tests
     runs-on: windows-latest
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: dsh-desktop
