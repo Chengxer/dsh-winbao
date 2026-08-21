@@ -916,7 +916,7 @@ fn wsl_config_payload(backend: &str, distro: &str, install_dir: &str) -> serde_j
         "wslDistro": distro,
         "wslInstallDir": install_dir,
         "status": {
-            "configured": backend == "wsl",
+            "configured": false, // W2: WSL 未实装，恒 false 防误导
             "distro": distro,
             "installDir": install_dir,
             "nodeVersion": "",
@@ -948,20 +948,13 @@ pub fn wsl_config_save(cfg: serde_json::Value, app: AppHandle) -> Result<serde_j
         // Electron 语义：配置错误以 {ok:false,error} 返回（设置页显示 error 文案）。
         return Ok(serde_json::json!({ "ok": false, "error": e }));
     }
-    // 目标为 wsl 时预检 WSL 可用性——用户在重启前就能发现配置问题
-    // （Electron configureAsync 预检的简版等价：只探 wsl --status，
-    // node/npm 安装链属完整托管，Phase 3 后续）。
+    // W2 review 定性：Tauri 版 supervisor 无 WSL 分支（spawn/kill/boot 链五缺口），
+    // 保存后重启无任何变化 = 假开关。诚实告知而非静默无效。
     if backend == "wsl" {
-        match wsl_available() {
-            Ok(true) => {}
-            Ok(false) => {
-                return Ok(serde_json::json!({
-                    "ok": false,
-                    "error": "WSL 不可用（wsl --status 失败）：请确认已安装 WSL 与至少一个发行版"
-                }));
-            }
-            Err(e) => return Ok(serde_json::json!({ "ok": false, "error": format!("WSL 检测失败：{e}") })),
-        }
+        return Ok(serde_json::json!({
+            "ok": false,
+            "error": "WSL 后端在 Tauri 版暂未支持（规划中）。当前版本始终使用本地内核。"
+        }));
     }
     let state = app.state::<AppState>();
     let store = shell_core::SettingsStore::new(state.paths.settings.clone());
@@ -1097,9 +1090,18 @@ pub fn sponsor_window(app: AppHandle) -> Result<serde_json::Value, BridgeError> 
     let state = app.state::<AppState>();
     let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
     let Some(sv) = sv else { return Err(BridgeError::internal("supervisor 未初始化")) };
+    // 图片缺失不 Err 不吞：打日志 + 返回空串，窗口层渲染诊断占位块
+    // （窗口照常可关；「点了没反应」和「无图空窗」都是 v0.5.0 被骂的形态）。
+    let base = sv.app_dir.join("assets").join("sponsor");
     let read = |name: &str| -> String {
-        let p = sv.app_dir.join("assets").join("sponsor").join(name);
-        std::fs::read(p).map(|b| format!("data:image/{};base64,{}", if name.ends_with(".png") { "png" } else { "jpeg" }, b64(&b))).unwrap_or_default()
+        let p = base.join(name);
+        match std::fs::read(&p) {
+            Ok(b) => format!("data:image/{};base64,{}", if name.ends_with(".png") { "png" } else { "jpeg" }, b64(&b)),
+            Err(e) => {
+                eprintln!("[sponsor] 收款码读取失败（{}）: {e}", p.display());
+                String::new()
+            }
+        }
     };
     crate::windows::open_sponsor_window(&app, &read("sponsor-alipay.jpg"), &read("sponsor-wechat.png"))
 }
@@ -1401,10 +1403,13 @@ mod tests {
 
     #[test]
     fn sponsor_and_qr_helpers() {
-        let html = crate::windows::sponsor_html("data:image/jpeg;base64,AAA", "data:image/png;base64,BBB");
-        assert!(html.contains("data:image/jpeg;base64,AAA"));
-        assert!(html.contains("data:image/png;base64,BBB"));
-        assert!(html.contains("请作者喝咖啡"));
+        // 注入脚本版（file:// 落盘版已废）：data URI 内嵌 + 文案在场。
+        let script = crate::windows::sponsor_inject_script("data:image/jpeg;base64,AAA", "data:image/png;base64,BBB");
+        assert!(script.contains("data:image/jpeg;base64,AAA"));
+        assert!(script.contains("data:image/png;base64,BBB"));
+        assert!(script.contains("请作者喝咖啡"));
+        // sponsor_qr 的 data URI 组装（页面内嵌放大用）：ff d8 ff e0 → "/9j/4A=="。
+        assert_eq!(b64(b"\xff\xd8\xff\xe0"), "/9j/4A==");
     }
 
     /// wsl 三通道契约形态（bridge-api.md §2.4 / Electron dsh:wsl-config）：
