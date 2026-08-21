@@ -472,7 +472,9 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          # libfuse2：linuxdeploy(AppImage) 运行依赖——ubuntu-22.04 默认不带，
+          # 缺它 AppImage 打包报 failed to run linuxdeploy
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2
 
       - name: Rust cache
         uses: actions/cache@v4
@@ -532,25 +534,35 @@ jobs:
       - name: Build installer
         # --bundles 覆盖 tauri.conf.json 的 targets:["nsis"]（Windows 专用，
         # 在 Linux/macOS 上不会产出任何 bundle——历史 run 因此从未真正打过
-        # Linux/macOS 安装包，旧 upload 用 warn 级别静默吞掉了）
-        run: cd dsh-tauri && npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --target x86_64-unknown-linux-gnu --bundles deb,appimage
+        # Linux/macOS 安装包，旧 upload 用 warn 级别静默吞掉了）。
+        # deb 先行（必须成功）；AppImage 的 linuxdeploy 在 CI 偶发失败，
+        # 单独跑且非阻断——有 deb 兜底。
+        run: |
+          cd dsh-tauri
+          npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --target x86_64-unknown-linux-gnu --bundles deb
+          npx --yes @tauri-apps/cli@latest build --config src-tauri/src/app/tauri.conf.json --target x86_64-unknown-linux-gnu --bundles appimage || echo "::warning::AppImage bundling failed (deb still published)"
 
       - name: Rename artifacts
         run: |
           VERSION=${{ steps.ver.outputs.version }}
           BUNDLE=dsh-tauri/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle
           ls -la "$BUNDLE/appimage" "$BUNDLE/deb" || true
-          # AppImage → DSH-Desktop-<ver>-linux-x64.AppImage
-          for f in "$BUNDLE"/appimage/*.AppImage; do
-            [ -e "$f" ] || continue
-            cp "$f" "DSH-Desktop-${VERSION}-linux-x64.AppImage"
-          done
           # deb → dsh-desktop_<ver>_amd64.deb（deb 标准命名，Tauri 默认即此格式，防御性重命名）
           for f in "$BUNDLE"/deb/*.deb; do
             [ -e "$f" ] || continue
             cp "$f" "dsh-desktop_${VERSION}_amd64.deb"
           done
-          ls -la DSH-Desktop-*-linux-x64.AppImage dsh-desktop_*_amd64.deb
+          # AppImage → DSH-Desktop-<ver>-linux-x64.AppImage（可选——linuxdeploy 偶发失败有 deb 兜底）
+          for f in "$BUNDLE"/appimage/*.AppImage; do
+            [ -e "$f" ] || continue
+            cp "$f" "DSH-Desktop-${VERSION}-linux-x64.AppImage"
+          done
+          # deb 必须有（本 job 的底线产物）；AppImage 缺失仅告警
+          if [ ! -f "dsh-desktop_${VERSION}_amd64.deb" ]; then
+            echo "::error::deb 产物缺失——Linux 构建异常"; exit 1
+          fi
+          [ -f "DSH-Desktop-${VERSION}-linux-x64.AppImage" ] || echo "::warning::AppImage 未产出（仅 deb 发布）"
+          ls -la dsh-desktop_*_amd64.deb DSH-Desktop-*-linux-x64.AppImage 2>/dev/null || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
