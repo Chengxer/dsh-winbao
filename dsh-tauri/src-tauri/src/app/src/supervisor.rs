@@ -872,6 +872,10 @@ impl Supervisor {
         {
             let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             g.last_error = Some(reason.to_string());
+            // 内核已死，URL 随之作废——不清则恢复页「重新加载」会按 stale URL
+            // 换页到已死端口（真机复现：ERR_CONNECTION_REFUSED 错误页，无任何
+            // 可操作按钮，比停在 loading 页更糟）。清空后 reload 走重启分支。
+            g.kernel_url = None;
         }
         if already {
             log_line(&format!("崩溃环冷却期内再次崩溃，维持恢复页（{reason}）"));
