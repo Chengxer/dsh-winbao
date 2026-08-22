@@ -25,7 +25,7 @@ pub mod codes {
     pub const KERNEL_PORT: &str = "E_KERNEL_PORT";
     pub const KERNEL_CRASH_LOOP: &str = "E_KERNEL_CRASH_LOOP";
     pub const KERNEL_NOT_READY: &str = "E_KERNEL_NOT_READY";
-    // §3 Sidecar / 插件域（sidecar-orchestrator）
+    // §3 Sidecar / 插件域（执行在 Node sidecar；Rust 编排在 app commands/sidecar）
     pub const SIDECAR_EXIT: &str = "E_SIDECAR_EXIT";
     pub const PATCH_ALREADY: &str = "E_PATCH_ALREADY";
     pub const PATCH_ANCHOR_MISSING: &str = "E_PATCH_ANCHOR_MISSING";
