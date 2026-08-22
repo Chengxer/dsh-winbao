@@ -29,11 +29,12 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import z from '@deepseek-ai/schemastery';
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings';
+import { settingsNamespace } from '@deepseek-ai/dsh-settings';
 import { visionChat } from './vlm.js';
 export const name = 'dsh-vision';
 export const inject = ['tools', 'systemPrompt', 'settings', 'llm', 'attachments'];
 const DEFAULT_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4';
+const DEFAULT_MODEL = 'glm-4.6v-flash';
 /** Zhipu's free tier gets congested (HTTP 429 code 1305); older free models still answer. */
 const DEFAULT_FREE_FALLBACKS = ['glm-4.1v-thinking-flash', 'glm-4v-flash'];
 /** Errors worth trying the next model for: rate limit, missing model, server trouble. */
@@ -55,6 +56,8 @@ const LEGACY_1K_CAP_MODELS = new Set(['glm-4v-flash', 'glm-4.1v-thinking-flash']
  */
 const MAX_TOKENS_REJECTED = /returned 400/;
 export const Config = z.object({
+    enabled: z.boolean().default(true)
+        .description('Master switch — false disables image admission, automatic attach-image recognition, the view_image tool, and the prompt section (natively multimodal models are untouched)'),
     baseURL: z.string().default(DEFAULT_BASE_URL)
         .description('OpenAI-compatible endpoint base URL (…/chat/completions is appended)'),
     apiKey: z.string().role('secret').default('')
@@ -238,14 +241,19 @@ export async function convertMessagesWithImages(messages, deps) {
  * UNCHANGED. Adding "image" is done exclusively by the llm service instance
  * wrap (wrapVisionResolveModelInfo below) — if both wraps added "image", each
  * would pollute the other's native-capability reading. listModels adds "image"
- * for UI consistency only (model pickers never drive the prompt gate).
+ * for UI consistency only (model pickers never drive the prompt gate), and only
+ * while the master switch is on (isEnabled callback, default always-true for
+ * the exported pure function).
  * @param adapter - the registration's current adapter (possibly already
  *   wrapped by another plugin).
  * @param provider - provider id the adapter is registered under.
  * @param nativeImageSupport - Map<string, boolean> recording native capability.
+ * @param isEnabled - optional () => boolean; false suspends the listModels
+ *   image declaration (capability recording continues — harmless, and the
+ *   cache stays warm for a later re-enable).
  * @returns the wrapped adapter (same reference when already wrapped).
  */
-export function wrapVisionAdapter(adapter, provider, nativeImageSupport) {
+export function wrapVisionAdapter(adapter, provider, nativeImageSupport, isEnabled = () => true) {
     if (!adapter || adapter.__dshVisionWrapped) return adapter;
     const wrapped = Object.create(adapter);
     wrapped.__dshVisionWrapped = true;
@@ -260,7 +268,7 @@ export function wrapVisionAdapter(adapter, provider, nativeImageSupport) {
     };
     wrapped.listModels = async (providerId) => {
         const models = await adapter.listModels(providerId);
-        if (!Array.isArray(models)) return models;
+        if (!Array.isArray(models) || !isEnabled()) return models;
         return models.map((m) => {
             const mods = m && Array.isArray(m.inputModalities) ? m.inputModalities : undefined;
             if (mods !== undefined && mods.includes('image')) return m;
@@ -284,11 +292,18 @@ export function wrapVisionAdapter(adapter, provider, nativeImageSupport) {
  * now always includes "image"). Idempotent per service instance via
  * `service.__dshVisionResolveWrapped`. Returns a restore function, or
  * undefined when nothing was wrapped (missing method / already wrapped).
+ *
+ * While the optional isEnabled callback resolves false (master switch off) the
+ * wrapped method returns the info UNCHANGED — no "image" is admitted, so the
+ * host prompt gate rejects attached images for text-only models exactly as it
+ * would without this plugin (recording still happens; it is read-only and
+ * keeps the native-capability cache warm for a later re-enable).
  * @param service - the llm service object (ctx.llm).
  * @param nativeImageSupport - Map<string, boolean> recording native capability.
+ * @param isEnabled - optional () => boolean consulted per call (hot config).
  * @returns restore function | undefined.
  */
-export function wrapVisionResolveModelInfo(service, nativeImageSupport) {
+export function wrapVisionResolveModelInfo(service, nativeImageSupport, isEnabled = () => true) {
     if (!service || typeof service.resolveModelInfo !== 'function') return undefined;
     if (service.__dshVisionResolveWrapped) return undefined;
     const hadOwn = Object.prototype.hasOwnProperty.call(service, 'resolveModelInfo');
@@ -301,7 +316,7 @@ export function wrapVisionResolveModelInfo(service, nativeImageSupport) {
         if (typeof provider === 'string' && typeof model === 'string') {
             nativeImageSupport.set(provider + '\0' + model, nativeSupportsImages);
         }
-        if (modalities === undefined || nativeSupportsImages) return info;
+        if (modalities === undefined || nativeSupportsImages || !isEnabled()) return info;
         // Text-only model: admit the image at the prompt gate — this plugin
         // converts it to recognition text in llm/stream before the adapter
         // ever sees it.
@@ -325,17 +340,21 @@ export function wrapVisionResolveModelInfo(service, nativeImageSupport) {
  * consistency + native-capability recording). Re-runs on llm/adapters-updated
  * so adapters registered after this plugin's apply are covered too. Never
  * throws (logging only) — a wrap failure must not take the plugin fiber down.
+ * @returns the service-method restore function collected from the wrap (or
+ *   undefined); the caller's teardown effect replays it verbatim instead of
+ *   re-implementing the unwrap steps.
  */
-function applyVisionWraps(ctx, nativeImageSupport) {
+function applyVisionWraps(ctx, nativeImageSupport, isEnabled) {
+    let restoreService;
     try {
         if (ctx.llm) {
-            wrapVisionResolveModelInfo(ctx.llm, nativeImageSupport);
+            restoreService = wrapVisionResolveModelInfo(ctx.llm, nativeImageSupport, isEnabled);
             if (ctx.llm.adapters) {
                 let wrappedCount = 0;
                 for (const [provider, registration] of ctx.llm.adapters) {
                     if (!registration || !registration.adapter) continue;
                     if (registration.adapter.__dshVisionWrapped) continue;
-                    registration.adapter = wrapVisionAdapter(registration.adapter, provider, nativeImageSupport);
+                    registration.adapter = wrapVisionAdapter(registration.adapter, provider, nativeImageSupport, isEnabled);
                     wrappedCount += 1;
                 }
                 if (wrappedCount > 0) {
@@ -347,6 +366,7 @@ function applyVisionWraps(ctx, nativeImageSupport) {
     catch (error) {
         console.warn('[dsh-vision] vision wrap failed: ' + ((error && error.message) || error));
     }
+    return restoreService;
 }
 
 export function apply(ctx, config) {
@@ -359,7 +379,8 @@ export function apply(ctx, config) {
         liveConfig = () => scope.get();
         scope.watch(() => {
             const cfg = liveConfig() || {};
-            console.log("[dsh-vision] settings updated: " + JSON.stringify({ baseURL: cfg.baseURL, model: cfg.model, apiKey: cfg.apiKey ? "***" : "" }));
+            console.log("[dsh-vision] settings updated: " + JSON.stringify({ enabled: cfg.enabled, baseURL: cfg.baseURL, model: cfg.model, apiKey: cfg.apiKey ? "***" : "" }));
+            syncEnabledSurfaces();
         });
     } catch (error) {
         console.warn("[dsh-vision] settings section unavailable (invalid stored config); falling back to composition config: " + ((error && error.message) || error));
@@ -368,15 +389,18 @@ export function apply(ctx, config) {
     const current = () => {
         const cfg = liveConfig() || {};
         const baseURL = cfg.baseURL ?? DEFAULT_BASE_URL;
-        const model = cfg.model ?? "glm-4.6v-flash";
+        const model = cfg.model ?? DEFAULT_MODEL;
         const fallbackModels = Array.isArray(cfg.fallbackModels) && cfg.fallbackModels.length > 0
             ? cfg.fallbackModels
-            : baseURL === DEFAULT_BASE_URL && model === "glm-4.6v-flash" ? DEFAULT_FREE_FALLBACKS : [];
+            : baseURL === DEFAULT_BASE_URL && model === DEFAULT_MODEL ? DEFAULT_FREE_FALLBACKS : [];
         // 旧模型（glm-4v-flash 等）max_tokens 上限 1024：默认 2048 必然 400，直接钳制。
         const maxTokens = LEGACY_1K_CAP_MODELS.has(model)
             ? Math.min(cfg.maxTokens ?? 2048, 1024)
             : cfg.maxTokens ?? 2048;
         return {
+            // 总开关：默认 true（保持现状，不破坏既有用户）。false = 视觉能力
+            // 整体停用：不承认 image 输入、不做识别替换、撤下工具与提示段。
+            enabled: cfg.enabled ?? true,
             baseURL,
             model,
             fallbackModels,
@@ -398,39 +422,68 @@ export function apply(ctx, config) {
         }
         return key;
     };
-    ctx.effect(() => ctx.tools.register(defineTool({
-        name: 'view_image',
-        description: 'Look at an image and answer a question about it (OCR, counting, chart reading, layout, arbitrary visual questions). Accepts an absolute local file path, an http(s) URL, or a data: URL.',
-        parameters: {
-            source: {
-                type: 'string',
-                required: true,
-                description: 'The image: absolute local file path, http(s) URL, or data: URL',
-            },
-            question: {
-                type: 'string',
-                description: 'What to find out about the image. Be specific. Default: a thorough general description including any visible text.',
-            },
-        },
-        output: TEXT_OUTPUT,
-        timeoutMs: current().timeoutMs,
-        isConcurrencySafe: () => true,
-        execute: async (args, exec) => {
-            const input = args;
-            const source = typeof input.source === 'string' ? input.source : '';
-            if (source === '')
-                throw new Error('view_image: source is required');
-            const question = typeof input.question === 'string' && input.question !== ''
-                ? input.question
-                : 'Describe this image thoroughly. Include any visible text verbatim, the overall layout, and notable details.';
-            return recognizeWithFallbacks(current(), resolveApiKey(), source, question, exec.signal);
-        },
-    })), 'dsh-vision.tool');
-    ctx.effect(() => ctx.systemPrompt.section({
-        name: 'tool:dsh-vision',
-        order: 116,
-        text: PROMPT_TEXT,
-    }), 'dsh-vision.prompt');
+    // —— 总开关的面（surfaces）：enabled=false 时撤下 view_image 工具与系统
+    // 提示段，true 时恢复。两处注册器都返回注销函数，开关热切换即时生效；
+    // 插件 fiber 卸载时统一回收（含当前处于开启态的部分）。
+    let offTool = null;
+    let offPrompt = null;
+    function syncEnabledSurfaces() {
+        const enabled = current().enabled;
+        if (!enabled) {
+            if (offTool !== null) { offTool(); offTool = null; }
+            if (offPrompt !== null) { offPrompt(); offPrompt = null; }
+            return;
+        }
+        if (offTool === null) {
+            offTool = ctx.tools.register(defineTool({
+                name: 'view_image',
+                description: 'Look at an image and answer a question about it (OCR, counting, chart reading, layout, arbitrary visual questions). Accepts an absolute local file path, an http(s) URL, or a data: URL.',
+                parameters: {
+                    source: {
+                        type: 'string',
+                        required: true,
+                        description: 'The image: absolute local file path, http(s) URL, or data: URL',
+                    },
+                    question: {
+                        type: 'string',
+                        description: 'What to find out about the image. Be specific. Default: a thorough general description including any visible text.',
+                    },
+                },
+                output: TEXT_OUTPUT,
+                timeoutMs: current().timeoutMs,
+                isConcurrencySafe: () => true,
+                execute: async (args, exec) => {
+                    // 开关关闭时工具本应已撤下；此处兜底（toggle 竞态窗口内的
+                    // 在途调用）保证「关闭 = vision admission 不生效」语义完整。
+                    if (!current().enabled) {
+                        throw new Error('view_image: 识图能力已关闭。可在 设置 → 识图插件（view_image） 顶部打开「启用识图」开关后重试。');
+                    }
+                    const input = args;
+                    const source = typeof input.source === 'string' ? input.source : '';
+                    if (source === '')
+                        throw new Error('view_image: source is required');
+                    const question = typeof input.question === 'string' && input.question !== ''
+                        ? input.question
+                        : 'Describe this image thoroughly. Include any visible text verbatim, the overall layout, and notable details.';
+                    return recognizeWithFallbacks(current(), resolveApiKey(), source, question, exec.signal);
+                },
+            }));
+        }
+        if (offPrompt === null) {
+            offPrompt = ctx.systemPrompt.section({
+                name: 'tool:dsh-vision',
+                order: 116,
+                text: PROMPT_TEXT,
+            });
+        }
+    }
+    ctx.effect(() => {
+        syncEnabledSurfaces();
+        return () => {
+            if (offTool !== null) { offTool(); offTool = null; }
+            if (offPrompt !== null) { offPrompt(); offPrompt = null; }
+        };
+    }, 'dsh-vision.capability');
     // —— 多模态体感：用户直接发图 → 后台 VLM 识别后以文本送入纯文本模型 ——
     // 拦截点选在 llm/stream（LLM 服务的每次流式调用 waterfall，payload 是
     // request 信封，含 messages）。它比 agent/pre-step 更靠后、更干净：替换
@@ -446,6 +499,8 @@ export function apply(ctx, config) {
     // 态模型（如 pi-ai）原图透传；文本型模型走 VLM 识别替换。
     const nativeImageSupport = new Map();
     const visionHandler = createLlmStreamHandler({
+        // 总开关关闭时拦截器整体透明（不识别、不替换、不重入）。
+        isEnabled: () => current().enabled,
         convert: async (messages, signal) => {
             // attachments 已在 inject 中声明，cordis 会在装配时校验服务存在
             // （宿主 prompt 入口的 saveImage 依赖同一服务，必然已装配）；
@@ -485,18 +540,16 @@ export function apply(ctx, config) {
     // 效（llm 服务已在 inject 中装配）；adapter 后注册的（热装配）经
     // llm/adapters-updated 重打——必须 {global:true}：该事件从 llm 服务作用
     // 域发出，插件作用域不在其祖先链上，非 global 监听永远收不到（上一版
-    // 修复失败的根因）。
-    applyVisionWraps(ctx, nativeImageSupport);
-    ctx.effect(() => ctx.on('llm/adapters-updated', () => applyVisionWraps(ctx, nativeImageSupport), { global: true }), 'dsh-vision.vision-wrap');
-    // 插件 fiber 卸载时恢复服务方法（防热重载叠加/污染）。
+    // 修复失败的根因）。总开关经 isEnabled 每次调用现查（热生效），关闭时
+    // 不再声明 image，host prompt 门槛自然回到「文本模型拒绝图片」。
+    const isEnabled = () => current().enabled;
+    const restoreVisionService = applyVisionWraps(ctx, nativeImageSupport, isEnabled);
+    ctx.effect(() => ctx.on('llm/adapters-updated', () => applyVisionWraps(ctx, nativeImageSupport, isEnabled), { global: true }), 'dsh-vision.vision-wrap');
+    // 插件 fiber 卸载时恢复服务方法（防热重载叠加/污染）——直接复用 wrap
+    // 返回的 restore，避免第二份手写 unwrap 漂移。
     ctx.effect(() => () => {
         try {
-            if (ctx.llm && ctx.llm.__dshVisionResolveWrapped) {
-                const entry = ctx.llm.__dshVisionResolveWrapped;
-                delete ctx.llm.__dshVisionResolveWrapped;
-                if (entry.hadOwn) ctx.llm.resolveModelInfo = entry.bound;
-                else delete ctx.llm.resolveModelInfo;
-            }
+            if (restoreVisionService) restoreVisionService();
         } catch { /* 清理失败不阻断卸载 */ }
     }, 'dsh-vision.vision-unwrap');
 }
@@ -517,9 +570,14 @@ export function apply(ctx, config) {
  * When `deps.supportsImages` is provided and resolves true for a request
  * (natively multimodal model, e.g. pi-ai), the request falls through to
  * `next()` untouched so the model receives the real image.
+ * When `deps.isEnabled` is provided and resolves false (master switch off),
+ * the listener is fully transparent: every request falls through to `next()`
+ * — no recognition, no rewrite, no re-entry (images are then stopped earlier,
+ * at the host prompt gate, which no longer admits them).
  * @param deps - { convert(messages, signal) → Promise<{messages, changed}>,
  *   getLlm() → {stream(options)}, markerKey (Symbol),
- *   supportsImages?(options) → Promise<boolean> }.
+ *   supportsImages?(options) → Promise<boolean>,
+ *   isEnabled?() → boolean }.
  * @returns the (options, next) => stream listener.
  */
 export function createLlmStreamHandler(deps) {
@@ -528,6 +586,7 @@ export function createLlmStreamHandler(deps) {
     return (options, next) => {
         if (options === null || typeof options !== 'object') return next();
         if (deps.markerKey !== undefined && options[deps.markerKey] === true) return next();
+        if (deps.isEnabled !== undefined && !deps.isEnabled()) return next();
         if (!hasImageBlocks(options.messages)) return next();
         const signal = options && options.signal !== undefined ? options.signal : undefined;
         return (async function* () {

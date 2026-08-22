@@ -60,6 +60,10 @@ window.__ModuleLoader__.load({
     const L = {
       nav: "识图插件（view_image）",
       navSub: "为纯文本模型提供识图能力。填写任意 OpenAI 兼容 VLM 端点的地址与密钥后，会话中即可调用 view_image 工具；输入框旁的「📎」按钮可直接发图或发送文本文件——图片发送后由后台自动识别（识别结果以文本带入模型，界面仍显示原图），文本文件内容自动追加到输入框。",
+      enabledLabel: "启用识图",
+      enabledHint: "总开关，立即生效。关闭后：图片不再自动识别或转述（纯文本模型会按原样拒绝图片输入）、view_image 工具与输入框「📎」按钮一并停用；原生支持图片的模型不受影响。",
+      enabledOn: "已开启：识图能力生效中",
+      enabledOff: "已关闭：识图能力停用（上方配置保留，重新打开后即用）",
       baseURLLabel: "API 地址",
       baseURLHint: "OpenAI 兼容 base URL，例如 https://open.bigmodel.cn/api/paas/v4 或 http://localhost:11434/v1",
       apiKeyLabel: "API 密钥",
@@ -102,12 +106,40 @@ window.__ModuleLoader__.load({
       });
     }
 
+    // 开关行：checkbox + 标签 + 说明。即时写 scope（enabled 是布尔，无「保持
+    // 已存值」语义），不走保存按钮——与宿主半边 scope.watch 的热生效配套。
+    function toggleRow(label, hint, checked, onToggle, statusLine) {
+      return jsxs("div", {
+        style: { display: "flex", flexDirection: "column", gap: 4, padding: "8px 10px", border: "1px solid var(--dsw-alias-border-l2, #ccc)", borderRadius: 8 },
+        children: [
+          jsxs("label", {
+            style: { display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" },
+            children: [
+              jsx("input", {
+                type: "checkbox",
+                checked: !!checked,
+                style: { margin: "3px 0 0" },
+                onChange: (e) => onToggle(e.target.checked)
+              }),
+              jsxs("span", { style: { display: "flex", flexDirection: "column", gap: 2 }, children: [
+                jsx("span", { children: label }),
+                hint ? jsx("span", { style: { fontSize: 12, opacity: 0.65 }, children: hint }) : null
+              ] })
+            ]
+          }),
+          statusLine ? jsx("span", { style: { fontSize: 12, opacity: 0.75 }, children: statusLine }) : null
+        ]
+      });
+    }
+
     function VisionSettingsCard(props) {
       const { useScope, scope } = props;
       const snap = useScope((s) => s);
       const [form, setForm] = react.useState({});
       const [busy, setBusy] = react.useState(false);
       const [saved, setSaved] = react.useState(false);
+      // 开关写入中的锁（hooks 必须位于提前 return 之前，顺序恒定）。
+      const [toggling, setToggling] = react.useState(false);
 
       react.useEffect(() => {
         if (snap.status !== "ready") return;
@@ -126,6 +158,21 @@ window.__ModuleLoader__.load({
       if (snap.status !== "ready") {
         return jsx("div", { children: snap.status === "loading" ? L.loading : L.unavailable });
       }
+
+      // 总开关：读快照、写 scope（即时热生效，不经保存按钮）。默认开——
+      // snap.value.enabled 只在用户显式关过时才是 false（宿主 schema 默认 true）。
+      const enabledOn = !(((snap.value || {}).enabled) === false);
+      const setEnabled = async (on) => {
+        setToggling(true);
+        try {
+          await scope.set("enabled", on);
+        } catch (error) {
+          // 写失败不改变快照，checkbox 受控于快照会自动弹回原状态。
+          console.warn("[dsh-vision] 切换识图开关失败:", error);
+        } finally {
+          setToggling(false);
+        }
+      };
 
       const set = (key) => (value) => setForm((f) => ({ ...f, [key]: value }));
       const numberOr = (text, fallback) => {
@@ -170,6 +217,13 @@ window.__ModuleLoader__.load({
         style: { display: "flex", flexDirection: "column", gap: 12, padding: 16, maxWidth: 560 },
         children: [
           jsx("h2", { children: L.navSub }),
+          toggleRow(
+            L.enabledLabel,
+            L.enabledHint,
+            enabledOn,
+            (on) => { if (!toggling) void setEnabled(on); },
+            enabledOn ? L.enabledOn : L.enabledOff
+          ),
           fieldRow(L.baseURLLabel, L.baseURLHint, textInput(form.baseURL, set("baseURL"))),
           fieldRow(L.apiKeyLabel, L.apiKeyHint, textInput(form.apiKey, set("apiKey"), "password")),
           fieldRow(L.modelLabel, L.modelHint, textInput(form.model, set("model"))),
@@ -323,7 +377,12 @@ window.__ModuleLoader__.load({
 
       function VisionImageButton({ inputActions, input }) {
         const fileRef = react.useRef(null);
+        // 总开关关闭时整颗按钮消失（返回 null）：图片通道此时在宿主侧也已
+        // 停用，留着入口只会让用户撞上「模型不支持图片输入」。快照未就绪
+        // （loading/unavailable）时保守显示——默认开，不因瞬时状态闪没。
+        const enabledSnap = useScope((s) => (s.status === "ready" ? ((s.value || {}).enabled !== false) : true));
         const actions = inputActions || {};
+        if (!enabledSnap) return null;
         const disabled = !canAttach || typeof actions.addImages !== "function" || typeof actions.setDraft !== "function";
         const pick = () => {
           if (!disabled && fileRef.current) fileRef.current.click();

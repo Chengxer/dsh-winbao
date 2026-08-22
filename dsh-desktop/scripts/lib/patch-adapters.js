@@ -76,6 +76,15 @@ async function describeImagesWithVision(ctx, content) {
 			if (descriptor !== void 0 && descriptor.value !== void 0 && typeof descriptor.value === "object") vision = descriptor.value;
 		} catch {}
 	}
+	// DSH Desktop: dsh-vision master switch (enabled) — off means the user turned
+	// the whole capability off in 设置 → 识图插件：skip conversion and flag the
+	// throw so the gate below restores the upstream MODEL_DOES_NOT_SUPPORT_IMAGES
+	// rejection (the exact pre-plugin behavior: images neither sent nor converted).
+	if (vision !== null && vision.enabled === false) {
+		const visionDisabled = new Error("dsh-vision disabled");
+		visionDisabled.dshVisionDisabled = true;
+		throw visionDisabled;
+	}
 	if (vision === null || typeof vision.baseURL !== "string" || vision.baseURL.trim() === "" || typeof vision.model !== "string" || vision.model.trim() === "") {
 		throw new Error("未配置识图服务：请到 设置 → 识图插件（view_image） 填写 VLM 接口地址与模型");
 	}
@@ -123,16 +132,23 @@ async function describeImagesWithVision(ctx, content) {
 `;
 const IMAGE_SEND_GATE_MARKER = 'if (modelInfo.inputModalities !== void 0 && !modelInfo.inputModalities.includes("image")) return err(request, {';
 const IMAGE_SEND_GATE_NEW = `if (modelInfo.inputModalities !== void 0 && !modelInfo.inputModalities.includes("image")) {
-							try {
-								admittedContent = await describeImagesWithVision(ctx, content);
-							} catch (error) {
-								return err(request, {
-									code: "attachment-error",
-									message: \`图片自动转述失败：\${error instanceof Error ? error.message : String(error)}。请在 设置 → 识图插件（view_image） 配置 VLM 后重试。\`,
-									details: { reason: "IMAGE_DESCRIPTION_FAILED" }
-								});
-							}
-						}`;
+								try {
+									admittedContent = await describeImagesWithVision(ctx, content);
+								} catch (error) {
+									if (error && error.dshVisionDisabled === true) {
+										return err(request, {
+											code: 'attachment-error',
+											message: \`Model "\${current.model}" does not support image input.\`,
+											details: { reason: 'MODEL_DOES_NOT_SUPPORT_IMAGES' }
+										});
+									}
+									return err(request, {
+										code: "attachment-error",
+										message: \`图片自动转述失败：\${error instanceof Error ? error.message : String(error)}。请在 设置 → 识图插件（view_image） 配置 VLM 后重试。\`,
+										details: { reason: "IMAGE_DESCRIPTION_FAILED" }
+									});
+								}
+							}`;
 
 function transformImageSendFix(src, file) {
   if (src.includes(IMAGE_SEND_MARKER)) return { status: 'already' };
@@ -186,6 +202,57 @@ function transformVisionKeyFix(src, file) {
     return { status: 'anchor-missing', detail: '锚点未匹配（版本可能已变化），跳过 ' + file };
   }
   return { status: 'changed', src: src.replace(VISION_KEY_FROM, VISION_KEY_TO) };
+}
+
+// ---------------------------------------------------------------------------
+// 识图总开关（enabled）门槛增量补丁：image-send-fix 已应用的旧树上补挂
+// 「dsh-vision 关闭 → 不转述、按上游原样拒绝」。IMAGE_SEND_MARKER 相同而
+// 内容已升级，旧树永远走 already 分支拿不到新常量，因此按 vision-key-fix
+// 的先例单列 transform 与 marker；两处锚点（helper 配置检查行 / gate 调用
+// 行）在旧树与新树均存在，产物与新版 IMAGE_SEND_HELPER / IMAGE_SEND_GATE_NEW
+// 直接生成的字节一致（新树靠 marker 短路 already，不会重复插入）。
+// ---------------------------------------------------------------------------
+const VISION_TOGGLE_MARKER = 'DSH Desktop: dsh-vision master switch (enabled)';
+const VISION_TOGGLE_HELPER_ANCHOR = '\tif (vision === null || typeof vision.baseURL !== "string" || vision.baseURL.trim() === "" || typeof vision.model !== "string" || vision.model.trim() === "") {';
+const VISION_TOGGLE_HELPER_CHECK = [
+  '\t// DSH Desktop: dsh-vision master switch (enabled) — off means the user turned',
+  '\t// the whole capability off in 设置 → 识图插件：skip conversion and flag the',
+  '\t// throw so the gate below restores the upstream MODEL_DOES_NOT_SUPPORT_IMAGES',
+  '\t// rejection (the exact pre-plugin behavior: images neither sent nor converted).',
+  '\tif (vision !== null && vision.enabled === false) {',
+  '\t\tconst visionDisabled = new Error("dsh-vision disabled");',
+  '\t\tvisionDisabled.dshVisionDisabled = true;',
+  '\t\tthrow visionDisabled;',
+  '\t}',
+  '',
+].join('\n');
+// 旧 gate 的 catch 头（含转述调用行作唯一性前缀，避免命中文件内其它 catch）。
+const VISION_TOGGLE_GATE_FROM = '\t\t\t\t\t\t\t\t\tadmittedContent = await describeImagesWithVision(ctx, content);\n\t\t\t\t\t\t\t\t} catch (error) {\n\t\t\t\t\t\t\t\t\treturn err(request, {';
+const VISION_TOGGLE_GATE_TO = [
+  '\t\t\t\t\t\t\t\t\tadmittedContent = await describeImagesWithVision(ctx, content);',
+  '\t\t\t\t\t\t\t\t} catch (error) {',
+  '\t\t\t\t\t\t\t\t\tif (error && error.dshVisionDisabled === true) {',
+  '\t\t\t\t\t\t\t\t\t\treturn err(request, {',
+  "\t\t\t\t\t\t\t\t\t\t\tcode: 'attachment-error',",
+  '\t\t\t\t\t\t\t\t\t\t\tmessage: `Model "${current.model}" does not support image input.`,',
+  "\t\t\t\t\t\t\t\t\t\t\tdetails: { reason: 'MODEL_DOES_NOT_SUPPORT_IMAGES' }",
+  '\t\t\t\t\t\t\t\t\t\t});',
+  '\t\t\t\t\t\t\t\t\t}',
+  '\t\t\t\t\t\t\t\t\treturn err(request, {',
+].join('\n');
+
+function transformVisionToggleGate(src, file) {
+  if (src.includes(VISION_TOGGLE_MARKER)) return { status: 'already' };
+  // helper 不存在 = image-send-fix 本身没打上（或上游原生内置 helper 且无该
+  // 检查行）——本补丁无从谈起，按失配跳过。
+  const helperIdx = src.indexOf(VISION_TOGGLE_HELPER_ANCHOR);
+  const gateIdx = src.indexOf(VISION_TOGGLE_GATE_FROM);
+  if (helperIdx === -1 || gateIdx === -1) {
+    return { status: 'anchor-missing', detail: '未找到识图 helper/门槛锚点（版本可能已变更或 image-send 未应用），跳过 ' + file };
+  }
+  const out = src.replace(VISION_TOGGLE_HELPER_ANCHOR, VISION_TOGGLE_HELPER_CHECK + VISION_TOGGLE_HELPER_ANCHOR)
+    .replace(VISION_TOGGLE_GATE_FROM, VISION_TOGGLE_GATE_TO);
+  return { status: 'changed', src: out };
 }
 
 // ---------------------------------------------------------------------------
@@ -453,6 +520,8 @@ module.exports = {
   // 原 main.js 内联 transform（声明化，字节级等价）。
   transformImageSendFix,
   transformVisionKeyFix,
+  // 识图总开关（enabled）门槛增量补丁（旧树 → 新语义）。
+  transformVisionToggleGate,
   transformProfilePatchGuard,
   transformProfileBundleAppBoot,
   transformProfileBundleProfileBoot,
@@ -483,6 +552,7 @@ module.exports = {
     SLOT_ERROR_ISOLATE_MARKER_V2,
     IMAGE_SEND_MARKER,
     VISION_KEY_MARKER,
+    VISION_TOGGLE_MARKER,
     PROFILE_PATCH_GUARD_MARKER,
     PROFILE_BUNDLE_GUARD_MARKER,
     PROFILE_BOOT_GUARD_MARKER,

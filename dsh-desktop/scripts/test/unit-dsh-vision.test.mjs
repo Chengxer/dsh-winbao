@@ -2,7 +2,7 @@
 // 运行：node --test scripts/test/unit-dsh-vision.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { convertMessagesWithImages, createLlmStreamHandler, wrapVisionAdapter, wrapVisionResolveModelInfo } from "../../assets/plugins/dsh-vision/lib/index.js";
+import { Config, convertMessagesWithImages, createLlmStreamHandler, wrapVisionAdapter, wrapVisionResolveModelInfo } from "../../assets/plugins/dsh-vision/lib/index.js";
 
 const enc = new TextEncoder();
 const ref = (id, extra = {}) => ({ attachmentId: id, mediaType: "image/png", bytes: 3, width: 2, height: 2, ...extra });
@@ -518,4 +518,97 @@ test("wrapService：无 resolveModelInfo 方法 → undefined 不抛错", () => 
   const native = new Map();
   assert.equal(wrapVisionResolveModelInfo({}, native), undefined);
   assert.equal(wrapVisionResolveModelInfo(undefined, native), undefined);
+});
+
+// —— 总开关（enabled）：默认值 / 读写往返 / 关闭时各面停用 ——
+test("Config：enabled 默认 true（不破坏既有用户）", () => {
+  assert.equal(Config({}).enabled, true); // 无存储节 → schema 默认开
+  assert.equal(Config({ baseURL: "https://x" }).enabled, true); // 其它字段存在亦然
+});
+
+test("Config：enabled 读写往返（存 false 读 false，再存 true 读 true）", () => {
+  // 模拟 settings 用户文档节的往返：存储只落用户覆盖字段。
+  let stored = {};
+  const write = (patch) => { stored = { ...stored, ...patch }; };
+  const read = () => Config(stored);
+  assert.equal(read().enabled, true); // 初始：无覆盖 → 默认开
+  write({ enabled: false });
+  assert.equal(read().enabled, false); // 关 → 落盘 → 读回 false
+  assert.equal(read().model, "glm-4.6v-flash"); // 开关与 VLM 配置互不干扰
+  write({ enabled: true });
+  assert.equal(read().enabled, true); // 再开 → 读回 true（往返闭合）
+  // JSON 序列化往返（YAML/JSON 存储同构）
+  assert.equal(Config(JSON.parse(JSON.stringify({ enabled: false }))).enabled, false);
+});
+
+test("handler：isEnabled=false → 完全透明（透传 next，不识别不重入）", async () => {
+  let convertCalls = 0;
+  let supportsCalls = 0;
+  const { handler, events, next } = makeHandler({
+    isEnabled: () => false,
+    convert: async () => { convertCalls++; return { messages: [], changed: true }; },
+    supportsImages: async () => { supportsCalls++; return false; },
+  });
+  const stream = handler({ provider: "deepseek", model: "v4-flash", messages: [message([img("t1")])] }, next);
+  assert.deepEqual(await collect(stream), ["fallback-chunk"]);
+  assert.equal(events.next, 1); // 走原始链
+  assert.equal(events.llm, 0); // 未重入
+  assert.equal(convertCalls, 0); // 未识别
+  assert.equal(supportsCalls, 0); // 连原生能力判定都跳过
+});
+
+test("handler：isEnabled 热切换（关→开往返，同一次注册）", async () => {
+  let enabled = false;
+  let convertCalls = 0;
+  const { handler, events, next } = makeHandler({
+    isEnabled: () => enabled,
+    convert: async (messages) => { convertCalls++; return { messages: messages.slice(), changed: true }; },
+  });
+  const options = { messages: [message([img()])] };
+  assert.deepEqual(await collect(handler(options, next)), ["fallback-chunk"]); // 关：透传
+  enabled = true;
+  assert.deepEqual(await collect(handler(options, next)), ["llm-chunk"]); // 开：识别替换
+  assert.equal(events.llm, 1);
+  assert.equal(convertCalls, 1);
+});
+
+test("wrapService：isEnabled=false → 不加 image（host 门槛将按原样拒绝）", async () => {
+  const native = new Map();
+  const service = {
+    resolveModelInfo: async (provider, model) => ({ model, inputModalities: ["text"] }),
+  };
+  wrapVisionResolveModelInfo(service, native, () => false);
+  const info = await service.resolveModelInfo("deepseek", "v4-flash");
+  assert.deepEqual(info.inputModalities, ["text"]); // 原样：vision admission 不生效
+  assert.equal(native.get("deepseek\0v4-flash"), false); // 原生能力仍记录（缓存保温）
+});
+
+test("wrapService：isEnabled 热切换往返（同一次 wrap 内关→开）", async () => {
+  const native = new Map();
+  let enabled = false;
+  const service = {
+    resolveModelInfo: async (provider, model) => ({ model, inputModalities: ["text"] }),
+  };
+  wrapVisionResolveModelInfo(service, native, () => enabled);
+  assert.deepEqual((await service.resolveModelInfo("p", "m")).inputModalities, ["text"]); // 关
+  enabled = true;
+  assert.deepEqual((await service.resolveModelInfo("p", "m")).inputModalities, ["text", "image"]); // 开
+});
+
+test("wrapAdapter：isEnabled=false → listModels 不加 image；原生多模态行不动", async () => {
+  const native = new Map();
+  const adapter = {
+    resolveModel: async () => ({ model: "v4-flash", inputModalities: ["text"] }),
+    listModels: async () => [
+      { model: "v4-flash", inputModalities: ["text"] },
+      { model: "native-vlm", inputModalities: ["text", "image"] },
+    ],
+  };
+  const wrapped = wrapVisionAdapter(adapter, "deepseek", native, () => false);
+  const listed = await wrapped.listModels("deepseek");
+  assert.deepEqual(listed[0].inputModalities, ["text"]); // 关：UI 一致性声明也停
+  assert.deepEqual(listed[1].inputModalities, ["text", "image"]); // 本就支持的行不受影响
+  const info = await wrapped.resolveModel("deepseek", "v4-flash");
+  assert.deepEqual(info.inputModalities, ["text"]); // resolveModel 本就只记录不改
+  assert.equal(native.get("deepseek\0v4-flash"), false); // 记录照常
 });

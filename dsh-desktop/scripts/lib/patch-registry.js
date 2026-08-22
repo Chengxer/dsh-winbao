@@ -73,6 +73,7 @@ const {
   transformAttachmentMimeTrust,
   transformImageSendFix,
   transformVisionKeyFix,
+  transformVisionToggleGate,
   transformProfilePatchGuard,
   transformProfileBundleAppBoot,
   transformProfileBundleProfileBoot,
@@ -90,6 +91,7 @@ const {
   SLOT_ERROR_ISOLATE_MARKER_V2,
   IMAGE_SEND_MARKER,
   VISION_KEY_MARKER,
+  VISION_TOGGLE_MARKER,
   PROFILE_PATCH_GUARD_MARKER,
   PROFILE_BUNDLE_GUARD_MARKER,
   PROFILE_BOOT_GUARD_MARKER,
@@ -295,6 +297,32 @@ const PATCH_SPECS = [
       alreadyLog: alreadySkip,
       doneLog: (file) => '已启用文本模型图片自动转述 ' + file,
       failLog: (file, err) => '识图发送补丁失败(' + file + '): ' + err.message,
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // 识图总开关（enabled）门槛增量补丁：旧树上补挂「dsh-vision 关闭 →
+  // 不转述、按上游原样拒绝」。必须在 image-send-fix 之后（依赖其 helper 与
+  // gate 形态）；与 vision-key-fix 无区域重叠，先后皆可。
+  // -------------------------------------------------------------------------
+  {
+    id: 'vision-toggle-gate',
+    group: 'runtime',
+    order: 95,
+    kind: 'file',
+    layout: 'runtime-local',
+    wslLayout: 'wsl',
+    pkgRel: EXPOSE_PKG_REL,
+    transform: transformVisionToggleGate,
+    marker: VISION_TOGGLE_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: '识图开关补丁',
+      alreadyLog: alreadySkip,
+      doneLog: (file) => '已接入识图总开关（关闭=原图不转述不发送） ' + file,
+      failLog: (file, err) => '识图开关补丁失败(' + file + '): ' + err.message,
     },
   },
 
