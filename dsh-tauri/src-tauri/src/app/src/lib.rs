@@ -428,6 +428,21 @@ fn locate_repo_root(candidates: &[std::path::PathBuf]) -> Option<std::path::Path
 ///
 /// CARGO_MANIFEST_DIR 是编译机绝对路径，在用户机上必然不存在——打包态
 /// 只有 exe 相对布局可靠。
+/// exe 向上每一跳生成两个候选：`<dir>/resources`（安装根/resources/dsh-desktop
+/// 形态——v0.5.x 便携版 zip 与部分安装器布局）与 `<dir>` 本身（安装根
+/// /dsh-desktop 形态——NSIS 安装版 exe 与 payload 同级）。
+/// 独立成函数仅为可测（find_repo_root 用 current_exe 无法在单测里模拟布局）。
+fn exe_walk_candidates(exe: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    let mut cur = exe.parent().map(|p| p.to_path_buf());
+    while let Some(d) = cur {
+        candidates.push(d.join("resources"));
+        candidates.push(d.clone());
+        cur = d.parent().map(|p| p.to_path_buf());
+    }
+    candidates
+}
+
 fn find_repo_root() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     if let Ok(root) = std::env::var("DSH_TAURI_REPO_ROOT") {
         let p = std::path::PathBuf::from(&root);
@@ -441,12 +456,7 @@ fn find_repo_root() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     // 前面，「编译机=测试机」场景会用仓库检出遮蔽安装目录，实装验证失真。
     // 开发态不受影响：target/debug 本就在仓库内，向上走必然命中仓库根。
     if let Ok(exe) = std::env::current_exe() {
-        let mut cur = exe.parent().map(|p| p.to_path_buf());
-        while let Some(d) = cur {
-            candidates.push(d.join("resources"));
-            candidates.push(d.clone());
-            cur = d.parent().map(|p| p.to_path_buf());
-        }
+        candidates.extend(exe_walk_candidates(&exe));
     }
     // 开发态兜底：CARGO_MANIFEST_DIR（编译机绝对路径）向上。
     let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -873,6 +883,44 @@ mod repo_root_tests {
         let r = find_repo_root();
         std::env::remove_var("DSH_TAURI_REPO_ROOT");
         assert!(r.is_err(), "显式覆盖但布局非法应 Err（提示覆盖值问题）");
+    }
+
+    /// 便携版 zip 布局 fixture（v0.5.x CI build-portable 产物形态）：
+    /// exe 与 portable.marker 在根，payload 全部在 resources/ 下。
+    /// 任何一跳缺 resources 候选都会让 exe-walk 只认安装版同根布局，
+    /// 便携版找不到 dsh-desktop → 恢复页（无法进主界面）。
+    #[test]
+    fn exe_walk_resolves_portable_zip_layout() {
+        let root = std::env::temp_dir().join(format!("dsh-tauri-portable-fx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let exe = root.join("DSH Desktop.exe");
+        let payload = root.join("resources").join("dsh-desktop");
+        std::fs::create_dir_all(payload.join("vendor").join("node")).unwrap();
+        std::fs::write(payload.join("vendor").join("node").join("node.exe"), b"fake-node").unwrap();
+        std::fs::write(root.join("portable.marker"), b"marker").unwrap();
+
+        let candidates = exe_walk_candidates(&exe);
+        // 每一跳 resources 候选排在同根候选之前（便携布局优先命中）。
+        assert_eq!(candidates.first(), Some(&root.join("resources")), "首候选必须是 exe 同级 resources/");
+        assert!(candidates.contains(&root), "同根候选也必须在列（安装版布局）");
+        let hit = locate_repo_root(&candidates).expect("便携 zip 布局必须命中 repo root");
+        assert_eq!(hit, root.join("resources"), "repo root 应解析为 resources/（sidecar=resources/sidecar、payload=resources/dsh-desktop）");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// NSIS 安装版布局 fixture：exe 与 dsh-desktop/ 同级、无 resources/。
+    #[test]
+    fn exe_walk_resolves_installed_flat_layout() {
+        let root = std::env::temp_dir().join(format!("dsh-tauri-flat-fx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let exe = root.join("dsh-tauri-app.exe");
+        std::fs::create_dir_all(root.join("dsh-desktop").join("vendor").join("node")).unwrap();
+        std::fs::write(root.join("dsh-desktop").join("vendor").join("node").join("node.exe"), b"fake-node").unwrap();
+
+        let candidates = exe_walk_candidates(&exe);
+        let hit = locate_repo_root(&candidates).expect("安装版同根布局必须命中 repo root");
+        assert_eq!(hit, root, "repo root 应为 exe 所在目录本身");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

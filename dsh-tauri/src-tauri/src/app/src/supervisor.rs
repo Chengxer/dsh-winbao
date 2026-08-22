@@ -242,8 +242,15 @@ impl Supervisor {
             match this.run_sidecar_boot(&tx, gen) {
                 Ok(()) => {}
                 Err(e) => {
-                    let mut g = this.inner.lock().unwrap_or_else(|p| p.into_inner());
-                    g.last_error = Some(e.clone());
+                    // last_error 写入必须独立作用域：enter_recovery_tx 内部的
+                    // kill_kernel/state/set_state 都会再取 inner 锁，同线程持锁
+                    // 重入 = 自死锁（v0.5.2 便携版 node.exe 缺失实测：boot 线程
+                    // 冻死在 kill_kernel 的 lock()，CrashLoop 永不发出，加载页
+                    // 永挂、恢复页永不出现——正是「便携版一直在加载」的主链）。
+                    {
+                        let mut g = this.inner.lock().unwrap_or_else(|p| p.into_inner());
+                        g.last_error = Some(e.clone());
+                    }
                     let _ = tx.send(SupervisorEvent::BootStep { name: "sidecar-boot".into(), ok: false, ms: t0.elapsed().as_millis() as u64, error: Some(e) });
                     this.enter_recovery(&tx, "boot 链失败");
                     return;
