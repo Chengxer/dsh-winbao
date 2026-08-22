@@ -29,11 +29,26 @@
  *   DSH_TAURI_APP_DIR  dsh-desktop 目录（默认：脚本位置 ../../../../dsh-desktop）
  *   DSH_HOME           dsh home（默认 ~/.dsh，与内核一致）
  *   DSH_TAURI_USERDATA 桌面壳数据目录（默认 %APPDATA%/dsh-desktop）
+ *
+ * WSL 托管模式（boot 链 WSL 半边，语义对齐 Electron wsl-backend.js + main.js）：
+ *   检测序（wsl-mode.js detectWslBackend）——非 Windows 恒 local →
+ *   DSH_DESKTOP_BACKEND=local 显式本地 → DSH_WSL_MODE=1 模拟（Rust 设置页
+ *   解锁前的临时缝）或 DSH_DESKTOP_BACKEND=wsl → settings.json 的
+ *   backend='wsl'（wslDistro/wslInstallDir 同文件）→ 默认 local。
+ *   生效后 DSH_HOME 等价于 WSL 安装目录的 UNC 形态
+ *   （\\wsl.localhost\<distro><installDir>，见 wsl-paths.js），boot 五步全部
+ *   经 UNC 写穿：sync（companion → UNC profile）、presets（→ UNC agent 包，
+ *   未就绪跳过）、patches（ctx.wslMode=true → wslLayout 双根）、preflight
+ *   （nm-roots 追加 agent 根）。repairProfileFallback / koffi 预检在 WSL 模式
+ *   跳过（junction 语义不适用于 Linux 内核自管的 symlink；win32 预编译 koffi
+ *   与 Linux 内核无关——原生模块由 WSL 内 npm 安装的 linux 变体提供）。
+ *   解析失败回落 local 继续启动（Electron issue #54 同语义）。
  */
 
 const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
+const wslMode = require('./wsl-mode');
 
 // ---------------------------------------------------------------------------
 // 路径与公共上下文
@@ -149,8 +164,51 @@ function makeSettingsStore(mods, userDataDir) {
   };
 }
 
+/**
+ * WSL 模式下定位 dsh 安装锚点包（sync-companion-plugins.js findDshPackageDir
+ * 的前三候选同款，home 为 UNC 形态）：agent（wsl-backend 布局）→ profile
+ * fallback → home 直挂。定位不到返回 ''（reconcile 按无锚点处理：不预写
+ * 核心 bundle，绝不拿 Windows 本地包冒充 WSL 侧锚点）。
+ */
+function findWslDshPackageDir(home) {
+  const isDsh = (dir) => {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+      return pkg && pkg.name === '@deepseek-ai/dsh' ? dir : '';
+    } catch { return ''; }
+  };
+  for (const dir of [
+    path.join(home, 'agent', 'node_modules', '@deepseek-ai', 'dsh'),
+    path.join(home, 'profiles', 'node_modules', '@deepseek-ai', 'dsh'),
+    path.join(home, 'node_modules', '@deepseek-ai', 'dsh'),
+  ]) {
+    if (isDsh(dir)) return dir;
+  }
+  return '';
+}
+
+/**
+ * 解析后端模式上下文（boot / koffi-preflight 等启动链子命令共用）。
+ * @returns {Promise<{backend:'local'|'wsl', home:string, wsl:Object|null, fallbackReason?:string}>}
+ *   wsl 模式 home = UNC 形态安装目录（effectiveDshHome 语义）；WSL 配置
+ *   解析失败回落 local（Electron issue #54：配置错误不阻断启动）。
+ */
+async function resolveBackendCtx({ appDir, home, userDataDir }) {
+  let settings = {};
+  try { settings = loadSettingsInline({ userDataDir }); } catch { settings = {}; }
+  try {
+    const wsl = await wslMode.resolveWslBackend({ env: process.env, settings, platform: process.platform });
+    if (wsl) return { backend: 'wsl', home: wsl.uncHome, wsl };
+    return { backend: 'local', home, wsl: null };
+  } catch (err) {
+    const reason = String((err && err.message) || err);
+    log('WSL 托管模式解析失败，回落本地模式继续启动: ' + reason);
+    return { backend: 'local', home, wsl: null, fallbackReason: reason };
+  }
+}
+
 /** 造 integration 门面（DI 面对齐 main.js ensurePluginIntegration 的注入）。 */
-function makeIntegration(mods, { appDir, home, userDataDir }) {
+function makeIntegration(mods, { appDir, home, userDataDir, wsl = null }) {
   const settings = makeSettingsStore(mods, userDataDir);
   let yamlTried = false;
   let yamlDialect = null;
@@ -162,15 +220,21 @@ function makeIntegration(mods, { appDir, home, userDataDir }) {
     return yamlDialect;
   };
   return mods.integration.createPluginIntegration({
+    // WSL 模式：home = UNC 安装目录（effectiveDshHome），插件同步 / 补丁 /
+    // 预检全部经 UNC 写穿；patch-target-resolver 按 wslMode 切 wslLayout。
     getHome: () => home,
     appDir,
     getUserDataDir: () => userDataDir,
-    wslMode: () => false, // Tauri 版 Phase 3 评估 WSL 托管
+    wslMode: () => !!wsl,
     log,
     loadYaml,
     loadSettings: settings.load,
     saveSettings: settings.save,
-    getInstallAnchorDir: () => path.dirname(path.join(appDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')),
+    // WSL 模式锚点 = WSL 内 dsh 包（UNC）；本地模式 = payload 内置包
+    // （main.js dshPackageJson 同式）。
+    getInstallAnchorDir: wsl
+      ? () => findWslDshPackageDir(home)
+      : () => path.dirname(path.join(appDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')),
     onManifestResetRecovered: (ids) => log('manifest 重置恢复: ' + JSON.stringify(ids)),
     onHealReset: (kind, backup) => log('heal 重置(' + kind + '): ' + backup),
     hostDetectors: { openPath: () => true },
@@ -582,8 +646,17 @@ function createPluginManager(mods, { appDir, home }) {
 // ---------------------------------------------------------------------------
 
 async function cmdBoot(args, ctx) {
-  const { mods, home, appDir } = ctx;
-  const integration = makeIntegration(mods, { appDir, home, userDataDir: resolveUserData() });
+  const { mods, appDir, userDataDir } = ctx;
+  // 后端模式解析（WSL 半边入口）：wsl 生效时 home 换成 UNC 安装目录；解析
+  // 失败回落 local（issue #54 语义，fallbackReason 进结果供 supervisor/日志展示）。
+  const backend = await resolveBackendCtx({ appDir, home: ctx.home, userDataDir });
+  const home = backend.home;
+  const integration = makeIntegration(mods, { appDir, home, userDataDir, wsl: backend.wsl });
+  if (backend.wsl) {
+    log('WSL 托管模式: distro=' + backend.wsl.distro + ' installDir=' + backend.wsl.installDir
+      + ' home(UNC)=' + backend.wsl.uncHome
+      + (backend.wsl.simulated ? '（DSH_WSL_MODE 模拟，Rust 设置页解锁前的临时缝）' : ''));
+  }
   const t0 = Date.now();
   const steps = [];
   // 步骤成败分级（对齐 Electron main.js 容忍语义 +「客户端必须能打开」原则）：
@@ -613,14 +686,26 @@ async function cmdBoot(args, ctx) {
   // presets 步（v0.5.1 迁移）：Electron 时代有三条预设同步路径（after-pack 预装 /
   // main.js 内联 syncLocalAgentPresets / WSL UNC 半边），Tauri 此前全缺——旧注释
   // 「plugin-sync 内部已含预设对账」经核实为错误陈述（plugin-sync 不碰 agent-presets）。
-  // 现复用 payload 自带的 install-minimal-win-preset.js（幂等，mtime/size 跳过），
-  // 目标为当前生效的 @deepseek-ai/dsh 包（Tauri 无 overlay updater，即 payload 副本；
-  // 将来若迁移 overlay 更新链，需带回 Electron 的「overlay 优先」选择逻辑）。
+  // 现复用 payload 自带的 install-minimal-win-preset.js（幂等，mtime/size 跳过）：
+  //   local：目标为当前生效的 @deepseek-ai/dsh 包（Tauri 无 overlay updater，即
+  //     payload 副本；将来若迁移 overlay 更新链，需带回 Electron 的「overlay 优先」）；
+  //   wsl：目标为 UNC agent 包（Electron syncBuiltinAgentPresets 同式）——agent
+  //     未就绪（Rust 侧 ensureInstalled 未跑完 / 首启）时跳过不阻断，下次 boot 补齐。
   // 步骤语义照抄 sidecar 容忍策略：失败告警不阻断启动（Electron 侧同款 try/catch）。
   let ok = true;
   ok = (await step('repair', () => integration.healBeforeServer())) && ok;
   ok = (await step('sync', () => integration.syncPlugins())) && ok;
   ok = (await step('presets', () => {
+    if (backend.wsl) {
+      const dshDir = findWslDshPackageDir(home);
+      if (!dshDir) {
+        log('presets: WSL 内 dsh 包未就绪（' + path.join(home, 'agent', 'node_modules', '@deepseek-ai', 'dsh') + '），本次跳过（Rust 侧安装完成后下次 boot 补齐）');
+        return { ok: true, count: 0, note: 'wsl-agent-not-ready' };
+      }
+      const dests = mods.presetInstaller.installBuiltinPresets(dshDir);
+      log('presets: ' + dests.length + ' 个内置预设对账完成 → WSL agent 包 ' + dshDir);
+      return { ok: true, count: dests.length };
+    }
     const dshDir = mods.presetInstaller.installedDshPackageDir();
     const dests = mods.presetInstaller.installBuiltinPresets(dshDir);
     log('presets: ' + dests.length + ' 个内置预设对账完成（minimal-win/router-standard/anchored 系/whoami/warmupbetter 系等）→ ' + dshDir);
@@ -628,7 +713,21 @@ async function cmdBoot(args, ctx) {
   })) && ok;
   ok = (await step('patches', () => integration.applyPatches())) && ok;
   ok = (await step('preflight', () => integration.preflightHealth())) && ok;
-  return { ok, totalMs: Date.now() - t0, steps };
+  // 后端观测字段（additive，supervisor 只消费 ok/steps）：WSL 生效时携带
+  // distro/installDir/UNC home/agent 就绪态；回落时携带原因（设置页可展示）。
+  const result = { ok, totalMs: Date.now() - t0, steps, backend: backend.backend };
+  if (backend.wsl) {
+    result.wsl = {
+      distro: backend.wsl.distro,
+      installDir: backend.wsl.installDir,
+      uncHome: backend.wsl.uncHome,
+      simulated: !!backend.wsl.simulated,
+      agentReady: fs.existsSync(path.join(home, 'agent', 'node_modules', '@deepseek-ai', 'dsh', 'package.json')),
+    };
+  } else if (backend.fallbackReason) {
+    result.wslFallbackReason = backend.fallbackReason;
+  }
+  return result;
 }
 
 function ctxFromArgs(argv) {
@@ -814,6 +913,16 @@ async function main() {
       }
       case 'koffi-preflight': {
         const c = ctx();
+        // WSL 模式跳过（Electron main.js WSL 分支同语义）：预检目标是壳自带
+        // win32 预编译 koffi（picker 等 host 原生能力）；WSL 模式内核跑 Linux，
+        // 原生模块来自 WSL 内 npm 安装的 linux 变体，Windows 侧探测无意义，
+        // picker overlay 也只作用于本地内核。Rust 契约按 stdout 末行 ===
+        // {"ok":true} 判过——跳过必须原样输出 {"ok":true}（不得附加字段）。
+        const backend = await resolveBackendCtx({ appDir: c.appDir, home: c.home, userDataDir: c.userDataDir });
+        if (backend.wsl) {
+          process.stderr.write('[sidecar] koffi 预检：WSL 托管模式跳过（原生模块为 WSL 内 linux 变体，win32 探测不适用）\n');
+          return emit({ ok: true });
+        }
         // Electron 版 runKoffiPreflight 语义：vendor node 跑 scripts/koffi-preflight.cjs
         // 冒烟（0 = 通过）。缓存策略由 Rust 侧 settings 负责（本子命令纯探测）。
         const { execFileSync } = require('node:child_process');

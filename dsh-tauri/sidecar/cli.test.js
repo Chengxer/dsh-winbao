@@ -345,3 +345,108 @@ test('safe-overlay：无失败日志 → 不生成禁用条目', { skip: !HAVE_D
   assert.deepStrictEqual(r.json.ids, [], '干净日志应返回空名单');
   assert.strictEqual(fs.existsSync(path.join(sb.dir, 'safe-boot.overlay.yml')), false, '不应生成文件');
 });
+
+// ===========================================================================
+// WSL 托管模式（boot 链 WSL 半边）
+// ---------------------------------------------------------------------------
+// 本机 WSL VM 损坏（wsl --status 退出 0 但 wsl -e 失败），全部用模拟：
+//   · DSH_WSL_MODE=1 触发模式（Rust 设置页解锁前的临时缝）；
+//   · DSH_TAURI_WSL_DISTRO 免清单探测、DSH_TAURI_WSL_UNC_HOME 把「UNC 安装
+//     目录」指到临时目录（\\wsl$ 结构本机造不出——用普通目录模拟路径形态，
+//     boot 半边的全部 fs 语义与真 UNC 等价：路径拼接 / 写穿 / 布局）；
+//   · wsl.exe 真实交互（spawn 原语）在 wsl-mode.test.js 用桩替身覆盖。
+// ===========================================================================
+
+/** WSL 测试环境：模拟模式 + 显式 distro + UNC home 指向给定目录。 */
+function wslEnv(uncHome, extra = {}) {
+  return {
+    ...extra,
+    DSH_WSL_MODE: '1',
+    DSH_TAURI_WSL_DISTRO: 'Ubuntu',
+    DSH_TAURI_WSL_UNC_HOME: uncHome,
+  };
+}
+
+/** 造最小 WSL agent 布局（<uncHome>/agent/node_modules/@deepseek-ai/dsh）。 */
+function makeWslAgentLayout(uncHome) {
+  const dshDir = path.join(uncHome, 'agent', 'node_modules', '@deepseek-ai', 'dsh');
+  fs.mkdirSync(dshDir, { recursive: true });
+  fs.writeFileSync(path.join(dshDir, 'package.json'), JSON.stringify({
+    name: '@deepseek-ai/dsh',
+    version: '0.1.0-rc.8',
+    main: 'lib/bin.js',
+  }));
+  return dshDir;
+}
+
+test('boot（WSL 半边）：五步全过，sync/presets 落 UNC home，本地 DSH_HOME 零写入', { skip: !HAVE_DEPS }, (t) => {
+  const sb = sandbox(t.name);
+  t.after(() => fs.rmSync(sb.dir, { recursive: true, force: true }));
+  const uncHome = path.join(sb.dir, 'wsl-home'); // 普通目录模拟 \\wsl$ 布局形态
+  const dshDir = makeWslAgentLayout(uncHome);
+  const env = { ...sb.env, ...wslEnv(uncHome) };
+
+  const r = cli(['boot'], { env, timeout: 180_000 });
+  assert.strictEqual(r.code, 0, `stderr: ${r.stderr.slice(-800)}`);
+  assert.strictEqual(r.json.ok, true, JSON.stringify(r.json).slice(0, 400));
+  // 步骤契约不变（supervisor 消费 ok/steps；WSL 是同一五步链）。
+  assert.deepStrictEqual(r.json.steps.map((s) => s.name), ['repair', 'sync', 'presets', 'patches', 'preflight']);
+  for (const s of r.json.steps) assert.strictEqual(s.ok, true, JSON.stringify(s));
+  // 后端观测字段。
+  assert.strictEqual(r.json.backend, 'wsl');
+  assert.strictEqual(r.json.wsl.distro, 'Ubuntu');
+  assert.strictEqual(r.json.wsl.uncHome, uncHome);
+  assert.strictEqual(r.json.wsl.simulated, true);
+  assert.strictEqual(r.json.wsl.agentReady, true);
+  // sync 半边：companion 落 UNC profile（伴生插件实体目录是设计——farm/junction
+  // 语义不适用于该层）。
+  assert.ok(fs.existsSync(path.join(uncHome, 'profiles', 'web', 'cordis.patch.yml')), 'UNC profile patch 应建档');
+  assert.ok(fs.existsSync(path.join(uncHome, 'profiles', 'web', 'node_modules')), 'UNC profile node_modules 应建档');
+  // presets 半边：内置 Agent 预设同步进 UNC agent 包（Electron
+  // syncBuiltinAgentPresets 同式目标）。
+  assert.ok(fs.existsSync(path.join(dshDir, 'config', 'agent-presets', 'minimal-win', 'agent.cordis.yml')), '内置预设应同步进 WSL agent 包');
+  // 本地 DSH_HOME（沙箱）零写入——WSL 模式一切落点换到 UNC home。
+  assert.strictEqual(fs.existsSync(path.join(sb.dir, 'profiles')), false, '本地 home 不应被写入');
+});
+
+test('boot（WSL 半边）：agent 未就绪 → presets 跳过不阻断（下次 boot 补齐）', { skip: !HAVE_DEPS }, (t) => {
+  const sb = sandbox(t.name);
+  t.after(() => fs.rmSync(sb.dir, { recursive: true, force: true }));
+  const uncHome = path.join(sb.dir, 'wsl-home'); // 空目录：Rust 侧 ensureInstalled 未跑完的形态
+  const env = { ...sb.env, ...wslEnv(uncHome) };
+  const r = cli(['boot'], { env, timeout: 180_000 });
+  assert.strictEqual(r.code, 0, `stderr: ${r.stderr.slice(-800)}`);
+  assert.strictEqual(r.json.ok, true, JSON.stringify(r.json).slice(0, 400));
+  const presets = r.json.steps.find((s) => s.name === 'presets');
+  assert.strictEqual(presets.ok, true, 'agent 未就绪不得阻断 boot');
+  assert.match(r.stderr, /WSL 内 dsh 包未就绪/);
+  assert.strictEqual(r.json.wsl.agentReady, false);
+});
+
+test('boot（WSL 解析失败）：回落 local 继续启动（Electron issue #54 语义）', { skip: !HAVE_DEPS }, (t) => {
+  const sb = sandbox(t.name);
+  t.after(() => fs.rmSync(sb.dir, { recursive: true, force: true }));
+  // distro 缺省 → 探测 wsl.exe；DSH_TAURI_WSL_EXE 指向不存在的可执行文件 →
+  // ENOENT → 空清单 → 可读错误 → 回落 local（确定性、不碰真机 wsl.exe）。
+  const env = { ...sb.env, DSH_WSL_MODE: '1', DSH_TAURI_WSL_EXE: 'definitely-not-wsl.exe' };
+  const r = cli(['boot'], { env, timeout: 180_000 });
+  assert.strictEqual(r.code, 0, `stderr: ${r.stderr.slice(-800)}`);
+  assert.strictEqual(r.json.ok, true);
+  assert.strictEqual(r.json.backend, 'local');
+  assert.match(r.json.wslFallbackReason, /未检测到 WSL 发行版/);
+  // 回落 = 完整 local boot：本地沙箱 home 正常建档。
+  assert.ok(fs.existsSync(path.join(sb.dir, 'profiles', 'web', 'cordis.patch.yml')), '回落后本地链应正常建档');
+});
+
+test('koffi-preflight（WSL 模式）：跳过且 stdout 末行逐字为 {"ok":true}（Rust 字符串契约）', { skip: !HAVE_DEPS }, (t) => {
+  const sb = sandbox(t.name);
+  t.after(() => fs.rmSync(sb.dir, { recursive: true, force: true }));
+  const uncHome = path.join(sb.dir, 'wsl-home');
+  const env = { ...sb.env, ...wslEnv(uncHome) };
+  const r = cli(['koffi-preflight'], { env });
+  assert.strictEqual(r.code, 0);
+  // supervisor.run_koffi_preflight 按 ends_with("{\"ok\":true}") 判过——
+  // WSL 跳过分支绝不能附加字段（skipped 之类会破坏该匹配）。
+  assert.strictEqual(r.stdout.trimEnd().split('\n').pop(), '{"ok":true}');
+  assert.match(r.stderr, /WSL 托管模式跳过/);
+});

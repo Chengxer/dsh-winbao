@@ -36,10 +36,10 @@ const NODE = (() => {
 const HAVE_DEPS = fs.existsSync(NODE) && fs.existsSync(path.join(APP_DIR, 'node_modules', 'koffi'));
 
 /** 驱动 farm-repair.js（与 supervisor.run_farm_repair 同参数形态：app-dir 走 argv）。 */
-function runRepair(home) {
+function runRepair(home, extraEnv = {}) {
   const r = spawnSync(NODE, [SCRIPT, APP_DIR], {
     encoding: 'utf8',
-    env: { ...process.env, DSH_HOME: home },
+    env: { ...process.env, DSH_HOME: home, ...extraEnv },
     timeout: 60_000,
   });
   return { code: r.status, stderr: r.stderr || '' };
@@ -115,5 +115,61 @@ test('farm-repair：farm 不存在时静默退出（首次安装形态）', { sk
   const r = runRepair(home);
   assert.strictEqual(r.code, 0);
   assert.strictEqual(r.stderr.trim(), '', '无事可做应零输出');
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+// ===========================================================================
+// WSL 托管模式：整链跳过（junction 语义不适用于 Linux 内核自管的 symlink
+// farm；Windows 侧 realpath 判定经 9P 读 Linux symlink 不可靠，误挪会破坏
+// WSL 内核已建好的 farm——见 farm-repair.js 头注释）。
+// ===========================================================================
+
+test('farm-repair：DSH_HOME 为 WSL UNC 形态 → 跳过（实体目录分毫不动）', { skip: !HAVE_DEPS }, () => {
+  // \\wsl$ 结构本机造不出——UNC 只作判定输入（纯路径形态检查），fs 布局用
+  // 本地目录承载「若有误判就会被挪走」的探针实体目录。
+  const localHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-farm-wsl-'));
+  const farm = path.join(localHome, 'profiles', 'node_modules');
+  fs.mkdirSync(path.join(farm, 'koffi', 'build'), { recursive: true });
+  fs.writeFileSync(path.join(farm, 'koffi', 'build', 'marker.txt'), 'must-stay');
+  const before = snapshot(farm);
+
+  const r = spawnSync(NODE, [SCRIPT, APP_DIR], {
+    encoding: 'utf8',
+    env: { ...process.env, DSH_HOME: '\\\\wsl.localhost\\Ubuntu\\home\\u\\.dsh', DSH_TAURI_USERDATA: path.join(localHome, 'ud') },
+    timeout: 60_000,
+  });
+  assert.strictEqual(r.status, 0, `跳过应 exit 0: ${r.stderr}`);
+  assert.match(r.stderr, /WSL 模式：farm 修复不适用/);
+  assert.strictEqual(moveCount(r.stderr), 0);
+  assert.deepStrictEqual(snapshot(farm), before, '本地探针分毫不动（判定先于一切 fs 动作）');
+  fs.rmSync(localHome, { recursive: true, force: true });
+});
+
+test('farm-repair：settings backend=wsl（本地形态 DSH_HOME）→ 同样跳过', { skip: !HAVE_DEPS }, () => {
+  // supervisor 不把 UNC home 传进本进程环境（farm-repair 读 DSH_HOME）——
+  // settings 判定兜住「home 仍是本地默认 ~/.dsh 形态」的实况。
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-farm-wsl-cfg-'));
+  const ud = path.join(home, 'ud');
+  fs.mkdirSync(ud, { recursive: true });
+  fs.writeFileSync(path.join(ud, 'settings.json'), JSON.stringify({ backend: 'wsl', wslDistro: 'Ubuntu' }));
+  const farm = path.join(home, 'profiles', 'node_modules');
+  fs.mkdirSync(path.join(farm, 'sharp'), { recursive: true });
+  fs.writeFileSync(path.join(farm, 'sharp', 'package.json'), '{}');
+
+  const r = runRepair(home, { DSH_TAURI_USERDATA: ud });
+  assert.strictEqual(r.code, 0);
+  assert.match(r.stderr, /后端模式为 wsl/);
+  assert.ok(fs.existsSync(path.join(farm, 'sharp', 'package.json')), 'farm 条目不得被触碰');
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+test('farm-repair：DSH_WSL_MODE=1 模拟 → 跳过（本地 home 亦不修）', { skip: !HAVE_DEPS }, () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-farm-wsl-sim-'));
+  const farm = path.join(home, 'profiles', 'node_modules');
+  fs.mkdirSync(path.join(farm, 'koffi'), { recursive: true });
+  const r = runRepair(home, { DSH_WSL_MODE: '1', DSH_TAURI_USERDATA: path.join(home, 'ud') });
+  assert.strictEqual(r.code, 0);
+  assert.match(r.stderr, /WSL 模式：farm 修复不适用/);
+  assert.ok(fs.existsSync(path.join(farm, 'koffi')), '模拟模式下实体目录同样不得被挪');
   fs.rmSync(home, { recursive: true, force: true });
 });
