@@ -177,8 +177,8 @@ fn toggle_setting(store: &shell_core::SettingsStore, key: &str) -> Result<bool, 
 /// npm registry latest 版本查询（无 HTTP 依赖：子进程拉取；npmmirror 优先、
 /// npmjs 兜底——Electron 更新链双源同思路，国内网络优先镜像）。
 ///
-/// `E_AGENT_UPDATE_NETWORK`：agent 更新链自用码，尚未登记
-/// contracts/error-codes.md（见模块审查报告）——码值保持原样防行为变更。
+/// `E_AGENT_UPDATE_NETWORK`：agent 更新链自用码，已登记
+/// contracts/error-codes.md §1（2026-08-22 原则审查清偿登记；码值自始未变）。
 const E_AGENT_UPDATE_NETWORK: &str = "E_AGENT_UPDATE_NETWORK";
 
 fn npm_latest_version(pkg: &str) -> Result<String, BridgeError> {

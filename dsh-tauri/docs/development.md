@@ -50,9 +50,9 @@ dsh-tauri/
 export PATH="$PATH:$USERPROFILE/.cargo/bin"   # cargo
 
 # 测试（改任何代码后的最低门槛）
-cd dsh-tauri/src-tauri && cargo test --workspace        # Rust 全量（18 套件 142 例；CI 跳 4 集成例 → 138，以实际输出为准）
-cd dsh-tauri && node --test sidecar/cli.test.js         # sidecar（13 例）
-cd dsh-desktop && node --test scripts/test/unit-*.test.js  # 共享脚本回归（69 文件；Electron 线同源）
+cd dsh-tauri/src-tauri && cargo test --workspace        # Rust 全量（177 例，其中 1 例本地 ignored；以实际输出为准）
+cd dsh-tauri && node --test sidecar/cli.test.js         # sidecar（16 例）
+cd dsh-desktop && node --test scripts/test/unit-*.test.js  # 共享脚本回归（71 文件；Electron 线同源）
 
 # 开发运行（debug）
 cd dsh-tauri/src-tauri/src/app && cargo run

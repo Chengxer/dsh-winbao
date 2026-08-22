@@ -62,11 +62,12 @@ Ships the full dsh runtime and official plugins — no Node.js install required,
 
 ## 🚀 Quick Start
 
-**Requirements**: Windows 10 / 11 (x64). No pre-installed Node.js or any other runtime. (Linux / macOS builds and the portable flavor arrive in later versions — the CI pipeline is already wired up.)
+**Requirements**: Windows 10 / 11 (x64). No pre-installed Node.js or any other runtime. (Linux / macOS builds and the portable flavor have shipped from v0.5.1 on — the 0.5.x line publishes as prereleases via the CI pipeline; grab them on the [Releases](https://github.com/myYangyunfan/dsh_desktop/releases) page.)
 
 > [!NOTE]
 > **The table below points to pre-v0.5.0 Electron builds** (the last Electron line was 0.4.x). **From v0.5.0 the app runs on the Tauri architecture** — v0.5.0 (released 2026-08-21) ships a Windows x64 NSIS installer:
 > [`DSH.Desktop_0.5.0_x64-setup.exe`](https://github.com/myYangyunfan/dsh_desktop/releases/download/v0.5.0/DSH.Desktop_0.5.0_x64-setup.exe) (~87 MB, `currentUser` mode needs no admin, WebView2 bootstrapper embedded).
+> Newer v0.5.x prereleases (v0.5.2, 2026-08-22, fixes the reboot-loop / white-screen issues reported on v0.5.1) are on the Releases page.
 > Installing it over any legacy Electron build (0.1.x–0.4.x) relocates to the old directory, keeps all data, and requires zero manual migration (see the [upgrade guide](dsh-tauri/docs/upgrade-guide.md)).
 
 ### International users (GitHub)
@@ -135,7 +136,7 @@ See the [development manual §6](dsh-tauri/docs/development.md) for the full flo
 
 ## 🤖 Releases
 
-From v0.5.0, releases go through the **Tauri GitHub Actions cloud pipeline** ([`tauri-release.yml`](.github/workflows/tauri-release.yml)): pushing a `v*` tag triggers three-platform builds (unified vendor node v24.15.0 + full `stage-payload.sh` + fail-fast compat build), then collects the artifacts into a Release automatically. **v0.5.0 was published by this pipeline** (2026-08-21; this round shipped the Windows x64 NSIS installer — Linux / macOS outputs are wired up and arrive in later versions). The Electron-era `release.yml` pipeline was retired along with the architecture. For manual local packaging outside CI, see [Build from Source](#-build-from-source) above (stage-payload → tauri build → installed-layout smoke, three steps).
+From v0.5.0, releases go through the **Tauri GitHub Actions cloud pipeline** ([`tauri-release.yml`](.github/workflows/tauri-release.yml)): pushing a `v*` tag triggers three-platform builds (unified vendor node v24.15.0 + full `stage-payload.sh` + fail-fast compat build), then collects the artifacts into a Release automatically. **v0.5.0 was published by this pipeline** (2026-08-21; this round shipped the Windows x64 NSIS installer). **From v0.5.1 the full three-platform asset set (Windows installer/portable, Linux AppImage/deb, macOS dmg) passed verification and publishes as prereleases on the 0.5.x line**; v0.5.2 (2026-08-22) fixes the issues users reported on v0.5.1. The Electron-era `release.yml` pipeline was retired along with the architecture. For manual local packaging outside CI, see [Build from Source](#-build-from-source) above (stage-payload → tauri build → installed-layout smoke, three steps).
 
 ### 📦 Installer formats the Tauri architecture can export
 
@@ -146,8 +147,8 @@ Controlled by `bundle.targets` in `tauri.conf.json` — add or remove entries to
 | Windows x64 | **NSIS installer** (`DSH.Desktop_<version>_x64-setup.exe`) — LZMA-compressed, ~87 MB measured; `currentUser` mode needs no admin rights; WebView2 bootstrapper embedded so offline machines can install too; upgrade chain reinstalls into the old directory, keeping data | ✅ **Shipped in v0.5.0** (CI-built, passes installed-layout smoke test) |
 | Windows arm64 | NSIS installer (cross-build with `--target aarch64-pc-windows-msvc`) | 🔜 Natively supported by Tauri, not yet validated |
 | Windows | MSI (WiX toolchain, add `"msi"` to `targets`) | 🔜 Natively supported by Tauri, not yet enabled |
-| Linux x64 | `.AppImage` / `.deb` | 🔶 CI wired up (`x86_64-unknown-linux-gnu`); not produced in v0.5.0, later versions |
-| macOS (Apple Silicon) | `.app` / `.dmg` disk images | 🔶 CI wired up (`aarch64-apple-darwin`); not produced in v0.5.0, later versions |
+| Linux x64 | `.AppImage` / `.deb` | ✅ Produced by CI from v0.5.1 (six-asset verification, prerelease line) |
+| macOS (Apple Silicon) | `.app` / `.dmg` disk images | ✅ Produced by CI from v0.5.1 (ad-hoc signature verified, prerelease line) |
 
 > A no-install portable build is not a built-in Tauri target — the Tauri line defaults to the NSIS `currentUser` installer, and a standalone portable package is planned for a later release.
 
@@ -198,7 +199,7 @@ Shipped with the installer (full third-party inventory: [THIRD_PARTY_NOTICES.md]
             Native window loads Web UI (localhost only)
 ```
 
-Layering rules: crates never depend on the tauri runtime and are independently unit-tested (142 Rust tests green; CI skips 4 environment-dependent integration cases → 138; plus 13 sidecar Node tests and 899 shared-script unit tests); the assembly root only wires things up; kernel-side Node logic lives in `dsh-desktop/scripts/`. See the [development manual](dsh-tauri/docs/development.md).
+Layering rules: crates never depend on the tauri runtime and are independently unit-tested (177 Rust tests green; plus 16 sidecar Node tests across 71 shared-script unit files); the assembly root only wires things up; kernel-side Node logic lives in `dsh-desktop/scripts/`. See the [development manual](dsh-tauri/docs/development.md).
 
 ## 📄 License
 

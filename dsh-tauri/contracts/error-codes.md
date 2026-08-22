@@ -15,6 +15,8 @@
 | `E_CUT_FEATURE` | 该能力在 Tauri 版已裁撤（内核自动更新、GPU 守卫、自研客户端更新链） | menu_action 等 |
 | `E_TIMEOUT` | 下游超时（内核 HTTP / sidecar 探活） | kernel-process / sidecar |
 | `E_NOT_IMPLEMENTED` | 能力已规划未实装（占位拒绝，非裁撤——区别于 `E_CUT_FEATURE`） | image_paste_save（Phase 3 剪贴板位图） |
+| `E_IMAGE_PASTE` | 剪贴板粘贴图落盘失败（dataUrl 缺失/非法、写盘失败） | bridge commands（image_paste_save） |
+| `E_AGENT_UPDATE_NETWORK` | npm registry 版本查询双源（npmmirror/npmjs）均不可达 | menu_action `check-agent-update` 最简比对链 |
 
 ## 2. 内核进程域（kernel-process）
 

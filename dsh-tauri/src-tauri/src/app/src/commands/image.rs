@@ -7,8 +7,8 @@ use bridge::BridgeError;
 
 use super::common::b64_decode;
 
-/// 错误码：图片粘贴域自用码，尚未登记 contracts/error-codes.md（见模块
-/// 审查报告）——常量化但码值保持原样，防跨进程行为变更。
+/// 错误码：图片粘贴域自用码，已登记 contracts/error-codes.md §1
+/// （2026-08-22 原则审查清偿登记；码值自始未变，无跨进程行为变更）。
 const E_IMAGE_PASTE: &str = "E_IMAGE_PASTE";
 
 #[tauri::command]

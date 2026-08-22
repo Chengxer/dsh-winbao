@@ -1,4 +1,4 @@
-# Changelog
+# Changelog — DSH Desktop（Tauri 版，`tauri/modular` 分支）
 
 ## [0.5.2] — 2026-08-22
 
@@ -12,9 +12,14 @@
 - **Electron 余额生态全量收口**（cccedf27）：数据生产链接线（3min 轮询/可见性暂停/恢复回放）——此前 dock 恒走降级态；pr-107 代理隧道/mtime 缓存/暂停门移植；toggle 即时刷新
 - **壳层预设全集迁移**（60d6f884）：boot 链 presets 步，8 预设含 router-standard 与 v4-flash-godmode-opencode-go（router 定性=reasoning 四档任务路由预设）
 
- DSH Desktop（Tauri 版，`tauri/modular` 分支）
+## [0.5.1] — 2026-08-21 发布（0.5.x 预览线；初定本地打包，后改判 CI 发布）
 
-## [未发布] — Windows 升级目录识别 + macOS arm64「已损坏」根治
+> 紧随 v0.5.0 的收敛版：内核家族随官方 deepseek-harness 1.1rc 平移，
+> 并根治 v0.5.0 实测暴露的赞助窗、WSL、测试基建与假死误杀问题。
+> **后改判经 CI 流水线发布**（0.5.x 预览线；发布链三跑修三坑——
+> e7fe9a60 / 878d149d / fdb02ab0，六资产版本/体积校验全过。0.5.2 所修的
+> 「频繁重启 + 白屏」用户实测反馈即来自本版。release notes 草稿见
+> `docs/release-notes/v0.5.1-draft.md`）。
 
 ### Windows：0.4.x Electron → Tauri 升级「无法识别旧版安装目录」根治
 
@@ -69,13 +74,6 @@
   补传应从对应 tag 的提交构建，避免版本错标。
 - **长期**：取得 Apple Developer ID 后做正式签名 + 公证，下载即开。
 
-## [0.5.1] — 2026-08-21 本地打包（预览版，不发布）
-
-> 紧随 v0.5.0 的收敛版：内核家族随官方 deepseek-harness 1.1rc 平移，
-> 并根治 v0.5.0 实测暴露的赞助窗、WSL、测试基建与假死误杀问题。
-> **本版仅本地打包验证，不对外发布**（release notes 草稿见
-> `docs/release-notes/v0.5.1-draft.md`）。
-
 ### 内核家族平移：0.1.0-rc.8 → 0.1.1-rc.1
 
 对齐官方 release（github.com/deepseek-ai/deepseek-harness 1.1rc）：
@@ -129,7 +127,7 @@ winpid 口径错误、edge-client 沙箱 setTimeout 误用、两个过时 Electr
 ### 版本链
 
 `tauri.conf.json` / Cargo workspace / `dsh-desktop/package.json` 统一
-0.5.1；安装包产物 `DSH.Desktop_0.5.1_x64-setup.exe`（本地打包，不发布）。
+0.5.1；安装包产物 `DSH.Desktop_0.5.1_x64-setup.exe`（本地打包形态记录；对外发布为 CI 流水线产物，0.5.x 预览线）。
 
 ## [0.5.0] — 2026-08-19 定稿 / 2026-08-21 发布 —— 首个 Tauri 对外测试版
 

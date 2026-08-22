@@ -3,10 +3,14 @@
 DeepSeek Harness 桌面客户端的 Tauri 2 重构。**v0.5.0 起为仓库主线架构**——Electron 壳已退役
 （壳文件与打包链于 2026-08 清理，内核侧 `dsh-desktop/scripts` 作为 payload 源保留复用）；
 契约先行，Phase 0-4 全量实装，**v0.5.0 已发布**（2026-08-21，CI 流水线产出 win-x64 NSIS）。
-**v0.5.1（2026-08-21）本地打包、不发布**：内核家族平移 0.1.0-rc.8 → 0.1.1-rc.1
+**v0.5.1（2026-08-21）后经 CI 发布（0.5.x 预览线；初定本地打包，发布链三跑修三坑）**：
+内核家族平移 0.1.0-rc.8 → 0.1.1-rc.1
 （deepseek-harness 1.1rc）+ 赞助窗三零依赖根治 + WSL #132/假开关双修 + 假死探活
 阈值放宽（详见 [CHANGELOG.md](CHANGELOG.md)，release notes 草稿见
 [docs/release-notes/v0.5.1-draft.md](docs/release-notes/v0.5.1-draft.md)）。
+**v0.5.2（2026-08-22，最新）**：v0.5.1 用户实测「频繁重启 + 白屏」四根因根治
++ opencode-go Vision 模型目录补齐 + 余额生态全量收口 + 内存泄漏两修 +
+壳层预设全集迁移（详见 [CHANGELOG.md](CHANGELOG.md)）。
 
 > **开发手册（统一入口）**：[`docs/development.md`](docs/development.md) ——
 > 架构地图 / 接口索引与防漂移机制 / 加命令五步 / 加插件 / 打包冒烟 / 调试开关。
@@ -46,8 +50,8 @@ dsh-tauri/
 ```bash
 # 前置：dsh-desktop/ 已 npm install
 cd dsh-tauri
-cargo test --manifest-path src-tauri/Cargo.toml   # Rust 全量（18 套件 142 例，CI 跳 4 集成例 → 138；含瀑布破坏性实测）
-node --test sidecar/cli.test.js                    # sidecar（13 例，沙箱 home 真机流程）
+cargo test --manifest-path src-tauri/Cargo.toml   # Rust 全量（177 例，含瀑布破坏性实测；CI 跳集成例）
+node --test sidecar/cli.test.js                    # sidecar（16 例，沙箱 home 真机流程）
 
 # 开发运行
 cd src-tauri/src/app && cargo run                  # 主线（loading→内核→Web UI）
@@ -63,7 +67,7 @@ bash ../scripts/smoke-installed.sh                 # ③ 安装布局冒烟（�
 
 | 维度 | Electron（dsh-desktop/，已退役） | Tauri（本目录，主线） |
 |------|--------------------------|-----------------|
-| 状态 | 末代 0.4.x（Releases 可下，仅维护） | **v0.5.0 已发布**（win-x64 NSIS，CI 流水线）；Linux/macOS 随后续版本 |
+| 状态 | 末代 0.4.x（Releases 可下，仅维护） | **v0.5.x 预览线经 CI 发布**（v0.5.0 win-x64 起；v0.5.1 起三平台六资产） |
 | 用户数据 | `%APPDATA%/dsh-desktop` + `~/.dsh` | 同路径同 schema（升级零迁移，装回旧目录） |
 | 内核自动更新 | 有（overlay 链） | **已删除**（随客户端发版） |
 | 客户端自动更新 | 无哈希/签名校验 | tauri-plugin-updater（minisign 签名链） |

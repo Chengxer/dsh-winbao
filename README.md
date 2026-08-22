@@ -64,14 +64,16 @@
 
 **系统要求**：Windows 10 / 11（x64），无需预装 Node.js。
 
-### 下载 v0.5.0（Tauri 架构，2026-08-21 已发布）
+### 下载（Tauri 架构）
+
+**最新版到 [GitHub Releases](https://github.com/myYangyunfan/dsh_desktop/releases) 页下载（v0.5.x 预览线）**——v0.5.2（2026-08-22）修复 v0.5.1 用户实测的「频繁重启 + 白屏」等问题。下表保留 v0.5.0（首个对外测试版，2026-08-21 发布）直链：
 
 | 平台 | 下载 |
 | --- | --- |
 | 💻 Windows x64 | [`DSH.Desktop_0.5.0_x64-setup.exe`](https://github.com/myYangyunfan/dsh_desktop/releases/download/v0.5.0/DSH.Desktop_0.5.0_x64-setup.exe)（NSIS 安装包，约 87 MB，`currentUser` 模式免管理员，内嵌 WebView2 引导器） |
 
-- v0.5.0 由 [Tauri 发布流水线](https://github.com/myYangyunfan/dsh_desktop/actions/workflows/tauri-release.yml) 云端构建发布，本轮上线 Windows x64；Linux / macOS 产物与便携版将随后续版本陆续产出（见[发布](#-发布)）。
-- 从任意旧版（Electron 0.1.x–0.4.x）覆盖安装 v0.5.0：自动定位旧目录、静默卸载保数据、**装回原位置**，用户数据零迁移（详见[迁移指南](dsh-tauri/docs/upgrade-guide.md)）。
+- v0.5.0 由 [Tauri 发布流水线](https://github.com/myYangyunfan/dsh_desktop/actions/workflows/tauri-release.yml) 云端构建发布（本轮上线 Windows x64）；**v0.5.1 起三平台产物（Linux AppImage/deb、macOS dmg）与 Windows 便携版均由流水线产出**（六资产校验，见[发布](#-发布)）。
+- 从任意旧版（Electron 0.1.x–0.4.x）覆盖安装：自动定位旧目录、静默卸载保数据、**装回原位置**，用户数据零迁移（详见[迁移指南](dsh-tauri/docs/upgrade-guide.md)）。
 
 ### 国内用户（Gitee）
 
@@ -105,8 +107,8 @@ v0.5.0（Tauri 架构）——前置：[Rust 工具链](https://rustup.rs/) + `d
 ```bash
 # 测试（Rust 全量 + sidecar + 共享脚本）
 cd dsh-tauri
-cargo test --manifest-path src-tauri/Cargo.toml   # Rust 142 例（CI 跳 4 集成例 → 138）
-node --test sidecar/cli.test.js                    # sidecar 13 例
+cargo test --manifest-path src-tauri/Cargo.toml   # Rust 177 例（CI 跳集成例）
+node --test sidecar/cli.test.js                    # sidecar 16 例
 cd ../dsh-desktop && node --test scripts/test/unit-*.test.js  # 共享脚本回归
 
 # 开发运行
@@ -123,7 +125,7 @@ bash dsh-tauri/scripts/smoke-installed.sh
 
 ## 🤖 发布
 
-v0.5.0 起发布走 **Tauri GitHub Actions 云端流水线**（[`tauri-release.yml`](.github/workflows/tauri-release.yml)）：推 `v*` tag → 三平台构建（统一 vendor node v24.15.0 + 完整 `stage-payload.sh` + compat 构建 fail-fast）→ 自动汇总产物发布 Release。**v0.5.0 已由此流水线发布**（2026-08-21，本轮上线 Windows x64 NSIS 安装包；Linux / macOS 产物流水线已接，待后续版本产出）。Electron 时代的 `release.yml` 流水线随架构退役。CI 之外的手动本地打包路径见上方[从源码构建](#-从源码构建)（stage-payload → tauri build → 安装态冒烟三步）。
+v0.5.0 起发布走 **Tauri GitHub Actions 云端流水线**（[`tauri-release.yml`](.github/workflows/tauri-release.yml)）：推 `v*` tag → 三平台构建（统一 vendor node v24.15.0 + 完整 `stage-payload.sh` + compat 构建 fail-fast）→ 自动汇总产物发布 Release。**v0.5.0 已由此流水线发布**（2026-08-21，本轮上线 Windows x64 NSIS 安装包）；**v0.5.1 起三平台六资产（Windows 安装包/便携版、Linux AppImage/deb、macOS dmg）校验通过，0.5.x 以预览线（prerelease）标记发布**；v0.5.2（2026-08-22）为 v0.5.1 用户实测问题的修复版。Electron 时代的 `release.yml` 流水线随架构退役。CI 之外的手动本地打包路径见上方[从源码构建](#-从源码构建)（stage-payload → tauri build → 安装态冒烟三步）。
 
 ### 📦 Tauri 架构可导出的安装包形式
 
@@ -131,11 +133,11 @@ v0.5.0 起发布走 **Tauri GitHub Actions 云端流水线**（[`tauri-release.y
 
 | 平台 | 安装包形式 | 状态 |
 | --- | --- | --- |
-| Windows x64 | **NSIS 安装包**（`DSH.Desktop_<版本>_x64-setup.exe`）——LZMA 压缩实测 ~87 MB；`currentUser` 模式免管理员安装；WebView2 引导器内嵌，离线机器也能装；升级链自动装回旧目录保数据 | ✅ **v0.5.0 已发布**（CI 产出，过安装态冒烟） |
-| Windows arm64 | NSIS 安装包（`--target aarch64-pc-windows-msvc` 交叉构建） | 🔜 Tauri 原生支持，待实测 |
+| Windows x64 | **NSIS 安装包**（`DSH.Desktop_<版本>_x64-setup.exe`）——LZMA 压缩实测 ~87 MB；`currentUser` 模式免管理员安装；WebView2 引导器内嵌，离线机器也能装；升级链自动装回旧目录保数据 | ✅ **v0.5.0 已发布**（CI 产出，过安装态冒烟）；另有便携版 zip（v0.5.1 起） |
+| Windows arm64 | NSIS 安装包（`--target aarch64-pc-windows-msvc` 交叉构建） | 🔜 Tauri 原生支持，待实测（v0.5.1 起流水线实验线） |
 | Windows | MSI（WiX 工具链，`targets` 加 `"msi"`） | 🔜 Tauri 原生支持，待开启 |
-| Linux x64 | `.AppImage` / `.deb` | 🔶 CI 已接（`x86_64-unknown-linux-gnu`），v0.5.0 未产出，待后续版本 |
-| macOS（Apple Silicon） | `.app` / `.dmg` 磁盘映像 | 🔶 CI 已接（`aarch64-apple-darwin`），v0.5.0 未产出，待后续版本 |
+| Linux x64 | `.AppImage` / `.deb` | ✅ CI 已产出（v0.5.1 起六资产校验，预览线） |
+| macOS（Apple Silicon） | `.app` / `.dmg` 磁盘映像 | ✅ CI 已产出（v0.5.1 起，ad-hoc 签名校验，预览线） |
 
 > 便携版（免安装、可放 U 盘）不是 Tauri 内置 target——Tauri 版以 NSIS `currentUser` 安装为默认形态，独立便携包规划中以后续版本提供。
 
@@ -181,7 +183,7 @@ v0.5.0 起发布走 **Tauri GitHub Actions 云端流水线**（[`tauri-release.y
             原生窗口加载 Web UI（仅本机回环访问）
 ```
 
-分层铁律：crates 不依赖 tauri 运行时、可独立单测（Rust 142 例全绿，CI 环境跳过 4 个本机集成用例后 138 例；sidecar Node 13 例 + 共享脚本 unit 69 文件 899 例）；装配根只接线不实现；内核侧 Node 逻辑全部活在 `dsh-desktop/scripts/`。开发手册见 [`dsh-tauri/docs/development.md`](dsh-tauri/docs/development.md)。
+分层铁律：crates 不依赖 tauri 运行时、可独立单测（Rust 177 例全绿；sidecar Node 16 例 + 共享脚本 unit 71 文件）；装配根只接线不实现；内核侧 Node 逻辑全部活在 `dsh-desktop/scripts/`。开发手册见 [`dsh-tauri/docs/development.md`](dsh-tauri/docs/development.md)。
 
 ## 📄 License
 
