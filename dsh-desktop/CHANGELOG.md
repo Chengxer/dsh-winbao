@@ -6,6 +6,13 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 
 ## [Unreleased]
 
+### Tauri 线同步（tauri/modular，2026-08-22 持续优化批次）
+- 内核家族 @deepseek-ai/* 0.1.1-rc.1 → 0.1.1-rc.2（19 pin，纯重发布）；patch 家族扩至 36 项
+- 新增 runtime 补丁：agent-preset-fallback / prompt-context-literal / session-orphans / fallback-heal-isolation / credentials-initial-retry / credentials-absent-guidance / device-auth-guidance（双形态锚点）
+- 插件波次：dsh-subagent-lens（新）、better-sidebar chunk 自愈重试、dsh-balance 槽竞态修复、graph-memory 模板 defuse、synapse 滚动三层防御+锁修复、dsh-file-drop 📎 附件链、dsh-float-window mount-then-hide、dsh-plugin-manager 后端健康卡
+- composition-integrity 探测 + compositionPreflight 自愈（credentials 偶发缺席根治）
+
+
 ### 重构：插件管理子系统（plugin-center，单一门面 + 统一数据流）
 
 - **统一门面与分层**：新增 `scripts/plugin-core/`（errors / ids / text / fs-atomic /

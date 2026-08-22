@@ -11,6 +11,14 @@
 //! 杀树：Windows taskkill /T /F（Electron 版实证：控制台进程优雅 kill 无效）；
 //! Unix killpg(-pgid, SIGKILL)——spawn 时设内核为进程组长，整组一次收割
 //! （kernel_process::kill_tree）。
+//!
+//! WSL 托管模式（契约 wsl-backend.md，两模式共用瀑布/崩溃环/看门狗，零变更）：
+//! boot 线程首步 configure（失败回落 local——issue #54，不阻塞不恢复页）→
+//! ensure_installed（先于插件/补丁链）→ sidecar boot `--home <UNC>` →
+//! spawn `wsl.exe -d <distro> -e sh -lc`（--port 0，实际端口从就绪行解析）→
+//! 收割三层（WSL 内 pid 文件 kill + 杀 wsl.exe 包装 + 300ms 缓冲；
+//! wsl 的发行版级 terminate/shutdown 全局终结命令**绝不调用**——见契约
+//! §4.6 红线）。local 模式全链行为零变更（不变量 §7.1）。
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -26,6 +34,8 @@ use kernel_process::crash_loop::Verdict;
 const SERVICE_STABLE_SECS: u64 = 45;
 /// boot 看门狗上限（D2「永挂形态」根治）：boot 全链有界 5 分钟。
 const BOOT_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(300);
+/// WSL 分支看门狗上限（契约 §4.2）：npm 首装 30 分钟超时 + boot 链余量。
+const BOOT_WATCHDOG_TIMEOUT_WSL: Duration = Duration::from_secs(35 * 60);
 
 use shell_core::RunState;
 
@@ -56,6 +66,16 @@ pub struct Supervisor {
     pub bin_js: PathBuf,
     pub kernel_version: String,
     inner: Arc<Mutex<Inner>>,
+    /// WSL 后端运行态（boot 线程 configure 成功后 Some；未配置/回落 local 为
+    /// None——所有 WSL 分支以 `wsl_active().is_some()` 守卫，local 零变更）。
+    wsl: Arc<Mutex<Option<Arc<wsl_backend::WslBackend>>>>,
+    /// 启动期 WSL 探测失败回落 local 的原因（#54；本次运行期有效，设置页展示）。
+    fallback_reason: Arc<Mutex<String>>,
+    /// 后端模式意图（settings 三键 + env 覆盖，`new` 时定死：watchdog 时长与
+    /// boot 线程 configure 的输入；探测本身延迟到 boot 线程——setup 零 wsl.exe）。
+    wsl_cfg: Option<wsl_backend::BackendCfg>,
+    /// wsl.exe 原语（生产 RealWslInvoker；测试注入桩——design D7）。
+    wsl_invoker: Arc<dyn wsl_backend::WslInvoker>,
 }
 
 struct Inner {
@@ -110,6 +130,14 @@ fn vendor_node_exe(app_dir: &std::path::Path) -> PathBuf {
 
 impl Supervisor {
     pub fn new(repo_root: &std::path::Path) -> Self {
+        Self::new_with_wsl_invoker(
+            repo_root,
+            Arc::new(wsl_backend::RealWslInvoker) as Arc<dyn wsl_backend::WslInvoker>,
+        )
+    }
+
+    /// 测试构造（wsl.exe 原语注桩——design D7；生产恒 `new` + RealWslInvoker）。
+    fn new_with_wsl_invoker(repo_root: &std::path::Path, invoker: Arc<dyn wsl_backend::WslInvoker>) -> Self {
         let app_dir = repo_root.join("dsh-desktop");
         // sidecar cli 双布局解析：开发检出在 <repo>/dsh-tauri/sidecar/，
         // 安装产物在 <安装根>/resources/sidecar/（repo_root 即 resources）。
@@ -122,6 +150,15 @@ impl Supervisor {
             } else {
                 repo_root.join("sidecar").join("cli.js")
             }
+        };
+        // 后端模式意图（env > settings 三键；与 sidecar wsl-mode.js detectWslBackend
+        // 同口径，含 DSH_WSL_MODE 模拟缝）。只解析不探测——wsl.exe 冷启动可达
+        // 数十秒，setup 线程零调用（design 5.3），探测延迟到 boot 线程。
+        let wsl_cfg = {
+            let store = shell_core::SettingsStore::new(shell_core::DshPaths::resolve().settings);
+            let map = store.load().unwrap_or_default();
+            let cfg = wsl_backend::detect_backend_mode_from_map(&map);
+            (cfg.backend == "wsl").then_some(cfg)
         };
         Self {
             sidecar_cli,
@@ -144,6 +181,10 @@ impl Supervisor {
                 probe_gen: 0,
                 stopping: false,
             })),
+            wsl: Arc::new(Mutex::new(None)),
+            fallback_reason: Arc::new(Mutex::new(String::new())),
+            wsl_cfg,
+            wsl_invoker: invoker,
         }
     }
 
@@ -158,6 +199,39 @@ impl Supervisor {
     }
     pub fn last_error(&self) -> Option<String> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner()).last_error.clone()
+    }
+
+    // ---- WSL 托管模式访问面（commands 层消费；local 模式零开销）----
+
+    /// WSL 后端是否生效（configure 成功且未回落）。
+    pub fn wsl_active(&self) -> Option<Arc<wsl_backend::WslBackend>> {
+        self.wsl.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+    /// 实际生效后端（运行态；供 `wsl_config_get` 的 backend 字段）。
+    pub fn backend_effective(&self) -> &'static str {
+        if self.wsl_active().is_some() { "wsl" } else { "local" }
+    }
+    /// 启动期 WSL 探测失败回落 local 的原因（空 = 无回落）。
+    pub fn fallback_reason(&self) -> String {
+        self.fallback_reason.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+    /// WSL 状态快照（契约 §2.1 status 对象；未配置/回落 = configured:false 全空）。
+    pub fn wsl_status_json(&self) -> serde_json::Value {
+        match self.wsl_active() {
+            Some(b) => b.status_json(),
+            None => serde_json::json!({
+                "configured": false, "distro": "", "installDir": "",
+                "nodeVersion": "", "npmVersion": "", "agentVersion": "", "lastError": "",
+            }),
+        }
+    }
+    /// Windows 侧数据落点统一出口（契约 §6：local → DshPaths::dsh_home；
+    /// wsl → UNC 等价路径）。
+    pub fn effective_home(&self) -> PathBuf {
+        match self.wsl_active() {
+            Some(b) => b.unc_home(),
+            None => shell_core::DshPaths::resolve().dsh_home,
+        }
     }
 
     fn set_state(&self, next: RunState) {
@@ -181,9 +255,15 @@ impl Supervisor {
         let this = Arc::clone(self);
         let tx2 = tx.clone();
         std::thread::spawn(move || {
-            // 看门狗（D2 永挂形态根治）：boot 全链有界 5 分钟，超时进恢复页
-            // ——防 vendor node 被 AV 拦到半死导致 loading 永挂。
-            Self::spawn_boot_watchdog(&this, tx.clone(), BOOT_WATCHDOG_TIMEOUT);
+            // 看门狗（D2 永挂形态根治）：boot 全链有界，超时进恢复页——防
+            // vendor node 被 AV 拦到半死导致 loading 永挂。WSL 分支放宽到 35
+            // 分钟（npm 首装 30 分钟上限 + boot 链余量，契约 §4.2）。
+            let wd_timeout = if this.wsl_cfg.as_ref().is_some_and(|c| c.backend == "wsl") {
+                BOOT_WATCHDOG_TIMEOUT_WSL
+            } else {
+                BOOT_WATCHDOG_TIMEOUT
+            };
+            Self::spawn_boot_watchdog(&this, tx.clone(), wd_timeout);
             // panic 隔离：瀑布任何一环意外 panic（兼容性场景的兜底）→ 落恢复页，
             // 客户端继续运行（全局 panic hook 已另行落盘 panics.log）。
             let this2 = Arc::clone(&this);
@@ -198,8 +278,8 @@ impl Supervisor {
     }
 
     /// boot 看门狗线程：`timeout` 后仍在「未完成」态 → 转恢复页。
-    /// 超时参数化仅为测试注入短超时（生产恒 BOOT_WATCHDOG_TIMEOUT），
-    /// 对外行为零变更。代际感知（v0.5.1 频繁重启回归修复）：restart 每次
+    /// 超时参数化：测试注入短超时 + WSL 分支 35 分钟（生产两值），对外行为
+    /// 零变更。代际感知（v0.5.1 频繁重启回归修复）：restart 每次
     /// 都会再挂一个看门狗，旧看门狗若不校验代际，会在新一次 boot 进行中
     /// 超时开火，把正在启动的内核打入恢复页（慢机上表现为反复重启）。
     fn spawn_boot_watchdog(this: &Arc<Self>, tx: Sender<SupervisorEvent>, timeout: Duration) {
@@ -214,8 +294,8 @@ impl Supervisor {
             }
             if Self::watchdog_should_fire(g.stopping, g.state) {
                 drop(g);
-                eprintln!("[supervisor] 看门狗：boot 链 5 分钟超时，转恢复页");
-                this_wd.enter_recovery_tx(&wd_tx, "boot 链超时（5 分钟看门狗）");
+                eprintln!("[supervisor] 看门狗：boot 链超时（{:?}），转恢复页", timeout);
+                this_wd.enter_recovery_tx(&wd_tx, &format!("boot 链超时（{timeout:?} 看门狗）"));
             }
         });
     }
@@ -230,13 +310,34 @@ impl Supervisor {
     fn boot_waterfall(this: Arc<Self>, tx: Sender<SupervisorEvent>, preferred_port: Option<u16>) {
         {
             let gen = this.inner.lock().unwrap_or_else(|p| p.into_inner()).generation;
+            // ---- [-1] WSL 后端解析（契约 §4.2 顺序红线：loading 窗已开 →
+            //      configure 探测）。失败回落 local 继续启动（issue #54：不
+            //      阻塞、不恢复页、配置保留），原因进 fallback_reason。----
+            let mut wsl = Self::wsl_configure_or_fallback(&this);
+            // ---- [0w] ensure_installed（**必须先于插件/补丁链**：补丁目标含
+            //      <UNC>/agent/node_modules，agent 未就位则锚点全空——Electron
+            //      main.js 4957 ensureInstalled 先于 syncPlugins 同序）。首装/
+            //      版本漂移 → WSL 内 npm staging 安装（进度经 BootStep 事件）；
+            //      失败同样回落 local（#54）。----
+            if wsl.is_some() {
+                if let Err(e) = this.run_wsl_ensure_installed(&tx) {
+                    log_line(&format!("WSL agent 安装失败，回落本地模式继续启动（issue #54）: {e}"));
+                    this.wsl_fallback(&e);
+                    wsl = None;
+                }
+            }
             // ---- [0.5] farm 实体目录去材料化（Electron repairProfileFallback
             // 等价物，H/V2 实测定论的残余风险）：farm 条目被云同步/复制还原成
             // 实体目录时内核 heal 直接放弃（"exists and is not a symlink"），
             // 原生依赖链断裂 → 预设挂载失败。挪开让 heal 重建 junction。
             // 尽力而为：失败仅日志，绝不阻断 boot 链。
-            this.run_farm_repair();
-            // ---- [1] sidecar boot ----
+            // WSL 模式跳过（契约 §4.2：junction 是 Windows 本地概念，WSL 内
+            // profile fallback 由内核自行 heal；sidecar farm-repair.js 亦自跳）。----
+            if wsl.is_none() {
+                this.run_farm_repair();
+            }
+            // ---- [1] sidecar boot（WSL 模式 home=UNC，Windows 侧经 UNC 写穿：
+            //      sync/presets/patches/preflight 契约 §4.2）----
             this.set_state(RunState::Repair);
             let t0 = Instant::now();
             match this.run_sidecar_boot(&tx, gen) {
@@ -259,8 +360,14 @@ impl Supervisor {
             if this.inner.lock().unwrap_or_else(|p| p.into_inner()).generation != gen || this.inner.lock().unwrap_or_else(|p| p.into_inner()).stopping {
                 return;
             }
-            // ---- [1.5] koffi 预检 → 目录选择器降级 overlay（Electron 对齐，升级适配）----
-            this.run_koffi_preflight();
+            // ---- [1.5] koffi 预检 → 目录选择器降级 overlay（Electron 对齐，升级适配）。
+            // WSL 模式跳过（契约 §4.2：win32 预编译探测与 Linux 内核无关，
+            // 原生模块由 WSL 内 npm 安装的 linux 变体提供；sidecar 同款跳过）。----
+            if wsl.is_none() {
+                this.run_koffi_preflight();
+            } else {
+                log_line("koffi 预检：WSL 托管模式跳过（原生模块为 WSL 内 linux 变体）");
+            }
             // ---- [1.6] 启动前快照（plugin-guard；GUARD_FILES 四文件）----
             let boot_snap = this.guard_cli_json(&["guard-snapshot", "boot"])
                 .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(String::from));
@@ -268,11 +375,17 @@ impl Supervisor {
                 log_line(&format!("守护瀑布：启动快照 {id}"));
             }
             // ---- [2] 端口 ----
-            let port = match choose_stable_port(preferred_port) {
-                Some(p) => p,
-                None => {
-                    this.enter_recovery(&tx, "无可用安全端口");
-                    return;
+            // WSL 模式 `--port 0`（WSL 内 OS 分配；Windows 侧 bind 探测对 WSL
+            // 内监听无意义——design D3），实际端口从就绪行解析。
+            let port = if wsl.is_some() {
+                0u16
+            } else {
+                match choose_stable_port(preferred_port) {
+                    Some(p) => p,
+                    None => {
+                        this.enter_recovery(&tx, "无可用安全端口");
+                        return;
+                    }
                 }
             };
             this.inner.lock().unwrap_or_else(|p| p.into_inner()).port = Some(port);
@@ -302,7 +415,7 @@ impl Supervisor {
             if !safe_applied && applied.is_empty() {
                 log_line("守护瀑布：无可修复项也无失败插件名单，直接进入回滚层");
             }
-            let port2 = this.reuse_or_new_port(port);
+            let port2 = if wsl.is_some() { 0 } else { this.reuse_or_new_port(port) };
             match Arc::clone(&this).spawn_and_wait_ready(port2, &tx, Duration::from_secs(90)) {
                 Ok(url) => {
                     this.guard_incident("boot-recovered", &format!("首次启动失败，体检修复后恢复。修复项：{applied:?}"));
@@ -323,7 +436,7 @@ impl Supervisor {
                     log_line(&format!("守护瀑布：回滚到最后良好快照 {id}（{reason}）"));
                     let _ = this.guard_cli_json(&["guard-restore", &id]);
                     let _ = this.guard_cli_json(&["guard-repair"]); // 回滚后再清一次遮蔽
-                    let port3 = this.reuse_or_new_port(port);
+                    let port3 = if wsl.is_some() { 0 } else { this.reuse_or_new_port(port) };
                     match Arc::clone(&this).spawn_and_wait_ready(port3, &tx, Duration::from_secs(90)) {
                         Ok(url) => {
                             this.guard_incident("rollback-recovered", &format!("回滚到快照 {id} 后恢复启动"));
@@ -412,6 +525,7 @@ impl Supervisor {
             .args(args)
             .arg("--app-dir")
             .arg(&self.app_dir)
+            .args(self.sidecar_home_args())
             .creation_flags_win()
             .output()
             .ok()?;
@@ -427,6 +541,103 @@ impl Supervisor {
     }
 
     fn inner_crash_reset(&self) { /* 兼容占位：crash_count 复位已直写 */ }
+
+    // ---- WSL 托管模式（契约 wsl-backend.md §4；local 模式零变更）----
+
+    /// boot 线程首步：configure 探测链（wsl -l -q → distro → $HOME →
+    /// installDir → node/npm → UNC）。成功设运行态；失败回落 local（#54：
+    /// 配置保留、原因进 fallback_reason、绝不恢复页）。
+    fn wsl_configure_or_fallback(this: &Arc<Self>) -> Option<Arc<wsl_backend::WslBackend>> {
+        let cfg = this.wsl_cfg.clone()?;
+        if cfg.backend != "wsl" {
+            return None;
+        }
+        let backend = Arc::new(wsl_backend::WslBackend::new(Arc::clone(&this.wsl_invoker)));
+        let opts = wsl_backend::ConfigureOpts::from_env(&cfg.distro, &cfg.install_dir);
+        match backend.configure(&opts) {
+            Ok(()) => {
+                *this.wsl.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&backend));
+                let st = backend.status_json();
+                log_line(&format!(
+                    "WSL 托管后端就绪: distro={} installDir={} UNC={} node={} npm={}{}",
+                    backend.distro(),
+                    backend.install_dir(),
+                    backend.unc_home().display(),
+                    st["nodeVersion"].as_str().unwrap_or(""),
+                    st["npmVersion"].as_str().unwrap_or(""),
+                    if cfg.simulated { "（DSH_WSL_MODE 模拟缝）" } else { "" },
+                ));
+                Some(backend)
+            }
+            Err(e) => {
+                log_line(&format!("WSL 探测失败，回落本地模式继续启动（issue #54）: {e}"));
+                this.wsl_fallback(&e.to_string());
+                None
+            }
+        }
+    }
+
+    /// 回落 local：清运行态 + 记原因（#54；本次运行期有效）。
+    fn wsl_fallback(&self, reason: &str) {
+        *self.wsl.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.fallback_reason.lock().unwrap_or_else(|p| p.into_inner()) = reason.to_string();
+    }
+
+    /// ensure_installed（契约 §4.5）：agent 预检（入口存在 + 版本 == payload
+    /// 版本——D5 版本锚）→ 首装/漂移重装（WSL 内 npm staging + 原子切换）。
+    /// npm 进度行经 BootStep 事件 + 日志透出（首装数分钟必须有用户可见反馈）。
+    fn run_wsl_ensure_installed(&self, tx: &Sender<SupervisorEvent>) -> Result<(), String> {
+        let Some(backend) = self.wsl_active() else { return Ok(()) };
+        let t0 = Instant::now();
+        let target = self.kernel_version.clone();
+        let tx2 = tx.clone();
+        let mut install_started = false;
+        let res = backend.ensure_installed(&target, &mut |line| {
+            // 首条 npm 行 = 安装实际开始（预检通过前不发事件，loading 页步骤
+            // 列表不掺入常态路径）。
+            if !std::mem::replace(&mut install_started, true) {
+                let _ = tx2.send(SupervisorEvent::BootStep { name: "wsl-install".into(), ok: true, ms: 0, error: None });
+            }
+            log_line(&format!("wsl-install| {line}"));
+        });
+        match res {
+            Ok(false) => {
+                log_line("WSL agent 已就位且版本与 payload 一致（零安装）");
+                Ok(())
+            }
+            Ok(true) => {
+                let _ = tx.send(SupervisorEvent::BootStep {
+                    name: "wsl-install".into(),
+                    ok: true,
+                    ms: t0.elapsed().as_millis() as u64,
+                    error: None,
+                });
+                log_line(&format!("WSL agent 安装完成（{}ms）", t0.elapsed().as_millis()));
+                Ok(())
+            }
+            Err(e) => {
+                let _ = tx.send(SupervisorEvent::BootStep {
+                    name: "wsl-install".into(),
+                    ok: false,
+                    ms: t0.elapsed().as_millis() as u64,
+                    error: Some(e.to_string()),
+                });
+                Err(e.to_string())
+            }
+        }
+    }
+
+    /// sidecar 子命令的 `--home` 追加参数：WSL 生效时 home = UNC（guard-*/
+    /// safe-overlay 等以 ctx.home 为数据根的子命令不自检 WSL，必须显式切；
+    /// boot 子命令自检 WSL 后自取 UNC home，--home 仅作其回落 local 时的
+    /// 显式值——两侧一致）。local 模式返回空（现行为零变更）。
+    fn sidecar_home_args(&self) -> Vec<String> {
+        match self.wsl_active() {
+            Some(b) => vec!["--home".into(), b.unc_home().to_string_lossy().into_owned()],
+            None => Vec::new(),
+        }
+    }
+
     /// sidecar boot（node cli.js boot），逐步从 stderr 解析 [sidecar] 行转发。
     /// farm 实体目录去材料化（sidecar/farm-repair.js，node 侧 fs 操作）。
     /// 失败仅日志（log_line + stderr），绝不影响 boot 链。
@@ -467,6 +678,7 @@ impl Supervisor {
             .arg("boot")
             .arg("--app-dir")
             .arg(&self.app_dir)
+            .args(self.sidecar_home_args())
             .env("DSH_TAURI_VERSION", env!("CARGO_PKG_VERSION"))
             // GUI 进程起 console 子进程抑制终端窗（boot 是「启动后弹终端」主源，
             // 与本文件其余 node spawn 同口径——0.5.0 实测修复）。
@@ -508,24 +720,24 @@ impl Supervisor {
     fn run_koffi_preflight(&self) {
         let settings = shell_core::SettingsStore::new(shell_core::DshPaths::resolve().settings);
         let cached = settings.get("koffiPreflightOk").ok().flatten().and_then(|v| v.as_bool());
-        let ok = match cached {
-            Some(true) => true,
-            _ => {
-                let out = std::process::Command::new(&self.node_exe)
-                    .arg(&self.sidecar_cli)
-                    .arg("koffi-preflight")
-                    .arg("--app-dir")
-                    .arg(&self.app_dir)
-                    .creation_flags_win()
-                    .output();
-                let ok = matches!(out, Ok(o) if o.status.success()
-                    && String::from_utf8_lossy(&o.stdout).trim_end().ends_with("{\"ok\":true}"));
-                if ok {
-                    let _ = settings.set("koffiPreflightOk", serde_json::json!(true));
+            let ok = match cached {
+                Some(true) => true,
+                _ => {
+                    let out = std::process::Command::new(&self.node_exe)
+                        .arg(&self.sidecar_cli)
+                        .arg("koffi-preflight")
+                        .arg("--app-dir")
+                        .arg(&self.app_dir)
+                        .creation_flags_win()
+                        .output();
+                    let ok = matches!(out, Ok(o) if o.status.success()
+                        && koffi_preflight_passed(&String::from_utf8_lossy(&o.stdout)));
+                    if ok {
+                        let _ = settings.set("koffiPreflightOk", serde_json::json!(true));
+                    }
+                    ok
                 }
-                ok
-            }
-        };
+            };
         if !ok {
             let out = std::process::Command::new(&self.node_exe)
                 .arg(&self.sidecar_cli)
@@ -592,31 +804,53 @@ impl Supervisor {
     }
 
     /// spawn 内核进程 + 就绪行监视线程。
+    ///
+    /// WSL 模式（契约 §4.3）：spawn `wsl.exe -d <distro> -e sh -lc <cmd>` 包装
+    /// ——不设工作目录（cd 在命令串内）、不设环境（Windows 环境块不传进 WSL，
+    /// 净化在命令串 `env -u` 完成）、不设 PGID（WSL 内进程不在 Windows 进程
+    /// 树）。Job Object 照常绑 wsl.exe（强杀壳时至少收割包装进程）。local
+    /// 路径逐字节不变（不变量 §7.1）。
     fn spawn_kernel(self: Arc<Self>, port: u16, tx: &Sender<SupervisorEvent>) -> Result<(), String> {
         let overlays = self.inner.lock().unwrap_or_else(|p| p.into_inner()).overlays.clone();
-        let spec = SpawnSpec::new(&self.node_exe, &self.bin_js, &self.kernel_version, port, &overlays);
-        let mut cmd = Command::new(&spec.node_exe);
-        cmd.args(&spec.node_args).arg(&spec.bin_js).args(&spec.web_args);
-        // 环境白名单 + 监管标识（main.js childEnv 语义）。
-        for (k, v) in std::env::vars() {
-            if spec.env_allow.iter().any(|a| a.eq_ignore_ascii_case(&k)) {
-                cmd.env(k, v);
+        let wsl_backend_active = self.wsl_active();
+        let wsl_mode = wsl_backend_active.is_some();
+        let mut child = if let Some(backend) = &wsl_backend_active {
+            let no_open = kernel_process::semver::needs_no_open_flag(&self.kernel_version);
+            let cmd = backend.server_cmd(no_open);
+            log_line(&format!(
+                "内核(WSL) spawn: wsl.exe -d {} -e sh -lc {}（--port 0，实际端口待就绪行）",
+                backend.distro(),
+                cmd
+            ));
+            backend.spawn_server(no_open).map_err(|e| format!("spawn wsl.exe: {e}"))?
+        } else {
+            let spec = SpawnSpec::new(&self.node_exe, &self.bin_js, &self.kernel_version, port, &overlays);
+            let mut cmd = Command::new(&spec.node_exe);
+            cmd.args(&spec.node_args).arg(&spec.bin_js).args(&spec.web_args);
+            // 环境白名单 + 监管标识（main.js childEnv 语义）。
+            for (k, v) in std::env::vars() {
+                if spec.env_allow.iter().any(|a| a.eq_ignore_ascii_case(&k)) {
+                    cmd.env(k, v);
+                }
             }
-        }
-        cmd.env("DSH_DESKTOP_SUPERVISED", "1").env("NO_COLOR", "1");
-        cmd.current_dir(&self.app_dir).stdin(Stdio::null())
-            .stdout(Stdio::piped()).stderr(Stdio::piped())
-            .creation_flags_win();
-        // Unix 杀树根基：内核设为进程组长（PGID == pid），后续全部子孙（工具
-        // 进程/持久终端会话）天然继承同组——kill_kernel 的 killpg(-pgid) 才能
-        // 整组收割（mac 退出后内核残留的根因）。Windows no-op（杀树走 Job
-        // Object + taskkill）。
-        kernel_process::kill_tree::set_process_group_leader(&mut cmd);
-        let mut child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
-        let pid = child.id();
-        log_line(&format!("内核 pid={pid} spawn: {}", spec.display_cmd()));
+            cmd.env("DSH_DESKTOP_SUPERVISED", "1").env("NO_COLOR", "1");
+            cmd.current_dir(&self.app_dir).stdin(Stdio::null())
+                .stdout(Stdio::piped()).stderr(Stdio::piped())
+                .creation_flags_win();
+            // Unix 杀树根基：内核设为进程组长（PGID == pid），后续全部子孙（工具
+            // 进程/持久终端会话）天然继承同组——kill_kernel 的 killpg(-pgid) 才能
+            // 整组收割（mac 退出后内核残留的根因）。Windows no-op（杀树走 Job
+            // Object + taskkill）。
+            kernel_process::kill_tree::set_process_group_leader(&mut cmd);
+            let child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
+            log_line(&format!("内核 pid={} spawn: {}", child.id(), spec.display_cmd()));
+            child
+        };
 
         // Review#2 根治：Job Object 杀树保护（父进程被强杀时 OS 收割内核树）。
+        // WSL 模式绑定的 wsl.exe 包装进程（WSL 内进程收割见 kill_kernel 三层；
+        // 强杀壳时 WSL 内可能残留——契约 §4.6 残余风险，spawn 前 rm -f dsh.pid
+        // + 下次启动兜底）。
         if let Err(e) = kernel_process::job_object::assign_child_to_kill_on_close_job(&child) {
             log_line(&format!("Job Object 赋值失败（杀树保护降级为显式 taskkill）: {e}"));
         }
@@ -635,11 +869,53 @@ impl Supervisor {
                 let text = String::from_utf8_lossy(&chunk).into_owned();
                 if !text.trim().is_empty() {
                     log_line(&format!("web| {text}"));
+                    // C3（B2 配方）：内核 stdout 持久化 dsh-web.log（4MB 轮转）——
+                    // 此前 println/log_line 在 GUI 进程全丢弃，safe-overlay 崩溃
+                    // 自愈层无日志可解析、诊断无附件。IO 失败静默（不阻断启动）。
+                    crate::logging::append_capped(
+                        &shell_core::DshPaths::resolve().logs.join("dsh-web.log"),
+                        &format!("web| {text}"),
+                        crate::logging::LOG_CAP_BYTES,
+                    );
                 }
                 if url.is_none() {
                     if let Some(u) = parser.feed(&format!("{text}\n")) {
                         url = Some(u.clone());
-                        let rtx = { let mut g = this.inner.lock().unwrap_or_else(|p| p.into_inner()); g.kernel_url = Some(u.clone()); g.ready_tx.take() };
+                        // WSL 模式实际端口 = 就绪行 URL 的端口（--port 0 由 WSL 内
+                        // OS 分配；spawn 传入值仅日志参考——契约 §4.3/D3）。
+                        // 端口落在 Chromium 受限端口表 → 按本次拉起失败收链
+                        //（杀掉重试，瀑布二/三层承接；Electron restrictedPortOf
+                        // 两模式共用语义）。
+                        let port = if wsl_mode {
+                            match url_port(&u) {
+                                Some(p) if kernel_process::port::is_safe_port(p) => p,
+                                bad => {
+                                    let reason = match bad {
+                                        Some(p) => format!("就绪行端口 {p} 在 Chromium 受限端口表"),
+                                        None => format!("就绪行 URL 缺端口: {u}"),
+                                    };
+                                    log_line(&format!("{reason}，按本次拉起失败收链"));
+                                    let mut g = this.inner.lock().unwrap_or_else(|p| p.into_inner());
+                                    g.kernel_url = None;
+                                    if let Some(rtx) = g.ready_tx.take() {
+                                        let _ = rtx.send(Err(reason));
+                                    }
+                                    drop(g);
+                                    this.kill_kernel();
+                                    return;
+                                }
+                            }
+                        } else {
+                            port
+                        };
+                        {
+                            let mut g = this.inner.lock().unwrap_or_else(|p| p.into_inner());
+                            g.kernel_url = Some(u.clone());
+                            if wsl_mode {
+                                g.port = Some(port);
+                            }
+                        }
+                        let rtx = this.inner.lock().unwrap_or_else(|p| p.into_inner()).ready_tx.take();
                         if let Some(rtx) = rtx { let _ = rtx.send(Ok(u.clone())); }
                         this.set_state(RunState::Ready);
                         // HTTP 热探（用户实测「Failed to fetch 闪现」根治）：ready 行
@@ -694,7 +970,14 @@ impl Supervisor {
                     if n == 0 {
                         break;
                     }
-                    log_line(&format!("web-err| {}", String::from_utf8_lossy(&buf[..n]).trim_end()));
+                    let line = format!("web-err| {}", String::from_utf8_lossy(&buf[..n]).trim_end());
+                    log_line(&line);
+                    // C3（B2 配方）：内核 stderr 同落 dsh-web.log（4MB 轮转）。
+                    crate::logging::append_capped(
+                        &shell_core::DshPaths::resolve().logs.join("dsh-web.log"),
+                        &line,
+                        crate::logging::LOG_CAP_BYTES,
+                    );
                 }
             });
         }
@@ -736,7 +1019,17 @@ impl Supervisor {
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_secs(2));
                     let g = this.inner.lock().unwrap_or_else(|p| p.into_inner());
-                    if g.stopping || g.generation != gen || g.kernel.is_some() {
+                    // 状态门（VB1 残留缺口收口）：自动重启仅覆盖 **Ready 态的运行期
+                    // 崩溃**。boot 期（Spawn/Repair 等）的内核退出归瀑布——
+                    // ready_tx 已把「内核启动期退出」按本次拉起失败回报给
+                    // spawn_and_wait_ready，瀑布二/三层会接管重拉；此前的 2s
+                    // 自动重启线程与瀑布二层 spawn 竞速（瀑布先重跑 sidecar
+                    // boot，>2s），会产出双内核：自动重启的内核占住端口后被
+                    // g.kernel 覆写泄漏，瀑布层内核绑定失败连锁退出（慢机
+                    // 「启动期 CPU 尖峰/反复拉起」形态）。唤醒时复查（而非仅
+                    // 布防时）：restart() 后到 boot_waterfall 置 Repair 前有
+                    // 毫秒级 Ready 空窗，旧线程须在此自灭。
+                    if g.stopping || g.generation != gen || g.kernel.is_some() || g.state != RunState::Ready {
                         return;
                     }
                     drop(g);
@@ -905,20 +1198,51 @@ impl Supervisor {
     }
 
     /// 杀内核整树（restart / 恢复页 / 探活失败 / 应用退出共用）。
-    /// Windows：taskkill /T /F；Unix：killpg(-pgid, SIGKILL) 整组收割
+    ///
+    /// local：Windows taskkill /T /F；Unix：killpg(-pgid, SIGKILL) 整组收割
     /// ——OS 绑定见 kernel_process::kill_tree（本函数仅持锁取 child + 派发）。
+    ///
+    /// WSL：三层收割（契约 §4.6；发行版级 terminate/shutdown 全局终结命令
+    /// **绝不调用**——那会终结整个发行版内用户的其他进程）：
+    /// ① WSL 内按 pid 文件 kill（另一条 wsl.exe 调用，≤30s；taskkill /T 对
+    ///   WSL 内进程无效——不在 Windows 进程树，/T 枚举不到）；
+    /// ② 杀 wsl.exe 包装 child + 收尸；
+    /// ③ 300ms 缓冲后再进端口探测（Electron killTree WSL 分支语义）。
     pub fn kill_kernel(&self) {
+        let backend = self.wsl_active();
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(mut c) = g.kernel.take() {
             let pid = c.id();
-            kill_tree(&mut c, pid);
+            match &backend {
+                Some(b) => {
+                    b.stop();
+                    let _ = c.kill();
+                    let _ = c.wait();
+                    drop(g);
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+                None => kill_tree(&mut c, pid),
+            }
         }
     }
 
     /// 应用退出路径：同步终结（不依赖事件循环）。
+    /// WSL 分支：WSL 内 stop fire-and-forget（退出不等 30s 上限；Electron
+    /// killTreeSync 同款）+ 同步杀 wsl.exe 包装进程。
     pub fn shutdown(&self) {
         self.inner.lock().unwrap_or_else(|p| p.into_inner()).stopping = true;
-        self.kill_kernel();
+        if let Some(b) = self.wsl_active() {
+            std::thread::spawn(move || {
+                b.stop();
+            });
+            let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(mut c) = g.kernel.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        } else {
+            self.kill_kernel();
+        }
     }
 }
 
@@ -942,6 +1266,29 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
+/// 从就绪行 URL 提取端口（WSL 模式实际端口来源——契约 §4.3）：
+/// 取最后一个 `:` 后的连续数字段（容忍尾随路径）。无端口 → None。
+fn url_port(url: &str) -> Option<u16> {
+    let idx = url.rfind(':')?;
+    let digits: String = url[idx + 1..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// koffi-preflight 通过判定：stdout 末行 JSON 的 `ok == true`。
+/// 此前用 `ends_with("{\"ok\":true}")` 字符串契约——sidecar 的「脚本缺失
+/// 跳过」形态 `{"ok":true,"skipped":"no-script"}` 不满足该匹配（X2 指出），
+/// 改按 JSON 语义判定（契约放宽为「末行 JSON ok 字段为 true」，WSL 跳过
+/// 分支的逐字 `{"ok":true}` 亦满足）。
+fn koffi_preflight_passed(stdout: &str) -> bool {
+    stdout
+        .trim_end()
+        .lines()
+        .last()
+        .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .and_then(|v| v.get("ok").and_then(|x| x.as_bool()))
+        .unwrap_or(false)
+}
+
 fn log_line(msg: &str) {
     // T4 反馈：无时间戳时恢复耗时只能外部计时——补 HH:MM:SS 前缀。
     let secs = std::time::SystemTime::now()
@@ -959,14 +1306,14 @@ fn log_line(msg: &str) {
 /// 崩溃环/看门狗触发后排障时「打开日志」是空目录，恢复页「请导出日志反馈」
 /// 无从取证。追加写失败静默（日志绝不影响主流程）。
 pub fn file_log(line: &str) {
-    use std::io::Write;
-    let dir = shell_core::DshPaths::resolve().logs;
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("desktop.log"))
-        .and_then(|mut f| writeln!(f, "{} {}", crate::chrono_like_now(), line));
+    // C3（B2 配方）：desktop.log 经 logging::append_capped 落盘（4MB 轮转
+    // .old 只留一代；IO 失败静默）——此前 GUI 进程 stdout 丢弃，boot/路由
+    // 日志从不落盘。时间戳口径不变（chrono_like_now）。
+    crate::logging::append_capped(
+        &shell_core::DshPaths::resolve().logs.join("desktop.log"),
+        &format!("{} {line}", crate::chrono_like_now()),
+        crate::logging::LOG_CAP_BYTES,
+    );
 }
 
 #[cfg(windows)]
@@ -1267,6 +1614,23 @@ Content-Length: 0
             .and_then(|s| s.split("/// 看门狗触发判定").next())
             .expect("spawn_boot_watchdog 段");
         assert!(wd_seg.contains("g.generation != gen"), "看门狗必须代际感知（restart 叠犬不得打断新 boot）");
+        // ⑤ 自动重启状态门（VB1 残留缺口收口）：boot 期退出不得走 2s 自动
+        //    重启（与瀑布二层 spawn 竞速 = 双内核/端口互踩）；唤醒时必须
+        //    复查 state == Ready，Ready 态运行期崩溃的自动重启语义保持不变。
+        let ok_seg = exit_seg
+            .split("Verdict::Ok =>")
+            .nth(1)
+            .and_then(|s| s.split("/// 探活循环").next())
+            .expect("自动重启（Verdict::Ok）段");
+        let wake_seg = ok_seg
+            .split("std::thread::sleep(Duration::from_secs(2))")
+            .nth(1)
+            .and_then(|s| s.split("this.spawn_kernel").next())
+            .expect("自动重启线程唤醒段");
+        assert!(
+            wake_seg.contains("g.state != RunState::Ready"),
+            "自动重启线程唤醒时必须复查 Ready 态（boot 期退出归瀑布 ready_tx 路径）: {wake_seg}"
+        );
     }
 
     /// enter_recovery_tx 幂等锚点：冷却期内后续崩溃不得重发 CrashLoop 事件
@@ -1309,6 +1673,253 @@ Content-Length: 0
         Supervisor::spawn_boot_watchdog(&sv2, tx2, Duration::from_millis(150));
         assert!(rx2.recv_timeout(Duration::from_secs(1)).is_err(), "Ready 态超时后不得有任何事件");
         assert_eq!(sv2.state(), RunState::Ready);
+    }
+
+    // ------------------------------------------------------------------
+    // WSL 托管模式（契约 wsl-backend.md；形态锁 + 注桩端到端）
+    // ------------------------------------------------------------------
+
+    /// 收割禁令（不变量 §7.2）：supervisor 全文件不得出现发行版级终结命令
+    /// （wsl 的 terminate / shutdown 全局形态——那会终结整个发行版内用户的
+    /// 其他进程）。kill_kernel 的 WSL 分支必须是 stop（pid 文件）→ 杀包装
+    /// child 的次序。（拼接构串避免测试字面量自匹配 include_str! 文本。）
+    #[test]
+    fn wsl_harvest_never_terminates_shape() {
+        let src = include_str!("supervisor.rs").replace("\r\n", "\n");
+        let terminate = ["wsl", " --term", "inate"].concat();
+        let shutdown = ["wsl", " --shut", "down"].concat();
+        assert!(!src.contains(&terminate), "绝不调用发行版级终结命令（契约 §4.6 红线）");
+        assert!(!src.contains(&shutdown), "绝不调用发行版级停机命令");
+        let seg = src
+            .split("pub fn kill_kernel")
+            .nth(1)
+            .and_then(|s| s.split("pub fn shutdown").next())
+            .expect("kill_kernel 段");
+        let stop_pos = seg.find("b.stop();").expect("WSL 分支必须先 stop（WSL 内 pid 文件收割）");
+        let kill_pos = seg.find("let _ = c.kill();").expect("再杀 wsl.exe 包装 child");
+        assert!(stop_pos < kill_pos, "收割次序：WSL 内 stop 先于杀包装进程");
+        // shutdown 的 WSL 分支：stop 必须 fire-and-forget（退出不等 30s 上限）。
+        let sd = src.split("pub fn shutdown").nth(1).and_then(|s| s.split("\n    }\n}").next()).expect("shutdown 段");
+        assert!(sd.contains("std::thread::spawn(move || {"), "WSL stop 须后台线程 fire-and-forget");
+    }
+
+    /// boot 瀑布 WSL 步序形态（契约 §4.2 顺序红线）：configure → 回落分支 →
+    /// ensure_installed **先于** sidecar boot（补丁目标含 <UNC>/agent/
+    /// node_modules）；farm/koffi 跳过分支在场；端口 --port 0；看门狗 35 分钟。
+    #[test]
+    fn wsl_boot_waterfall_order_shape() {
+        let src = include_str!("supervisor.rs").replace("\r\n", "\n");
+        let seg = src
+            .split("fn boot_waterfall")
+            .nth(1)
+            .and_then(|s| s.split("fn on_boot_success").next())
+            .expect("boot_waterfall 段");
+        let ensure_pos = seg.find("run_wsl_ensure_installed(&tx)").expect("ensure_installed 步骤");
+        let sidecar_pos = seg.find("run_sidecar_boot(&tx, gen)").expect("sidecar boot 步骤");
+        assert!(ensure_pos < sidecar_pos, "ensure_installed 必须先于插件/补丁链（Electron main.js 4957 同序）");
+        // farm-repair / koffi 的 WSL 跳过分支。
+        assert!(seg.contains("if wsl.is_none() {\n                this.run_farm_repair();"), "farm 修复仅 local 跑");
+        assert!(seg.contains("if wsl.is_none() {\n                this.run_koffi_preflight();"), "koffi 预检仅 local 跑");
+        // 端口：WSL --port 0。
+        assert!(seg.contains("let port = if wsl.is_some() {\n                0u16"), "WSL 端口占位 0（实际端口从就绪行解析）");
+        // 看门狗放宽常量存在且被选用。
+        assert!(src.contains("BOOT_WATCHDOG_TIMEOUT_WSL: Duration = Duration::from_secs(35 * 60)"));
+        assert!(src.contains("BOOT_WATCHDOG_TIMEOUT_WSL\n            } else"), "watchdog 按 WSL 意图放宽");
+        // sidecar --home 接线（UNC 写穿）。
+        let home_seg = src.split("fn sidecar_home_args").nth(1).and_then(|s| s.split("\n    }").next()).expect("sidecar_home_args 段");
+        assert!(home_seg.contains("\"--home\""), "WSL 模式 sidecar 子命令须传 --home <UNC>");
+    }
+
+    /// spawn 形态：WSL 分支走 wsl_spawn_args（严格 argv）、不设 PGID/current_dir/
+    /// env；就绪行线程内 actual port 提取 + 受限端口收链；local 分支 spec 链不变。
+    #[test]
+    fn wsl_spawn_and_actual_port_shape() {
+        let src = include_str!("supervisor.rs").replace("\r\n", "\n");
+        let seg = src
+            .split("fn spawn_kernel")
+            .nth(1)
+            .and_then(|s| s.split("/// 内核退出处理").next())
+            .expect("spawn_kernel 段");
+        assert!(seg.contains("backend.server_cmd(no_open)"), "WSL 命令串经 wsl-backend spec 构造");
+        // 就绪行线程：WSL actual port 提取。
+        assert!(seg.contains("url_port(&u)"), "就绪行 URL 提取 actual port（契约 §4.3）");
+        assert!(seg.contains("kernel_process::port::is_safe_port(p)"), "受限端口表检查");
+        assert!(seg.contains("if wsl_mode {\n                                g.port = Some(port);"), "actual port 写回 Inner.port");
+        // local 分支的既有锚点仍在。
+        assert!(seg.contains("SpawnSpec::new(&self.node_exe"), "local 分支 SpawnSpec 链不变");
+        assert!(seg.contains("set_process_group_leader(&mut cmd)"), "local 分支 PGID 设置不变");
+    }
+
+    /// koffi-preflight 通过判定契约（X2 指出的形态修正）：末行 JSON `ok==true`
+    /// 语义——逐字 `{"ok":true}`（WSL 跳过形态）与 `{"ok":true,"skipped":
+    /// "no-script"}`（脚本缺失形态）都过；`{"ok":false}`/非 JSON 不过。
+    #[test]
+    fn koffi_preflight_passed_json_contract() {
+        assert!(koffi_preflight_passed("{\"ok\":true}\n"));
+        assert!(koffi_preflight_passed("日志行\n{\"ok\":true,\"skipped\":\"no-script\"}\n"), "脚本缺失跳过形态必须判过（旧 ends_with 契约漏判）");
+        assert!(!koffi_preflight_passed("{\"ok\":false}\n"));
+        assert!(!koffi_preflight_passed("not json\n"));
+        assert!(!koffi_preflight_passed(""));
+    }
+
+    /// C2b 形态锚点：假死重启同计——probe_loop 的两条受控重启路径（TCP 失联
+    /// ×3 / 假死 ×20）必须经 on_kernel_exit(None) 走同一崩溃环判定（含 C2a
+    /// 慢环计数），不得绕开计数直接杀进程拉起。
+    #[test]
+    fn zombie_restart_shares_crash_loop_counter_shape() {
+        let src = include_str!("supervisor.rs").replace("\r\n", "\n");
+        let seg = src
+            .split("fn probe_loop")
+            .nth(1)
+            .and_then(|s| s.split("/// 原地重启").next())
+            .expect("probe_loop 段");
+        let calls = seg.matches("this.on_kernel_exit(None, &tx);").count();
+        assert_eq!(calls, 2, "假死（zombie≥20）与端口失联（consecutive≥3）两条路径都必须经 on_kernel_exit（C2b 同计）: {calls}");
+        // on_kernel_exit 内部经 record_crash（计数判据入口）。
+        let exit_seg = src
+            .split("fn on_kernel_exit")
+            .nth(1)
+            .and_then(|s| s.split("/// 探活循环").next())
+            .expect("on_kernel_exit 段");
+        assert!(exit_seg.contains("g.crash.record_crash(now)"), "退出判定必须经 CrashLoopDetector（快环窗口 + C2a 慢环计数同源）");
+    }
+
+    /// 就绪行 URL 端口提取形态。
+    #[test]
+    fn url_port_forms() {
+        assert_eq!(url_port("http://127.0.0.1:51731"), Some(51731));
+        assert_eq!(url_port("http://127.0.0.1:51731/token"), Some(51731));
+        assert_eq!(url_port("https://host:80"), Some(80));
+        assert_eq!(url_port("http://host"), None, "无端口 → None（按拉起失败收链）");
+        assert_eq!(url_port("http://host:0"), Some(0), "0 可解析（受限表外，由 is_safe 放行——OS 已分配不可能为 0）");
+    }
+
+    /// WSL 注桩端到端（Windows + 仓库检出；本机 WSL VM 损坏——wsl.exe 全链
+    /// 经 StubInvoker 桩替身，UNC 用本地目录模拟形态，与 cli.test.js 的
+    /// DSH_TAURI_WSL_UNC_HOME 手法一致）：settings backend=wsl → configure →
+    /// ensure_installed（npm 桩）→ sidecar boot（--home，真 node 五步）→
+    /// spawn（桩 echo 就绪行）→ actual port 换页事件 → Ready → 收割。
+    #[test]
+    #[cfg(windows)]
+    fn wsl_stub_boot_to_kernel_ready_e2e() {
+        use std::sync::Mutex as StdMutex;
+        let Some(root) = repo_root() else { eprintln!("[skip] 仓库检出不含 dsh-desktop"); return; };
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = sandbox("wsl-e2e");
+        let unc_home = home.join("unc-home"); // 模拟 \\wsl.localhost\<distro>\... 形态的落点目录
+        std::fs::create_dir_all(&unc_home).unwrap();
+        // settings：backend=wsl（distro/installDir 留空——configure 走探测链）。
+        std::env::set_var("DSH_TEST_HOME", &home);
+        std::env::set_var("DSH_TAURI_USERDATA", home.join("ud"));
+        let store = shell_core::SettingsStore::new(shell_core::DshPaths::resolve().settings);
+        store.set("backend", serde_json::json!("wsl")).unwrap();
+        // 覆盖缝：distro/home/UNC 全注入（supervisor 与 sidecar 两半边同键）。
+        std::env::set_var("DSH_TAURI_WSL_DISTRO", "Ubuntu-22.04");
+        std::env::set_var("DSH_TAURI_WSL_HOME", "/home/tester");
+        std::env::set_var("DSH_TAURI_WSL_UNC_HOME", &unc_home);
+
+        /// wsl.exe 桩：探测/安装全脚本化；spawn 用 cmd echo 就绪行 + ping 保活。
+        struct WslStub {
+            calls: StdMutex<Vec<String>>,
+        }
+        impl wsl_backend::WslInvoker for WslStub {
+            fn run_with_lines(
+                &self,
+                _distro: &str,
+                cmd: &str,
+                _timeout: Duration,
+                _on_line: &mut (dyn FnMut(&str) + Send),
+            ) -> wsl_backend::WslRunResult {
+                self.calls.lock().unwrap_or_else(|p| p.into_inner()).push(cmd.to_string());
+                let (stdout, code) = if cmd.contains("printf %s \"$HOME\"") {
+                    ("/home/tester\n".to_string(), 0)
+                } else if cmd.contains("node --version") {
+                    ("v20.11.0\n".to_string(), 0)
+                } else if cmd.contains("npm --version") {
+                    ("10.2.4\n".to_string(), 0)
+                } else if cmd.contains("npm install") {
+                    ("...npm 进度行...\nWSL_INSTALL_OK\n".to_string(), 0)
+                } else if cmd.contains("mkdir -p") {
+                    (String::new(), 0)
+                } else if cmd.contains("test -f") {
+                    (String::new(), 1) // agent 未就绪 → 走安装分支
+                } else if cmd.starts_with("p=") {
+                    ("ok\n".to_string(), 0) // stop_cmd（收割）
+                } else {
+                    (String::new(), 0)
+                };
+                wsl_backend::WslRunResult { ok: code == 0, code, timed_out: false, stdout, stderr: String::new() }
+            }
+            fn list_distros(&self) -> Vec<String> {
+                vec!["Ubuntu-22.04".into()]
+            }
+            fn spawn_server(&self, _distro: &str, _cmd: &str) -> std::io::Result<Child> {
+                let mut c = Command::new("cmd");
+                c.args(["/d", "/c", "echo dsh web: http://127.0.0.1:39517 & ping -n 90 127.0.0.1 > nul"]);
+                c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+                c.creation_flags_win(); // WinFlags trait 经 use super::* 可见
+                c.spawn()
+            }
+        }
+
+        let stub = Arc::new(WslStub { calls: StdMutex::new(Vec::new()) });
+        let sv: Arc<Supervisor> = Arc::new(Supervisor::new_with_wsl_invoker(
+            &root,
+            stub.clone() as Arc<dyn wsl_backend::WslInvoker>,
+        ));
+        assert!(sv.wsl_cfg.is_some(), "settings backend=wsl 应解析为 WSL 意图");
+        let (tx, rx) = std::sync::mpsc::channel();
+        sv.spawn_boot(tx, None);
+        let deadline = Instant::now() + Duration::from_secs(150);
+        let mut saw_install = false;
+        let mut boot_steps: Vec<String> = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
+            match rx.recv_timeout(left) {
+                Ok(SupervisorEvent::BootStep { name, ok, .. }) => {
+                    assert!(ok, "boot 步骤 {name} 不应失败");
+                    if name == "wsl-install" { saw_install = true; }
+                    if !name.starts_with("wsl-") { boot_steps.push(name); }
+                }
+                Ok(SupervisorEvent::KernelReady { url, port }) => {
+                    assert!(url.starts_with("http://127.0.0.1:"), "就绪 URL 形态: {url}");
+                    assert_eq!(port, 39517, "actual port 必须取就绪行解析值（spawn 传入 0）: {port}");
+                    break;
+                }
+                Ok(SupervisorEvent::CrashLoop { .. }) => panic!("WSL 注桩链不应进恢复页"),
+                Ok(other) => { let _ = other; }
+                Err(_) => panic!("150s 内未就绪（boot_steps={boot_steps:?} saw_install={saw_install}）"),
+            }
+        }
+        // 链路断言：五步全过 + 安装步在场 + 运行态就绪 + actual port 落 Inner。
+        assert_eq!(boot_steps, vec!["repair", "sync", "presets", "patches", "preflight"], "sidecar 五步契约（经 --home UNC）");
+        assert!(saw_install, "agent 未就绪应触发 wsl-install 步（BootStep 进度上报）");
+        assert!(sv.wsl_active().is_some(), "configure 成功后 WSL 运行态生效");
+        assert_eq!(sv.backend_effective(), "wsl");
+        assert_eq!(sv.fallback_reason(), "", "无回落");
+        assert_eq!(sv.inner.lock().unwrap_or_else(|p| p.into_inner()).port, Some(39517), "Inner.port = actual port");
+        assert_eq!(sv.effective_home(), unc_home, "effective_home = UNC（模拟目录形态）");
+        // 等状态落 Ready（on_boot_success 在 KernelReady 同线程近旁）。
+        for _ in 0..50 {
+            if sv.state() == RunState::Ready { break; }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(sv.state(), RunState::Ready);
+        // 收割：kill_kernel 应发 stop_cmd（pid 文件）+ 杀包装 child。
+        sv.kill_kernel();
+        let calls = stub.calls.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        assert!(
+            calls.iter().any(|c| c.starts_with("p=") && c.contains("kill $(cat")),
+            "kill_kernel 的 WSL 分支必须发 pid 文件收割命令: {calls:?}"
+        );
+        let terminate = ["--term", "inate"].concat();
+        assert!(!calls.iter().any(|c| c.contains(&terminate)), "绝不调用发行版级终结命令");
+        sv.shutdown();
+        // 清环境。
+        for k in ["DSH_TAURI_WSL_DISTRO", "DSH_TAURI_WSL_HOME", "DSH_TAURI_WSL_UNC_HOME", "DSH_TEST_HOME", "DSH_TAURI_USERDATA"] {
+            std::env::remove_var(k);
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
 

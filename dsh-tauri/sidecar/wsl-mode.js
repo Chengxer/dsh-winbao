@@ -235,7 +235,9 @@ function detectWslBackend(opts = {}) {
   if (sim || envBackend === 'wsl') {
     return { mode: 'wsl', source: sim && envBackend !== 'wsl' ? 'env-sim' : 'env', simulated: sim && envBackend !== 'wsl', distro, installDir };
   }
-  if (String(settings.backend || '').trim() === 'wsl') {
+  // TA9-2：backend 必须是字符串才判 wsl——数组/对象形态（配置损坏）在此
+  // 误判会短暂谎报 boot 结果的 backend 字段（后果有界，后续探测仍回落 local）。
+  if (typeof settings.backend === 'string' && settings.backend.trim() === 'wsl') {
     return { mode: 'wsl', source: 'settings', simulated: false, distro, installDir };
   }
   return { mode: 'local', source: 'default', distro, installDir };

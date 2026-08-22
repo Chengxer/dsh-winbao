@@ -1,5 +1,39 @@
 # Changelog — DSH Desktop（Tauri 版，`tauri/modular` 分支）
 
+## [0.5.3] — 2026-08-22
+
+### 修复（用户实测反馈驱动）
+- **「安装时不会检查我之前的安装目录」（NS1 定论+补漏）**：用户症状对上 v0.5.0 发行线（5376c35a 置空 PREINSTALL 后、23802d38 补检测前打包）——该线 Electron 旧目录识别整体缺席，老用户升级默认装 `%LOCALAPPDATA%\DSH Desktop` 出双目录。本机三包实测定论：0.5.0 exe（08-21 14:00 构建）复现症状；0.5.2 exe 原生升级检测（Tauri 键）与 Electron 识别（安装键/uuid 卸载键含引号剥离）均正常——唯一漏网是 0.3.x 老线主程序名 `dsh-desktop.exe` 不在标记集，标记校验拒绝采纳。修复：`DSH_DETECT_LEGACY_INSTALLDIR` 标记集补 `dsh-desktop.exe` 与 `Uninstall DSH Desktop.exe`（electron-builder 官方卸载器空格版兜底），仍全只读（ReadRegStr/FileExists，零交互零等待，无 /SD/超时悬挂面）；makensis 全量实编译 0 error/0 warning + 重打包三场景静默实测（原生复用/旧目录采纳/无标记回默认）全过
+- **graph-memory 模板注入瘫会话（G1）**：图记忆 DB 里的字面量 `{{state.gold}}` 被内核 prompt 插值器当变量引用硬抛——双层修复：插件侧 ZWJ 打断（recall 全文 defuse，存量 DB 免手术）+ 内核 `prompt-context-literal` 补丁（name 非法→字面透传+warn；unknown-variable 保持硬抛）
+- **凭据服务偶发缺席「credentials service is absent」（K1/K2）**：根因=半套 profile fallback 树（heal 单名失败整轮中止 × loader 静默降级）。三层补丁（heal 逐名容错/首读瞬时重试/报错带修复指引）+ compositionPreflight 自愈（悬空 junction 重建）+ 插件管理页「后端服务健康」卡
+- **设备未授权英文死谜语**：DeepSeek 服务端 403 风控原文透传——`device-auth-guidance` 补丁追加中文可操作指引（换令牌而非重装）
+- **v0.5.2 打不开（缺 D3DCOMPILER_47.dll）（B1）**：PE 导入表定证为 WebView2 传递依赖——DLL 随包旁路分发（NSIS+便携+CI 三道断言），`check-imports.mjs` 门禁
+- **日志消失（B2/C3）**：进程第一行即写 boot-early.log（含 panic hook）、desktop.log/dsh-web.log 4MB 轮转落盘、凭据脱敏（sk-/Bearer/Authorization/api_key）、旧 Electron 目录指路文件
+- **Win 浮窗白屏（FW1）**：双层根因（导航无活性探测 + 插件先藏后挂竞态）——壳层 3s 看门狗（reload 一次→错误卡）+ mount-then-hide + 错误卡重试
+- **加载页「undefined 0ms：失败」与失败文案闪现（Q1+信封修复）**：Tauri 事件信封 `{event,payload}` 裸读根因修复（pages+垫片双解包，事件链全通）+ 失败显示 1.8s 防抖 + 步骤失败分级 + 新尝试自动复位计数
+- **rc.1 resume 变砖存量用户**（W1 `agent-preset-fallback`）：未知预设 id 优雅回落（minimal-win→minimal），A=B 目录一致性已核
+- **dsh-balance 冷启动竞态**（slot not declared）：裸 register→inject 包装（对齐一方包姿势），旧宿主缺 inject 时降级
+- **synapse 画布详情跳顶（C1）**：事件洪水重渲染三层防御（滚动锚定+defer 门+sessionStorage 重载恢复）；睡眠唤醒偷锁（pid 活不按龄偷+EPERM 视为存活）
+- **会话删除孤儿进程**（C2 `session-orphans`）：deleteSession 走内核杀梯（cancel+jobs/terminals disposeOwned）
+- **better-sidebar「client module system unavailable」变砖（W2）**：指数退避自动重试+visibilitychange poke，内核回来零干预自愈
+- **托盘左键直接唤起主窗（T1）**：Win/Linux 左键唤起、mac 保持菜单惯例；⋯菜单复制按钮溢出（T2）
+- **更新链安全与稳健（U1-U3+终审修复）**：GitHub digest/sha256 边车校验 fail-closed、Gitee 单源无哈希锚拒绝下载（防镜像投毒）、HashMismatch 跨源换源重试（镜像漂移救回）+双源失败摘要、下载 URL 白名单、临时目录 TTL 清扫、进度事件节流
+- **崩溃环强化（C2 便签三件）**：慢环熔断（boot 世代自动重启计数≥5）、假死重启同计、重启风暴渲染抑制（90s 窗内轻量探针；URL 漂移必换页）
+- **WSL deadline 睡眠误杀（S2 配方→X1）**：QPC deadline 改中断时钟分片扣减——30min 安装窗内合盖不再杀健康安装
+
+### 新增
+- **客户端自动更新全链（U1/U2/U3，C4 ✓）**：右上⋯「检查客户端更新」——双源 GitHub/Gitee releases 并发探测（资产级回落/防降级）、就地回显下载百分比、Windows NSIS `/S /R /UPDATE` 静默升级保数据、启动 15s 静默检查+通知+「自动安装」开关；CI sha256 边车+mirror-gitee job+`verify-update-sources.mjs`；旧 npm 内核检查退役
+- **会话完成通知全链（C1+C2 ✓，N1/N2 验收）**：watcher 行协议→Electron 保真门控（开关/聚焦/当前会话）→30s/会话+15s 全局限流→系统通知；60s 新鲜度窗回前台跳转会话（主窗定向）；turn-end 即刷余额（30s 节流）
+- **文件上传（F1/F2）**：拖拽（Rust DragDrop→`client-file-drop`→悬停提示层）+ 📎 选择按钮进内核原生附件栏（3.5MB/2000px 白名单前置）+粘贴让位
+- **子代理活动快视（W3 新插件 dsh-subagent-lens）**：Task 委派行展开命令清单/文件清单（可点击打开）+会话头聚合条
+- **WSL 后端 Rust 半边（X1/X1b 验尸验收）**：wsl-backend crate（spawn/ensure_installed 原子切换/三层收割绝不 wsl --terminate/SliceBudget）+ supervisor WSL 模式 + wsl_config_save 三通道；与 X2 JS 半边六接口对接 ✓（真机清单待用户重启开虚拟化）
+- **托盘左键唤起**（见修复）
+- **测试与工程资产**：run-all-tests 总执行器、补丁 36×2 基线矩阵、契约哨兵（7 面双向）、金样快照、混沌/时钟/soak/竞态/升级路径/跨平台/工具自测 16 线测试大军（今日新增 500+ 用例）、ta8-ci-lint、check-imports
+
+### 工程
+- 内核家族 0.1.1-rc.1 → 0.1.1-rc.2（19 pin；纯重发布字节级零差，compat 零改动）
+- 契约同步：bridge-api.md（act 表/返回形态）、error-codes.md（E_UPDATER_* 新语义/E_NO_HOST 登记）、README×3（minisign 失真更正）
+- 哨兵测试 pristine 源策略：改读 .tmp-rc2-stage（dev 树=在跑实例 boot 链战场不可依赖）
 ## [0.5.2] — 2026-08-22
 
 ### 修复（用户实测反馈驱动）

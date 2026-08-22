@@ -11,7 +11,8 @@
 //! - [`lifecycle`] —— Phase 1 核心：app_init / 剪贴板 / 外部打开 / 心跳 / 会话 / 重启服务
 //! - [`balance`]   —— 余额数据生产链：sidecar balance-fetch 轮询环 + balance_refresh 触发
 //! - [`window`]    —— 窗口族：window_control / 浮窗 / 宠物窗 / 赞助
-//! - [`menu`]      —— ⋯ 菜单动作分发 + 设置开关 + npm 版本比对
+//! - [`menu`]      —— ⋯ 菜单动作分发 + 设置开关 + 客户端更新检查/安装（双源 releases
+//!   链见 [`updater_client`]；npm 内核比对已随 v0.5.3 退役）
 //! - [`recovery`]  —— 恢复页四件套
 //! - [`sidecar`]   —— sidecar 转发族：插件管理六通道 + 诊断 / 备份
 //! - [`file`]      —— 文件域：file_open / file_revert（fence 围栏）
@@ -31,6 +32,7 @@ mod recovery;
 mod sidecar;
 mod window;
 mod wsl;
+pub mod updater_client;
 
 // 注意：必须用 glob re-export。`#[tauri::command]` 会随函数生成隐藏项
 // `__cmd__<name>`（generate_handler! 依赖 `commands::__cmd__*` 路径），

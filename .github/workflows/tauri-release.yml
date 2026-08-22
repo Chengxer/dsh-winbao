@@ -14,6 +14,9 @@ name: Tauri Release
 #   macOS ARM64  dmg    → DSH-Desktop-<ver>-macos-arm64.dmg
 #   Linux x64    AppImage → DSH-Desktop-<ver>-linux-x64.AppImage
 #   Linux x64    deb    → dsh-desktop_<ver>_amd64.deb（deb 标准命名）
+#   自动更新校验边车 → 每个主资产附带 <主资产名>.sha256（publish job 统一生成，
+#   内容=sha256sum 格式「<64位小写hex>  <文件名>」，壳侧更新器解析取首段 hex；
+#   Gitee 镜像 job 一并镜像，镜像后由 verify-update-sources.mjs 做双源核验）
 #
 # 用法：git tag v0.5.1 && git push origin v0.5.1   ← 正式发版唯一入口
 #        手动 dispatch 仅用于给【已存在的 tag】补传/重建资产：流水线会强制
@@ -134,21 +137,36 @@ jobs:
         run: |
           set -e
           cd dsh-desktop
-          dest="dist/win-unpacked/resources/app/node_modules/@deepseek-ai"
-          mkdir -p "$dest"
-          for pkg in dsh-client-web-react dsh-client-schema-form dsh-client-ui-primitives dsh-client-ui-slots dsh-client-ui-attachment dsh-client-ui-renderer; do
-            full="@deepseek-ai/$pkg"
-            echo "Downloading $full@0.1.0-rc.7 ..."
-            tgz=$(npm pack "$full@0.1.0-rc.7" 2>&1 | tail -1) || { echo "WARN: $full not found, skipping"; continue; }
-            if [ ! -f "$tgz" ]; then echo "WARN: $full tarball not found ($tgz), skipping"; continue; fi
+          rc7_root="dist/win-unpacked/resources/app/node_modules"
+          mkdir -p "$rc7_root"
+          # PD1 对账（v0.5.2 复盘）：6 个 rc.7 客户端包之外，build-client-compat.mjs
+          # 的闭包 BFS 还需要 web-react 的 use-sync-external-store@1.2.0 与
+          # schema-form 的 @deepseek-ai/schemastery@3.18.1——v0.5.2 只下 6 个，
+          # compat 构建抛「闭包包缺失」被非阻断 WARN 吞掉 → 官方包缺
+          # client-compat.js（插件端 missed the module table）。闭包全集 10 包
+          # （+ schemastery 的 @standard-schema/spec@1.1.0 / @deepseek-ai/cosmokit@1.8.2）。
+          for spec in "@deepseek-ai/dsh-client-web-react@0.1.0-rc.7" \
+                      "@deepseek-ai/dsh-client-schema-form@0.1.0-rc.7" \
+                      "@deepseek-ai/dsh-client-ui-primitives@0.1.0-rc.7" \
+                      "@deepseek-ai/dsh-client-ui-slots@0.1.0-rc.7" \
+                      "@deepseek-ai/dsh-client-ui-attachment@0.1.0-rc.7" \
+                      "@deepseek-ai/dsh-client-ui-renderer@0.1.0-rc.7" \
+                      "use-sync-external-store@1.2.0" \
+                      "@deepseek-ai/schemastery@3.18.1" \
+                      "@standard-schema/spec@1.1.0" \
+                      "@deepseek-ai/cosmokit@1.8.2"; do
+            name="${spec%@*}"
+            echo "Downloading $spec ..."
+            tgz=$(npm pack "$spec" 2>&1 | tail -1) || { echo "WARN: $spec not found, skipping"; continue; }
+            if [ ! -f "$tgz" ]; then echo "WARN: $spec tarball not found ($tgz), skipping"; continue; fi
             tmp=$(mktemp -d)
             tar -xzf "$tgz" -C "$tmp"
-            mkdir -p "$dest/$pkg"
-            cp -r "$tmp/package/"* "$dest/$pkg/"
+            mkdir -p "$rc7_root/$name"
+            cp -r "$tmp/package/"* "$rc7_root/$name/"
             rm -f "$tgz"
-            echo "  OK: $pkg"
+            echo "  OK: $name"
           done
-          echo "rc7 packages ready"
+          echo "rc7 packages ready (6 client pkgs + 4 closure deps)"
         shell: bash
 
       - name: Stage payload (CI simplified)
@@ -173,8 +191,17 @@ jobs:
               [ -d "$DEST/node_modules/@deepseek-ai/$name" ] || cp -r "$pkg" "$DEST/node_modules/@deepseek-ai/$name"
             done
           fi
-          # compat（非阻断——有 renderer 回落链）
+          # compat（构建报错可不阻断——但产物必须在位，见下方 PD1 门禁）
           node dsh-tauri/scripts/build-client-compat.mjs 2>&1 || echo "WARN: compat failed (non-blocking)"
+          # PD1 复盘门禁：v0.5.2 的 compat 闭包缺包被上一行 WARN 静默吞掉，官方
+          # 包缺 client-compat.js（插件端 missed the module table 常态化）。
+          # 构建器允许降级告警，装出去的包不允许缺件——缺即拒绝发布。
+          COMPAT="$DEST/node_modules/@deepseek-ai/dsh-web-frontend/dist/assets/client-compat.js"
+          if [ ! -f "$COMPAT" ]; then
+            echo "::error::client-compat.js 缺失（build-client-compat 闭包失败——rc7 下载缺包？）"
+            exit 1
+          fi
+          echo "OK: client-compat.js in payload ($(stat -c%s "$COMPAT") bytes)"
           echo "Payload: $(du -sm "$DEST" | cut -f1)MB"
         shell: bash
 
@@ -183,6 +210,24 @@ jobs:
           cd dsh-tauri/src-tauri
           cargo test --workspace --quiet -- --skip sidecar_boot_sandbox --skip full_boot_to_kernel --skip broken_companion --skip corrupted_patch
         shell: bash
+
+      - name: Assert bundled D3DCOMPILER_47.dll (B1 fix prerequisite)
+        # B1 修复：WebView2 在缺少系统 D3DCompiler_47.dll 的机器（LTSC/精简版/
+        # Server 无桌面体验）上加载失败 → 应用进程入口报「丢失 D3DCOMPILER_47.dll」。
+        # 修复=随包旁路分发（tauri.conf.json resources → 安装到 exe 同目录，Windows
+        # 加载器优先应用目录）。此处构建前断言源 DLL 在位且完整，防静默缺失。
+        shell: bash
+        run: |
+          set -euo pipefail
+          f="dsh-tauri/dlls/D3DCOMPILER_47.dll"
+          [ -f "$f" ] || { echo "::error::缺少 $f（B1 修复依赖）"; exit 1; }
+          size=$(stat -c%s "$f")
+          if [ "$size" -lt 4000000 ]; then
+            echo "::error::$f 体积异常（${size} 字节，预期 ~4.6MB）"
+            exit 1
+          fi
+          node dsh-tauri/scripts/check-imports.mjs --pe "$f" --expect-machine x64
+          echo "OK: $f ($size bytes)"
 
       - name: Build installer
         run: |
@@ -228,6 +273,22 @@ jobs:
           fi
           echo "OK: DSH-Desktop-Setup-${VERSION}-win-x64.exe ($size bytes)"
           ls -la
+
+      - name: Assert D3DCOMPILER_47.dll inside NSIS installer (B1 fix gate)
+        # B1 修复门禁（追加）：解包安装包断言 D3DCOMPILER_47.dll 已随包打进去，
+        # 位于 exe 旁（$INSTDIR 根）——防 resources 配置回退导致用户精简系统再次
+        # 撞上「丢失 D3DCOMPILER_47.dll」。NSIS 安装包可用 7z 直接列内容。
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=${{ steps.ver.outputs.version }}
+          f="dsh-tauri/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/DSH-Desktop-Setup-${VERSION}-win-x64.exe"
+          [ -f "$f" ] || { echo "::error::未找到 $f"; exit 1; }
+          7z l "$f" | grep -i "D3DCOMPILER_47.dll" || {
+            echo "::error::NSIS 安装包内缺少 D3DCOMPILER_47.dll——B1 修复未生效（检查 tauri.conf.json resources）"
+            exit 1
+          }
+          echo "OK: D3DCOMPILER_47.dll 已随安装包分发"
 
       - name: Upload setup artifact
         uses: actions/upload-artifact@v4
@@ -331,21 +392,36 @@ jobs:
         run: |
           set -e
           cd dsh-desktop
-          dest="dist/win-unpacked/resources/app/node_modules/@deepseek-ai"
-          mkdir -p "$dest"
-          for pkg in dsh-client-web-react dsh-client-schema-form dsh-client-ui-primitives dsh-client-ui-slots dsh-client-ui-attachment dsh-client-ui-renderer; do
-            full="@deepseek-ai/$pkg"
-            echo "Downloading $full@0.1.0-rc.7 ..."
-            tgz=$(npm pack "$full@0.1.0-rc.7" 2>&1 | tail -1) || { echo "WARN: $full not found, skipping"; continue; }
-            if [ ! -f "$tgz" ]; then echo "WARN: $full tarball not found ($tgz), skipping"; continue; fi
+          rc7_root="dist/win-unpacked/resources/app/node_modules"
+          mkdir -p "$rc7_root"
+          # PD1 对账（v0.5.2 复盘）：6 个 rc.7 客户端包之外，build-client-compat.mjs
+          # 的闭包 BFS 还需要 web-react 的 use-sync-external-store@1.2.0 与
+          # schema-form 的 @deepseek-ai/schemastery@3.18.1——v0.5.2 只下 6 个，
+          # compat 构建抛「闭包包缺失」被非阻断 WARN 吞掉 → 官方包缺
+          # client-compat.js（插件端 missed the module table）。闭包全集 10 包
+          # （+ schemastery 的 @standard-schema/spec@1.1.0 / @deepseek-ai/cosmokit@1.8.2）。
+          for spec in "@deepseek-ai/dsh-client-web-react@0.1.0-rc.7" \
+                      "@deepseek-ai/dsh-client-schema-form@0.1.0-rc.7" \
+                      "@deepseek-ai/dsh-client-ui-primitives@0.1.0-rc.7" \
+                      "@deepseek-ai/dsh-client-ui-slots@0.1.0-rc.7" \
+                      "@deepseek-ai/dsh-client-ui-attachment@0.1.0-rc.7" \
+                      "@deepseek-ai/dsh-client-ui-renderer@0.1.0-rc.7" \
+                      "use-sync-external-store@1.2.0" \
+                      "@deepseek-ai/schemastery@3.18.1" \
+                      "@standard-schema/spec@1.1.0" \
+                      "@deepseek-ai/cosmokit@1.8.2"; do
+            name="${spec%@*}"
+            echo "Downloading $spec ..."
+            tgz=$(npm pack "$spec" 2>&1 | tail -1) || { echo "WARN: $spec not found, skipping"; continue; }
+            if [ ! -f "$tgz" ]; then echo "WARN: $spec tarball not found ($tgz), skipping"; continue; fi
             tmp=$(mktemp -d)
             tar -xzf "$tgz" -C "$tmp"
-            mkdir -p "$dest/$pkg"
-            cp -r "$tmp/package/"* "$dest/$pkg/"
+            mkdir -p "$rc7_root/$name"
+            cp -r "$tmp/package/"* "$rc7_root/$name/"
             rm -f "$tgz"
-            echo "  OK: $pkg"
+            echo "  OK: $name"
           done
-          echo "rc7 packages ready"
+          echo "rc7 packages ready (6 client pkgs + 4 closure deps)"
         shell: bash
 
       - name: Stage payload (CI simplified)
@@ -370,8 +446,17 @@ jobs:
               [ -d "$DEST/node_modules/@deepseek-ai/$name" ] || cp -r "$pkg" "$DEST/node_modules/@deepseek-ai/$name"
             done
           fi
-          # compat（非阻断——有 renderer 回落链）
+          # compat（构建报错可不阻断——但产物必须在位，见下方 PD1 门禁）
           node dsh-tauri/scripts/build-client-compat.mjs 2>&1 || echo "WARN: compat failed (non-blocking)"
+          # PD1 复盘门禁：v0.5.2 的 compat 闭包缺包被上一行 WARN 静默吞掉，官方
+          # 包缺 client-compat.js（插件端 missed the module table 常态化）。
+          # 构建器允许降级告警，装出去的包不允许缺件——缺即拒绝发布。
+          COMPAT="$DEST/node_modules/@deepseek-ai/dsh-web-frontend/dist/assets/client-compat.js"
+          if [ ! -f "$COMPAT" ]; then
+            echo "::error::client-compat.js 缺失（build-client-compat 闭包失败——rc7 下载缺包？）"
+            exit 1
+          fi
+          echo "OK: client-compat.js in payload ($(stat -c%s "$COMPAT") bytes)"
           echo "Payload: $(du -sm "$DEST" | cut -f1)MB"
         shell: bash
 
@@ -498,21 +583,36 @@ jobs:
         run: |
           set -e
           cd dsh-desktop
-          dest="dist/win-unpacked/resources/app/node_modules/@deepseek-ai"
-          mkdir -p "$dest"
-          for pkg in dsh-client-web-react dsh-client-schema-form dsh-client-ui-primitives dsh-client-ui-slots dsh-client-ui-attachment dsh-client-ui-renderer; do
-            full="@deepseek-ai/$pkg"
-            echo "Downloading $full@0.1.0-rc.7 ..."
-            tgz=$(npm pack "$full@0.1.0-rc.7" 2>&1 | tail -1) || { echo "WARN: $full not found, skipping"; continue; }
-            if [ ! -f "$tgz" ]; then echo "WARN: $full tarball not found ($tgz), skipping"; continue; fi
+          rc7_root="dist/win-unpacked/resources/app/node_modules"
+          mkdir -p "$rc7_root"
+          # PD1 对账（v0.5.2 复盘）：6 个 rc.7 客户端包之外，build-client-compat.mjs
+          # 的闭包 BFS 还需要 web-react 的 use-sync-external-store@1.2.0 与
+          # schema-form 的 @deepseek-ai/schemastery@3.18.1——v0.5.2 只下 6 个，
+          # compat 构建抛「闭包包缺失」被非阻断 WARN 吞掉 → 官方包缺
+          # client-compat.js（插件端 missed the module table）。闭包全集 10 包
+          # （+ schemastery 的 @standard-schema/spec@1.1.0 / @deepseek-ai/cosmokit@1.8.2）。
+          for spec in "@deepseek-ai/dsh-client-web-react@0.1.0-rc.7" \
+                      "@deepseek-ai/dsh-client-schema-form@0.1.0-rc.7" \
+                      "@deepseek-ai/dsh-client-ui-primitives@0.1.0-rc.7" \
+                      "@deepseek-ai/dsh-client-ui-slots@0.1.0-rc.7" \
+                      "@deepseek-ai/dsh-client-ui-attachment@0.1.0-rc.7" \
+                      "@deepseek-ai/dsh-client-ui-renderer@0.1.0-rc.7" \
+                      "use-sync-external-store@1.2.0" \
+                      "@deepseek-ai/schemastery@3.18.1" \
+                      "@standard-schema/spec@1.1.0" \
+                      "@deepseek-ai/cosmokit@1.8.2"; do
+            name="${spec%@*}"
+            echo "Downloading $spec ..."
+            tgz=$(npm pack "$spec" 2>&1 | tail -1) || { echo "WARN: $spec not found, skipping"; continue; }
+            if [ ! -f "$tgz" ]; then echo "WARN: $spec tarball not found ($tgz), skipping"; continue; fi
             tmp=$(mktemp -d)
             tar -xzf "$tgz" -C "$tmp"
-            mkdir -p "$dest/$pkg"
-            cp -r "$tmp/package/"* "$dest/$pkg/"
+            mkdir -p "$rc7_root/$name"
+            cp -r "$tmp/package/"* "$rc7_root/$name/"
             rm -f "$tgz"
-            echo "  OK: $pkg"
+            echo "  OK: $name"
           done
-          echo "rc7 packages ready"
+          echo "rc7 packages ready (6 client pkgs + 4 closure deps)"
         shell: bash
 
       - name: Stage payload (CI simplified)
@@ -537,8 +637,17 @@ jobs:
               [ -d "$DEST/node_modules/@deepseek-ai/$name" ] || cp -r "$pkg" "$DEST/node_modules/@deepseek-ai/$name"
             done
           fi
-          # compat（非阻断——有 renderer 回落链）
+          # compat（构建报错可不阻断——但产物必须在位，见下方 PD1 门禁）
           node dsh-tauri/scripts/build-client-compat.mjs 2>&1 || echo "WARN: compat failed (non-blocking)"
+          # PD1 复盘门禁：v0.5.2 的 compat 闭包缺包被上一行 WARN 静默吞掉，官方
+          # 包缺 client-compat.js（插件端 missed the module table 常态化）。
+          # 构建器允许降级告警，装出去的包不允许缺件——缺即拒绝发布。
+          COMPAT="$DEST/node_modules/@deepseek-ai/dsh-web-frontend/dist/assets/client-compat.js"
+          if [ ! -f "$COMPAT" ]; then
+            echo "::error::client-compat.js 缺失（build-client-compat 闭包失败——rc7 下载缺包？）"
+            exit 1
+          fi
+          echo "OK: client-compat.js in payload ($(stat -c%s "$COMPAT") bytes)"
           echo "Payload: $(du -sm "$DEST" | cut -f1)MB"
         shell: bash
 
@@ -565,6 +674,19 @@ jobs:
           echo "=== 便携版布局 ==="
           ls -la "$ROOT"
           du -sm "$ROOT" "$ROOT/resources/dsh-desktop"
+
+      - name: Bundle D3DCOMPILER_47.dll beside portable exe (B1 fix)
+        # B1 修复：便携版布局手工组装，不经 NSIS/tauri resources，需显式把 DLL
+        # 放到 exe 同目录（与安装版 $INSTDIR 根旁路口径一致），否则精简系统用户
+        # 解压即撞「丢失 D3DCOMPILER_47.dll」。
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="portable/DSH Desktop"
+          [ -f "dsh-tauri/dlls/D3DCOMPILER_47.dll" ] || { echo "::error::缺少 dsh-tauri/dlls/D3DCOMPILER_47.dll"; exit 1; }
+          cp "dsh-tauri/dlls/D3DCOMPILER_47.dll" "$ROOT/D3DCOMPILER_47.dll"
+          [ -f "$ROOT/D3DCOMPILER_47.dll" ] && [ -f "$ROOT/DSH Desktop.exe" ] || { echo "::error::便携版 B1 布局异常"; exit 1; }
+          echo "OK: $ROOT/D3DCOMPILER_47.dll ($(stat -c%s "$ROOT/D3DCOMPILER_47.dll") bytes)"
 
       - name: Create portable zip
         shell: pwsh
@@ -998,6 +1120,37 @@ jobs:
             exit 1
           fi
 
+      - name: Generate sha256 sidecars
+        # 自动更新强制校验链配套：客户端壳侧下载平台资产后强制校验同名
+        # .sha256 边车（解析规则：首段 64 位小写 hex）。边车在 publish 统一
+        # 生成而非各 build job 生成——单点产出保证「一个主资产恰好一个边车」，
+        # 且 dispatch 补传/重建资产时边车必然随新内容重建。
+        # 格式与 sha256sum 原生输出一致（<hex><两空格><文件名>），壳侧/verify
+        # 脚本均只取首段 hex，文件名尾注向后兼容可省略。
+        # 注：本步骤只在 ubuntu runner 上跑（sha256sum GNU 版），mac build job
+        # 不涉及——规避 BSD 工具链坑（stat -c 前车之鉴）。
+        run: |
+          set -euo pipefail
+          cd release-assets
+          main_count=0
+          for f in *; do
+            case "$f" in *.sha256) continue ;; esac
+            main_count=$((main_count + 1))
+            sha256sum "$f" > "$f.sha256"
+            hash=$(cut -d' ' -f1 "$f.sha256")
+            if ! echo "$hash" | grep -Eq '^[0-9a-f]{64}$'; then
+              echo "::error::边车格式异常（首段不是 64 位小写 hex）: $f.sha256"
+              exit 1
+            fi
+            echo "边车: $f.sha256  hash=$hash"
+          done
+          side_count=$(find . -maxdepth 1 -type f -name '*.sha256' | wc -l)
+          if [ "$side_count" -ne "$main_count" ]; then
+            echo "::error::边车数量 ${side_count} != 主资产数量 ${main_count}"
+            exit 1
+          fi
+          echo "OK: ${side_count}/${main_count} 个主资产均已生成 sha256 边车"
+
       - name: Resolve release tag/version
         id: ver
         run: |
@@ -1010,10 +1163,13 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Verify assets (版本一致 + 体积下限)
+      - name: Verify assets (版本一致 + 体积下限 + 边车齐全)
         # 版本混装防线④（最后一道闸）：每个资产文件名必须内嵌期望版本号、
         # 体积必须 >50MB。任一不满足即拒绝发布——上游 job 有 continue-on-error，
         # 不能全信，publish 是资产出仓前的总闸。
+        # 边车（*.sha256）例外分支：不适用 50MB 下限（本身就是百来字节），
+        # 改为校验 ①主资产存在 ②内容首段 64 位小写 hex；文件名版本检查对
+        # 边车同样生效（边车名=主资产名+后缀，天然含版本）。
         run: |
           set -euo pipefail
           VERSION='${{ steps.ver.outputs.version }}'
@@ -1022,18 +1178,39 @@ jobs:
           for f in release-assets/*; do
             name=$(basename "$f")
             case "$name" in
+              *.sha256)
+                main="${name%.sha256}"
+                if [ ! -f "release-assets/$main" ]; then
+                  echo "::error::边车没有对应主资产: $name"; fail=1
+                fi
+                if ! head -c 200 "$f" | grep -Eq '^[0-9a-f]{64}([[:space:]]|$)'; then
+                  echo "::error::边车格式坏（首段非 64 位小写 hex）: $name"; fail=1
+                fi
+                ;;
+              esac
+            case "$name" in
               *"$VERSION"*) ;;
               *) echo "::error::资产文件名未包含期望版本 ${VERSION}: $name（版本混装？拒绝发布）"; fail=1 ;;
             esac
             size=$(stat -c%s "$f")
-            if [ "$size" -lt 52428800 ]; then
-              echo "::error::资产体积异常（<50MB）: $name（${size} 字节）"
-              fail=1
-            fi
-            printf '%-48s %12d bytes\n' "$name" "$size"
+            case "$name" in
+              *.sha256) ;; # 边车不适用 50MB 下限
+              *)
+                if [ "$size" -lt 52428800 ]; then
+                  echo "::error::资产体积异常（<50MB）: $name（${size} 字节）"
+                  fail=1
+                fi ;;
+            esac
+            printf '%-52s %12d bytes\n' "$name" "$size"
           done
+          main_n=$(find release-assets -maxdepth 1 -type f ! -name '*.sha256' | wc -l)
+          side_n=$(find release-assets -maxdepth 1 -type f -name '*.sha256' | wc -l)
+          if [ "$main_n" -ne "$side_n" ]; then
+            echo "::error::边车数量 ${side_n} != 主资产数量 ${main_n}——每个主资产必须有边车（自动更新校验链）"
+            fail=1
+          fi
           [ "$fail" -eq 0 ] || exit 1
-          echo "OK: $(ls release-assets | wc -l) 个资产全部通过版本/体积校验"
+          echo "OK: ${main_n} 个主资产 + ${side_n} 个边车全部通过版本/体积/边车校验"
 
       - name: Generate release notes
         run: |
@@ -1073,7 +1250,10 @@ jobs:
         #     补传/重建资产」正是 workflow_dispatch 的第一用途，fail-fast 会让
         #     该用途无法执行；显式删除后重传是幂等重建，且下一步会逐个核对
         #     存在性与大小，不留旧内容残影、不会出现重复资产。
-        #  3) 上传失败不吞错（旧版 || echo WARN 会静默丢资产）。
+          #  3) 上传失败不吞错（旧版 || echo WARN 会静默丢资产）。
+          #  4) 循环遍历 release-assets/* 全部文件——.sha256 边车与主资产
+          #     同目录，天然走同一套 delete-then-upload 幂等路径（重跑 release
+          #     job 时边车同样删后传，不会残留旧哈希）。
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # publish job 无 checkout（无 git 上下文）——gh 必须显式知道仓库，
@@ -1123,4 +1303,236 @@ jobs:
             fi
             echo "OK: $name ($size bytes)"
           done
+          # 边车收口：远端边车数量必须与本地一致（缺失=上传被吞或重名被删）
+          remote_side=$(awk -F'\t' '$1 ~ /\.sha256$/ {n++} END {print n+0}' remote-assets.tsv)
+          local_side=$(find release-assets -maxdepth 1 -type f -name '*.sha256' | wc -l)
+          if [ "$remote_side" -ne "$local_side" ]; then
+            echo "::error::远端边车数量 ${remote_side} != 本地边车数量 ${local_side}——自动更新校验链不完整"
+            exit 1
+          fi
+          echo "OK: ${remote_side} 个边车已随主资产上传并核对"
           echo "=== 全部资产上传并核对通过 ==="
+
+  # ── Gitee 镜像（自动更新第二源）─────────────────────────────────────────
+  # 客户端壳侧更新器轮询 GitHub + Gitee 双源 releases/latest，国内用户主要打
+  # Gitee。镜像范围=GitHub release 全部资产（含 .sha256 边车），约束与策略：
+  #   · Gitee 单附件上限 100MB（104857600 字节）——超限主资产（AppImage/deb/
+  #     dmg）跳过并告警（壳侧会回落 GitHub 源下载，属预期）；边车均为小文件
+  #     不受限，必须全部镜像。
+  #   · Gitee v5 API 无「删除单个附件」端点（重复上传会产生重复条目），幂等
+  #     策略：同名同大小→跳过；同名不同大小→删除整个 Gitee release 重建
+  #     （对齐 GitHub 侧 delete-then-upload 纪律；dispatch 重建资产后重跑
+  #     本 job 即完成镜像同步）。
+  #   · Gitee 侧自动附带 tag 源码包（v*.zip / v*.tar.gz），属平台行为不算缺失。
+  #   · 依赖仓库 secret：GITEE_TOKEN（gitee.com 私人令牌，需 projects 权限）。
+  mirror-gitee:
+    name: Mirror Release to Gitee
+    needs: [publish]
+    if: always() && !cancelled() && needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GH_REPO: myYangyunfan/dsh_desktop
+      GITEE_API: https://gitee.com/api/v5
+      GITEE_REPO: my-yang-yunfan/dsh_desktop
+      GITEE_FILE_LIMIT: '104857600'
+    steps:
+      - name: Resolve release tag/version
+        id: ver
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            tag='${{ github.event.inputs.version }}'
+            case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+          else
+            tag='${{ github.ref_name }}'
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Guard GITEE_TOKEN
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          if [ -z "$GITEE_TOKEN" ]; then
+            echo "::error::缺少 secret GITEE_TOKEN——请在 仓库 Settings → Secrets and variables → Actions 配置 gitee.com 私人令牌（需 projects 权限），然后重跑本 job"
+            exit 1
+          fi
+          echo "GITEE_TOKEN 已配置"
+
+      - name: Checkout (for tag push fallback)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ver.outputs.tag }}
+          fetch-depth: 1
+
+      - name: Ensure tag exists on Gitee
+        # Gitee 建_release 依赖 tag 已存在。常见情形是 Gitee 仓库已通过镜像同步
+        # 拿到 tag（直接跳过 push）；否则用 GITEE_TOKEN 作 HTTPS 密码浅取 tag
+        # 推过去；再不行给出人工路径（runbook §自动更新配套）。
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.ver.outputs.tag }}'
+          # 本地建立 tag ref（checkout 检出的是 commit，未必带 tag 引用）
+          git fetch --no-tags --depth=1 origin "refs/tags/${TAG}:refs/tags/${TAG}" || {
+            echo "::error::无法从 GitHub 取 tag ${TAG}（tag 不存在？）"; exit 1; }
+          if curl -sf "${GITEE_API}/repos/${GITEE_REPO}/tags?access_token=${GITEE_TOKEN}&per_page=100" \
+               | jq -e --arg t "$TAG" '[.[].name] | index($t)' >/dev/null; then
+            echo "Gitee 已有 tag ${TAG}（镜像同步或此前推送）——跳过 push"
+            exit 0
+          fi
+          echo "Gitee 缺 tag ${TAG}——通过 HTTPS + token 推送"
+          LOGIN=$(curl -sf "${GITEE_API}/user?access_token=${GITEE_TOKEN}" | jq -r '.login')
+          [ -n "$LOGIN" ] && [ "$LOGIN" != "null" ] || { echo "::error::GITEE_TOKEN 无法换取用户名（/user 失败）"; exit 1; }
+          git remote add gitee "https://${LOGIN}:${GITEE_TOKEN}@gitee.com/${GITEE_REPO}.git"
+          # remote URL 含 token：push --quiet 且失败时先脱敏再回显
+          if ! git push --quiet gitee "refs/tags/${TAG}" 2>/tmp/push.err; then
+            echo "::error::推送 tag 到 Gitee 失败（Gitee 仓库可能落后于 GitHub，浅推 tag 缺上游对象）。"
+            echo "人工处理：Gitee 仓库管理→强制同步，或本地 git push gitee ${TAG} 后重跑本 job"
+            cat /tmp/push.err | sed "s/${GITEE_TOKEN}/***/g" || true
+            exit 1
+          fi
+          echo "OK: tag ${TAG} 已推送到 Gitee"
+
+      - name: Download GitHub release assets
+        # 从 GitHub release 下载全部资产作为镜像源（含 .sha256 边车）——
+        # 以上传核对过的远端为准，而非本地构建产物。
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.ver.outputs.tag }}'
+          mkdir -p gh-assets
+          gh release download "$TAG" --dir gh-assets --clobber
+          echo "=== 待镜像资产 ==="
+          ls -la gh-assets
+
+      - name: Get-or-rebuild Gitee release
+        # 幂等核心：同名同大小→复用现有 release；任何同名不同大小（dispatch
+        # 重建过资产）→ 删整个 Gitee release 重建（v5 无删单附件 API）；
+        # 不存在→按 GitHub 元数据创建。
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.ver.outputs.tag }}'
+          # GitHub 侧元数据（镜像以 GitHub 为准源）
+          gh release view "$TAG" --json name,body,isPrerelease > gh-meta.json
+          NAME=$(jq -r '.name' gh-meta.json)
+          BODY=$(jq -r '.body' gh-meta.json)
+          PRE=$(jq -r '.isPrerelease' gh-meta.json)
+          http=$(curl -s -o gitee-rel.json -w '%{http_code}' "${GITEE_API}/repos/${GITEE_REPO}/releases/tags/${TAG}?access_token=${GITEE_TOKEN}")
+          create_release() {
+            curl -sf -X POST "${GITEE_API}/repos/${GITEE_REPO}/releases" \
+              --data-urlencode "access_token=${GITEE_TOKEN}" \
+              --data-urlencode "tag_name=${TAG}" \
+              --data-urlencode "name=${NAME}" \
+              --data-urlencode "body=${BODY}" \
+              --data-urlencode "prerelease=${PRE}" \
+              --data-urlencode "target_commitish=${TAG}" > gitee-rel.json
+          }
+          if [ "$http" = "200" ]; then
+            REL_ID=$(jq -r '.id' gitee-rel.json)
+            echo "Gitee release ${TAG} 已存在（id=${REL_ID}）——核对资产漂移"
+            drift=0
+            while IFS=$'\t' read -r name size; do
+              remote=$(jq -r --arg n "$name" '.assets[]? | select(.name==$n) | .size' gitee-rel.json | head -1)
+              if [ -n "$remote" ] && [ "$remote" != "null" ] && [ "$remote" != "$size" ]; then
+                echo "漂移: $name 本地=${size} Gitee=${remote}（同名不同大小）"
+                drift=1
+              fi
+            done < <(cd gh-assets && for f in *; do printf '%s\t%s\n' "$f" "$(stat -c%s "$f")"; done)
+            if [ "$drift" -eq 1 ]; then
+              echo "同名资产内容不一致——删除整个 Gitee release 重建（v5 无删单附件端点）"
+              curl -sf -X DELETE "${GITEE_API}/repos/${GITEE_REPO}/releases/${REL_ID}?access_token=${GITEE_TOKEN}"
+              create_release
+            fi
+          elif [ "$http" = "404" ]; then
+            echo "Gitee release ${TAG} 不存在——按 GitHub 元数据创建"
+            create_release
+          else
+            echo "::error::查询 Gitee release 失败 http=${http}"; cat gitee-rel.json; exit 1
+          fi
+          REL_ID=$(jq -r '.id' gitee-rel.json)
+          [ -n "$REL_ID" ] && [ "$REL_ID" != "null" ] || { echo "::error::未取得 Gitee release id"; cat gitee-rel.json; exit 1; }
+          echo "REL_ID=$REL_ID" >> "$GITHUB_ENV"
+          echo "OK: Gitee release id=${REL_ID}"
+
+      - name: Upload assets to Gitee
+        # 上传缺失资产；>100MB 跳过（壳侧回落 GitHub 源，预期行为）；
+        # 已存在同名同大小跳过（幂等）。边车是小文件，永远在镜像范围内。
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          set -euo pipefail
+          REL_ID='${{ env.REL_ID }}'
+          LIMIT=${GITEE_FILE_LIMIT}
+          # 刷新远端资产清单（rebuild 后为空，复用时为现状）
+          curl -sf "${GITEE_API}/repos/${GITEE_REPO}/releases/tags/${{ steps.ver.outputs.tag }}?access_token=${GITEE_TOKEN}" > gitee-now.json
+          for f in gh-assets/*; do
+            name=$(basename "$f")
+            size=$(stat -c%s "$f")
+            remote=$(jq -r --arg n "$name" '.assets[]? | select(.name==$n) | .size' gitee-now.json | head -1)
+            if [ -n "$remote" ] && [ "$remote" != "null" ]; then
+              if [ "$remote" = "$size" ]; then
+                echo "跳过（已镜像且大小一致）: $name"
+                continue
+              fi
+              echo "::error::$name 已存在但大小不一致（远端=$remote 本地=$size）——上一步入不了这里，请检查 get-or-rebuild 逻辑"
+              exit 1
+            fi
+            if [ "$size" -gt "$LIMIT" ]; then
+              echo "::warning::跳过超 Gitee 100MB 限制的资产: $name（${size} 字节；壳侧自动回落 GitHub 源下载）"
+              continue
+            fi
+            echo "上传到 Gitee: $name（${size} 字节）"
+            curl -sf -X POST "${GITEE_API}/repos/${GITEE_REPO}/releases/${REL_ID}/attach_files?access_token=${GITEE_TOKEN}" \
+              -F "file=@${f}" > /dev/null
+          done
+
+      - name: Verify mirrored assets
+        # 镜像收口：重查 Gitee release，每个 ≤100MB 的源资产（含全部边车）
+        # 必须存在且大小与 GitHub 侧逐字节一致。
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.ver.outputs.tag }}'
+          LIMIT=${GITEE_FILE_LIMIT}
+          curl -sf "${GITEE_API}/repos/${GITEE_REPO}/releases/tags/${TAG}?access_token=${GITEE_TOKEN}" > gitee-final.json
+          echo "=== Gitee 镜像核对（tag ${TAG}）==="
+          fail=0
+          mirrored=0
+          for f in gh-assets/*; do
+            name=$(basename "$f")
+            size=$(stat -c%s "$f")
+            if [ "$size" -gt "$LIMIT" ]; then
+              printf '%-52s %12d bytes  [超限跳过，预期缺失]\n' "$name" "$size"
+              continue
+            fi
+            remote=$(jq -r --arg n "$name" '.assets[]? | select(.name==$n) | .size' gitee-final.json | head -1)
+            if [ -z "$remote" ] || [ "$remote" = "null" ]; then
+              echo "::error::Gitee 缺失资产: $name（${size} 字节，未超限不应缺失）"
+              fail=1
+              continue
+            fi
+            if [ "$remote" != "$size" ]; then
+              echo "::error::Gitee 资产大小不一致: $name github=${size} gitee=${remote}"
+              fail=1
+              continue
+            fi
+            printf '%-52s %12d bytes  OK\n' "$name" "$size"
+            mirrored=$((mirrored + 1))
+          done
+          # 边车必须全部在镜像内（小文件永不受限）
+          side_total=$(find gh-assets -maxdepth 1 -name '*.sha256' | wc -l)
+          side_mirrored=$(jq -r '[.assets[]?.name | select(endswith(".sha256"))] | length' gitee-final.json)
+          if [ "$side_mirrored" -lt "$side_total" ]; then
+            echo "::error::Gitee 边车不全：${side_mirrored}/${side_total}（边车是小文件，缺=镜像链路故障）"
+            fail=1
+          fi
+          [ "$fail" -eq 0 ] || exit 1
+          echo "OK: ${mirrored} 个资产镜像一致（含 ${side_mirrored} 个边车；>100MB 主资产按预期跳过）"

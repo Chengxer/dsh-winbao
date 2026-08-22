@@ -40,8 +40,18 @@ Var DshLegacyTmp
 ;   · 安装键 = Software\DSH Desktop（INSTALL_REGISTRY_KEY，
 ;     APP_FILENAME = productName「DSH Desktop」，oneClick:false → 保留空格）
 ;   · 两处都写 InstallLocation；per-user 构建落 HKCU，防御性补读 HKLM/WOW6432Node
-;   · 旧目录可识别标记：DSH Desktop.exe（主程序）、resources\node\node.exe
-;     （内置 Node 运行时）、Uninstall_DSH_Desktop.exe（自研卸载器）
+;   · 旧目录可识别标记（五选一）：DSH Desktop.exe（0.4.x 主程序）、
+;     dsh-desktop.exe（0.3.x 老线主程序名，2026-08-22 NS1 实测补齐）、
+;     resources\node\node.exe（内置 Node 运行时）、
+;     Uninstall_DSH_Desktop.exe（自研卸载器）、
+;     Uninstall DSH Desktop.exe（electron-builder 官方卸载器，空格版兜底）
+;
+; 【/SD 与超时语义】本宏不含任何 MessageBox / 用户交互 —— /SD 防呆的
+; 本质是「静默模式下 MessageBox 不许弹」，无 MessageBox 即零需求。
+; 超时语义：每步都是单次同步内核调用（ReadRegStr 本地 hive / FileExists
+; 一次 CreateFile），亚毫秒级完成，无轮询、无 Sleep、无等待句柄——
+; 不存在「超时」概念，也就不存在悬挂面（v0.5.0 卡死的全部根因
+; ——ExecWait UAC / C# 卸载器自提权 / 栈操作 / 枚举中删键——一概不在）。
 !macro DSH_DETECT_LEGACY_INSTALLDIR
   ; 仅当 Tauri 自身键为空（$4 是调用方 RestorePreviousInstallLocation 刚读的
   ; MANUPRODUCTKEY 值）时探测——0.5.0+ 之间的升级仍走原生逻辑。
@@ -77,10 +87,19 @@ Var DshLegacyTmp
     ${EndIf}
 
     ; 3) 校验：目录存在且含 Electron 线标记才采纳，防止指向已改名/残留空壳目录
+    ;    标记集（2026-08-22 补齐，NS1 实测发现 0.3.x 老线漏网）：
+    ;      DSH Desktop.exe            —— 0.4.x 主程序（productName，本机 dist 实证）
+    ;      dsh-desktop.exe            —— 0.3.x 老线主程序（package.json name 命名，
+    ;                                   23802d38 漏收致老线用户仍装双目录，本次补）
+    ;      resources\node\node.exe    —— 内置 Node 运行时（跨版本）
+    ;      Uninstall_DSH_Desktop.exe  —— 自研卸载器（下划线版）
+    ;      Uninstall DSH Desktop.exe  —— electron-builder 官方卸载器（空格版，兜底）
     ${If} $DshLegacyDir != ""
       ${If} ${FileExists} "$DshLegacyDir\DSH Desktop.exe"
+      ${OrIf} ${FileExists} "$DshLegacyDir\dsh-desktop.exe"
       ${OrIf} ${FileExists} "$DshLegacyDir\resources\node\node.exe"
       ${OrIf} ${FileExists} "$DshLegacyDir\Uninstall_DSH_Desktop.exe"
+      ${OrIf} ${FileExists} "$DshLegacyDir\Uninstall DSH Desktop.exe"
         StrCpy $INSTDIR $DshLegacyDir
         DetailPrint "DSH: legacy Electron install dir adopted: $INSTDIR"
       ${Else}

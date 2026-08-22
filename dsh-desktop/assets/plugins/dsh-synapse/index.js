@@ -407,7 +407,14 @@ export class WorkspaceStore {
     }
   }
 
-  /** A lock is stale when its owner PID is gone or the lock file is older than the stale window. */
+  /**
+   * A lock is stale when its owner PID is gone or (only for unparsable locks)
+   * the lock file is older than the stale window. S2 修复（睡眠唤醒偷锁）：
+   * 持有者 pid 仍存活时**不按龄偷锁**——墙钟 mtime 在系统睡眠期间照走，
+   * A 实例持锁写入时合盖 >LOCK_STALE_MS，B 实例唤醒即把活锁判成陈锁偷走，
+   * 双写互覆画布数据（「互相覆盖」形态，睡眠显著提高触发率）。
+   * pid 存活 = 持有者还在，锁不陈旧；陈龄仅用于 pid 不可解析的孤儿锁回收。
+   */
   async lockIsStale(lockFile) {
     try {
       const [content, stats] = await Promise.all([readFile(lockFile, 'utf8'), stat(lockFile)])
@@ -417,9 +424,11 @@ export class WorkspaceStore {
       if (pid === process.pid) return false
       try {
         process.kill(pid, 0)
-        return tooOld
-      } catch {
-        return true
+        return false
+      } catch (e) {
+        // TA4：EPERM = 进程存在但无权 signal（多用户 Windows 常态）——语义上
+        // 持有者仍存活，不得偷锁；仅 ESRCH（进程不存在）才判陈锁可回收。
+        return !(e && (e.code === 'EPERM' || e.code === 'EACCES'))
       }
     } catch {
       return false

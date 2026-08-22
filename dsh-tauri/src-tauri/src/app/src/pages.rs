@@ -5,6 +5,14 @@
 
 /// 启动加载页：boot 步骤进度 + 内核拉起状态 + 错误展示。
 ///
+/// 失败显示防抖 + 分级（#144「启动时报错但无影响」观感修复）：单步 !ok 只
+/// 留红字步骤行不翻全局标题（warn 级步骤失败时 boot 链仍推进）；整体失败
+/// 的唯一权威信号 kernel-fail 也不立刻翻标题，挂 1.8s 定时器——supervisor
+/// 瀑布对首败会自动重跑 boot 链（新一轮 boot-step 到达即取消定时器并复位
+/// 标题/err，N≥2 附「第 N 次尝试」），成功路径 KernelReady 换页离开本页，
+/// 失败字样永不闪现；kernel-fail 本就意味着恢复页即将接管（路由先 emit 后
+/// navigate），正常路径本页在防抖窗口内被换走，仅换页异常时才短暂展示终态。
+///
 /// 沉浸式双主题（对齐 Electron 玻璃标题栏观感）：壳页无内核主题可读，
 /// 用 prefers-color-scheme 双档 CSS 变量（亮=内核 light 值 #fff/#0f1115/…，
 /// 暗=Electron 同款 #0b1220/#e6ecff/…），色值与 bridge-shim 注入条一致；
@@ -68,29 +76,75 @@ pub const LOADING_HTML: &str = r#"<!doctype html>
   var B = window.dshDesktop;
   window.B = B;
   var el = document.getElementById('steps');
+  var titleEl = document.getElementById('title');
+  var errEl = document.getElementById('err');
+  var DEFAULT_TITLE = '正在启动 DSH 内核…';
+  var attempts = 1;      // boot 链轮次：链头 repair 重现（瀑布二/三层重跑 boot 链）即 +1
+  var roundOpen = false; // 本轮是否已收到过 boot-step
+  var failTimer = 0;     // 失败终态防抖句柄（0 = 无未决；页面即销毁，无需 beforeunload）
   function addLine(cls, text){
     var d = document.createElement('div');
     d.className = cls; d.textContent = text;
     el.appendChild(d);
     while (el.children.length > 10) el.removeChild(el.firstChild);
   }
+  function roundTitle(){
+    return attempts >= 2 ? DEFAULT_TITLE + '（第 ' + attempts + ' 次尝试）' : DEFAULT_TITLE;
+  }
+  // 新尝试复位：取消未决的失败终态展示；已翻的失败标题回「正在启动」（N≥2
+  // 带轮次计数）；err 清空。步骤区保持追加滚动不额外清屏——✗/✓ 同屏正好
+  // 比对「上轮失败、本轮自愈」的重试效果。
+  function resetForNewAttempt(newRound){
+    if (failTimer) { clearTimeout(failTimer); failTimer = 0; }
+    if (titleEl.getAttribute('data-fail') || newRound) {
+      titleEl.removeAttribute('data-fail');
+      errEl.textContent = '';
+      titleEl.textContent = roundTitle();
+    }
+  }
   function listen(name, cb){
     try {
       window.__TAURI_INTERNALS__.invoke('plugin:event|listen', {
         event: name, target: { kind: 'Any' },
-        handler: window.__TAURI_INTERNALS__.transformCallback(cb)
+        // Tauri 2 事件回调收的是信封 {event, payload}（tauri-2.11.5 event/mod.rs
+        // emit_js_script：fn({event, payload}, ids)）——此处统一解包再交 cb，
+        // 消费方拿到的恒为 payload 本体（#144 实拍「undefined 0ms：失败」的
+        // 根因就是旧代码裸读信封字段）。无 payload 形态回退 envelope 自身。
+        handler: window.__TAURI_INTERNALS__.transformCallback(function (ev) {
+          cb(ev && ev.payload !== undefined ? ev.payload : ev);
+        })
       }).catch(function(){});
     } catch (e) {}
   }
   var NAMES = { repair:'自愈检查', sync:'伴随插件同步', presets:'内置预设对账', patches:'运行时补丁', preflight:'就绪预检',
                 'sidecar-boot':'启动链', spawn:'内核拉起' };
-  listen('boot-step', function(ev){
-    addLine(ev.ok ? 'ok' : 'fail', (NAMES[ev.name] || ev.name) + ' ' + (ev.ms||0) + 'ms' + (ev.ok ? '' : '：' + (ev.error||'失败')));
-    if (!ev.ok) document.getElementById('title').textContent = '启动受阻';
+  listen('boot-step', function(p){
+    // （listen() 已解包信封，p 即 payload 本体。）
+    // 链头重现 = 新一轮自动重试开始（supervisor 瀑布：首拉失败后重跑 boot 链，
+    // 步骤名映射对齐 data-flow.md §3 boot 时序，repair 为链首）。
+    var newRound = p.name === 'repair' && roundOpen;
+    if (newRound) attempts++;
+    roundOpen = true;
+    resetForNewAttempt(newRound);
+    // 分级：单步 !ok 只保留该步红字行，不再翻全局标题——warn 级步骤失败时
+    // boot 链仍在推进（sidecar 整链 ok 判定与瀑布重跑都发生在这之后），此处
+    // 翻「失败」是把"步骤失败"夸大成"整体失败"（#144「报错但无影响」主源）。
+    // 整体失败的唯一权威信号是 kernel-fail（见下）。
+    addLine(p.ok ? 'ok' : 'fail', (NAMES[p.name] || p.name) + ' ' + (p.ms||0) + 'ms' + (p.ok ? '' : '：' + (p.error||'失败')));
   });
-  listen('kernel-fail', function(ev){
-    document.getElementById('title').textContent = '启动失败';
-    document.getElementById('err').textContent = String(ev.reason || '');
+  listen('kernel-fail', function(p){
+    // （listen() 已解包信封。）
+    // 失败终态防抖（1.8s）：kernel-fail 只在 supervisor 放弃自动重试（崩溃环）
+    // 时发出，且路由随即换页恢复页——正常路径本页在窗口内被换走，失败字样
+    // 永不闪现；仅当换页迟迟未发生（导航异常等）才翻终态，让用户不至面对
+    // 无解释的转圈。窗口内任何 boot-step（新尝试）都会取消此定时器并复位。
+    if (failTimer) clearTimeout(failTimer);
+    failTimer = setTimeout(function(){
+      failTimer = 0;
+      titleEl.setAttribute('data-fail', '1');
+      titleEl.textContent = '启动失败（正在转入恢复…）';
+      errEl.textContent = String(p.reason || '');
+    }, 1800);
   });
   listen('pet-state', function(){});
 })();
@@ -230,5 +284,79 @@ mod tests {
             assert!(page.contains("fill:currentColor"), "{name} 鲸鱼须随主题反色");
             assert!(!page.contains("linear-gradient"), "{name} 渐变方块 logo 应被鲸鱼替换");
         }
+    }
+
+    /// 失败显示防抖（#144「启动时报错但无影响」）：kernel-fail 不再立刻翻
+    /// 标题——挂 1.8s 定时器，窗口内任何 boot-step（新尝试）都会 clearTimeout
+    /// 取消并复位。supervisor 瀑布首败自动重跑 boot 链的成功路径上，失败字样
+    /// 不再闪现；恢复页换页接管时本页直接销毁（定时器随文档回收，无需
+    /// beforeunload）。到点（真终态：换页迟迟未发生）才翻标题 + 错误行。
+    #[test]
+    fn loading_fail_display_debounced() {
+        assert!(LOADING_HTML.contains("setTimeout"), "kernel-fail 须经防抖定时器翻终态");
+        assert!(LOADING_HTML.contains("clearTimeout"), "新尝试须能取消防抖定时器");
+        assert!(LOADING_HTML.contains("1800"), "防抖窗口 ~1.8s");
+        assert!(LOADING_HTML.contains("启动失败（正在转入恢复…）"), "kernel-fail 终态展示路径保留（防抖到点后）");
+        // 终态文案只允许出现在 setTimeout 回调内（非同步路径）。
+        let fail_at = LOADING_HTML.find("启动失败（正在转入恢复…）").unwrap();
+        let timer_at = LOADING_HTML.find("failTimer = setTimeout").unwrap();
+        assert!(fail_at > timer_at, "终态文案必须位于防抖回调内");
+    }
+
+    /// 新尝试自动复位：任何 boot-step 到达时取消未决定时器；标题处于失败态
+    /// 则复位为「正在启动 DSH 内核…」（轮次 N≥2 才附「第 N 次尝试」计数）并
+    /// 清空 err；链头 repair 重现（瀑布重跑 boot 链）= 新一轮。
+    #[test]
+    fn loading_boot_step_resets_failure_state() {
+        assert!(LOADING_HTML.contains("data-fail"), "失败态标记（标记在、复位分支才有判定锚点）");
+        assert!(LOADING_HTML.contains("errEl.textContent = ''"), "新尝试复位须清空 err");
+        assert!(LOADING_HTML.contains("次尝试"), "重试轮次计数文案");
+        assert!(LOADING_HTML.contains("attempts >= 2"), "计数 N≥2 才显示");
+        assert!(LOADING_HTML.contains("resetForNewAttempt"), "复位走统一入口（boot-step 每事件都经过）");
+        assert!(LOADING_HTML.contains("p.name === 'repair' && roundOpen"), "链头重现判定新一轮（listen 已解包信封，消费用 p）");
+    }
+
+    /// 分级语义：单步 !ok 只保留该步红字行，不再翻全局标题——warn 级步骤
+    /// 失败时 boot 链仍在推进，「步骤失败」≠「整体失败」；整体失败的唯一
+    /// 权威信号是 kernel-fail（其在 boot-step 监听之外独立翻终态）。
+    #[test]
+    fn loading_step_fail_graded_not_global() {
+        assert!(!LOADING_HTML.contains("启动受阻"), "单步失败不再翻全局标题（旧钉死文案应移除）");
+        assert!(!LOADING_HTML.contains("'启动失败'"), "旧的无修饰终态文案应替换为防抖版");
+        let boot_step_body = LOADING_HTML
+            .split("listen('boot-step'").nth(1).unwrap()
+            .split("listen('kernel-fail'").next().unwrap();
+        assert!(boot_step_body.contains("p.ok ? 'ok' : 'fail'"), "步骤红行（!ok 行级反馈）保留");
+        assert!(!boot_step_body.contains("titleEl.textContent ="), "boot-step 监听内不得改全局标题（含 !ok 分支）");
+    }
+
+    /// 事件监听名不回归：boot-step / kernel-fail / pet-state 三订阅稳定
+    /// （supervisor 路由层 emit 名的页面侧契约）。
+    #[test]
+    fn loading_event_names_stable() {
+        for name in ["'boot-step'", "'kernel-fail'", "'pet-state'"] {
+            assert!(LOADING_HTML.contains(name), "缺事件订阅 {name}");
+        }
+    }
+
+    /// 事件信封解包（#144 根因回归锚点）：Tauri 2 回调收 {event, payload} 信封
+    /// （tauri-2.11.5 emit_js_script），listen() 必须先解包再交消费者——旧代码
+    /// 裸读 ev.name/ev.ok 全 undefined，渲染成「undefined 0ms：失败」。
+    #[test]
+    fn loading_event_listeners_unwrap_envelope() {
+        let src = include_str!("pages.rs").replace("\r\n", "\n");
+        let listen_seg = src
+            .split("function listen(name, cb)")
+            .nth(1)
+            .and_then(|s| s.split("var NAMES").next())
+            .expect("listen 函数段");
+        assert!(
+            listen_seg.contains("ev.payload !== undefined ? ev.payload : ev"),
+            "listen 必须解包信封 payload（双形态回退）: {listen_seg}"
+        );
+        // 消费侧不得再裸读信封字段（防回归）。
+        let consumers = src
+            .split("listen('boot-step'").nth(1).and_then(|s| s.split("listen('kernel-fail'").next()).unwrap_or("");
+        assert!(!consumers.contains("ev.name"), "boot-step 消费必须经解包后的 p，不得裸读 ev.name");
     }
 }

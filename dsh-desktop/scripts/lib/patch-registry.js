@@ -60,6 +60,8 @@ const {
   ATTACH_LOCAL_REL,
   LOADER_PKG_REL,
   APP_BOOT_PKG_REL,
+  AGENT_PRESET_FALLBACK_PKG_RELS,
+  PROMPT_CONTEXT_LITERAL_PKG_RELS,
 } = require('./patch-target-resolver');
 
 const {
@@ -82,6 +84,14 @@ const {
   transformPluginInventoryTabMergeFix,
   transformPersistentShellAbortRace,
   transformTerminalInterruptEscalation,
+  transformAgentPresetFallback,
+  transformPromptContextLiteral,
+  // K1（credentials service is absent 偶发）三层修复。
+  transformFallbackHealIsolation,
+  transformCredentialsInitialRetry,
+  transformCredentialsAbsentGuidance,
+  // 设备未授权（DeepSeek 服务端风控 403）报文追加可操作指引。
+  transformDeviceAuthGuidance,
   rootAppliers,
 } = require('./patch-adapters');
 
@@ -100,6 +110,12 @@ const {
   PLUGIN_INVENTORY_TAB_MARKER,
   PERSISTENT_ABORT_RACE_MARKER,
   INTERRUPT_ESCALATION_MARKER,
+  AGENT_PRESET_FALLBACK_MARKER,
+  PROMPT_CONTEXT_LITERAL_MARKER,
+  FALLBACK_HEAL_ISOLATION_MARKER,
+  CREDENTIALS_INITIAL_RETRY_MARKER,
+  CREDENTIALS_ABSENT_GUIDANCE_MARKER,
+  DEVICE_AUTH_GUIDANCE_MARKER,
   LOADER_TREE_ISOLATION_MARKER,
   LOADER_ACTIVATION_ISOLATION_MARKER,
   FAIL_LOUD_ISOLATION_MARKER,
@@ -595,6 +611,89 @@ const PATCH_SPECS = [
       failLog: (file, err) => 'workspace 搜索栏修复失败(' + file + '): ' + err.message,
     },
   },
+  // K1 根因修复（「credentials service is absent」桌面端偶发，2026-08）：
+  //   fallback heal 单点容错 + credentials 首读瞬时重试 + 报错文案指引。
+  // 根因：半套 fallback 树（heal 单名失败整体中止）× loader 隔离静默降级 →
+  // credentials 服务缺席，用户保存 API key 才暴露。详见 patch-adapters K1 注释。
+  {
+    id: 'fallback-heal-isolation',
+    group: 'guard',
+    order: 151,
+    kind: 'file',
+    layout: 'guard',
+    wslLayout: 'guard',
+    pkgRel: APP_BOOT_PKG_REL,
+    transform: transformFallbackHealIsolation,
+    marker: FALLBACK_HEAL_ISOLATION_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: 'fallback heal 单点容错',
+      doneLog: (file) => '已注入逐名容错到 ' + file,
+      failLog: (file, err) => 'fallback heal 单点容错失败(' + file + '): ' + err.message,
+    },
+  },
+  {
+    id: 'credentials-initial-retry',
+    group: 'guard',
+    order: 152,
+    kind: 'file',
+    layout: 'guard',
+    wslLayout: 'guard',
+    pkgRel: path.join('dsh-credentials-local', 'lib', 'index.js'),
+    transform: transformCredentialsInitialRetry,
+    marker: CREDENTIALS_INITIAL_RETRY_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: 'credentials 首读重试',
+      doneLog: (file) => '已注入瞬时错误重试到 ' + file,
+      failLog: (file, err) => 'credentials 首读重试失败(' + file + '): ' + err.message,
+    },
+  },
+  {
+    id: 'credentials-absent-guidance',
+    group: 'guard',
+    order: 153,
+    kind: 'file',
+    layout: 'guard',
+    wslLayout: 'guard',
+    pkgRel: path.join('dsh-host-apiproxy', 'lib', 'index.js'),
+    transform: transformCredentialsAbsentGuidance,
+    marker: CREDENTIALS_ABSENT_GUIDANCE_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: 'credentials 缺席报错指引',
+      doneLog: (file) => '已注入修复指引到 ' + file,
+      failLog: (file, err) => 'credentials 缺席报错指引失败(' + file + '): ' + err.message,
+    },
+  },
+  {
+    // 设备未授权指引：DeepSeek 服务端 403 风控原文（"This device is not
+    // authorized…"）透传到前端是句英文死谜语——401/403 且命中设备授权特征时
+    // 追加中文可操作指引（换令牌而非重试/重装）。详见 patch-adapters 注释。
+    id: 'device-auth-guidance',
+    group: 'guard',
+    order: 154,
+    kind: 'file',
+    layout: 'guard',
+    wslLayout: 'guard',
+    pkgRel: path.join('dsh-llm-deepseek', 'lib', 'index.js'),
+    transform: transformDeviceAuthGuidance,
+    marker: DEVICE_AUTH_GUIDANCE_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: '设备未授权报错指引',
+      doneLog: (file) => '已注入可操作指引到 ' + file,
+      failLog: (file, err) => '设备未授权报错指引失败(' + file + '): ' + err.message,
+    },
+  },
   {
     id: 'plugin-inventory-tab-merge',
     group: 'guard',
@@ -665,6 +764,25 @@ const PATCH_SPECS = [
     failLog: (root, err) => '对话删除补丁失败(' + root + '): ' + err.message,
   },
   {
+    // 会话孤儿进程清理（C2）：workspace.deleteSession 摘除 live 会话后复用内核
+    // 自有 owner 清理 API（agent.cancel + jobs/terminals.disposeOwned 杀梯）。
+    // order 195 保证 session-manage(190) 的注入区先行存在。failPolicy warn：
+    // 内核侧 API 形态漂移时 anchor-missing 自动退役，不阻断 boot。
+    id: 'session-orphans',
+    group: 'package',
+    order: 195,
+    kind: 'root',
+    layout: 'nm-roots',
+    wslLayout: 'nm-roots',
+    apply: rootAppliers.patchSessionOrphans,
+    marker: null,
+    requires: ['deleteSession'],
+    failPolicy: 'warn',
+    cli: false,
+    successLog: (root) => '会话孤儿进程补丁: 已应用到 ' + root,
+    failLog: (root, err) => '会话孤儿进程补丁失败(' + root + '): ' + err.message,
+  },
+  {
     id: 'open-project-dir',
     group: 'package',
     order: 200,
@@ -730,6 +848,116 @@ const PATCH_SPECS = [
     cli: true,
     successLog: (root) => 'opencode-go 模型目录补丁: 已应用到 ' + root,
     failLog: (root, err) => 'opencode-go 模型目录补丁失败(' + root + '): ' + err.message,
+  },
+  // -------------------------------------------------------------------------
+  // 设置写入韧性补丁（PR5，v0.5.2「添加供应商没反应/灰」两层根治）：
+  //   1) 孤儿锁自愈（dsh-atomic-write）——内核持锁窗口内被强杀留下
+  //      settings.yaml.lock 孤儿，此后该机所有设置写入 2s 超时失败（页面只读
+  //      面全部正常，用户只见英文路径报错沉在表单底部）。竞争分支追加「锁内
+  //      PID 已死即删」探测，PID 复用/权限歧义退回上游语义。
+  //   2) 设置页韧性（dsh-client-ui-settings-models）——describe 镜像只在 idle
+  //      首载而宿主 register 不发事件，镜像陈旧时「添加自定义供应商」按钮
+  //      protocols=[] 恒灰、「添加」addNamespace 缺席点击无反应；load() 在
+  //      provider 目录与镜像视图偏差时强制重读。附带 CustomProviderCard 的
+  //      settings-conflict 静默重试一次（打开后命名空间被写 → 点创建稳定吃
+  //      冲突报错，观感同「没反应」）。
+  // failPolicy warn：上游形态漂移时 anchor-missing 自动退役，不阻断 boot。
+  // -------------------------------------------------------------------------
+  {
+    id: 'atomic-write-orphan-lock',
+    group: 'package',
+    order: 242,
+    kind: 'root',
+    layout: 'nm-roots',
+    wslLayout: 'nm-roots',
+    apply: rootAppliers.patchAtomicWriteOrphanLock,
+    marker: null,
+    requires: [],
+    failPolicy: 'warn',
+    cli: true,
+    successLog: (root) => '孤儿锁自愈补丁: 已应用到 ' + root,
+    failLog: (root, err) => '孤儿锁自愈补丁失败(' + root + '): ' + err.message,
+  },
+  {
+    id: 'settings-models-resilience',
+    group: 'package',
+    order: 243,
+    kind: 'root',
+    layout: 'nm-roots',
+    wslLayout: 'nm-roots',
+    apply: rootAppliers.patchSettingsModelsResilience,
+    marker: null,
+    requires: [],
+    failPolicy: 'warn',
+    cli: true,
+    successLog: (root) => '设置页韧性补丁: 已应用到 ' + root,
+    failLog: (root, err) => '设置页韧性补丁失败(' + root + '): ' + err.message,
+  },
+
+  // -------------------------------------------------------------------------
+  // agent-preset 未知 id 回落补丁（0.5.0 存量用户 resume 变砖修复，追加条目）。
+  //
+  // 用户会话/profile 引用 Electron 老版本安装的 minimal-win 预设，0.5.0 Tauri
+  // 内核 dsh-agent-presets roster 无此 id → resolve() 抛 UnknownPresetError →
+  // resume 硬失败白屏。补丁把该分支改为 warn 降级回落（minimal-win→minimal、
+  // 其余未知 id→standard），PresetMountError 保持硬抛。详见 patch-adapters 的
+  // transformAgentPresetFallback 注释。cli:false（对齐 image-send-fix 先例：
+  // 桌面壳 boot 链 applyAll 全量应用，CLI 同步期不碰内核包源码之外的目标）。
+  // -------------------------------------------------------------------------
+  {
+    id: 'agent-preset-fallback',
+    group: 'runtime',
+    order: 240,
+    kind: 'file',
+    layout: 'runtime-local',
+    wslLayout: 'wsl',
+    pkgRels: AGENT_PRESET_FALLBACK_PKG_RELS,
+    transform: transformAgentPresetFallback,
+    marker: AGENT_PRESET_FALLBACK_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: 'agent-preset 回落补丁',
+      alreadyLog: alreadySkip,
+      doneLog: (file) => '已让未知预设 id 降级回落（minimal-win→minimal / 未知→standard） ' + file,
+      failLog: (file, err) => 'agent-preset 回落补丁失败(' + file + '): ' + err.message,
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // prompt 插值 name-invalid 字面透传补丁（graph-memory recall 字面量
+  // {{state.gold}} 每轮炸瘫 prompt 组装修复，追加条目）。
+  //
+  // 内核 dsh-system-prompt interpolate() 把所有 context/section 文本当 {{name}}
+  // 模板扫描：graph-memory recall 出的 DB 节点/episode 内容（不可信数据）里存了
+  // 字面 {{state.gold}}，名字带点不过 VARIABLE_NAME → 硬抛 → 整轮 prompt 组装
+  // 失败，会话每轮必瘫。补丁把该分支改为 warn + 字面透传；unknown-variable
+  // 分支保持硬抛（真实模板作者错误，如 dsh-workspace-anchor 有意引用 {{cwd}}）。
+  // 与 graph-memory 插件侧 defuseTemplateGroups 双层互补。cli:false（对齐
+  // agent-preset-fallback 先例：桌面壳 boot 链 applyAll 全量应用，CLI 同步期
+  // 不碰内核包源码之外的目标）。详见 patch-adapters 的
+  // transformPromptContextLiteral 注释。
+  // -------------------------------------------------------------------------
+  {
+    id: 'prompt-context-literal',
+    group: 'runtime',
+    order: 250,
+    kind: 'file',
+    layout: 'runtime-local',
+    wslLayout: 'wsl',
+    pkgRels: PROMPT_CONTEXT_LITERAL_PKG_RELS,
+    transform: transformPromptContextLiteral,
+    marker: PROMPT_CONTEXT_LITERAL_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: 'prompt 字面量透传补丁',
+      alreadyLog: alreadySkip,
+      doneLog: (file) => '已让非法变量名字面透传 + warn（unknown-variable 仍硬抛） ' + file,
+      failLog: (file, err) => 'prompt 字面量透传补丁失败(' + file + '): ' + err.message,
+    },
   },
 ];
 

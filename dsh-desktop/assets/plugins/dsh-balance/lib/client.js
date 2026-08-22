@@ -274,11 +274,33 @@ window.__ModuleLoader__.load({
 		 */
 		function apply(ctx) {
 			ensureCss();
-			ctx.effect(() => ctx.slots.register({
-				name: "conversation.composer.dock",
-				id: "balance",
-				order: 100
-			}, BalanceDock), "dsh-balance: composer dock entry");
+			// 一方包正确姿势（C2 定性，对齐 dsh-client-ui-goal 同款）：keyed slot 的
+			// 子条目必须经 ctx.slots.inject(key, factory) 注册——前端 boot 用
+			// Promise.all 并发物化全部插件 entry，不保证 conversation 大 bundle 先于
+			// 本插件小 bundle 就绪；裸 slots.register 会在父 entry 尚未声明 children
+			// 表时硬抛 "slot is not declared"（0.5.0 用户实机复现，插件整包加载失败）。
+			// inject 把注册推迟到父 entry 就绪后派发，消除冷缓存首启竞态。
+			// TA4：旧宿主（rc.7- 形态）slots kit 无 inject 时降级直 register
+			//（可能撞 conversation 未声明竞态，但优于整插件 TypeError 加载失败）。
+			ctx.effect(() => {
+				if (typeof ctx.slots.inject === "function") {
+					ctx.slots.inject(
+						"conversation.composer.dock",
+						() => ctx.slots.register({
+							name: "conversation.composer.dock",
+							id: "balance",
+							order: 100
+						}, BalanceDock),
+						"dsh-balance: composer dock entry"
+					);
+				} else {
+					ctx.slots.register({
+						name: "conversation.composer.dock",
+						id: "balance",
+						order: 100
+					}, BalanceDock);
+				}
+			});
 		}
 
 		exports.apply = apply;

@@ -13,9 +13,14 @@
 mod commands;
 mod pages;
 mod poc_page;
+// pub 供 tests/（session_notify_boundary.rs 等对抗测试）走纯函数契约
+// （N2 P1-D：模块头承诺的 pub 契约此前被私有 mod 挡住）。
+pub mod session_notify;
 mod supervisor;
 // pub 供 tests/sponsor_window.rs 集成测试走生产同款建窗路径（mock runtime）。
 pub mod windows;
+// C3 极早期日志：boot-early.log / 封顶追加 / panic hook 最早落盘（logging.rs）。
+mod logging;
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -131,7 +136,31 @@ fn chrono_like_now() -> String {
     shell_core::time::format_unix_secs(secs)
 }
 
+/// 便携版 userData 重定向（Electron main.js:5317 同语义，检测逻辑在
+/// shell_core::upgrade::portable_user_data_dir：PORTABLE_EXECUTABLE_DIR 环境
+/// 优先，否则 exe 同级 portable.marker）。重定向方式：环境变量注入
+///（shell-core paths 的覆盖通道复用，语义 = Electron app.setPath('userData')）。
+///
+/// 调用时机红线：必须在 run() 第一行、**早于 early_log/panic hook**——否则
+/// 首行 boot-early.log 与 pre-setup panic 会落到宿主 %APPDATA%\dsh-desktop，
+/// 便携「数据随 exe 走（data/）」语义被最早的日志打破，且崩溃取证被劈成
+/// AppData 与 data/ 两处（v0.5.x 便携实测形态）。幂等：非便携态零副作用。
+fn apply_portable_user_data_redirect() {
+    if let Some(portable) = shell_core::upgrade::portable_user_data_dir() {
+        std::env::set_var("DSH_TAURI_USERDATA", &portable);
+        eprintln!("[upgrade] 便携版运行：userData → {}", portable.display());
+    }
+}
+
 pub fn run() {
+    // C3：极早期落盘——run() 第一行就写 boot-early.log（v0.5.2 真机：进程死在
+    // Builder/setup 早期时 logs/ 目录从未被创建，全程零日志）。Builder::build
+    // 的 expect panic 也由此 hook 兜底落盘。
+    // 顺序：便携重定向在前（便携版首行日志必须落 exe 旁 data/，不得先写宿主
+    // %APPDATA%——见 apply_portable_user_data_redirect 时机红线）。
+    apply_portable_user_data_redirect();
+    logging::early_log("[boot] 壳进程 run() 入口");
+    logging::install_early_panic_hook();
     install_panic_hook();
     let mut builder = tauri::Builder::default();
     // 第二实例拉起（用户双击图标而应用已在跑）：聚焦既有主窗而非报错退出。
@@ -151,6 +180,17 @@ pub fn run() {
             }
         }));
     }
+    // C1：会话完成通知点击跳转兜底——tauri-plugin-notification 2.3.3 桌面无
+    // 点击回调（action_type_id 仅 mobile），通知发出时记录「最近通知的会话」，
+    // 主窗重新聚焦且在新鲜度窗内即补发 notification-jump（垫片已监听该事件，
+    // bridge-shim.js:78）。限定主窗：浮窗/宠物窗聚焦不得触发跳转。
+    builder = builder.on_window_event(|window, event| {
+        if window.label() == "main" {
+            if let tauri::WindowEvent::Focused(true) = event {
+                session_notify::on_main_window_focused(window.app_handle());
+            }
+        }
+    });
     builder
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -217,6 +257,8 @@ pub fn run() {
                             sv.shutdown();
                         }
                     }
+                    // C1：退出收割 session watcher 子进程（幂等）。
+                    session_notify::shutdown_watcher();
                 }
                 tauri::RunEvent::Exit => {
                     // std::process::exit 不跑 Drop：锁与内核树在此显式收尾
@@ -226,6 +268,9 @@ pub fn run() {
                             sv.shutdown();
                         }
                     }
+                    // C1：退出收割 session watcher 子进程（幂等；RunEvent::Exit
+                    // 为进程收尾必经点）。
+                    session_notify::shutdown_watcher();
                     if let Some(mut g) = INSTANCE_LOCK.lock().unwrap_or_else(|p| p.into_inner()).take() {
                         g.release();
                     }
@@ -237,13 +282,11 @@ pub fn run() {
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // ---- 升级适配：便携版 userData 重定向（Electron main.js:5317 同语义）----
-    // 顺序必须在「读取任何 userData 路径」之前：paths/锁/日志全部随之落到 data/。
-    if let Some(portable) = shell_core::upgrade::portable_user_data_dir() {
-        // 重定向方式：环境变量注入（shell-core paths 的 dev 覆盖通道复用，
-        // 语义 = Electron app.setPath('userData', portable)）。
-        std::env::set_var("DSH_TAURI_USERDATA", &portable);
-        eprintln!("[upgrade] 便携版运行：userData → {}", portable.display());
-    }
+    // 已在 run() 第一行完成（apply_portable_user_data_redirect）——此处不再
+    // 重复：任何 userData 路径读取（paths/锁/日志）之前必须已重定向。
+    // C3：目录分裂指针文件——%APPDATA%\DSH Desktop（Electron 内核 userData）
+    // 与 WebView2 data 目录各放指路 README（幂等，不迁移任何数据）。
+    logging::write_log_pointer_files();
     let state = AppState::empty();
     upgrade_first_run_report(&state);
     // ---- 静态页（loading / recovery / poc）经 preview-server 托管 ----
@@ -290,6 +333,25 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     };
     #[allow(unused_variables)]
     let main_win = windows::create_main_window(app.handle(), &initial_url, saved)?;
+    // ---- 文件拖放接线（F1，2026-08）----
+    // dragDropEnabled 默认 true（tauri-utils WindowConfig 默认；windows.rs
+    // 建主窗未关闭）：wry 在 WebView2 上注册 OLE DropTarget 并
+    // SetAllowExternalDrop(false)——页面 HTML5 drop 收不到外部文件
+    // （dsh-file-drop 插件在桌面端此前完全失效）。原生 DragDropEvent 在
+    // Rust 侧带完整路径 → route_drag_drop 过滤/分类后 app.emit
+    // CLIENT_FILE_DROP_EVENT 广播全窗口，bridge 垫片转发为页面级 window
+    // CustomEvent `client-file-drop`（dsh-file-drop 插件经
+    // window.addEventListener 消费；契约见文件尾部「文件拖放」段）。
+    // on_window_event 追加式注册，与 windows.rs 既有监听
+    //（Resized/CloseRequested）并存。
+    {
+        let dd_handle = app.handle().clone();
+        main_win.on_window_event(move |e| {
+            if let tauri::WindowEvent::DragDrop(ev) = e {
+                route_drag_drop(&dd_handle, ev);
+            }
+        });
+    }
     // 诊断开关：DSH_TAURI_DEVTOOLS=1 打开 DevTools（debug build）。
     if std::env::var("DSH_TAURI_DEVTOOLS").ok().as_deref() == Some("1") {
         #[cfg(debug_assertions)]
@@ -315,6 +377,31 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // 托盘失败不影响主窗可用性（日志告警即止）。
     if let Err(e) = setup_tray(app.handle()) {
         eprintln!("[tray] 初始化失败（不影响主窗）: {e}");
+    }
+
+    // ---- 客户端更新静默检查（一次性，不阻塞启动；引擎见 commands/updater_client.rs）----
+    // 独立线程 + 延迟 15s：不挤占启动关键路径（内核拉起/首屏），也给内核页
+    // 挂事件监听留时间；无更新 → 零打扰；离线/失败 → 完全静默（仅日志取证）；
+    // 有更新 → emit `client-update-available`（**事件名与载荷契约**：
+    // {"current","next","notes","asset":{"name","url","size"},"source":
+    // "github"|"gitee"}，U2 垫片消费；webview 若尚未挂监听而错过，可经菜单
+    // check-client-update 通道主动再查兜底）。PoC 回归/测试隔离模式不查。
+    if !poc_mode && std::env::var("DSH_TAURI_TEST_ISOLATION").ok().as_deref() != Some("1") {
+        let handle = app.handle().clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(15));
+            match tauri::async_runtime::block_on(commands::updater_client::check_latest(env!("CARGO_PKG_VERSION"))) {
+                Ok(commands::updater_client::CheckOutcome::Available(u)) => {
+                    route_log(format!(
+                        "[update] 检测到客户端新版本 {} → {}（{}，{}）",
+                        u.current, u.next, u.source, u.asset.name
+                    ));
+                    let _ = handle.emit("client-update-available", &u);
+                }
+                Ok(commands::updater_client::CheckOutcome::UpToDate) => {}
+                Err(e) => route_log(format!("[update] 启动更新检查失败（静默忽略）：{e}")),
+            }
+        });
     }
     Ok(())
 }
@@ -359,6 +446,80 @@ fn route_log(msg: String) {
     supervisor::file_log(&msg);
 }
 
+// ---------------------------------------------------------------------------
+// C2c 重启风暴渲染抑制（2026-08 崩溃环强化）：KernelReady 在「距上次整页
+// 换页 < 90s」内不再无条件 navigate——自动重启（崩溃重启/假死受控重启）换
+// 新内核时，旧页面脚本往往还活着（SPA 会自行重连新内核），反复整页换页
+// 会打断用户输入/滚动位置并重置页面状态。抑制时改发轻量探针（eval 一条
+// 经 renderer_heartbeat 通道回执的 invoke），确认页面死了才真正换页。
+// ---------------------------------------------------------------------------
+
+/// 上次**内核页**整页换页时刻（Unix ms；恢复页/初始 loading 换页不锚定）。
+static LAST_KERNEL_NAV_MS: AtomicU64 = AtomicU64::new(0);
+/// 上次换页使用的内核 URL（RV3 P1-2：抑制窗口内若新内核 URL **不同**
+/// （WSL `--port 0` 随机端口 / 端口漂移），页面探针活着也必须换页——
+/// 否则 SPA 钉死在死端口上且 KernelReady 只来一次，页面永不自愈）。
+static LAST_KERNEL_NAV_URL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// 渲染抑制窗口：窗口内的 KernelReady 只探针不换页。
+const KERNEL_NAV_SUPPRESS_WINDOW_MS: u64 = 90_000;
+
+/// 抑制窗口判定（纯函数，可单测）。
+fn should_suppress_kernel_nav(since_last_nav_ms: u64) -> bool {
+    since_last_nav_ms < KERNEL_NAV_SUPPRESS_WINDOW_MS
+}
+
+/// 是否可安全抑制换页：窗口内 **且** URL 未变（URL 变更 = 端口漂移，
+/// 抑制会把页面钉死在死端口上——RV3 P1-2）。
+fn suppressible(since_last_nav_ms: u64, url_changed: bool) -> bool {
+    should_suppress_kernel_nav(since_last_nav_ms) && !url_changed
+}
+
+/// KernelReady 换页入口（C2c）：
+/// - 距上次换页 ≥ 90s（或首次）/ URL 变更 → 直接整页换页；
+/// - 窗口内且 URL 相同 → 后台线程发轻量探针（心跳计数增量回执）：页面活
+///   → 跳过换页（日志留痕）；死了 → 换页。探针异步，不阻塞事件路由线程。
+fn kernel_ready_navigate(app: tauri::AppHandle, url: String) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = LAST_KERNEL_NAV_MS.load(Ordering::Relaxed);
+    let url_changed = {
+        let guard = LAST_KERNEL_NAV_URL.lock().unwrap_or_else(|p| p.into_inner());
+        guard.as_deref().is_some_and(|prev| prev != url)
+    };
+    if url_changed {
+        route_log(format!("[route] 内核 URL 变更（端口漂移），跳过渲染抑制直接换页（{url}）"));
+    }
+    if !suppressible(now.saturating_sub(last), url_changed) {
+        LAST_KERNEL_NAV_MS.store(now, Ordering::Relaxed);
+        *LAST_KERNEL_NAV_URL.lock().unwrap_or_else(|p| p.into_inner()) = Some(url.clone());
+        let _ = commands::navigate_main(&app, &url);
+        return;
+    }
+    std::thread::spawn(move || {
+        let Some(state) = app.try_state::<AppState>() else { return };
+        let Some(w) = app.get_webview_window("main") else { return };
+        let before = state.heartbeats.load(Ordering::Relaxed);
+        // 轻量探针：页面向壳回发一次心跳计数（bridge 垫片 renderer_heartbeat
+        // 通道——内核页有 __TAURI_INTERNALS__ invoke 能力）。
+        let _ = w.eval("try{window.__TAURI_INTERNALS__.invoke('renderer_heartbeat',{})}catch(e){}");
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        if state.heartbeats.load(Ordering::Relaxed) > before {
+            route_log(format!("[route] 重启风暴渲染抑制：距上次换页 <{KERNEL_NAV_SUPPRESS_WINDOW_MS}ms 且页面存活，跳过整页换页（{url}）"));
+        } else {
+            route_log(format!("[route] 重启风暴渲染抑制：页面探针无响应，执行整页换页（{url}）"));
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            LAST_KERNEL_NAV_MS.store(now, Ordering::Relaxed);
+            *LAST_KERNEL_NAV_URL.lock().unwrap_or_else(|p| p.into_inner()) = Some(url.clone());
+            let _ = commands::navigate_main(&app, &url);
+        }
+    });
+}
+
 fn route_one_event(app: &tauri::AppHandle, ev: SupervisorEvent) {
     match ev {
             SupervisorEvent::BootStep { name, ok, ms, error } => {
@@ -379,7 +540,8 @@ fn route_one_event(app: &tauri::AppHandle, ev: SupervisorEvent) {
                     let store = shell_core::SettingsStore::new(state.paths.settings.clone());
                     let _ = store.set("lastWebPort", serde_json::json!(port));
                 }
-                let _ = commands::navigate_main(app, &url);
+                // C2c：重启风暴渲染抑制（窗口内探针确认页面活，死了才整页换页）。
+                kernel_ready_navigate(app.clone(), url.clone());
                 if let Some(w) = app.get_webview_window("main") {
                     let diag_base = { let u = app.state::<AppState>().loading_url.lock().unwrap_or_else(|p| p.into_inner()).clone(); let mut o = String::new(); if let Some(pos) = u.rfind('/') { o = u[..pos].to_string(); } o };
                     match w.eval(format!("window.__DIAG_BASE__={:?}; window.__TAURI_INTERNALS__.invoke('current_session',{{sessionId:'[diag] t0'}}).then(function(){{fetch(window.__DIAG_BASE__+'/__diag/t0-invoke-OK')}},function(err){{fetch(window.__DIAG_BASE__+'/__diag/t0-invoke-REJECT-'+encodeURIComponent(String(err&&err.message||err)))}})", diag_base)) {
@@ -396,6 +558,14 @@ fn route_one_event(app: &tauri::AppHandle, ev: SupervisorEvent) {
                 // 余额轮询环（Electron startBalanceLoop 语义：首刷延迟 500ms +
                 // 3 分钟轮询 + 最小化暂停 + 恢复补刷；幂等重入——代数守卫防线程累积）。
                 commands::balance::start_balance_loop(app.clone());
+                // C1：会话完成通知链（Electron main.js:6337 boot 成功后
+                // new SessionWatcher(...).start() 的同点位）——vendor node 直起
+                // payload 根级 session-watcher.js（stdout 行协议），崩溃退避
+                // 重启/退出收割见 session_notify.rs；幂等（代数守卫）。
+                // 测试隔离模式不拉真 node 子进程。
+                if std::env::var("DSH_TAURI_TEST_ISOLATION").ok().as_deref() != Some("1") {
+                    session_notify::start_watcher(app.clone());
+                }
                 // 诊断探针（DSH_TAURI_DIAG=1）：换页 10s 后抓 dialog/composer/console 状态。
                 inject_diag_probe(app.clone());
             }
@@ -501,6 +671,17 @@ fn percent_encode(s: &str) -> String {
 
 /// 托盘：显示主窗 / 打开日志 / 退出（退出前同步杀树）。
 fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    /// 唤起主窗三件套——「显示主窗口」菜单项与托盘左键单击共用（不得复制两份）。
+    /// 幂等：已显示/已置前时再调无感，兼作双击防抖（见 on_tray_icon_event）。
+    /// show 在前：closeToTray 藏起的窗口也由此唤回；拿不到主窗时静默。
+    fn show_main(app: &tauri::AppHandle) {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.show();
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+        }
+    }
+
     let menu = tauri::menu::MenuBuilder::new(app)
         .text("show", "显示主窗口")
         .text("logs", "打开日志")
@@ -511,14 +692,12 @@ fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
         .icon(app.default_window_icon().cloned().ok_or("无应用图标")?)
         .tooltip("DSH Desktop")
         .menu(&menu)
-        .show_menu_on_left_click(true)
+        // 平台惯例：mac 托盘左键=弹菜单（macOS 惯例，保持现状）；Win/Linux
+        // 左键=直接唤起主窗、右键才弹菜单——桌面右下角主流习惯（用户反馈）。
+        // 运行时 cfg! 单链分支：布尔即平台差异全貌，无需复制两份 builder 链。
+        .show_menu_on_left_click(cfg!(target_os = "macos"))
         .on_menu_event(|app, ev| match ev.id().as_ref() {
-            "show" => {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.set_focus();
-                }
-            }
+            "show" => show_main(app),
             "logs" => {
                 // 跨平台开启器（explorer/open/xdg-open）——此前仅 Windows 拉
                 // explorer，mac/linux 托盘「打开日志」点了没反应。
@@ -536,10 +715,113 @@ fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
             }
             _ => {}
         })
+        // 左键唤起主窗（非 macOS）。双击防抖策略：Windows 双击序列连发
+        // Click(Up)→DoubleClick（首击即已唤起），三件套幂等 → 重复调用无
+        // 视觉抖动，无需抑制计时器。macOS 早退：左键已让位给菜单（平台惯例）。
+        // Linux(appindicator 后端)不派发图标点击事件，右键菜单仍由后端弹出。
+        .on_tray_icon_event(|tray, ev| {
+            if cfg!(target_os = "macos") {
+                return;
+            }
+            match ev {
+                tauri::tray::TrayIconEvent::Click {
+                    button: tauri::tray::MouseButton::Left,
+                    button_state: tauri::tray::MouseButtonState::Up,
+                    ..
+                }
+                | tauri::tray::TrayIconEvent::DoubleClick {
+                    button: tauri::tray::MouseButton::Left,
+                    ..
+                } => show_main(tray.app_handle()),
+                _ => {}
+            }
+        })
         .build(app)?;
     // 托盘生命周期：随进程退出回收；Drop 会摘图标，进程内需常驻 → forget。
     std::mem::forget(tray);
     Ok(())
+}
+
+/// 托盘左键行为形态锚点（用户反馈 #T1）：Win/Linux 左键=唤起主窗、右键=菜单；
+/// macOS 左键=菜单（平台惯例，保持现状）。include_str 形态断言，CRLF 归一。
+#[cfg(test)]
+mod tray_behavior_shape {
+    /// 仓库检出为 CRLF，锚点统一按 \n 书写。
+    fn src() -> String {
+        include_str!("lib.rs").replace("\r\n", "\n")
+    }
+
+    /// setup_tray 函数体段（首处定义 → forget 常驻行；测试模块自身在段外）。
+    fn tray_seg(src: &str) -> &str {
+        src.split("fn setup_tray")
+            .nth(1)
+            .and_then(|s| s.split("std::mem::forget").next())
+            .expect("setup_tray 函数体")
+    }
+
+    /// 左键弹菜单仅 macOS：cfg! 布尔等价于双分支字面量——mac 求值为 true
+    /// （菜单惯例不回归），Win/Linux 为 false（左键留给唤窗）。
+    #[test]
+    fn left_click_menu_only_on_macos() {
+        let src = src();
+        let seg = tray_seg(&src);
+        assert!(
+            seg.contains(".show_menu_on_left_click(cfg!(target_os = \"macos\"))"),
+            "show_menu_on_left_click 必须按平台取值：mac=true / Win+Linux=false: {seg}"
+        );
+    }
+
+    /// 非 macOS 左键唤起主窗：单击(Up)与双击同路由到三件套辅助函数。
+    #[test]
+    fn left_click_raises_window_via_shared_helper() {
+        let src = src();
+        let seg = tray_seg(&src);
+        assert!(seg.contains("on_tray_icon_event"), "必须挂托盘图标事件处理: {seg}");
+        assert!(
+            seg.contains("TrayIconEvent::Click")
+                && seg.contains("MouseButtonState::Up")
+                && seg.contains("TrayIconEvent::DoubleClick")
+                && seg.contains("MouseButton::Left"),
+            "左键单击(Left/Up)与双击(Left)都要唤起主窗: {seg}"
+        );
+        // 三件套：show（closeToTray 藏起也能唤回）/unminimize/set_focus。
+        for call in ["w.show()", "w.unminimize()", "w.set_focus()"] {
+            assert!(seg.contains(call), "主窗唤起三件套缺 {call}: {seg}");
+        }
+        // mac 早退（空白折叠后匹配，防缩进重排误伤）：左键已让位给菜单。
+        let flat = seg.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains("if cfg!(target_os = \"macos\") { return;"),
+            "macOS 左键不得唤窗（左键=菜单是 mac 托盘平台惯例）: {flat}"
+        );
+    }
+
+    /// 「显示主窗口」菜单项与左键唤起共用同一辅助函数，禁止复制两份三件套。
+    #[test]
+    fn show_menu_item_and_left_click_share_helper() {
+        let src = src();
+        let seg = tray_seg(&src);
+        assert_eq!(
+            seg.matches("fn show_main(").count(),
+            1,
+            "唤起辅助函数必须恰好定义一次: {seg}"
+        );
+        assert_eq!(
+            seg.matches("show_main(").count(),
+            3,
+            "定义 1 处 + 调用 2 处（show 菜单项 / 左键图标事件）: {seg}"
+        );
+    }
+
+    /// 托盘菜单三项不回归。
+    #[test]
+    fn tray_menu_items_unchanged() {
+        let src = src();
+        let seg = tray_seg(&src);
+        for item in ["显示主窗口", "打开日志", "退出"] {
+            assert!(seg.contains(item), "托盘菜单项「{item}」不得缺失: {seg}");
+        }
+    }
 }
 
 
@@ -720,6 +1002,21 @@ fn upgrade_first_run_report(state: &AppState) {
 /// 修法：代数号交替——新监测线程上岗即令旧线程（≤10s 内）自行退出，
 /// 任一时刻至多一个活跃监测线程。
 static HEARTBEAT_WATCHER_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// 心跳监测的「页面定时器有效」判定（纯函数，可单测）。
+///
+/// 不可见（closeToTray 隐藏）**或最小化**的主窗，其页面定时器被 WebView2
+/// 节流——Chromium 对 hidden 页面 5 分钟后进入 intensive throttling，
+/// `setInterval(heartbeat, 5s)` 实际退化为 ~1 次/分钟。此时心跳缺失不代表
+/// 页面挂死，不得计入失联（否则最小化挂后台 ~5 分钟后每 ~40s 被误
+/// `location.reload()`——C 路径「后台长挂恢复后页面死/事件断」的壳侧主因，
+/// 2026-08 最小化 7 分钟真机复现实证）。与 commands/balance.rs
+/// `window_visibility` 同口径：查询失败按「定时器有效」处理（宁可漏判停摆
+/// 也不误杀节流中的正常页面；真挂死由内核探活环与下次可见期兜底）。
+fn heartbeat_timer_active(visible: Option<bool>, minimized: Option<bool>) -> bool {
+    visible.unwrap_or(true) && !minimized.unwrap_or(false)
+}
+
 fn watch_renderer_heartbeat(app: tauri::AppHandle) {
     let gen = HEARTBEAT_WATCHER_GEN.fetch_add(1, Ordering::Relaxed) + 1;
     std::thread::spawn(move || {
@@ -750,8 +1047,11 @@ fn watch_renderer_heartbeat(app: tauri::AppHandle) {
             }
             let Some(state) = app.try_state::<AppState>() else { return };
             let Some(win) = app.get_webview_window("main") else { return };
-            // 不可见窗口定时器被节流（与 Electron 判定口径一致）——不计失联。
-            if !win.is_visible().unwrap_or(true) {
+            // 不可见/最小化窗口定时器被节流（与 Electron 判定口径一致）——
+            // 不计失联。最小化必须单独判：Win32 语义下最小化窗口
+            // IsWindowVisible 恒真，只判 is_visible 会漏（详见
+            // heartbeat_timer_active 文档；2026-08 最小化 7 分钟真机复现）。
+            if !heartbeat_timer_active(win.is_visible().ok(), win.is_minimized().ok()) {
                 stall = 0;
                 last = state.heartbeats.load(Ordering::Relaxed);
                 continue;
@@ -764,7 +1064,13 @@ fn watch_renderer_heartbeat(app: tauri::AppHandle) {
                 last = now;
             }
             if stall >= 4 {
-                eprintln!("[renderer-recovery] 可见主窗心跳停摆 {}0 秒，自动重载页面", stall);
+                // 落盘（v0.5.2 教训：GUI 安装态 eprintln 无人接收——自动重载
+                // 是用户可感知事件，desktop.log 必须留痕，否则「页面自己刷了/
+                // 流式被打断」在「打开日志」里无从取证）。
+                route_log(format!(
+                    "[renderer-recovery] 可见主窗心跳停摆 {}0 秒，自动重载页面",
+                    stall
+                ));
                 let _ = win.eval("try{location.reload()}catch(e){}");
                 stall = 0;
             }
@@ -858,6 +1164,90 @@ mod heartbeat_watcher_tests {
             "监测循环必须校验代数号并退出旧线程: {seg}"
         );
     }
+
+    /// 形态锚点（C 路径误重载修复，2026-08）：监测循环的失联豁免必须经
+    /// heartbeat_timer_active 判定（含 is_minimized）——只判 is_visible 时，
+    /// Win32 语义下最小化窗口 IsWindowVisible 恒真，WebView2 对 hidden 页面
+    /// 5 分钟后 intensive throttling（5s 心跳退化为 ~1/min）→ stall 4×10s
+    /// 判停摆 → 每 ~40s location.reload()（最小化 7 分钟真机复现）。
+    #[test]
+    fn heartbeat_watcher_exempt_check_covers_minimized_shape() {
+        let src = include_str!("lib.rs");
+        let seg = src
+            .split("fn watch_renderer_heartbeat")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n\n/// 诊断探针").next())
+            .expect("watch_renderer_heartbeat 函数体");
+        assert!(
+            seg.contains("heartbeat_timer_active(win.is_visible().ok(), win.is_minimized().ok())"),
+            "失联豁免必须走 heartbeat_timer_active（含最小化判定）: {seg}"
+        );
+        assert!(
+            !seg.contains("win.is_visible().unwrap_or(true)"),
+            "不得再裸判 is_visible（漏最小化节流形态）: {seg}"
+        );
+    }
+
+    /// heartbeat_timer_active 决策表（与 balance.rs window_visibility 同口径）：
+    /// 可见且未最小化 → 计；不可见 / 最小化（Win32 下 is_visible 仍真）→ 豁免；
+    /// 查询失败按「定时器有效」处理（宁可漏判停摆也不误杀节流页）。
+    #[test]
+    fn heartbeat_timer_active_decision_table() {
+        use super::heartbeat_timer_active;
+        assert!(heartbeat_timer_active(Some(true), Some(false)), "可见未最小化：正常计失联");
+        assert!(!heartbeat_timer_active(Some(false), Some(false)), "不可见（托盘隐藏）：豁免");
+        assert!(!heartbeat_timer_active(Some(true), Some(true)), "最小化（is_visible 仍真）：必须豁免——WebView2 hidden 节流");
+        assert!(!heartbeat_timer_active(Some(false), Some(true)), "不可见且最小化：豁免");
+        assert!(heartbeat_timer_active(None, None), "查询失败按定时器有效（不误杀）");
+        assert!(heartbeat_timer_active(None, Some(false)), "可见性未知 + 未最小化：按有效");
+        assert!(!heartbeat_timer_active(None, Some(true)), "可见性未知 + 最小化：豁免");
+        assert!(heartbeat_timer_active(Some(true), None), "最小化未知：按未最小化（与 balance 同默认）");
+    }
+}
+
+/// C2c 重启风暴渲染抑制（2026-08 崩溃环强化）：KernelReady 路由分支在
+/// 「距上次换页 < 90s」时不整页换页，改 eval 轻量探针确认页面活、死了才换页。
+#[cfg(test)]
+mod kernel_nav_suppression_tests {
+    use super::*;
+
+    /// 窗口判定表（纯函数）：0/89_999ms 抑制；90_000ms 起放行（含首次
+    /// last=0 的巨型间隔）。
+    #[test]
+    fn suppression_window_table() {
+        assert!(should_suppress_kernel_nav(0), "连续 KernelReady（重启风暴）必须抑制");
+        assert!(should_suppress_kernel_nav(89_999), "窗口内抑制");
+        assert!(!should_suppress_kernel_nav(90_000), "恰 90s 放行整页换页");
+        assert!(!should_suppress_kernel_nav(u64::MAX - 1), "首次换页（last=0）放行");
+    }
+
+    /// 形态锚点：KernelReady 分支必须经 kernel_ready_navigate（不得直连
+    /// navigate_main）；探针走 renderer_heartbeat 计数回执；窗口常量 90s。
+    #[test]
+    fn kernel_ready_routes_through_suppression_helper() {
+        let src = include_str!("lib.rs").replace("\r\n", "\n");
+        let seg = src
+            .split("SupervisorEvent::KernelReady { url, port } => {")
+            .nth(1)
+            .and_then(|s| s.split("SupervisorEvent::KernelExit").next())
+            .expect("KernelReady 路由分支");
+        assert!(seg.contains("kernel_ready_navigate(app.clone(), url.clone());"), "KernelReady 必须经抑制入口换页: {seg}");
+        assert!(!seg.contains("commands::navigate_main(app, &url)"), "不得直连整页换页（绕过 C2c）");
+        let helper = src
+            .split("fn kernel_ready_navigate")
+            .nth(1)
+            .and_then(|s| s.split("fn route_one_event").next())
+            .expect("kernel_ready_navigate 函数体");
+        // RV3 P1-2 后判定入口统一为 suppressible（窗口 + URL 未变）；旧的纯窗口
+        // 判定保留为内部纯函数。
+        assert!(helper.contains("suppressible("), "必须走窗口+URL 联合判定（URL 变更即换页）");
+        assert!(helper.contains("renderer_heartbeat"), "轻量探针必须经心跳计数回执通道");
+        assert!(helper.contains("LAST_KERNEL_NAV_MS.store"), "真实换页后必须更新锚点时刻");
+        assert!(helper.contains("LAST_KERNEL_NAV_URL"), "真实换页后必须记录 URL 锚点（漂移检测）");
+        // 探针不得阻塞事件路由线程（后台线程）。
+        assert!(helper.contains("std::thread::spawn"), "探针须后台线程（路由线程零阻塞）");
+        assert!(src.contains("KERNEL_NAV_SUPPRESS_WINDOW_MS: u64 = 90_000"), "90s 窗口常量锚点");
+    }
 }
 
 #[cfg(test)]
@@ -925,6 +1315,36 @@ mod repo_root_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// 便携重定向时机：apply_portable_user_data_redirect 必须在 early_log 之前
+    /// 生效——用启动器环境通道（PORTABLE_EXECUTABLE_DIR）注入验证：调用后
+    /// DSH_TAURI_USERDATA 已指向 <dir>/data（early_log 随之落便携 data/，
+    /// 不再写宿主 %APPDATA%）。非便携态不碰环境。
+    #[test]
+    fn portable_redirect_env_set_before_any_logging_would_run() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("dsh-tauri-portable-redirect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 前置：无便携输入时不得改动环境。
+        let saved = std::env::var_os("DSH_TAURI_USERDATA");
+        std::env::remove_var("DSH_TAURI_USERDATA");
+        std::env::remove_var("PORTABLE_EXECUTABLE_DIR");
+        apply_portable_user_data_redirect();
+        assert!(std::env::var_os("DSH_TAURI_USERDATA").is_none(), "非便携态不得写 DSH_TAURI_USERDATA");
+        // 启动器通道：重定向到 <dir>/data。
+        std::env::set_var("PORTABLE_EXECUTABLE_DIR", &dir);
+        apply_portable_user_data_redirect();
+        assert_eq!(std::env::var_os("DSH_TAURI_USERDATA"), Some(dir.join("data").into_os_string()),
+            "early_log 之前 DSH_TAURI_USERDATA 必须已指向便携 data/");
+        // 收尾还原（防污染同进程其他测试的路径解析）。
+        std::env::remove_var("PORTABLE_EXECUTABLE_DIR");
+        match saved {
+            Some(v) => std::env::set_var("DSH_TAURI_USERDATA", v),
+            None => std::env::remove_var("DSH_TAURI_USERDATA"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// NSIS 安装版布局 fixture：exe 与 dsh-desktop/ 同级、无 resources/。
     #[test]
     fn exe_walk_resolves_installed_flat_layout() {
@@ -958,3 +1378,155 @@ mod panic_hook_tests {
         assert_eq!(crate::supervisor::panic_payload_str(&42u8), "未知 panic 载荷");
     }
 }
+
+// ---------------------------------------------------------------------------
+// 文件拖放（F1，2026-08）：Rust DragDropEvent → client-file-drop 事件
+// ---------------------------------------------------------------------------
+//
+// 背景：Tauri 2 窗口默认 drag_drop_enabled=true（tauri-utils WindowConfig
+// 默认；windows.rs 建主窗未关闭），wry-0.55 在 WebView2 上据此注册 OLE
+// DropTarget 并 SetAllowExternalDrop(false)——页面 HTML5 dragover/drop 对
+// 外部文件不触发，dsh-file-drop 插件（document 级 drop 监听）在桌面端
+// 此前完全收不到拖放；网页端（浏览器直开 127.0.0.1）则原生工作——两端
+// 行为不一致的根源。修复路线：保持原生拦截（WebView2 远程页的 HTML5
+// File 本就拿不到完整路径，而插件对图片/二进制走「路径提示」语义正需要
+// 路径），Rust 侧 DragDropEvent::Drop{paths} 携带完整路径，过滤分类后
+// 广播给页面。
+//
+// 事件契约（壳→页面；bridge-shim.js 与 dsh-file-drop 插件消费方对齐）：
+// - 事件名：`client-file-drop`（app.emit 全窗口广播；垫片转发为页面级
+//   window CustomEvent 同名事件，插件 normalizeDropPayload 取
+//   detail.files，多余键被其 sanitizer 忽略）。
+// - 载荷：{"type":"drop","files":[{"path","name","ext","size","kind"}],
+//   "skipped":[{"path","name","reason"}]} / {"type":"enter","count":N} /
+//   {"type":"leave"}。
+// - kind 口径：image=内核附件白名单扩展名（dsh-attachment-local
+//   MEDIA_TYPES：png/jpeg/webp/gif）；text=插件 TEXT_EXT 同集或无扩展名；
+//   其余 binary。与插件 classifyFile 同判定序（image 优先）。
+
+/// 拖放广播事件名（垫片转发为页面级 window CustomEvent 同名事件，
+/// dsh-file-drop 插件消费）。
+pub const CLIENT_FILE_DROP_EVENT: &str = "client-file-drop";
+
+/// 单次拖放接受的文件数上限（超量部分进 skipped 而非悄悄丢弃）。
+pub const DROP_MAX_FILES: usize = 32;
+/// 单文件大小预检上限（路径提示语义不读内容，此为载荷/下游防御性上限）。
+pub const DROP_MAX_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// 图片扩展名白名单（内核 dsh-attachment-local MEDIA_TYPES 同口径）。
+pub const DROP_IMAGE_EXT: &[&str] = &[".png", ".jpg", ".jpeg", ".webp", ".gif"];
+/// 文本扩展名（与 dsh-file-drop 插件 client.js TEXT_EXT 同集）。
+pub const DROP_TEXT_EXT: &[&str] = &[
+    ".txt", ".md", ".markdown", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx",
+    ".json", ".jsonc", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+    ".py", ".rb", ".go", ".rs", ".java", ".c", ".h", ".cpp", ".hpp", ".cs",
+    ".php", ".sh", ".bat", ".ps1", ".sql", ".html", ".htm", ".css", ".scss",
+    ".less", ".xml", ".csv", ".tsv", ".log", ".env", ".gitignore", ".npmrc",
+    ".lock", ".sum", ".properties", ".editorconfig", ".vue", ".svelte",
+];
+
+/// 扩展名（小写含点；无扩展名/隐藏文件首点 → 空串，与插件 extOf 的
+/// dot<=0 同语义——「.gitignore」按无扩展名处理）。
+pub fn drop_ext(file_name: &str) -> String {
+    match file_name.rfind('.') {
+        Some(dot) if dot > 0 => file_name[dot..].to_ascii_lowercase(),
+        _ => String::new(),
+    }
+}
+
+/// 文件分类：image（内核白名单）/ text（插件 TEXT_EXT 或无扩展名）/ binary。
+/// 与插件 classifyFile 同判定序：image 优先，其次 text，兜底 binary。
+pub fn drop_kind(ext: &str) -> &'static str {
+    if DROP_IMAGE_EXT.contains(&ext) {
+        "image"
+    } else if ext.is_empty() || DROP_TEXT_EXT.contains(&ext) {
+        "text"
+    } else {
+        "binary"
+    }
+}
+
+/// Drop 预检结果（JSON 载荷直出，供事件 payload 组装与单测断言）。
+pub struct DropPrecheck {
+    pub files: Vec<serde_json::Value>,
+    pub skipped: Vec<serde_json::Value>,
+}
+
+/// Drop 路径预检：目录/不存在/超大/超量剔除进 skipped（带 reason），存活
+/// 项带 {path,name,ext,size,kind} 进 files。只读元数据，不读文件内容。
+pub fn precheck_drop_paths(paths: &[std::path::PathBuf]) -> DropPrecheck {
+    let mut out = DropPrecheck { files: Vec::new(), skipped: Vec::new() };
+    for p in paths {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let skip = |reason: &str| {
+            serde_json::json!({ "path": p.display().to_string(), "name": name, "reason": reason })
+        };
+        let Ok(meta) = std::fs::metadata(p) else {
+            out.skipped.push(skip("missing"));
+            continue;
+        };
+        if !meta.is_file() {
+            out.skipped.push(skip("directory"));
+            continue;
+        }
+        if meta.len() > DROP_MAX_FILE_BYTES {
+            out.skipped.push(skip("too-large"));
+            continue;
+        }
+        if out.files.len() >= DROP_MAX_FILES {
+            out.skipped.push(skip("too-many"));
+            continue;
+        }
+        let ext = drop_ext(&name);
+        out.files.push(serde_json::json!({
+            "path": p.display().to_string(),
+            "name": name,
+            "ext": ext,
+            "size": meta.len(),
+            "kind": drop_kind(&ext),
+        }));
+    }
+    out
+}
+
+/// DragDropEvent 路由：Drop→预检+全窗口广播；Enter/Leave→悬停反馈；
+/// Over 为高频位置噪声，不转发。
+fn route_drag_drop(app: &tauri::AppHandle, ev: &tauri::DragDropEvent) {
+    match ev {
+        tauri::DragDropEvent::Drop { paths, .. } => {
+            let pre = precheck_drop_paths(paths);
+            let _ = app.emit(
+                CLIENT_FILE_DROP_EVENT,
+                serde_json::json!({ "type": "drop", "files": pre.files, "skipped": pre.skipped }),
+            );
+        }
+        tauri::DragDropEvent::Enter { paths, .. } => {
+            let _ = app.emit(
+                CLIENT_FILE_DROP_EVENT,
+                serde_json::json!({ "type": "enter", "count": paths.len() }),
+            );
+        }
+        tauri::DragDropEvent::Leave => {
+            let _ = app.emit(CLIENT_FILE_DROP_EVENT, serde_json::json!({ "type": "leave" }));
+        }
+        tauri::DragDropEvent::Over { .. } => {} // 位置高频噪声，不转发
+        // DragDropEvent 跨 crate 标记 non_exhaustive：未来新增变体默认静默。
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TA1 测试加固门（用户批准的最小 cfg(test)] 门）：仅测试构建链接下方两个
+// 单元测试文件——它们需要访问私有 mod（commands::updater_client / logging）
+// 内的 pub 契约，tests/ 集成测试不可达。纯追加，零生产路径改动。
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+#[path = "ta1_property_unit.rs"]
+mod ta1_property_unit;
+
+#[cfg(test)]
+#[path = "ta1_concurrency_unit.rs"]
+mod ta1_concurrency_unit;

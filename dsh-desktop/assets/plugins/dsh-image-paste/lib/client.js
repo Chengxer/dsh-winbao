@@ -2,7 +2,8 @@
 //
 // 浏览器半边（classic-script bundle，经 __ModuleLoader__.load 注册）：
 //   · 监听对话页面的 paste 事件，从 clipboardData.items 提取图片文件
-//     （kind === 'file' 且 type 以 image/ 开头）；
+//     （kind === 'file' 且 type 以 image/ 开头）；rc.8 内核输入框原生接管
+//     的粘贴（defaultPrevented）让位，仅作官方管道缺席时的降级通道；
 //   · 经 preload 受控 IPC（dshDesktop.imagePaste.save）把图片保存到临时
 //     目录，拿到完整路径后按 dsh-file-drop 同款格式注入输入框路径提示
 //     （agent 用 inspect_image 工具分析图片后继续）；
@@ -161,6 +162,13 @@
   function attachPasteHandler() {
     if (typeof document === 'undefined') return;
     document.addEventListener('paste', function (e) {
+      // rc.8 内核输入框已原生把粘贴图片收进官方附件栏（textarea 的 onPaste
+      // → intakeImages；纯图与带文本粘贴都会 preventDefault）。本监听器在
+      // document 冒泡段晚于内核处理器执行：defaultPrevented 即「官方已接
+      // 手」→ 让位，避免同一张图既进原生附件栏、又追加一份路径提示文本
+      //（双重处理）。官方未接手（粘贴焦点不在输入框 / 会话忙 / 旧内核）时
+      // 维持原路径提示降级。
+      if (e.defaultPrevented) return;
       var cd = e.clipboardData;
       if (!cd) return;
       var files = window.__dshImagePasteCore.imageFilesFrom(cd.items);

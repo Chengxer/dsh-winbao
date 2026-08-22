@@ -91,20 +91,27 @@ mod tests {
         assert_eq!(REQUIRED_SURFACES.len(), 49, "契约方法计数（48+recovery.openLogs）");
     }
 
-    /// check-agent-update 需求变更锚点：菜单保留「检查 dsh 更新…」，垫片
-    /// 不再本地拦截（此前的 E_CUT_FEATURE 短路已删——Rust 侧 menu_action 走
-    /// npm latest 对比链实现）。E_CUT_FEATURE 不应再出现在垫片（无其他裁撤
-    /// 方法位需要垫片侧守卫；guard:action 通道本就不在垫片面）。
+    /// check-agent-update 退役锚点（v0.5.3）：npm 内核更新链整体退役
+    /// （内核随客户端分发，无 overlay 更新链）——菜单动作与垫片引用不得
+    /// 残留；更新项统一走 check-client-update（updater_client 双源链）。
+    /// E_CUT_FEATURE 不应出现在垫片（无其他裁撤方法位需要垫片侧守卫；
+    /// guard:action 通道本就不在垫片面）。
     #[test]
-    fn cut_feature_guard_present() {
-        assert!(BRIDGE_SHIM_JS.contains("check-agent-update"), "菜单项「检查 dsh 更新…」需保留");
-        assert!(!BRIDGE_SHIM_JS.contains("E_CUT_FEATURE"), "check-agent-update 已实现，垫片裁撤守卫应移除");
+    fn agent_update_menu_action_retired() {
+        assert!(!BRIDGE_SHIM_JS.contains("check-agent-update"), "check-agent-update 菜单动作已退役，不得残留");
+        assert!(BRIDGE_SHIM_JS.contains("check-client-update"), "更新项必须切换到 check-client-update");
+        assert!(!BRIDGE_SHIM_JS.contains("E_CUT_FEATURE"), "垫片不应有裁撤守卫残留");
     }
 
     #[test]
     fn event_names_align_contract() {
         for ev in ["window-maximized", "notification-jump", "balance-changed", "pet-state"] {
             assert!(BRIDGE_SHIM_JS.contains(ev), "事件 {ev} 缺失");
+        }
+        // 客户端更新链（v0.5.3）：available = 启动自动检查命中（红点/通知/
+        // 自动安装）；progress = 下载进度（菜单行尾就地百分比）。
+        for ev in ["client-update-available", "client-update-progress"] {
+            assert!(BRIDGE_SHIM_JS.contains(ev), "客户端更新事件 {ev} 缺失");
         }
         for js_ev in ["dsh-balance-changed", "dsh-pet-state"] {
             assert!(BRIDGE_SHIM_JS.contains(js_ev), "页面 CustomEvent {js_ev} 缺失");
@@ -261,21 +268,25 @@ mod window_chrome_tests {
     }
 
     /// ⋯ 下拉菜单（Electron preload renderMenu 复刻）：⋯ 按钮在 min/max/close
-    /// 左边；菜单含「检查 dsh 更新…」/更新源/三开关/reload/devtools/fullscreen/
-    /// open-browser/open-logs/sponsor/about/quit；**不含「检查客户端更新…」**
-    /// （唯一不展示的更新项；通道在壳侧保留但菜单不露出）。
+    /// 左边；菜单含「检查客户端更新…」（v0.5.3 唯一更新项，双源 GitHub/Gitee
+    /// 客户端更新链）/更新源/四开关（三 Electron 键 + toggle-auto-update）/
+    /// reload/devtools/fullscreen/open-browser/open-logs/sponsor/about/quit；
+    /// **不得再含「检查 dsh 更新」**（npm 内核链已随「内核随客户端分发」退役）。
     #[test]
     fn window_chrome_dots_menu_items() {
         for marker in [
-            "dch-menu-btn",                    // ⋯ 按钮（30x28 同款）
-            "cx: '2.4'",                       // 实心三点图形（Electron GLYPHS.menu 同款）
-            "MENU_ID",                         // 菜单面板 id
-            "menuItemHtml('check-agent-update'", // 保留「检查 dsh 更新…」
-            "检查 dsh 更新",
-            "更新源（点击复制）",
+            "dch-menu-btn",                            // ⋯ 按钮（30x28 同款）
+            "cx: '2.4'",                               // 实心三点图形（Electron GLYPHS.menu 同款）
+            "MENU_ID",                                 // 菜单面板 id
+            "menuItemHtml('check-client-update'",      // 唯一更新项「检查客户端更新…」
+            "检查客户端更新",
+            "下载并安装",                                // 可更新态的安装按钮
+            "更新源（点行内「复制」拷贝地址）",
             "menuItemHtml('toggle-notify'",
             "menuItemHtml('toggle-close-to-tray'",
             "menuItemHtml('toggle-balance'",
+            "menuItemHtml('toggle-auto-update'",       // 自动安装客户端更新开关
+            "自动安装客户端更新",
             "menuItemHtml('reload'",
             "menuItemHtml('devtools'",
             "menuItemHtml('fullscreen'",
@@ -283,29 +294,32 @@ mod window_chrome_tests {
             "menuItemHtml('open-logs'",
             "menuItemHtml('sponsor'",
             "☕ 请作者喝咖啡",
-            "sponsorWindow()",                 // sponsor 走赞助窗通道
+            "sponsorWindow()",                         // sponsor 走赞助窗通道
             "menuItemHtml('about'",
             "关于 DSH Desktop",
             "menuItemHtml('quit'",
-            "' data-act=\"' + act",            // 菜单项统一带 data-act（事件路由键）
-            "menu_action",                     // 动作统一经 menu_action 桥
+            "' data-act=\"' + act",                    // 菜单项统一带 data-act（事件路由键）
+            "menu_action",                             // 动作统一经 menu_action 桥
         ] {
             assert!(BRIDGE_SHIM_JS.contains(marker), "⋯ 菜单缺 {marker}");
         }
-        // 渲染段（renderMenu 函数体）不得出现客户端更新项——全文断言会误伤
-        // menu.action 注释里「为何不展示」的说明文字。
+        // 退役锚点（全文级）：npm 内核检查项与其文案不得以任何形态回潮。
+        assert!(!BRIDGE_SHIM_JS.contains("检查 dsh 更新"), "「检查 dsh 更新」已退役（内核随客户端分发）");
+        // 渲染段（updRowHtml + renderMenu 函数体）必须含客户端更新项。
         let menu_seg = BRIDGE_SHIM_JS
-            .split("function renderMenu()")
+            .split("function updRowHtml()")
             .nth(1)
             .and_then(|s| s.split("function closeMenu()").next())
-            .expect("renderMenu 函数段");
-        assert!(!menu_seg.contains("check-client-update"), "客户端更新项不得进菜单");
-        assert!(!menu_seg.contains("检查客户端更新"), "同上（中文文案）");
+            .expect("菜单渲染函数段（updRowHtml→closeMenu）");
+        assert!(menu_seg.contains("check-client-update"), "更新项必须进菜单渲染");
+        assert!(menu_seg.contains("检查客户端更新"), "同上（中文文案）");
+        assert!(!menu_seg.contains("check-agent-update"), "退役动作不得进渲染段");
     }
 
     /// ⋯ 菜单交互契约：点击外部 / Escape 关闭；开关类 toggle 后重渲染（菜单
-    /// 保持打开）；agent 更新检查就地回显（检查中…/可更新/已是最新/检查失败）；
-    /// 自愈重注不重复挂 document 监听。
+    /// 保持打开）；客户端更新检查就地回显（检查中…/可更新 vX/已是最新/
+    /// 检查失败）+ 下载进度百分比 + 有会话时的二次点击确认 + 启动自动检查
+    /// 命中的红点/系统通知/自动安装；自愈重注不重复挂 document 监听。
     #[test]
     fn window_chrome_dots_menu_interaction() {
         for marker in [
@@ -314,10 +328,18 @@ mod window_chrome_tests {
             "installMenuHooks",             // document 监听一次性安装
             "menuHooksInstalled",           // 防自愈重注重复累积
             "renderMenu()",                 // toggle 成功后重渲染（菜单不关）
-            "检查中…",                      // agent 更新检查就地反馈
+            "检查中…",                      // 客户端更新检查就地反馈
             "已是最新",
-            "检查失败",
             "可更新 v",
+            "检查失败",
+            "下载中 ",                       // 进度百分比（client-update-progress 驱动）
+            "下载完成，正在安装…",
+            "再点一次确认",                  // 有会话运行时的安装二次确认
+            "markUpdateDot",                // ⋯ 按钮红点（client-update-available）
+            "dch-dot",
+            "plugin:notification|notify",   // 系统通知走壳内既有通知插件 IPC
+            "handleClientUpdateAvailable",  // 事件消费入口（红点/通知/自动安装）
+            "autoInstallUpdates",           // 自动安装开关（app_init 回填）
         ] {
             assert!(BRIDGE_SHIM_JS.contains(marker), "菜单交互缺 {marker}");
         }
@@ -325,7 +347,7 @@ mod window_chrome_tests {
         let toggle_seg = BRIDGE_SHIM_JS
             .split("if (act === 'toggle-notify'")
             .nth(1)
-            .and_then(|s| s.split("if (act === 'check-agent-update'").next())
+            .and_then(|s| s.split("if (act === 'check-client-update'").next())
             .expect("toggle 分支");
         assert!(!toggle_seg.contains("closeMenu()"), "toggle 分支应留在菜单重渲染: {toggle_seg}");
     }
@@ -361,6 +383,74 @@ mod window_chrome_tests {
         assert!(
             inject_seg.contains("maxGlyphUnsub = dshDesktop.windowControls.onMaximizeChange(setMaxGlyph)"),
             "新订阅的退订器必须落回 maxGlyphUnsub"
+        );
+    }
+}
+
+/// T2 UI 修复：⋯ 菜单「更新源」复制按钮——中文「复制」/「已复制 ✓」不得
+/// 溢出按钮框（用户实测：按钮太小、字跑出框外）。复制按钮须有独立
+/// .dch-copy 类（不复用单字符快捷键徽章 .dch-kbd），且 CSS 必须带
+/// nowrap + fit-content 兜底；含中文的安装按钮 .dch-install 同守卫。
+#[cfg(test)]
+mod menu_copy_button_tests {
+    use super::BRIDGE_SHIM_JS;
+
+    #[test]
+    fn copy_button_has_dedicated_class_with_overflow_guards() {
+        // 独立类存在且被渲染段使用（GitHub/Gitee 两行各一个）。
+        assert!(BRIDGE_SHIM_JS.contains(".dch-copy{"), "复制按钮须有独立 .dch-copy 样式类");
+        assert_eq!(
+            BRIDGE_SHIM_JS.matches("button class=\"dch-copy\"").count(),
+            2,
+            "更新源两行（github/gitee）各一个复制按钮"
+        );
+        // .dch-copy 规则段内的溢出守卫。
+        let copy_css = BRIDGE_SHIM_JS
+            .split(".dch-copy{")
+            .nth(1)
+            .and_then(|s| s.split(".dch-copy:hover").next())
+            .expect(".dch-copy CSS 规则段");
+        for guard in ["white-space:nowrap", "min-width:fit-content", "box-sizing:border-box"] {
+            assert!(copy_css.contains(guard), ".dch-copy 缺溢出守卫 {guard}");
+        }
+    }
+
+    #[test]
+    fn chinese_text_badges_have_nowrap_guards() {
+        // 安装按钮（「下载并安装」）：同样不得换行/溢出。
+        let install_css = BRIDGE_SHIM_JS
+            .split(".dch-install{")
+            .nth(1)
+            .and_then(|s| s.split(".dch-install:hover").next())
+            .expect(".dch-install CSS 规则段");
+        for guard in ["white-space:nowrap", "min-width:fit-content"] {
+            assert!(install_css.contains(guard), ".dch-install 缺溢出守卫 {guard}");
+        }
+    }
+}
+
+/// 事件信封解包回归锚点（tauri-2.11.5 emit_js_script：回调收 {event, payload}）：
+/// onEvent 必须先解包 payload 再交 map/消费者——旧代码裸读导致 notification-jump/
+/// balance-changed/pet-state/更新进度/拖放转发全部字段 undefined（事件链静默失效）。
+#[cfg(test)]
+mod event_envelope_tests {
+    use super::BRIDGE_SHIM_JS;
+
+    #[test]
+    fn onevent_unwraps_envelope_payload() {
+        let seg = BRIDGE_SHIM_JS
+            .split("function onEvent(name, queue, map)")
+            .nth(1)
+            .and_then(|s| s.split("onEvent('window-maximized'").next())
+            .expect("onEvent 函数段");
+        assert!(
+            seg.contains("ev.payload !== undefined ? ev.payload : ev"),
+            "onEvent 必须解包信封（双形态回退）: {seg}"
+        );
+        // map 收到的必须是解包后的 payload（不得把信封传给 map）。
+        assert!(
+            seg.contains("map ? map(payload) : payload"),
+            "map 消费的是解包后的 payload"
         );
     }
 }

@@ -1284,6 +1284,157 @@ window.__ModuleLoader__.load({
 			return state.activePane ?? "";
 		}
 		//#endregion
+		//#region src/client/chunk-availability.ts
+		/**
+		* Chunk availability probes + the auto-retry loop for lazy chunk loads
+		* (pure functions + an injectable loop; the standalone compiled mirror
+		* lib/chunk-availability.js is unit-tested by
+		* dsh-desktop/scripts/test/unit-better-sidebar-chunk-retry.test.js).
+		*
+		* Background (0.5.0 user report): while the kernel process dies/restarts,
+		* `window.__DSH_MODULES__` is briefly missing, so a lazy chunk load threw
+		* `chunk "editor": client module system unavailable` and the view stayed on
+		* its manual-retry error state forever — to a user the sidebar looked
+		* bricked. The loop keeps probing with exponential backoff (2s/4s/8s/…
+		* capped at 30s, unlimited rounds) and wakes subscribed views when the
+		* module system and chunk come back, so recovery is automatic.
+		*/
+		const CHUNK_RETRY_BASE_DELAY_MS = 2000;
+		const CHUNK_RETRY_MAX_DELAY_MS = 30000;
+		/**
+		* Delay before the next auto-retry attempt: base * 2^(failedAttempts-1),
+		* capped at max. `failedAttempts` counts loads that already failed
+		* (1 = right after the first failure → base). Non-positive/non-finite
+		* input is treated as 1 (never 0 / NaN / Infinity delay).
+		*/
+		function nextDelayMs(failedAttempts, base = CHUNK_RETRY_BASE_DELAY_MS, max = CHUNK_RETRY_MAX_DELAY_MS) {
+			const n = Number.isFinite(failedAttempts) && failedAttempts >= 1 ? Math.floor(failedAttempts) : 1;
+			const b = Number.isFinite(base) && base > 0 ? base : CHUNK_RETRY_BASE_DELAY_MS;
+			const m = Number.isFinite(max) && max > 0 ? max : CHUNK_RETRY_MAX_DELAY_MS;
+			return Math.min(b * 2 ** (n - 1), Math.max(b, m));
+		}
+		/**
+		* Whether the client module system (`globalThis.__DSH_MODULES__`, set by
+		* the shell before plugins activate) is present with a callable import —
+		* the cheap probe every retry round runs first; while it is down the
+		* chunk script is not even fetched.
+		*/
+		function isModuleSystemAvailable(globalLike = globalThis) {
+			if (globalLike === null || typeof globalLike !== "object") return false;
+			const modules = globalLike.__DSH_MODULES__;
+			return typeof modules === "object" && modules !== null && typeof modules.import === "function";
+		}
+		/**
+		* Whether a chunk script already executed and registered its factory on
+		* the plugin-owned `__dshChunks__` registry (true → a retry only needs
+		* the externals require, not a re-fetch).
+		*/
+		function isChunkRegistered(globalLike, name) {
+			if (globalLike === null || typeof globalLike !== "object") return false;
+			return typeof globalLike.__dshChunks__?.[name] === "function";
+		}
+		/** Shared error copy for the unavailable case (load + tests assert this). */
+		function moduleSystemUnavailableMessage(chunk) {
+			return `[dsh-better-sidebar] chunk "${chunk}": client module system unavailable`;
+		}
+		/**
+		* One shared auto-retry loop per chunk: exponential backoff, unlimited
+		* rounds, exactly one pending timer however many views subscribe. The
+		* loop self-disposes when its last subscriber unsubscribes (a view
+		* unmounting can never leak a timer), on success (ready event), or via
+		* dispose() (plugin HMR reset). Subscriber callbacks are isolated: a
+		* throwing view breaks nothing.
+		*/
+		function createChunkRetryLoop(name, options) {
+			const { isAvailable = () => isModuleSystemAvailable(globalThis), attemptLoad, schedule } = options;
+			const timer = schedule ?? ((fn, delayMs) => {
+				const id = setTimeout(fn, delayMs);
+				return () => {
+					clearTimeout(id);
+				};
+			});
+			let fails = 1;
+			let pending;
+			let inFlight = false;
+			let done = false;
+			const subscribers = /* @__PURE__ */ new Set();
+			const emit = (event) => {
+				for (const onEvent of [...subscribers]) {
+					try {
+						onEvent(event);
+					} catch (error) {
+						console.error(`[dsh-better-sidebar] chunk "${name}" retry subscriber error:`, error);
+					}
+				}
+			};
+			const cancelPending = () => {
+				if (pending !== void 0) {
+					pending();
+					pending = void 0;
+				}
+			};
+			const scheduleProbe = () => {
+				cancelPending();
+				pending = timer(() => {
+					void probe();
+				}, nextDelayMs(fails));
+			};
+			const finish = () => {
+				done = true;
+				cancelPending();
+			};
+			const probe = async () => {
+				pending = void 0;
+				if (done) return;
+				if (!isAvailable()) {
+					fails += 1;
+					emit({ attempt: fails, ready: false });
+					scheduleProbe();
+					return;
+				}
+				inFlight = true;
+				try {
+					await attemptLoad();
+				} catch {
+					inFlight = false;
+					if (done) return;
+					fails += 1;
+					emit({ attempt: fails, ready: false });
+					scheduleProbe();
+					return;
+				}
+				inFlight = false;
+				finish();
+				emit({ attempt: fails, ready: true });
+			};
+			return {
+				subscribe(onEvent) {
+					if (done) throw new Error(`[dsh-better-sidebar] chunk "${name}" retry loop already finished`);
+					subscribers.add(onEvent);
+					if (pending === void 0 && !inFlight) scheduleProbe();
+					let subscribed = true;
+					return () => {
+						if (!subscribed) return;
+						subscribed = false;
+						subscribers.delete(onEvent);
+						if (subscribers.size === 0) finish();
+					};
+				},
+				get active() {
+					return !done;
+				},
+				poke() {
+					if (done || inFlight) return;
+					cancelPending();
+					void probe();
+				},
+				dispose() {
+					subscribers.clear();
+					finish();
+				}
+			};
+		}
+		//#endregion
 		//#region src/client/chunk-loader.ts
 		/**
 		* The platform externals a chunk bundle may require (mirror of
@@ -1366,7 +1517,7 @@ window.__ModuleLoader__.load({
 				const test = testLoaders.get(name);
 				if (test !== void 0) return test();
 				const modules = moduleSystem();
-				if (modules === void 0) throw new Error(`[dsh-better-sidebar] chunk "${name}": client module system unavailable`);
+				if (modules === void 0 || !isModuleSystemAvailable(globalThis)) throw new Error(moduleSystemUnavailableMessage(name));
 				await scriptLoader(CHUNK_URL(name));
 				const factory = chunkRegistry()[name];
 				if (typeof factory !== "function") throw new Error(`[dsh-better-sidebar] chunk "${name}" script did not register its factory`);
@@ -1379,12 +1530,79 @@ window.__ModuleLoader__.load({
 			return task;
 		}
 		/**
+		* One auto-retry loop per chunk name (module-level singleton: any number of
+		* mounted lazy views for the same chunk share one loop, one timer) — the
+		* dedup that keeps HMR/re-mounts from stacking retry rounds.
+		*/
+		const retryLoops = /* @__PURE__ */ new Map();
+		/** The single document visibility listener poking all live loops (lazy). */
+		let detachVisibilityPoke;
+		function ensureVisibilityPoke() {
+			if (detachVisibilityPoke !== void 0) return;
+			if (typeof document === "undefined" || typeof document.addEventListener !== "function") return;
+			const onVisible = () => {
+				if (document.visibilityState !== "visible") return;
+				for (const loop of retryLoops.values()) loop.poke();
+			};
+			document.addEventListener("visibilitychange", onVisible);
+			detachVisibilityPoke = () => {
+				document.removeEventListener("visibilitychange", onVisible);
+				detachVisibilityPoke = void 0;
+			};
+		}
+		function dropVisibilityPokeIfIdle() {
+			if (retryLoops.size === 0 && detachVisibilityPoke !== void 0) detachVisibilityPoke();
+		}
+		function retryLoopFor(name) {
+			let loop = retryLoops.get(name);
+			if (loop === void 0) {
+				loop = createChunkRetryLoop(name, {
+					attemptLoad: async () => {
+						await loadChunk(name);
+					}
+				});
+				retryLoops.set(name, loop);
+				ensureVisibilityPoke();
+			}
+			return loop;
+		}
+		function dropRetryLoopIfIdle(name, loop) {
+			if (retryLoops.get(name) === loop && !loop.active) {
+				retryLoops.delete(name);
+				dropVisibilityPokeIfIdle();
+			}
+		}
+		/**
+		* Subscribe to the chunk's auto-retry loop after a failed load. The loop
+		* probes `__DSH_MODULES__` (cheap check) and re-attempts the load every
+		* round with exponential backoff (2s → 30s cap, unlimited); events update
+		* the view's "waiting" copy, `ready: true` tells it to re-load and
+		* hot-recover. Returns the unsubscribe — the view's effect cleanup calls
+		* it; when the LAST view of a chunk unsubscribes the loop (and its timer)
+		* is dropped entirely.
+		*/
+		function ensureChunkAutoRetry(name, onEvent) {
+			const loop = retryLoopFor(name);
+			const unsubscribe = loop.subscribe(onEvent);
+			let active = true;
+			return () => {
+				if (!active) return;
+				active = false;
+				unsubscribe();
+				dropRetryLoopIfIdle(name, loop);
+			};
+		}
+		/**
 		* Drop all chunk state for a fresh plugin activation (HMR-safe): clear the
-		* in-memory cache and any test-registry entries, so the next lazy open
-		* re-fetches and re-executes the current chunk scripts (the registry slots
-		* are overwritten by the re-execution — no cleanup needed).
+		* in-memory cache, any test-registry entries, and every auto-retry loop
+		* (their pending timers are cancelled), so the next lazy open re-fetches
+		* and re-executes the current chunk scripts (the registry slots are
+		* overwritten by the re-execution — no cleanup needed).
 		*/
 		function resetChunks() {
+			for (const loop of retryLoops.values()) loop.dispose();
+			retryLoops.clear();
+			dropVisibilityPokeIfIdle();
 			cache.clear();
 			testLoaders.clear();
 			externalsRequire = void 0;
@@ -1420,6 +1638,7 @@ window.__ModuleLoader__.load({
 			terminalError: "终端连接失败",
 			terminalConnectFailed: "终端多次连接失败",
 			terminalRetry: "重试",
+			chunkAutoRetryWaiting: "正在等待后端就绪，将自动恢复…（第 {n} 次尝试）",
 			preview: "预览",
 			edit: "编辑",
 			refresh: "刷新",
@@ -1640,6 +1859,7 @@ window.__ModuleLoader__.load({
 			terminalError: "Terminal connection failed",
 			terminalConnectFailed: "Terminal failed to connect repeatedly",
 			terminalRetry: "Retry",
+			chunkAutoRetryWaiting: "Waiting for the backend to come back — recovering automatically… (attempt {n})",
 			preview: "Preview",
 			edit: "Edit",
 			refresh: "Refresh",
@@ -2926,6 +3146,7 @@ window.__ModuleLoader__.load({
 			const [state, setState] = (0, react.useState)({ status: "loading" });
 			(0, react.useEffect)(() => {
 				let cancelled = false;
+				let stopAutoRetry;
 				setState({ status: "loading" });
 				loadChunk(chunk).then((mod) => {
 					if (cancelled) return;
@@ -2945,11 +3166,21 @@ window.__ModuleLoader__.load({
 					if (cancelled) return;
 					setState({
 						status: "error",
-						message: error instanceof Error ? error.message : String(error)
+						message: error instanceof Error ? error.message : String(error),
+						autoAttempt: 1
+					});
+					stopAutoRetry = ensureChunkAutoRetry(chunk, (event) => {
+						if (cancelled) return;
+						if (event.ready) {
+							setAttempt((current) => current + 1);
+							return;
+						}
+						setState((prev) => prev.status === "error" ? { ...prev, autoAttempt: event.attempt } : prev);
 					});
 				});
 				return () => {
 					cancelled = true;
+					stopAutoRetry?.();
 				};
 			}, [
 				chunk,
@@ -2962,7 +3193,9 @@ window.__ModuleLoader__.load({
 			});
 			if (state.status === "error") return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: sidebar_module_css_default.editorError,
-				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: state.message }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: state.message }), state.autoAttempt !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+					children: t("chunkAutoRetryWaiting", { n: state.autoAttempt })
+				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 					type: "button",
 					className: sidebar_module_css_default.terminalRetry,
 					onClick: () => {

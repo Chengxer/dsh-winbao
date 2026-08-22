@@ -1,0 +1,116 @@
+{
+  "_meta": {
+    "updateFlow": "快照由 ta16-golden.test.js 从源码提取生成，禁止手编；文案有意变更时执行 UPDATE_SNAPSHOTS=1 npm test（在 dsh-desktop 目录）重写后随代码一起 review 提交。",
+    "note": "垫片 ⋯ 菜单：菜单项序 + 客户端更新行全状态文案 + 其他菜单区文案",
+    "sources": [
+      "dsh-tauri/src-tauri/crates/bridge/dist/bridge-shim.js"
+    ]
+  },
+  "menuItems": [
+    {
+      "act": "toggle-notify",
+      "label": "会话完成通知"
+    },
+    {
+      "act": "toggle-close-to-tray",
+      "label": "关闭时最小化到托盘"
+    },
+    {
+      "act": "toggle-balance",
+      "label": "显示余额/本轮费用"
+    },
+    {
+      "act": "toggle-auto-update",
+      "label": "自动安装客户端更新"
+    },
+    {
+      "act": "reload",
+      "label": "重新加载"
+    },
+    {
+      "act": "devtools",
+      "label": "开发者工具"
+    },
+    {
+      "act": "fullscreen",
+      "label": "全屏"
+    },
+    {
+      "act": "open-browser",
+      "label": "在浏览器中打开"
+    },
+    {
+      "act": "open-logs",
+      "label": "打开日志目录"
+    },
+    {
+      "act": "sponsor",
+      "label": "☕ 请作者喝咖啡"
+    },
+    {
+      "act": "about",
+      "label": "关于 DSH Desktop"
+    },
+    {
+      "act": "quit",
+      "label": "退出"
+    }
+  ],
+  "updateRowLabels": [
+    "检查客户端更新…",
+    "检查客户端更新…",
+    "检查失败：",
+    "下载完成，正在安装…",
+    "下载中 ",
+    "下载完成，正在安装…",
+    "已下载 v",
+    "，请拖入 Applications 完成更新",
+    "已更新到 v",
+    "，重启应用后生效",
+    "已是最新",
+    "可更新 v",
+    "（源：",
+    "会话运行中，再点一次确认",
+    "下载并安装",
+    "<span>检查客户端更新…</span><span class=\"dch-upd-info\">"
+  ],
+  "otherMenuTexts": [
+    "检查客户端更新…",
+    "检查失败：",
+    "下载完成，正在安装…",
+    "下载中 ",
+    "已下载 v",
+    "，请拖入 Applications 完成更新",
+    "已更新到 v",
+    "，重启应用后生效",
+    "已是最新",
+    "可更新 v",
+    "（源：",
+    "会话运行中，再点一次确认",
+    "下载并安装",
+    "<span>检查客户端更新…</span><span class=\"dch-upd-info\">",
+    "，请将 DSH Desktop 拖入 Applications 完成更新",
+    "未知错误",
+    "发现新版本 v",
+    "，点击右上角 ⋯ 菜单查看并安装",
+    "未知",
+    "<div class=\"dch-repos-title\">更新源（点行内「复制」拷贝地址）</div>",
+    "</span><button class=\"dch-copy\" data-copy=\"github\" title=\"复制地址\">复制</button></div>",
+    "</span><button class=\"dch-copy\" data-copy=\"gitee\" title=\"复制地址\">复制</button></div>",
+    "会话完成通知",
+    "关闭时最小化到托盘",
+    "显示余额/本轮费用",
+    "自动安装客户端更新",
+    "重新加载",
+    "开发者工具",
+    "全屏",
+    "在浏览器中打开",
+    "打开日志目录",
+    "☕ 请作者喝咖啡",
+    "关于 DSH Desktop",
+    "退出",
+    "检查中…",
+    "返回形态异常",
+    "已复制 ✓"
+  ]
+}

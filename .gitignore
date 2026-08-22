@@ -43,3 +43,10 @@ _float-diag.js
 _*.js
 _*.diff
 .qoder/
+
+# RV5 终检追加（2026-08-22）：本地调试/上传暂存目录，不入库
+.g-up4/
+.g52/
+.gitee-upload/
+target-s1/
+*.exe

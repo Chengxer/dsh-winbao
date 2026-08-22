@@ -85,6 +85,11 @@ const COMPANION_PLUGINS = [
   // 把同一工作区内的会话/追问/分支呈现为可拖拽缩放的对话画布；bundle 插件，
   // 零依赖、复用现有 dsh web 服务。上游：https://github.com/liangmianya/dsh-synapse
   { id: 'synapse', name: 'dsh-synapse' },
+  // 子代理活动快视（本仓库内置）：Task/subagent 委派调用的展开式活动视图
+  // （内联命令/文件明细 + 打开子会话）+ 会话头部命令/文件聚合条；明细全部
+  // 来自客户端已加载的会话事件流（零后端请求）。宿主半边仅注册 settings
+  // 命名空间，UI 全在客户端半边（toolview 按 key 注册）。
+  { id: 'dsh-subagent-lens', name: '@dsh-external/dsh-subagent-lens' },
 ];
 
 /** 包名 → assets/plugins 下的目录名（去 scope 前缀）。 */

@@ -32,15 +32,23 @@ const BALANCE_TICK_MS: u64 = 5_000;
 /// 首刷延迟（Electron A-10：首屏稳定 500ms 后再起非关键链，避开首帧窗口）。
 const BALANCE_FIRST_FETCH_DELAY_MS: u64 = 500;
 
-/// 余额链共享状态（最近一次结果缓存 + in-flight 去重）。
+/// 余额链共享状态（最近一次结果缓存 + in-flight 去重 + 非强制路径节流时间戳）。
 pub struct BalanceState {
     pub last: Mutex<Option<serde_json::Value>>,
     fetching: AtomicBool,
+    /// 最近一次**发起**取数的时刻（N2 P1-C：非强制路径 30s 节流——Electron
+    /// maybeRefreshBalance 经 balance-scheduler throttleMs 的同款语义；强制
+    /// 路径（balance_refresh 命令/菜单 toggle）不受限）。
+    last_attempt: Mutex<Option<std::time::Instant>>,
 }
 
 impl BalanceState {
     pub fn new() -> Self {
-        Self { last: Mutex::new(None), fetching: AtomicBool::new(false) }
+        Self {
+            last: Mutex::new(None),
+            fetching: AtomicBool::new(false),
+            last_attempt: Mutex::new(None),
+        }
     }
 }
 
@@ -88,23 +96,62 @@ fn fetch_once(app: &AppHandle) -> Option<serde_json::Value> {
 
 /// 取数 + 缓存 + 唯一出口推送。in-flight 去重（Electron balance-scheduler
 /// 同语义）：并发触发共享同一次 node 子进程，不叠请求。
-fn fetch_and_push(app: &AppHandle) {
+/// 返回值：本轮是否取到数据（VB4 补齐——Electron scheduleRetry 的失败加速
+/// 重试语义：失败后轮询环按 30s→60s→120s→300s 阶梯缩短下一轮间隔，成功即
+/// 清零回 3min 常规节拍）。
+fn fetch_and_push(app: &AppHandle) -> bool {
     let state = app.state::<AppState>();
     if state.balance.fetching.swap(true, Ordering::AcqRel) {
-        return; // 已有在途取数：直接返回（不释放旗标）
+        return false; // 已有在途取数：直接返回（不释放旗标）——不算失败
     }
-    if let Some(v) = fetch_once(app) {
+    let ok = fetch_once(app).map(|v| {
         *state.balance.last.lock().unwrap_or_else(|p| p.into_inner()) = Some(v.clone());
         let _ = app.emit("balance-changed", v);
-    }
+        true
+    });
     state.balance.fetching.store(false, Ordering::Release);
+    ok.unwrap_or(false)
+}
+
+/// 失败加速重试阶梯（VB4：Electron scheduleRetry 30s→1m→2m→5m 同语义——
+/// 失败后不等满 3min 常规轮询，按连续失败次数取下一轮间隔）。
+fn retry_interval(consecutive_failures: u32) -> Duration {
+    match consecutive_failures.min(4) {
+        0 => Duration::from_secs(BALANCE_POLL_SECS),
+        1 => Duration::from_secs(30),
+        2 => Duration::from_secs(60),
+        3 => Duration::from_secs(120),
+        _ => Duration::from_secs(300),
+    }
 }
 
 /// 触发一次后台刷新（balance_refresh 命令 / 菜单 toggle-balance 用）：
 /// 立即返回（命令不阻塞渲染进程），取数在后台线程。
+///
+/// C2 挂点（Electron main.js:2642 onSessionTurnEnd 首行 maybeRefreshBalance）：
+/// 会话回合完成 → `session_notify::handle_turn_end` 首行即调本函数——先于
+/// notifyOnTurnEnd 开关/聚焦/限流门，任何 turn-end 都刷余额（in-flight 去重
+/// 保证与轮询环并发不叠请求）。
 pub fn trigger_fetch(app: &AppHandle) {
     let h = app.clone();
     std::thread::spawn(move || fetch_and_push(&h));
+}
+
+/// C2 非强制路径（N2 P1-C）：turn-end 触发的刷新走 30s 节流——Electron
+/// maybeRefreshBalance 的 scheduler 语义（30s 内多次 turn-end 只发一次真实
+/// 请求；流式多回合不逐回合起 node 子进程）。节流以「上次发起」计（无论成败），
+/// 与 in-flight 去重互补；菜单/命令强制路径仍走 [`trigger_fetch`] 不受限。
+pub fn trigger_fetch_throttled(app: &AppHandle) {
+    const TURN_END_THROTTLE: std::time::Duration = std::time::Duration::from_secs(30);
+    {
+        let state = app.state::<crate::AppState>();
+        let mut last = state.balance.last_attempt.lock().unwrap_or_else(|p| p.into_inner());
+        if last.is_some_and(|t| t.elapsed() < TURN_END_THROTTLE) {
+            return; // 窗口内：静默跳过（Electron scheduler 同款早退）
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    trigger_fetch(app);
 }
 
 /// 可见性判定纯函数（主窗缺省按不可见处理——无窗时轮询暂停，防后台空刷）。
@@ -138,6 +185,7 @@ pub fn start_balance_loop(app: AppHandle) {
         fetch_and_push(&app);
         let mut last_fetch = Instant::now();
         let mut was_visible = main_window_visible(&app);
+        let mut failures: u32 = 0; // 连续取数失败次数（VB4 加速重试阶梯）
         loop {
             std::thread::sleep(Duration::from_millis(BALANCE_TICK_MS));
             if BALANCE_LOOP_GEN.load(Ordering::Relaxed) != gen {
@@ -158,13 +206,15 @@ pub fn start_balance_loop(app: AppHandle) {
                 if let Some(v) = cached {
                     let _ = app.emit("balance-changed", v);
                 }
-                fetch_and_push(&app);
+                failures = if fetch_and_push(&app) { 0 } else { failures.saturating_add(1) };
                 last_fetch = Instant::now();
                 was_visible = true;
                 continue;
             }
-            if last_fetch.elapsed() >= Duration::from_secs(BALANCE_POLL_SECS) {
-                fetch_and_push(&app);
+            // VB4：失败加速重试——常规轮询间隔按连续失败次数走阶梯（成功即回
+            // 3min；Electron scheduleRetry 30s→1m→2m→5m 同语义）。
+            if last_fetch.elapsed() >= retry_interval(failures) {
+                failures = if fetch_and_push(&app) { 0 } else { failures.saturating_add(1) };
                 last_fetch = Instant::now();
             }
         }

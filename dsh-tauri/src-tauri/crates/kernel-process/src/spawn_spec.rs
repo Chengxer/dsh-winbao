@@ -65,6 +65,17 @@ pub fn node_args(crash_shield: Option<&std::path::Path>) -> Vec<String> {
     args
 }
 
+/// WSL 包装 spawn 的 wsl.exe argv（契约 wsl-backend.md §4.3 / design D2）：
+/// `["-d", <distro>, "-e", "sh", "-lc", <cmd>]`——严格独立 argv 单词
+/// （wsl.exe 只接受 `--` 后按空格拆开的 argv；整条命令拼一个带空格的字符串
+/// 会被当单词直接 exec 失败）。`-e` 跳过默认 shell 二次解析；`sh -lc` 登录
+/// shell 使 fnm/nvm 的 node 进 PATH（**不双重嵌套登录 shell**——Electron 已
+/// 清理过该问题）。cmd 内已含 `cd`/pid 文件/`exec node`，由调用方经
+/// wsl-backend crate 的 spec 构造。
+pub fn wsl_spawn_args(distro: &str, cmd: &str) -> Vec<String> {
+    vec!["-d".into(), distro.into(), "-e".into(), "sh".into(), "-lc".into(), cmd.into()]
+}
+
 /// 子进程环境白名单（Windows 必需集 + node 运行必需集）。
 /// Electron 版 shieldArgs 的语义：**白名单**而非黑名单（防泄漏任意父进程变量）。
 pub const ENV_ALLOWLIST: &[&str] = &[
@@ -162,5 +173,19 @@ mod tests {
         assert!(!ENV_ALLOWLIST.contains(&"NODE_OPTIONS"));
         assert!(!ENV_ALLOWLIST.contains(&"ELECTRON_RUN_AS_NODE"));
         assert!(ENV_ALLOWLIST.contains(&"SystemRoot"));
+    }
+
+    /// WSL 包装 argv：严格独立单词（无空格拼接）、参数序 -d → -e → sh -lc → cmd。
+    #[test]
+    fn wsl_spawn_args_strict_argv_shape() {
+        let cmd = "cd /opt/d && exec node bin.js web --port 0";
+        let args = wsl_spawn_args("Ubuntu-24.04", cmd);
+        assert_eq!(args, vec!["-d", "Ubuntu-24.04", "-e", "sh", "-lc", cmd]);
+        // distro 含空格也必须是单个 argv（经 wsl.exe argv 传递，不拼命令串）。
+        let spaced = wsl_spawn_args("Ubuntu 24.04 LTS", "x");
+        assert_eq!(spaced[1], "Ubuntu 24.04 LTS");
+        // cmd 整串原样单个 argv（不按空格拆）。
+        assert_eq!(wsl_spawn_args("D", "a b c").len(), 6);
+        assert_eq!(wsl_spawn_args("D", "a b c")[5], "a b c");
     }
 }

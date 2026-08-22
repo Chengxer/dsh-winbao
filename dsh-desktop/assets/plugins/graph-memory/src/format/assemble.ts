@@ -12,6 +12,26 @@ import { getCommunitySummary, getEpisodicMessages } from "../store/store.ts";
 const CHARS_PER_TOKEN = 3;
 
 /**
+ * 打断文本中形如模板变量组的 `{{` / `}}` 序列（在其后插入零宽连接符 U+200D）。
+ *
+ * DSH 内核 dsh-system-prompt 的 interpolate() 会把 context / section 文本当
+ * `{{name}}` 模板扫描：GROUP_AT 命中而名字不合法（如 `{{state.gold}}` 含点），
+ * 或 `{{` 之后远处还存在 `}}` 时，整轮 prompt 组装硬抛失败。本插件 recall 出的
+ * 文本来自图数据库内容（节点摘要 / episode 转录），属于不可信数据——其中的
+ * 字面量 `{{...}}` 必须原样透传，而不是让内核按模板语义报错。
+ *
+ * 在成对 `{` / `}` 之间插入 ZWJ 后，两个序列不再相邻，插值器的
+ * `text.indexOf("{{")` 与 GROUP_AT 均无法命中，全文按普通散文透传；ZWJ 对
+ * LLM 视觉几乎无损。仅处理 `{{` / `}}` 两种序列（`{{` 后紧跟 `{` 的三连仍
+ * 每对都被打断），其余内容不动；已打断的序列不再匹配，幂等。
+ */
+export function defuseTemplateGroups(text: string): string {
+  return text
+    .replace(/\{(?=\{)/g, "{\u200d")
+    .replace(/\}(?=\})/g, "}\u200d");
+}
+
+/**
  * 构建知识图谱的 system prompt 引导文字
  */
 export function buildSystemPromptAddition(params: {

@@ -28,14 +28,25 @@ window.__ModuleLoader__.load({
 		const TAG = "@deepseek-ai/dsh-float-window/client.css";
 
 		const CSS = [
-			// 浮窗侧：折叠时隐藏 56px 侧栏 rail，让会话占满。
-			// AppFrame 根节点在折叠时带 data-sidebar-collapsed 属性（官方布局源码），
-			// 用它做稳定选择器，避免依赖哈希类名。
-			// 注意：绝不能对首个子列（sidebarCol）用 display:none —— 该列离开
-			// grid 后，centerCol/detailsCol 会自动前移一列：centerCol 落入 0px
-			// 侧栏轨道，detailsCol 落入 1fr 中间轨道，表现为「会话空白、只剩详情」。
-			'body[data-dsh-float] [data-sidebar-collapsed]{grid-template-columns:0 minmax(0,1fr) 0!important}',
-			// 主窗侧：弹出按钮（与头部其它动作一致的小图标按钮）。
+		// 浮窗侧：折叠时隐藏 56px 侧栏 rail，让会话占满。
+		// AppFrame 根节点在折叠时带 data-sidebar-collapsed 属性（官方布局源码），
+		// 用它做稳定选择器，避免依赖哈希类名。
+		// 注意：绝不能对首个子列（sidebarCol）用 display:none —— 该列离开
+		// grid 后，centerCol/detailsCol 会自动前移一列：centerCol 落入 0px
+		// 侧栏轨道，detailsCol 落入 1fr 中间轨道，表现为「会话空白、只剩详情」。
+		// 注意：data-dsh-float 由 setupFloat 在「目标会话已选中且布局折叠完成」
+		// 之后才打上（mount-then-hide）——若在 apply 时立即打，选择会话的
+		// 20s 重试期内 0 轨道 CSS 已生效而会话内容未挂，浮窗表现为白屏。
+		'body[data-dsh-float] [data-sidebar-collapsed]{grid-template-columns:0 minmax(0,1fr) 0!important}',
+		// 浮窗插件超时错误卡（W2 重试环模式兜底：重试耗尽→可见错误，不白屏）。
+		"#__dsh_float_plugin_error__{position:fixed;inset:0;z-index:2147483646;display:flex;flex-direction:column;",
+		"align-items:center;justify-content:center;gap:12px;background:#0b1220;color:#e6ecff;",
+		"font:14px 'Segoe UI','Microsoft YaHei',sans-serif;text-align:center;padding:24px}",
+		"#__dsh_float_plugin_error__ .dsh-fl-err-sub{color:#8b9ac4;font-size:12px;line-height:18px}",
+		"#__dsh_float_plugin_error__ button{min-width:88px;padding:6px 14px;border:1px solid #3a4656;",
+		"border-radius:8px;background:#1a2332;color:#e6ecff;cursor:pointer;font-size:13px}",
+		"#__dsh_float_plugin_error__ button:hover{background:#243247}",
+		// 主窗侧：弹出按钮（与头部其它动作一致的小图标按钮）。
 			".dsh-float-btn{display:inline-flex;align-items:center;justify-content:center;",
 			"box-sizing:border-box;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;",
 			"background:transparent;color:var(--dsw-alias-label-tertiary);width:26px;height:26px;",
@@ -92,7 +103,7 @@ window.__ModuleLoader__.load({
 		// ------------------------------------------------------------------
 		// 公共工具：带重试的调用（sessions/layout 可能在 boot 中尚未就绪）
 		// ------------------------------------------------------------------
-		function retry(fn, { attempts = 40, delayMs = 500, label = "" } = {}) {
+		function retry(fn, { attempts = 40, delayMs = 500, label = "", reg } = {}) {
 			return new Promise((resolve) => {
 				let tries = 0;
 				const tick = () => {
@@ -108,7 +119,8 @@ window.__ModuleLoader__.load({
 						if (label) console.warn("[dsh-float-window] " + label + " 未就绪");
 						return resolve(false);
 					}
-					setTimeout(tick, delayMs);
+					const t = setTimeout(tick, delayMs);
+					if (reg) reg.push(t);
 				};
 				tick();
 			});
@@ -142,9 +154,21 @@ window.__ModuleLoader__.load({
 		// 插件无需监听。
 		// ------------------------------------------------------------------
 		function setupFloat(ctx) {
-			if (typeof document !== "undefined") {
-				document.body.setAttribute("data-dsh-float", "1");
-			}
+			// 所有 setTimeout/setRetry 计时器统一登记：dispose（插件卸载/HMR）
+			// 时全部清理，杜绝野计时器在窗口关闭后继续弹错误卡（W2 教训）。
+			const timers = [];
+			const later = (fn, ms) => {
+				const t = setTimeout(fn, ms);
+				timers.push(t);
+				return t;
+			};
+			let card = null;
+			const dismissCard = () => {
+				if (card) {
+					try { card.remove(); } catch { /* fake DOM/已移除 */ }
+					card = null;
+				}
+			};
 			const targetId = FLOAT && FLOAT.sessionId ? String(FLOAT.sessionId) : "";
 
 			// 1) 选中目标会话。sessions 服务在 runtime apply 时已提供，对外方法
@@ -171,13 +195,9 @@ window.__ModuleLoader__.load({
 				if (sessions.list && typeof sessions.list.getSnapshot === "function") {
 					const snap = sessions.list.getSnapshot();
 					if (snap && typeof snap === "object") {
-						// DEBUG: 打印快照顶层键，排查浮窗空白问题（stringify 后 DevTools/日志都能直接看到键名）。
 						if (!selectTarget._debugged) {
 							selectTarget._debugged = true;
 							console.log("[dsh-float-window] snap keys:", JSON.stringify(Object.keys(snap)), "phase:", snap.phase, "targetId:", targetId);
-							if (snap.byId) console.log("[dsh-float-window] snap.byId keys:", JSON.stringify(Object.keys(snap.byId).slice(0, 5)));
-							if (Array.isArray(snap.items)) console.log("[dsh-float-window] snap.items sample:", JSON.stringify(snap.items.slice(0, 3).map((i) => i && i.id)));
-							if (Array.isArray(snap.summaries)) console.log("[dsh-float-window] snap.summaries sample:", JSON.stringify(snap.summaries.slice(0, 3).map((s) => s && s.id)));
 						}
 						let found = false;
 						if (snap.byId && typeof snap.byId === "object" && snap.byId[targetId]) {
@@ -187,10 +207,7 @@ window.__ModuleLoader__.load({
 						} else if (Array.isArray(snap.summaries)) {
 							found = snap.summaries.some((s) => s && String(s.id) === targetId);
 						}
-						if (!found) {
-							console.log("[dsh-float-window] target session not found in snap, retrying...");
-							return false;
-						}
+						if (!found) return false;
 					}
 				}
 				try {
@@ -236,40 +253,93 @@ window.__ModuleLoader__.load({
 				return true;
 			};
 
-			// 兜底：若目标会话始终未在列表中出现（例如旧会话已清理），至少让 UI
-			// 不再空白——重试耗尽后保持现状并打印警告提示。
-			setTimeout(() => {
-				const sessions = typeof ctx.get === "function" ? ctx.get("sessions", false) : undefined;
-				if (sessions && typeof sessions.open === "function") {
-					try {
-						sessions.open(targetId);
-					} catch (e) {
-						console.warn(
-							"[dsh-float-window] 目标会话 " + targetId + " 未在会话列表出现，浮窗可能为空: " +
-							((e && e.message) || e)
-						);
-					}
+			// mount-then-hide：目标会话选中且布局折叠完成后，才打 data-dsh-float
+			// 启用 0 轨道 CSS。旧实现在 apply 时立即打属性——选择会话最长要重试
+			// 20s，期间 56px rail 被清零而会话内容未挂，浮窗呈现为白屏。
+			const armFloatCss = () => {
+				if (typeof document !== "undefined" && document.body && document.body.setAttribute) {
+					document.body.setAttribute("data-dsh-float", "1");
 				}
-			}, 40 * 500 + 200);
+			};
+
+			// 重试耗尽兜底：可见错误卡 + 重试/关闭（不再静默留白屏）。
+			const showError = (reason) => {
+				if (typeof document === "undefined" || !document.body || !document.createElement) return;
+				dismissCard();
+				card = document.createElement("div");
+				card.id = "__dsh_float_plugin_error__";
+				var t1 = document.createElement("div");
+				t1.textContent = "浮窗未能载入会话";
+				var t2 = document.createElement("div");
+				t2.className = "dsh-fl-err-sub";
+				t2.textContent = reason + "。会话可能已被删除，或内核仍在启动。";
+				var btns = document.createElement("div");
+				btns.style.display = "flex";
+				btns.style.gap = "10px";
+				var retryBtn = document.createElement("button");
+				retryBtn.textContent = "重试";
+				retryBtn.onclick = () => {
+					dismissCard();
+					run();
+				};
+				var closeBtn = document.createElement("button");
+				closeBtn.textContent = "关闭浮窗";
+				closeBtn.onclick = () => {
+					try {
+						const bridge = typeof window !== "undefined" ? window.dshDesktop : undefined;
+						if (bridge && bridge.floatWindow && typeof bridge.floatWindow.close === "function") {
+							bridge.floatWindow.close();
+						} else if (typeof window !== "undefined" && window.close) {
+							window.close();
+						}
+					} catch { /* 桥不可用时按钮静默 */ }
+				};
+				btns.appendChild(retryBtn);
+				btns.appendChild(closeBtn);
+				card.appendChild(t1);
+				card.appendChild(t2);
+				card.appendChild(btns);
+				document.body.appendChild(card);
+			};
 
 			// 2) 串行化：先确保目标会话选中并渲染，再关闭详情/折叠侧栏。
 			//    弃用原先两个并发 retry 的竞态实现——若关闭详情先于会话选中完成，
 			//    详情面板会在会话选中后被占用者重新打开，导致占位文案残留。
-			retry(selectTarget, { label: "选中目标会话" }).then((ok) => {
-				if (!ok) return;
-				retry(() => {
-					const sessions = typeof ctx.get === "function" ? ctx.get("sessions", false) : undefined;
-					if (!targetRendered(sessions)) return false;
-					return foldLayout();
-				}, { label: "折叠布局" }).then((done) => {
-					if (!done) return;
-					// 兜底：详情面板占用者可能在会话挂载后才打开面板，稍后再补一次关闭。
-					setTimeout(() => {
+			const run = () => {
+				retry(selectTarget, { label: "选中目标会话", reg: timers }).then((ok) => {
+					if (!ok) {
+						showError("目标会话 " + (targetId || "(空)") + " 未在会话列表出现（已重试 20 秒）");
+						return;
+					}
+					retry(() => {
 						const sessions = typeof ctx.get === "function" ? ctx.get("sessions", false) : undefined;
-						if (targetRendered(sessions)) foldLayout();
-					}, 1200);
+						if (!targetRendered(sessions)) return false;
+						return foldLayout();
+					}, { label: "折叠布局", reg: timers }).then((done) => {
+						if (!done) {
+							showError("布局折叠超时（layout 服务不可用）");
+							return;
+						}
+						armFloatCss();
+						// 兜底：详情面板占用者可能在会话挂载后才打开面板，稍后再补一次关闭。
+						later(() => {
+							const sessions = typeof ctx.get === "function" ? ctx.get("sessions", false) : undefined;
+							if (targetRendered(sessions)) foldLayout();
+						}, 1200);
+					});
 				});
-			});
+			};
+			run();
+
+			// disposer：插件卸载/HMR 时清计时器、摘错误卡、还原 body 属性。
+			return () => {
+				for (const t of timers) clearTimeout(t);
+				timers.length = 0;
+				dismissCard();
+				if (typeof document !== "undefined" && document.body && document.body.removeAttribute) {
+					document.body.removeAttribute("data-dsh-float");
+				}
+			};
 		}
 
 		// ------------------------------------------------------------------
@@ -336,12 +406,17 @@ window.__ModuleLoader__.load({
 				ctx.effect(() => setupNotificationJump(ctx), "dsh-float-window: notification jump");
 				return;
 			}
-			// 浮窗：沉浸折叠 + 选中会话 + 标题。
+			// 浮窗：沉浸折叠 + 选中会话 + 标题。setupFloat 返回 disposer
+			// （清计时器/摘错误卡/还原 body 属性），ctx.effect 回调原样透传，
+			// 插件卸载/HMR 时由 cordis 自动调用。
 			ctx.effect(() => setupFloat(ctx), "dsh-float-window: float adjustments");
 		}
 
 		exports.apply = apply;
 		exports.inject = ["slots"];
+		// 纯逻辑单测钩子（scripts/test/unit-float-window-client.test.js）：
+		// 不参与运行时（setupFloat 为闭包内部函数，只有这里能拿到）。
+		exports.__test = { setupFloat, retry };
 		return module.exports;
 	}
 });

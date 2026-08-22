@@ -1,0 +1,402 @@
+{
+  "_meta": {
+    "updateFlow": "快照由 ta16-golden.test.js 从源码提取生成，禁止手编；文案有意变更时执行 UPDATE_SNAPSHOTS=1 npm test（在 dsh-desktop 目录）重写后随代码一起 review 提交。",
+    "note": "错误文案常量清单（含 file:line）",
+    "sources": [
+      "dsh-tauri/src-tauri/src/app/src/commands/menu.rs",
+      "dsh-tauri/src-tauri/src/app/src/commands/updater_client.rs",
+      "dsh-tauri/src-tauri/src/app/src/commands/wsl.rs",
+      "dsh-tauri/src-tauri/src/app/src/session_notify.rs",
+      "dsh-tauri/src-tauri/src/app/src/lib.rs",
+      "dsh-tauri/src-tauri/src/app/src/windows.rs",
+      "dsh-desktop/session-watcher.js"
+    ]
+  },
+  "menuRs": [
+    {
+      "line": 57,
+      "text": "开发者工具仅开发版可用"
+    },
+    {
+      "line": 70,
+      "text": "未装配"
+    },
+    {
+      "line": 134,
+      "text": "已是最新版本"
+    },
+    {
+      "line": 200,
+      "text": "启动安装器失败: {e}"
+    },
+    {
+      "line": 218,
+      "text": "打开 DMG 失败: {e}"
+    },
+    {
+      "line": 229,
+      "text": "定位当前可执行文件失败: {e}"
+    },
+    {
+      "line": 240,
+      "text": "未知菜单动作：{other}"
+    },
+    {
+      "line": 246,
+      "text": "主窗不存在"
+    },
+    {
+      "line": 256,
+      "text": "无法连接更新源（GitHub/Gitee 均不可达），请检查网络后从右上角 ⋯ 菜单重试（{m}）"
+    }
+  ],
+  "updaterClientRs": [
+    {
+      "line": 127,
+      "text": "离线（两源均不可达）：{m}"
+    },
+    {
+      "line": 128,
+      "text": "更新源不可达：{m}"
+    },
+    {
+      "line": 129,
+      "text": "发行版信息异常：{m}"
+    },
+    {
+      "line": 131,
+      "text": "sha256 校验失败：期望 {expected}，实际 {actual}"
+    },
+    {
+      "line": 133,
+      "text": "下载失败：{m}"
+    },
+    {
+      "line": 152,
+      "text": "更新检查离线：{m}"
+    },
+    {
+      "line": 154,
+      "text": "更新源不可达：{m}"
+    },
+    {
+      "line": 157,
+      "text": "发行版信息异常：{m}"
+    },
+    {
+      "line": 161,
+      "text": "安装包 sha256 校验失败：期望 {expected}，实际 {actual}"
+    },
+    {
+      "line": 163,
+      "text": "更新下载失败：{m}"
+    },
+    {
+      "line": 164,
+      "text": "更新链 io：{m}"
+    },
+    {
+      "line": 203,
+      "text": "reqwest meta client 构建"
+    },
+    {
+      "line": 217,
+      "text": "reqwest download client 构建"
+    },
+    {
+      "line": 502,
+      "text": "JSON 解析失败：{e}"
+    },
+    {
+      "line": 503,
+      "text": "响应缺 tag_name"
+    },
+    {
+      "line": 556,
+      "text": "{source}: 读体失败：{e}"
+    },
+    {
+      "line": 577,
+      "text": "探测任务失败：{e}"
+    },
+    {
+      "line": 619,
+      "text": "已查 {scanned:?}，均无 {os}/{arch} 可用安装包（Gitee 100MB 限可能缺席大资产）"
+    },
+    {
+      "line": 658,
+      "text": "{}\\n…（已截断）"
+    },
+    {
+      "line": 686,
+      "text": "显式 sha256 形态非法（需 64 位 hex）: {s}"
+    },
+    {
+      "line": 709,
+      "text": "Gitee 源下载缺少可用的哈希锚点（GitHub digest/边车均不可达）——为防镜像投毒已拒绝自动下载；请稍后重试或到 GitHub Releases 手动下载"
+    },
+    {
+      "line": 741,
+      "text": "{e1}（双源均不符，疑似全面投毒/发布事故——主源实际={a1}；换源后实际={a2}）"
+    },
+    {
+      "line": 778,
+      "text": "下载 URL 非法：{url}"
+    },
+    {
+      "line": 786,
+      "text": "下载 URL 不在更新源白名单（https + github/gitee）：{url}"
+    },
+    {
+      "line": 801,
+      "text": "请求失败：{e}"
+    },
+    {
+      "line": 809,
+      "text": "流中断：{e}"
+    },
+    {
+      "line": 817,
+      "text": "下载不完整：收到 {received} B，元数据标注 {} B"
+    },
+    {
+      "line": 827,
+      "text": "安装包疑似损坏：{received} B 低于下限 {SETUP_SIZE_FLOOR} B（且无 sha256 可校验）"
+    }
+  ],
+  "wslRs": [
+    {
+      "line": 80,
+      "text": "后端模式必须是 local 或 wsl（收到 {backend:?}）"
+    },
+    {
+      "line": 86,
+      "text": "WSL 安装目录必须是 WSL 内绝对路径（以 / 或 ~ 开头）"
+    },
+    {
+      "line": 89,
+      "text": "WSL 安装目录不能包含空白或 shell 特殊字符（$ ` ; & | < > 引号 括号）"
+    }
+  ],
+  "sessionNotifyRs": [
+    {
+      "line": 171,
+      "text": "DSH 任务完成"
+    },
+    {
+      "line": 172,
+      "text": "会话任务已完成"
+    },
+    {
+      "line": 320,
+      "text": "[notify] session watcher 不启动（不影响主窗）：{e}"
+    },
+    {
+      "line": 336,
+      "text": "AppState 未就绪"
+    },
+    {
+      "line": 342,
+      "text": "supervisor 未装配（内核未就绪）"
+    },
+    {
+      "line": 347,
+      "text": "payload 脚本缺失：{}"
+    },
+    {
+      "line": 389,
+      "text": "[notify] session watcher 启动失败：{e}"
+    },
+    {
+      "line": 398,
+      "text": "[notify] session watcher 连续 {spawn_failures} 次启动失败，放弃（内核重启可复活）"
+    },
+    {
+      "line": 416,
+      "text": "[notify] session watcher 在岗（{}，监视 {}）"
+    },
+    {
+      "line": 435,
+      "text": "[notify] turn-end 处理 panic（已隔离，继续）"
+    },
+    {
+      "line": 440,
+      "text": "[notify] watcher 超长行丢弃（>{WATCHER_LINE_CAP}B）"
+    },
+    {
+      "line": 466,
+      "text": "[notify] session watcher 退出，{}ms 后第 {restarts} 次重启"
+    },
+    {
+      "line": 490,
+      "text": "stdout 管道缺失"
+    },
+    {
+      "line": 491,
+      "text": "stderr 管道缺失"
+    },
+    {
+      "line": 593,
+      "text": "[notify] 任务完成: {}"
+    },
+    {
+      "line": 606,
+      "text": "[notify] 通知发送失败: {e}"
+    }
+  ],
+  "libRs": [
+    {
+      "line": 151,
+      "text": "[upgrade] 便携版运行：userData → {}"
+    },
+    {
+      "line": 162,
+      "text": "[boot] 壳进程 run() 入口"
+    },
+    {
+      "line": 251,
+      "text": "tauri 构建"
+    },
+    {
+      "line": 308,
+      "text": "[pages] preview-server 启动失败（降级 data: 内嵌页）: {e}"
+    },
+    {
+      "line": 310,
+      "text": "<!doctype html><meta charset=\\\"utf-8\\\"><body style=\\\"font:14px system-ui;background:#0b1220;color:#d7dde4;display:flex;align-items:center;justify-content:center;height:100vh\\\"><div style=\\\"max-width:520px\\\">静态页服务启动失败，请查看日志目录：<br>{}<br>重启应用可重试。</div></body>"
+    },
+    {
+      "line": 323,
+      "text": "DSH Desktop 已在运行"
+    },
+    {
+      "line": 369,
+      "text": "[boot] 内核装配失败（主窗转恢复页，不退出）: {e}"
+    },
+    {
+      "line": 379,
+      "text": "[tray] 初始化失败（不影响主窗）: {e}"
+    },
+    {
+      "line": 396,
+      "text": "[update] 检测到客户端新版本 {} → {}（{}，{}）"
+    },
+    {
+      "line": 402,
+      "text": "[update] 启动更新检查失败（静默忽略）：{e}"
+    },
+    {
+      "line": 436,
+      "text": "[route] 事件路由 panic（已隔离，继续处理后续事件）"
+    },
+    {
+      "line": 492,
+      "text": "[route] 内核 URL 变更（端口漂移），跳过渲染抑制直接换页（{url}）"
+    },
+    {
+      "line": 509,
+      "text": "[route] 重启风暴渲染抑制：距上次换页 <{KERNEL_NAV_SUPPRESS_WINDOW_MS}ms 且页面存活，跳过整页换页（{url}）"
+    },
+    {
+      "line": 511,
+      "text": "[route] 重启风暴渲染抑制：页面探针无响应，执行整页换页（{url}）"
+    },
+    {
+      "line": 529,
+      "text": "[route] boot 步骤 {name} OK（{ms}ms）"
+    },
+    {
+      "line": 531,
+      "text": "[route] boot 步骤 {name} FAIL（{ms}ms）: {}"
+    },
+    {
+      "line": 531,
+      "text": "未知失败"
+    },
+    {
+      "line": 573,
+      "text": "[route] 内核退出 code={code:?}"
+    },
+    {
+      "line": 577,
+      "text": "[route] 崩溃环触发（累计 {crashes} 次），主窗转恢复页"
+    },
+    {
+      "line": 578,
+      "text": "内核反复异常退出"
+    },
+    {
+      "line": 585,
+      "text": "内核服务反复异常退出，已进入恢复模式"
+    },
+    {
+      "line": 589,
+      "text": "[route] 探活失败 ×{consecutive}"
+    },
+    {
+      "line": 593,
+      "text": "[route] 内核假死可疑 ×{consecutive}（端口通、HTTP 无响应）"
+    },
+    {
+      "line": 639,
+      "text": "DSH_TAURI_REPO_ROOT={root} 不含 dsh-desktop/vendor/node"
+    },
+    {
+      "line": 657,
+      "text": "未找到内核目录 dsh-desktop（开发检出与安装产物布局均未命中；可设 DSH_TAURI_REPO_ROOT 指定）"
+    },
+    {
+      "line": 686,
+      "text": "显示主窗口"
+    },
+    {
+      "line": 687,
+      "text": "打开日志"
+    },
+    {
+      "line": 689,
+      "text": "退出"
+    },
+    {
+      "line": 692,
+      "text": "无应用图标"
+    }
+  ],
+  "floatWatchdog": [
+    "浮窗页面加载失败",
+    "页面长时间无内容（内核可能正在启动或重启），自动重试一次仍未恢复。",
+    "重试",
+    "关闭浮窗",
+    "浮窗加载失败"
+  ],
+  "watcherJs": [
+    {
+      "line": 195,
+      "text": "listLogs 失败: "
+    },
+    {
+      "line": 229,
+      "text": "处理失败 "
+    },
+    {
+      "line": 255,
+      "text": "处理失败 "
+    },
+    {
+      "line": 391,
+      "text": "DSH 任务完成"
+    },
+    {
+      "line": 399,
+      "text": "会话 "
+    },
+    {
+      "line": 400,
+      "text": " 轮任务完成）"
+    },
+    {
+      "line": 402,
+      "text": "onTurnEnd 回调异常: "
+    }
+  ]
+}

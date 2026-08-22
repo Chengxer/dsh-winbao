@@ -114,8 +114,43 @@ window.__ModuleLoader__.load({
 			diagOrderApplying: "应用中…",
 			diagOrderApplied: "已应用建议顺序，重启后生效",
 			diagOrderCycle: "规则/依赖存在循环，无法自动排序：",
-			diagOrderRestart: "顺序变更需完全退出并重启后生效。"
+			diagOrderRestart: "顺序变更需完全退出并重启后生效。",
+			// 后端服务健康（组合完整性运行期探测）
+			healthTitle: "后端服务健康",
+			healthHint: "实时读取内核 Loader 条目（pluginInventory），检测凭据 / 会话 / 模型 / 网关等关键后端服务的挂载状态。缺席通常意味着启动时被静默隔离，会以「保存 key 报错」「会话不保存」等形式延迟暴露——这里让它提前可见。",
+			healthRun: "重新检测",
+			healthRunning: "检测中…",
+			healthOk: "关键后端服务全部在位 ✓",
+			healthMissing: "缺席",
+			healthFailed: "挂载失败",
+			healthDisabled: "已被禁用",
+			healthFix: "修复指引：完全退出并重启 DSH Desktop（启动链会自动修复 / 重装缺失组件）。若重启后仍缺席，请在下方「导出诊断日志包」并随反馈附上。",
+			healthError: "检测失败：",
+			healthNoChannel: "内核插件清单通道不可用（请确认已更新到最新版 DSH Desktop）"
 		};
+
+		// 关键后端服务清单（运行期形态）：id = 组合 yml 的行 id（loader entryId），
+		// module = 行声明的包名（entryId 带嵌套前缀时的兜底匹配键）。
+		// 与 scripts/integration/composition-integrity.js 的 criticalServices() 保持
+		// 同一职责口径（缺席后果文案一致）；此处仅保留有独立 loader 条目的行
+		// （dsh-base / dsh-web-app 两个受保护 bundle 容器在运行期没有条目）。
+		const CRITICAL_RUNTIME = [
+			{ id: "credentials", module: "@deepseek-ai/dsh-credentials-local", label: "凭据服务", consequence: "保存 / 读取 API key 失败（保存 key 时报 \"credentials service is absent\"）" },
+			{ id: "settings", module: "@deepseek-ai/dsh-settings-file", label: "设置文档", consequence: "设置读写失效：模型页 / 偏好保存后不生效或报错" },
+			{ id: "llm", module: "@deepseek-ai/dsh-llm", label: "模型调用核心", consequence: "所有模型请求无法发起，对话不可用" },
+			{ id: "llm-deepseek", module: "@deepseek-ai/dsh-llm-deepseek", label: "DeepSeek 模型路由", consequence: "官方 DeepSeek 模型全部不可用" },
+			{ id: "session", module: "@deepseek-ai/dsh-session", label: "会话域", consequence: "会话创建 / 派发失效，无法开始任何对话" },
+			{ id: "session-persistence-jsonl", module: "@deepseek-ai/dsh-session-persistence-jsonl", label: "会话落盘", consequence: "会话不持久化：重启后全部历史丢失" },
+			{ id: "sandbox", module: "@deepseek-ai/dsh-sandbox-local", label: "文件边界", consequence: "沙箱判定失效，文件操作权限边界不可用" },
+			{ id: "approval", module: "@deepseek-ai/dsh-user-approval", label: "权限审批", consequence: "工具调用的用户审批（允许 / 拒绝）流程失效" },
+			{ id: "storage-json", module: "@deepseek-ai/dsh-storage-json", label: "本地存储", consequence: "本地键值存储失效，依赖 storage 域的功能不保存" },
+			{ id: "webserver", module: "@deepseek-ai/dsh-host-webserver", label: "本地服务端口", consequence: "页面端口不监听：白屏 / 一直加载" },
+			{ id: "api-gateway", module: "@deepseek-ai/dsh-host-apiproxy", label: "API 网关", consequence: "前后端 RPC 全部哑火，页面所有操作报错" },
+			{ id: "plugin-inventory", module: "@deepseek-ai/dsh-host-plugin-inventory", label: "插件清单服务", consequence: "插件清单 / 健康页无数据" },
+			{ id: "modules", module: "@deepseek-ai/dsh-client-modules", label: "前端模块表", consequence: "浏览器模块表（window.__DSH_BOOT__）缺失，页面空白" },
+			{ id: "connection", module: "@deepseek-ai/dsh-client-connection", label: "前后端传输", consequence: "fetch / SSE 传输断开，页面无法与后端通信" },
+			{ id: "web-runtime", module: "@deepseek-ai/dsh-web-app", label: "Web 运行时", consequence: "Web 运行时未挂载，页面无法完成启动" }
+		];
 
 		function bridge() {
 			const b = window.dshDesktop;
@@ -718,8 +753,95 @@ window.__ModuleLoader__.load({
 			] });
 		}
 
-		/** 设置侧栏「诊断与管理」分区：诊断 / 备份恢复 / 日志包导出 / 防砖体检 / bundle 顺序。 */
-		function DiagSection() {
+		/**
+		 * 后端服务健康卡（组合完整性运行期探测）。
+		 * 数据通道：内核 pluginInventory.list()（dsh-host-plugin-inventory 对
+		 * Loader 条目的实时只读投影，含 fiberPhase）。判定：
+		 *   条目缺席（missing）  —— Loader 故障隔离把激活失败的 entry 移出树，
+		 *                          缺席即「credentials service is absent」类
+		 *                          延迟暴露的静默前置形态；
+		 *   fiberPhase=failed     —— 挂载失败但仍挂在树上；
+		 *   enabled=false         —— 被用户层显式禁用（黄色提示，非红条）。
+		 */
+		function BackendHealthCard({ list }) {
+			const [health, setHealth] = react.useState({ kind: "loading" });
+			const [busy, setBusy] = react.useState(false);
+
+			const detect = react.useCallback(() => {
+				if (busy) return;
+				setBusy(true);
+				setHealth({ kind: "loading" });
+				Promise.resolve()
+					.then(() => (typeof list === "function" ? list() : Promise.reject(new Error(L.healthNoChannel))))
+					.then((raw) => {
+						const entries = normalizeLive(raw);
+						if (!entries) throw new Error("unexpected inventory shape");
+						// entryId / moduleName 双键索引（覆写行共享 id，取任一命中即可）。
+						const byId = new Map();
+						for (const e of entries) {
+							if (!e || typeof e !== "object") continue;
+							if (e.entryId !== void 0 && !byId.has(e.entryId)) byId.set(e.entryId, e);
+							if (e.moduleName !== void 0 && !byId.has(e.moduleName)) byId.set(e.moduleName, e);
+						}
+						const problems = [];
+						for (const c of CRITICAL_RUNTIME) {
+							// entryId 优先；嵌套树前缀（group/id）场景按 moduleName 兜底。
+							const e = byId.get(c.id) || (c.module ? byId.get(c.module) : void 0);
+							if (!e) problems.push({ ...c, problem: L.healthMissing });
+							else if (e.fiberPhase === "failed") problems.push({ ...c, problem: L.healthFailed });
+							else if (e.enabled === false) problems.push({ ...c, problem: L.healthDisabled });
+						}
+						setBusy(false);
+						setHealth(problems.length === 0 ? { kind: "ok", checked: CRITICAL_RUNTIME.length } : { kind: "bad", problems });
+					})
+					.catch((err) => {
+						setBusy(false);
+						setHealth({ kind: "error", message: String((err && err.message) || err) });
+					});
+			}, [busy, list]);
+
+			// 进入分区即自动检测一次：缺席要「永远可见」，不等用户手点。
+			react.useEffect(() => {
+				detect();
+				// eslint-disable-next-line react-hooks/exhaustive-deps
+			}, []);
+
+			const errColor = "var(--dsw-alias-state-error-primary, #ff7a85)";
+			const warnColor = "var(--dsw-alias-state-warning-primary, #d99a3d)";
+			const okColor = "var(--dsw-alias-state-success-primary, #4caf7d)";
+			const body = (() => {
+				if (health.kind === "loading") return jsx("div", { style: { fontSize: 12, opacity: 0.6 }, children: L.healthRunning });
+				if (health.kind === "error") return jsx("div", { style: { fontSize: 12, color: errColor, wordBreak: "break-all" }, children: "⛔ " + L.healthError + health.message });
+				if (health.kind === "ok") return jsx("div", { style: { fontSize: 12, color: okColor }, children: L.healthOk });
+				// bad：红条（缺席/挂载失败）或黄条（仅禁用）。
+				const hard = health.problems.filter((p) => p.problem !== L.healthDisabled);
+				const color = hard.length > 0 ? errColor : warnColor;
+				return jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 6 }, children: [
+					jsxs("div", { style: { fontSize: 12, fontWeight: 600, color, padding: "8px 10px", borderRadius: 8, border: "1px solid " + color, background: "color-mix(in srgb, " + color + " 10%, transparent)" }, children: [
+						hard.length > 0 ? "⛔ " + L.healthMissing + " / " + L.healthFailed + "（" + hard.length + "）" : "⚠ " + L.healthDisabled + "（" + health.problems.length + "）"
+					] }),
+					jsx("ul", { style: { margin: 0, paddingLeft: 18, fontSize: 12, display: "flex", flexDirection: "column", gap: 4 }, children: health.problems.map((p, i) => jsxs("li", { style: { wordBreak: "break-all" }, children: [
+						jsx("span", { style: { fontWeight: 600, color: p.problem === L.healthDisabled ? warnColor : errColor }, children: "「" + p.label + "」" + p.problem + "：" }),
+						jsx("span", { children: p.consequence })
+					] }, i)) }),
+					jsx("div", { style: { fontSize: 12, opacity: 0.75 }, children: L.healthFix })
+				] });
+			})();
+
+			return jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 8 }, children: [
+				jsx("span", { style: { fontSize: 13, fontWeight: 600 }, children: L.healthTitle }),
+				jsx("div", { style: { fontSize: 11, opacity: 0.55 }, children: L.healthHint }),
+				body,
+				jsx("div", { children: jsx("button", {
+					type: "button", disabled: busy, onClick: detect,
+					style: { fontSize: 12, padding: "5px 12px", borderRadius: 8, cursor: busy ? "default" : "pointer", whiteSpace: "nowrap", border: "1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.35))", background: "transparent", color: "inherit", opacity: busy ? 0.55 : 1 },
+					children: busy ? L.healthRunning : L.healthRun
+				}) })
+			] });
+		}
+
+		/** 设置侧栏「诊断与管理」分区：后端服务健康 / 诊断 / 备份恢复 / 日志包导出 / 防砖体检 / bundle 顺序。 */
+		function DiagSection({ list }) {
 			const [diagReport, setDiagReport] = react.useState(null);
 			const [diagBusy, setDiagBusy] = react.useState(false);
 			const [bkBusy, setBkBusy] = react.useState(false);
@@ -1017,6 +1139,7 @@ window.__ModuleLoader__.load({
 
 			return jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 12 }, children: [
 				jsx("div", { style: { fontSize: 12, opacity: 0.6 }, children: L.diagHint }),
+				card(L.healthTitle, jsx(BackendHealthCard, { list })),
 				card(L.diagTitle + " — 诊断", jsxs("div", { children: [
 					actionBtn(diagBusy ? L.diagRunning : L.diagRun, doRunDiag, diagBusy, false),
 					diagBody
@@ -1072,13 +1195,16 @@ window.__ModuleLoader__.load({
 				label: () => L.tab,
 				inject: injected
 			}, PluginManagerTab), "dsh-plugin-manager: plugins management tab");
-			// 「插件」分区下的第二个标签「诊断与管理」（与「管理」并列）：诊断 / 备份恢复 /
-			// 日志包导出 / 防砖体检 / bundle 顺序检测与重排。
+			// 「插件」分区下的第二个标签「诊断与管理」（与「管理」并列）：后端服务健康 /
+			// 诊断 / 备份恢复 / 日志包导出 / 防砖体检 / bundle 顺序检测与重排。
+			// inject 与「管理」标签同源（pluginInventory.list）：健康卡走内核运行期
+			// Loader 投影，管理标签走本地桥 + live 注册表合并。
 			ctx.slots.inject("settings.plugins.tab", () => ctx.slots.register({
 				name: "settings.plugins.tab",
 				id: "diag",
 				order: 25,
-				label: () => L.diagTitle
+				label: () => L.diagTitle,
+				inject: injected
 			}, DiagSection), "dsh-plugin-manager: diagnostics & maintenance tab");
 		}
 

@@ -859,14 +859,19 @@ dependencies = [
  "fence",
  "kernel-process",
  "preview-server",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "shell-core",
  "tauri",
  "tauri-build",
  "tauri-plugin-notification",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "url",
+ "wsl-backend",
 ]
 
 [[package]]
@@ -5314,6 +5319,13 @@ dependencies = [
  "windows-core 0.61.2",
  "windows-version",
  "x11-dl",
+]
+
+[[package]]
+name = "wsl-backend"
+version = "0.5.2"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

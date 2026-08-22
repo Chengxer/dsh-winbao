@@ -88,13 +88,23 @@ const mod = capturedLoad.factory((name) => {
 if (typeof mod.apply !== 'function') throw new Error('exports.apply 缺失');
 
 // ---------- 通过 slots 注册捕获 BalanceDock ----------
+// dsh-balance 槽注册走 ctx.slots.inject(key, factory)（一方包正确姿势，
+// 消除 conversation bundle 未就绪时 slots.register 硬抛竞态，见
+// assets/plugins/dsh-balance/lib/client.js apply 注释）：mock 的 inject
+// 立即求值 factory，捕获路径与旧 register 等价。
 let dockComponent = null;
 const fakeCtx = {
-  slots: { register(slotInfo, Component) { dockComponent = Component; } },
+  slots: {
+    register(slotInfo, Component) { dockComponent = Component; },
+    inject(key, factory) {
+      if (key !== 'conversation.composer.dock') throw new Error('unexpected slot key: ' + key);
+      factory();
+    },
+  },
   effect(cb) { cb(); },
 };
 mod.apply(fakeCtx);
-if (typeof dockComponent !== 'function') throw new Error('未能从 slots.register 捕获 BalanceDock');
+if (typeof dockComponent !== 'function') throw new Error('未能从 slots.inject/register 捕获 BalanceDock');
 
 // ---------- 渲染驱动器：preset 为「事件已推送」的状态数据 ----------
 function renderDock(data, usage) {

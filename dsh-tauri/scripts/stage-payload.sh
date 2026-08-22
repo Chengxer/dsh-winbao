@@ -88,49 +88,115 @@ mirror_dir "$SRC/scripts" "$DST/scripts"
 mirror_dir "$SRC/assets" "$DST/assets"
 
 # ---- vendor：node 二进制（$NODE_BIN——win 为 node.exe，unix 为 node）+ npm 全量（插件安装/更新链用到）----
+# PD1 对账修复：历史 staging 残留会把另一平台的 node 二进制留在 DST（本机
+# win 包曾混入 115MB 的 unix node，110MB vs 官方 72MB 的最大单项）——每次
+# 显式清掉非本平台那份（与 CI 便携版 rm -f vendor/node/node 同口径）。
+if [ "$NODE_BIN" = node.exe ]; then
+  rm -f "$DST/vendor/node/node"
+else
+  rm -f "$DST/vendor/node/node.exe"
+fi
 cp -f "$SRC/vendor/node/$NODE_BIN" "$DST/vendor/node/$NODE_BIN"
 mirror_dir "$SRC/vendor/npm" "$DST/vendor/npm"
 
-# ---- node_modules：生产依赖全量（排除 devDeps 三件；/XD 按目录名精确匹配，
-#      electron-to-chromium 等兄弟名不受影响）----
+# ---- node_modules：生产依赖全量（排除面与 CI「Stage payload (CI simplified)」
+#      逐项对齐——PD1 对账：本地只排 devDeps 三件，比 CI 少排了 @electron 与
+#      darwin/wasm 原生模块，win 包混入 ~28MB 死重。robocopy /XD 按目录名
+#      （basename）匹配，scoped 目录用末段名即可命中；electron-to-chromium
+#      等兄弟名不受影响）----
 mirror_dir "$SRC/node_modules" "$DST/node_modules" \
-   //XD electron electron-builder electron-winstaller
+   //XD electron electron-builder electron-winstaller @electron \
+   sharp-darwin-arm64 sharp-libvips-darwin-arm64 sharp-wasm32 koffi-darwin-arm64
+# robocopy /XD 语义陷阱：排除目录同时被挡在「复制」与「/MIR 删除」之外——
+# 此前 staging 残留在 DST 的 darwin/wasm 二进制（PD1：~27MB 死重）不会被
+# /MIR 清掉，必须显式删除（与 CI staging 的 rm -rf 行逐项同口径）。
+rm -rf "$DST/node_modules/electron" "$DST/node_modules/electron-builder" \
+       "$DST/node_modules/electron-winstaller" "$DST/node_modules/@electron" \
+       "$DST/node_modules/@img/sharp-darwin-arm64" "$DST/node_modules/@img/sharp-libvips-darwin-arm64" \
+       "$DST/node_modules/@img/sharp-wasm32" "$DST/node_modules/@koromix/koffi-darwin-arm64"
 
 # ---- rc7 客户端包 vendor（历史层：内核侧 fallback farm 兜底）----
-# 注：页面端「missed the module table」的真修复是下方 build-client-compat
-# （seed 表机制——页面永远不读 node_modules）。本块保留的意义：profile
-# fallback farm 的 junction 指向 payload node_modules，内核侧（Node 进程）
-# 若 require 这些包可解析。源与发版字节一致，无冲突。
+# PD1 对账修复：来源不再依赖本机 0.4.1 构建产物 dist/win-unpacked 的整棵
+# node_modules（残留闭包会把 ~98 个非必需包 + darwin/wasm 二进制混进 win 包
+# ——本地 110MB vs 官方 72MB 的主因之一，且依赖「这台机器恰好打过 0.4.1」
+# 这一巧合）。改为与 CI「Download rc7 client packages」同源同版本：
+#   1) RC7 源目录（= build-client-compat.mjs 硬编码读取的路径）按 8 包闭包
+#      全集「缺哪补哪」——本机已有 0.4.1 残留时零下载、字节不变；新 clone
+#      从 npm registry 拉（registry.npmjs.org / npmmirror 均已收录）。
+#   2) vendor 只补这 8 个包（CI 同口径），不再全量镜像残留闭包。
+# 闭包全集：6 个 rc.7 客户端包 + build-client-compat.mjs 闭包 BFS 必需的
+# use-sync-external-store@1.2.0（web-react 依赖）、@deepseek-ai/schemastery
+# @3.18.1（schema-form 依赖）及其传递依赖 @standard-schema/spec@1.1.0 与
+# @deepseek-ai/cosmokit@1.8.2——v0.5.2 官方包正是缺闭包依赖导致 compat 静默失败。
 VENDOR_SRC="$REPO_ROOT/dsh-desktop/dist/win-unpacked/resources/app/node_modules"
-if [ -d "$VENDOR_SRC" ]; then
-  vendored=0
-  for d in "$VENDOR_SRC"/*/ "$VENDOR_SRC"/@*/*/; do
-    [ -d "$d" ] || continue
-    base="$(basename "$d")"
-    parent="$(basename "$(dirname "$d")")"
-    if [ "$parent" = node_modules ]; then rel="$base"; else rel="$parent/$base"; fi
-    case "$rel" in .bin|*.json) continue ;; esac
-    if [ ! -d "$DST/node_modules/$rel" ]; then
-      # robocopy 成功码为 1-7（≠0），set -e 下裸调会被误杀——同 rc() 护栏。
-      set +e
-      mirror_dir "$d" "$DST/node_modules/$rel"
-      rcv=$?
-      set -e
-      [ $rcv -lt 8 ] || { echo "[stage] vendor 失败($rcv): $rel" >&2; exit 1; }
-      vendored=$((vendored+1))
+RC7_PKGS=(
+  "@deepseek-ai/dsh-client-web-react@0.1.0-rc.7"
+  "@deepseek-ai/dsh-client-schema-form@0.1.0-rc.7"
+  "@deepseek-ai/dsh-client-ui-primitives@0.1.0-rc.7"
+  "@deepseek-ai/dsh-client-ui-slots@0.1.0-rc.7"
+  "@deepseek-ai/dsh-client-ui-attachment@0.1.0-rc.7"
+  "@deepseek-ai/dsh-client-ui-renderer@0.1.0-rc.7"
+  "use-sync-external-store@1.2.0"
+  "@deepseek-ai/schemastery@3.18.1"
+  "@standard-schema/spec@1.1.0"
+  "@deepseek-ai/cosmokit@1.8.2"
+)
+mkdir -p "$VENDOR_SRC"
+rc7_fail=0
+for spec in "${RC7_PKGS[@]}"; do
+  name="${spec%@*}"
+  if [ ! -d "$VENDOR_SRC/$name" ]; then
+    echo "[stage] rc7 源缺 $name —— npm pack $spec ..."
+    # fetch 超时收紧（默认可达数分钟，registry 不可达时拖死全流程）；主
+    # registry 失败回落 npmmirror（国内网络环境实测可达，CI 无此问题）。
+    tgz="$(cd "$VENDOR_SRC" && npm pack "$spec" --fetch-timeout=20000 --fetch-retries=1 2>/dev/null | tail -1)" || true
+    if [ ! -f "$VENDOR_SRC/$tgz" ]; then
+      echo "[stage] npm pack 主 registry 失败: $spec —— 回落 registry.npmmirror.com"
+      tgz="$(cd "$VENDOR_SRC" && npm pack "$spec" --registry=https://registry.npmmirror.com --fetch-timeout=20000 --fetch-retries=1 2>/dev/null | tail -1)" || true
     fi
-  done
-  echo "[stage] vendor rc7 客户端闭包：补 $vendored 个缺失包（内核侧 fallback farm 兜底）"
-else
-  echo "[stage] WARN: 缺 0.4.1 构建产物（$VENDOR_SRC）——跳过 vendor（不阻断）" >&2
+    if [ ! -f "$VENDOR_SRC/$tgz" ]; then
+      echo "[stage] WARN: npm pack 失败: $spec（两个 registry 均不可达？）" >&2
+      rc7_fail=1
+      continue
+    fi
+    tmp=$(mktemp -d)
+    tar -xzf "$VENDOR_SRC/$tgz" -C "$tmp"
+    mkdir -p "$VENDOR_SRC/$name"
+    cp -r "$tmp/package/." "$VENDOR_SRC/$name/"
+    rm -rf "$tmp" "$VENDOR_SRC/$tgz"
+  fi
+done
+vendored=0
+for spec in "${RC7_PKGS[@]}"; do
+  name="${spec%@*}"
+  if [ -d "$VENDOR_SRC/$name" ] && [ ! -d "$DST/node_modules/$name" ]; then
+    # robocopy 成功码为 1-7（≠0），set -e 下裸调会被误杀——同 rc() 护栏。
+    set +e
+    mirror_dir "$VENDOR_SRC/$name" "$DST/node_modules/$name"
+    rcv=$?
+    set -e
+    [ $rcv -lt 8 ] || { echo "[stage] vendor 失败($rcv): $name" >&2; exit 1; }
+    vendored=$((vendored+1))
+  fi
+done
+echo "[stage] vendor rc7 客户端闭包：补 $vendored 个缺失包（10 包 CI 同口径；内核侧 fallback farm 兜底）"
+if [ "$rc7_fail" -ne 0 ]; then
+  echo "[stage] WARN: rc7 npm 源不完整——compat 门禁（下方）将拦截缺件包" >&2
 fi
 
 # ---- 页面端 client-compat（「missed the module table」的真修复）----
 # 必须在 node_modules //MIR 之后：compat 会向 payload 的 dsh-web-frontend
 # dist 注入 index.html <script> 与 assets/client-compat.js，先跑会被镜像冲掉。
-# compat 构建尽力而为：失败不阻断主构建（CI 环境可能缺 esbuild/rc7 包）
-# ——没有 compat 时插件走 renderer 回落链（三级降级已实装）。
-node "$REPO_ROOT/dsh-tauri/scripts/build-client-compat.mjs" 2>&1 || echo "[stage] WARN: client-compat 构建失败（非阻断——插件走 renderer 三级回落链）"
+# PD1 门禁：构建器失败可以只告警，但产物不允许缺——v0.5.2 官方包正是 compat
+# 闭包缺包被 WARN 静默吞掉而缺 client-compat.js 出厂（插件端 missed the
+# module table 常态化）。缺件即 fail-fast，拒绝再打病包。
+node "$REPO_ROOT/dsh-tauri/scripts/build-client-compat.mjs" 2>&1 || echo "[stage] WARN: client-compat 构建报错（见上）——以下门禁校验产物在位性"
+COMPAT_OUT="$DST/node_modules/@deepseek-ai/dsh-web-frontend/dist/assets/client-compat.js"
+if [ ! -f "$COMPAT_OUT" ]; then
+  echo "[stage] FATAL: $COMPAT_OUT 缺失——client-compat 闭包失败（rc7 源缺包？），拒绝打包" >&2
+  exit 1
+fi
+echo "[stage] OK: client-compat.js 在位 ($(wc -c < "$COMPAT_OUT" | tr -d ' ') bytes)"
 
 echo "[stage] 完成。体积统计："
 du -sm "$DST" "$DST/node_modules" "$DST/vendor" "$DST/assets" 2>/dev/null

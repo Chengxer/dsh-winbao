@@ -35,7 +35,10 @@ const Config = z.object({
 let liveConfig = () => ({ enabled: false, wireField: "reasoning_effort" });
 
 // 具备原生 reasoning 机制的适配器（注入会破坏其原生验证路径）。
-const NATIVE_REASONING_CLASSES = new Set(["DeepSeekAdapter"]);
+const // VB3 修复（2026-08-22）：pi-ai 适配器类名 PiAiAdapter 必须同样豁免——
+// 漏豁免时：非推理模型出现假档位（发送即 UNSUPPORTED_REASONING_EFFORT）、
+// 原生推理模型被叠加外键 reasoning_effort（严格网关 400）。
+NATIVE_REASONING_CLASSES = new Set(["DeepSeekAdapter", "PiAiAdapter"]);
 const DEEPSEEK_PROVIDER = "deepseek-official";
 
 // 官方思考强度档位形状。

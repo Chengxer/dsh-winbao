@@ -53,17 +53,16 @@
 
 | act | 语义 | 返回 |
 |-----|------|------|
-| `open-logs` | 打开日志目录（explorer） | `{ok}` |
-| `open-browser` | 系统浏览器打开 `payload.url`（缺省用当前内核地址） | `{ok}` |
-| `check-agent-update` | **最简版本比对**：本地内核版本 vs npm registry latest（双源镜像，语义化比较防降级误报）；完整下载/替换链后续迭代 | `{ok, current, latest, hasUpdate}` |
+| `open-logs` | 打开日志目录（explorer） | `null`（委托 open_in_explorer，无返回体） |
+| `open-browser` | 系统浏览器打开 `payload.url`（缺省用当前内核地址） | `null`（委托 open_http_url，无返回体） |
 | `reload` | 主窗当前页软重载（Electron reloadMainWindow 语义） | `null` |
 | `devtools` | 开 DevTools（仅 debug 构建；release 返回 `{ok:false}`） | `{ok}` |
 | `fullscreen` | 全屏切换 | `{fullscreen}` |
 | `about` | 关于信息（应用版本/平台/内核版本） | `{appVersion, platform, kernelVersion}` |
 | `quit` | 退出应用（托盘「退出」同语义：先杀内核树再 exit） | `null` |
-| `toggle-notify` / `toggle-close-to-tray` / `toggle-balance` | settings 单键切换（`notifyOnTurnEnd` / `closeToTray` / `showBalanceDock`，垫片 merge 进菜单 state 重渲染） | `{<settings键>: <新值>}` |
-| `check-client-update` | 客户端更新检查（tauri-plugin-updater，minisign fail-closed；endpoint 未配置时报 `E_UPDATER_CONFIG`） | `{ok, version, notes}` 或 `{ok, upToDate}` |
-| `install-client-update` | 下载并安装客户端更新（签名校验失败 `E_UPDATER_SIGNATURE` fail-closed） | `{ok, installed}` |
+| `toggle-notify` / `toggle-close-to-tray` / `toggle-balance` / `toggle-auto-update` | settings 单键切换（`notifyOnTurnEnd` / `closeToTray` / `showBalanceDock` / `autoInstallUpdates`，垫片 merge 进菜单 state 重渲染） | `{<settings键>: <新值>}` |
+| `check-client-update` | **双源客户端更新检查**（GitHub + Gitee releases/latest 并发探测，资产级回落；语义化比较防降级；`updater_client::check_latest`）。历史：`check-agent-update`（npm 内核比对）已随「内核随客户端分发、无 overlay 更新链」设计退役 | `{ok, current, next, notes, asset, source}` 或 `{ok, upToDate}` |
+| `install-client-update` | 下载并安装客户端更新（`download_to_temp` 流式下载+sha256 校验【GitHub digest > .sha256 边车 > size/50MB 兜底；HashMismatch 时自动换另一源重试一次——镜像漂移救回、真篡改仍硬失败】；Windows NSIS `/S /R /UPDATE` 静默升级保数据→shutdown→exit 由安装器 `/R` 重启；macOS 开 DMG 手动引导；Linux AppImage 原子自替换） | Windows `{ok, installing}` / mac `{ok, manual:true, version}` / linux `{ok, replaced, manual, version}` |
 
 ### 2.4 `wsl`（WSL 后端配置，3 项）
 
@@ -160,5 +159,5 @@
 - **R1 `getPathForFile`**：Electron `webUtils.getPathForFile` 读浏览器 File 的磁盘路径。Tauri 无直接等价（WebView2 侧 File 对象拿不到完整路径）。迁移方案：拖拽改走 Tauri `onDragDropEvent`（Rust 侧给路径列表），垫片在 drop 事件里回填 `file.path`；Phase 2 落地，过渡期返回 `''`（与「浏览器打开 WebUI」时同语义，插件已有降级路径）。
 - **同步 send 方法**（`floatWindow.close` 等 4 个）：Tauri command 天然异步；垫片保持同步返回 `void` 语义（内部 fire-and-forget invoke，`.catch` 静默），插件不感知差异。
 - **远程页注入**：内核 Web UI 是 `http://127.0.0.1:<port>` 远程页。Tauri 2 经 capability `remote.urls` 放行该 origin 的 IPC；垫片作为 `initialization_script` 每次导航注入。命令侧再做 origin 白名单（沿用 Electron `pluginManagerIpcAllowed` 语义：插件管理通道仅主窗 origin 可调）。PoC-A 验证此链路。
-- **菜单裁撤**：内核自动更新链（overlay 布局 / runUpdateFlow / 定时触发）已删除；`check-agent-update` 不再返回 `E_CUT_FEATURE`——v0.5.0 起为最简版本比对（见 §2.3 表），完整下载/替换链后续迭代。
+- **菜单裁撤**：内核自动更新链（overlay 布局 / runUpdateFlow / 定时触发）已删除；`check-agent-update`（npm registry 内核版本比对）已整体退役——Tauri 版内核随客户端分发、无 overlay 更新链，客户端更新检查（`check-client-update`，GitHub+Gitee 双源 releases）完全取代其在 ⋯ 菜单的位置。
 - **赞助窗实现注记（v0.5.0 终修）**：`sponsor_window` 为单例（已开则 show+focus 并返回 `{ok, reused:true}`）；HTML（内联 data URI 二维码图片）写 `%TEMP%\dsh-sponsor\sponsor.html` 后 `file://` 直载（绕开 WebView2 大 data URL 整页导航限制与 file:// 相对路径图片拦截）；原生标题栏（decorations+closable），不加自定义 CloseRequested 处理器（默认关闭即 destroy——回调内 destroy 曾致 UI 线程死锁）。

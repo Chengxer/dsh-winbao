@@ -38,6 +38,14 @@ const WALK_SWEEP_MS = 30000; // 目录对账（发现新会话、清理消失的
 // frame is encountered, it searches forward for the next valid frame magic and
 // continues scanning, so frames appended after a corrupt region are still
 // recovered instead of being silently dropped.
+//
+// 2026-08 修复（C1 迁移配套）：indexOf 的针从 magic 数值换成 4 字节 Buffer
+// 模式——Buffer.indexOf(number) 按单字节搜（数值被 &0xFF → 0x28），此前
+// 只因 magic 首字节恰为 0x28 而「碰巧」工作（沿途 0x28 逐跳）；torn 分支
+// 起点从 offset+1 改为 offset——紧跟在截断帧后的下一帧 magic 就在 offset
+// 处，+1 会跳过它（此前该形态下后续帧被永久吞掉）。
+const MAGIC_BYTES = Buffer.alloc(4);
+MAGIC_BYTES.writeUInt32LE(ZSTD_MAGIC, 0);
 function scanZstdFrames(buffer) {
   const frames = [];
   let offset = 0;
@@ -46,8 +54,8 @@ function scanZstdFrames(buffer) {
     if (buffer.length - offset < 4) return { frames, tornStart: start };
     if (buffer.readUInt32LE(offset) !== ZSTD_MAGIC) {
       // Bytes before the next frame magic: skip the garbage and resume at the
-      // next valid frame boundary, if any.
-      const next = buffer.indexOf(ZSTD_MAGIC, offset + 1);
+      // next valid frame boundary, if any.（当前字节已验证非 magic → 从 +1 起。）
+      const next = buffer.indexOf(MAGIC_BYTES, offset + 1);
       if (next === -1) return { frames, tornStart: start };
       offset = next;
       continue;
@@ -57,7 +65,7 @@ function scanZstdFrames(buffer) {
     const descriptor = buffer.readUInt8(offset);
     offset += 1;
     if ((descriptor & 24) !== 0) {
-      const next = buffer.indexOf(ZSTD_MAGIC, offset + 1);
+      const next = buffer.indexOf(MAGIC_BYTES, offset);
       if (next === -1) return { frames, tornStart: start };
       offset = next;
       continue;
@@ -81,12 +89,17 @@ function scanZstdFrames(buffer) {
       const blockSize = blockHeader >>> 3;
       if (blockType === 3) { torn = true; break; }
       const payloadBytes = blockType === 1 ? 1 : blockSize;
-      if (buffer.length - offset < payloadBytes) return { frames, tornStart: start };
+      // 帧体截断走 torn 恢复路径（模块头承诺的语义）：帧确实写到一半
+      //（尾部即结尾）时找不到后续 magic，仍按 tornStart 返回下次重读；
+      // 损坏/截断帧之后还有完整帧时跳过去恢复扫描（修复：此前直接
+      // return，后续帧被永久吞掉）。
+      if (buffer.length - offset < payloadBytes) { torn = true; break; }
       offset += payloadBytes;
       if (lastBlock) break;
     }
     if (torn) {
-      const next = buffer.indexOf(ZSTD_MAGIC, offset + 1);
+      // 下一帧可能恰好从 offset 开始（紧贴截断帧追加）→ 从 offset 起搜。
+      const next = buffer.indexOf(MAGIC_BYTES, offset);
       if (next === -1) return { frames, tornStart: start };
       offset = next;
       continue;
@@ -388,6 +401,56 @@ class SessionWatcher {
     try { this.onTurnEnd({ title, body, sessionId: h.id, cwd: h.cwd }); }
     catch (err) { this.log('watch', 'onTurnEnd 回调异常: ' + err.message); }
   }
+}
+
+// ---------------------------------------------------------------------------
+// CLI 模式（Tauri 壳 C1，2026-08）：vendor node 直起，stdout 行协议（JSON
+// Lines）——Rust 侧 session_notify.rs 逐行消费。Electron 遗产路径
+// require('./session-watcher')（main.js:43）经 require.main 守卫零变化。
+//   用法：node session-watcher.js --sessions-dir <dir>
+// 协议：每个 turn-end 一行
+//   {"type":"turn-end","sessionId","title","body"}（日志走 stderr，与 sidecar
+//   同口径）。stdin 管道保活：父进程持有写端，退出（哪怕被强杀 → 管道断）
+//   即自退，防孤儿监视进程。
+// ---------------------------------------------------------------------------
+if (require.main === module) {
+  const os = require('node:os');
+  const argv = process.argv.slice(2);
+  let sessionsDir = path.join(os.homedir(), '.dsh', 'sessions');
+  for (let i = 0; i < argv.length - 1; i++) {
+    if (argv[i] === '--sessions-dir') sessionsDir = argv[i + 1];
+  }
+  const watcher = new SessionWatcher({
+    sessionsDir,
+    log: function (tag, msg) {
+      try { process.stderr.write('[' + tag + '] ' + msg + '\n'); } catch {}
+    },
+    onTurnEnd: function (info) {
+      try {
+        process.stdout.write(JSON.stringify({
+          type: 'turn-end',
+          sessionId: typeof info.sessionId === 'string' ? info.sessionId : null,
+          title: typeof info.title === 'string' ? info.title : null,
+          body: typeof info.body === 'string' ? info.body : null,
+        }) + '\n');
+      } catch {
+        // stdout 已断（父进程退出中）：安静退出，不留孤儿。
+        try { watcher.stop(); } catch {}
+        process.exit(0);
+      }
+    },
+  });
+  watcher.start();
+  process.stdin.resume();
+  const bye = function () {
+    try { watcher.stop(); } catch {}
+    process.exit(0);
+  };
+  process.stdin.on('end', bye);
+  process.stdin.on('close', bye);
+  process.on('SIGTERM', bye);
+  process.on('SIGINT', bye);
+  process.on('exit', function () { try { watcher.stop(); } catch {} });
 }
 
 module.exports = { SessionWatcher, scanZstdFrames, expandRow };

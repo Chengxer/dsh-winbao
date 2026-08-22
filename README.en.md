@@ -42,7 +42,7 @@ Ships the full dsh runtime and official plugins — no Node.js install required,
 - **Guardian waterfall** — the kernel boot chain self-heals level by level: broken plugins auto-repair, corrupt configs rebuild, crash loops restart in place; no incompatible state ever exits the app (core v0.5.0 Tauri feature)
 - **Crash self-healing** — renderer freezes detected via heartbeat and auto-reload; the supervisor probes the kernel and relaunches with backoff
 - **History compatibility** — session event vocabulary is patched automatically so third-party plugin events never break history loading
-- **Dual-source updates** — agent version check (in-menu comparison against npm registry latest) + client self-update (tauri-plugin-updater, minisign-signed, fail-closed); upgrades reinstall to the old location with zero config loss
+- **Auto update** — in-app client update check & install from the ⋯ menu (dual-source GitHub/Gitee Releases with automatic failover, sha256-verified fail-closed, silent when offline); upgrades reinstall to the old location with zero config loss; the kernel ships with the client (no separate update chain)
 - **Shortcut self-healing** — desktop and Start Menu shortcuts are recreated automatically when missing
 
 ## 📸 App Preview
@@ -58,7 +58,7 @@ Ships the full dsh runtime and official plugins — no Node.js install required,
 | Sessions | Archive only | Archive / restore / delete |
 | Balance | None | Live "this turn cost · balance" + OpenCode Go |
 | Desktop | None | Tray / notifications / pet / side popup |
-| Updates | Manual | Agent version check + signed client update chain (minisign, fail-closed) |
+| Updates | Manual | Built-in dual-source client update chain (GitHub/Gitee + sha256 fail-closed) |
 
 ## 🚀 Quick Start
 

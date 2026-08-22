@@ -6,6 +6,8 @@ members = [
     "crates/bridge",
     "crates/fence",
     "crates/preview-server",
+    # WSL 托管后端编排（wsl.exe 探测/安装/启动命令；纯 std，不含 tauri）。
+    "crates/wsl-backend",
     # 通知限流/聚焦豁免决策逻辑（Phase 3 通知链接线目标；当前零消费者，
     # 保留为已测纯逻辑储备——见 migration-roadmap Phase 3）。
     "crates/session-watcher",
@@ -14,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 license = "MIT"
 authors = ["myYangyunfan"]

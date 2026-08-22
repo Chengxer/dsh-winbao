@@ -1,12 +1,20 @@
-//! ⋯ 菜单动作分发（`menu_action`，bridge-api.md §2.3 的 13 个 act 枚举）+
-//! settings 单键开关 helper + npm latest 版本比对（check-agent-update 最简链）。
+//! ⋯ 菜单动作分发（`menu_action`，bridge-api.md §2.3 的 act 枚举）+
+//! settings 单键开关 helper + 客户端更新链（`super::updater_client` 双源
+//! GitHub/Gitee Releases：check-client-update 检查 / install-client-update
+//! 下载并安装）。
+//!
+//! v0.5.3 起 `check-agent-update`（npm 内核 latest 比对链）退役：内核随
+//! 客户端整体分发，无独立 overlay 更新链——内核版本变化由客户端发版承载，
+//! 菜单唯一更新项即「检查客户端更新…」。退役的 E_AGENT_UPDATE_NETWORK
+//! 错误码在 contracts/error-codes.md 加「已退役」注记（码值不复用）。
 
 use bridge::BridgeError;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::AppState;
 
-use super::common::{open_http_url, open_in_explorer, terr, NoWindow};
+use super::common::{open_http_url, open_in_explorer, terr};
+use super::updater_client::{self, CheckOutcome};
 
 #[tauri::command]
 pub async fn menu_action(action: String, payload: Option<serde_json::Value>, app: AppHandle) -> Result<serde_json::Value, BridgeError> {
@@ -29,30 +37,7 @@ pub async fn menu_action(action: String, payload: Option<serde_json::Value>, app
                 });
             open_http_url(&url)
         }
-        "check-agent-update" => {
-            // 最简可行 agent 更新检查（sidecar 暂无 agent-check-update 子命令，
-            // 且 sidecar/ 属他人域不动）：本地版本 = 内核目录 @deepseek-ai/dsh
-            // package.json（supervisor.kernel_version），远端 = npm registry
-            // latest（双源镜像）。完整下载/替换链后续接（Electron runUpdateFlow
-            // 的对应物）；菜单侧只消费 {current,latest,hasUpdate} 就地展示。
-            let current = {
-                let state = app.state::<AppState>();
-                let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
-                sv.map(|s| s.kernel_version.clone()).unwrap_or_else(|| "unknown".into())
-            };
-            // PowerShell 子进程阻塞至多 ~16s（双源×8s），挪出 async 运行时线程。
-            let latest = tauri::async_runtime::spawn_blocking(|| npm_latest_version("@deepseek-ai/dsh"))
-                .await
-                .map_err(|e| BridgeError::internal(format!("agent 更新检查: {e}")))??;
-            Ok(serde_json::json!({
-                "ok": true,
-                "current": current,
-                "latest": latest,
-                // 语义化比较（非字符串不等）：防 registry 落后于内置包的降级误报
-                //（实测 npmmirror latest 0.1.0-rc.7 < 内置 0.1.0-rc.8）。
-                "hasUpdate": !latest.is_empty() && compare_versions(&latest, &current) == std::cmp::Ordering::Greater,
-            }))
-        }
+        // （check-agent-update 分支已删除——见模块 doc。）
         "reload" => {
             // Electron reloadMainWindow 语义：当前页软重载（内核 SPA 状态丢失可接受）。
             let win = main_window(&app)?;
@@ -101,7 +86,7 @@ pub async fn menu_action(action: String, payload: Option<serde_json::Value>, app
             app.exit(0);
             Ok(serde_json::Value::Null)
         }
-        "toggle-notify" | "toggle-close-to-tray" | "toggle-balance" => {
+        "toggle-notify" | "toggle-close-to-tray" | "toggle-balance" | "toggle-auto-update" => {
             let key = toggle_key(&action);
             let state = app.state::<AppState>();
             let store = shell_core::SettingsStore::new(state.paths.settings.clone());
@@ -117,32 +102,140 @@ pub async fn menu_action(action: String, payload: Option<serde_json::Value>, app
             Ok(serde_json::Value::Object(out))
         }
         "check-client-update" => {
-            use tauri_plugin_updater::UpdaterExt;
-            let updater = app.updater().map_err(|e| BridgeError::updater_network(e.to_string()))?;
-            if std::env::var("DSH_UPDATER_ENDPOINT").ok().is_none() {
-                // R5 triage：更新通道尚未开通（CI 从不注入该变量）——报错误
-                // 码会让用户看到「更新通道未配置（DSH_UPDATER_ENDPOINT…）」
-                // 这种面向开发者的文案。诚实化：正常返回结构化未开通态 +
-                // 可操作指引（去 Releases 手动下载覆盖安装）。
-                return Ok(serde_json::json!({
+            // 双源（GitHub/Gitee Releases）latest 检查：updater_client 单一
+            // 来源（启动自动检查的 client-update-available 事件同链，lib.rs
+            // setup hook）。当前版本取编译期 CARGO_PKG_VERSION（与 tag 比较前
+            // 由 cmp_semver 归一）。离线/双源不可达 → E_UPDATER_NETWORK +
+            // 友好文案（见 updater_err_to_bridge）。
+            let current = env!("CARGO_PKG_VERSION").to_string();
+            let outcome = updater_client::check_latest(&current).await.map_err(updater_err_to_bridge)?;
+            match outcome {
+                CheckOutcome::UpToDate => Ok(serde_json::json!({ "ok": true, "upToDate": true })),
+                CheckOutcome::Available(u) => Ok(serde_json::json!({
                     "ok": true,
-                    "channel": "none",
-                    "message": "应用内更新暂未开放：请到 GitHub Releases（myYangyunfan/dsh_desktop）下载新版本安装包，完全退出应用后覆盖安装（会话数据不受影响）。"
-                }));
-            }
-            let update = updater.check().await.map_err(|e| BridgeError::updater_network(e.to_string()))?;
-            match update {
-                Some(u) => Ok(serde_json::json!({ "ok": true, "version": u.version, "notes": u.body, "downloadAndInstall": "经 dshDesktop.menu.action('install-client-update')" })),
-                None => Ok(serde_json::json!({ "ok": true, "upToDate": true })),
+                    "current": u.current,
+                    "next": u.next,
+                    "notes": u.notes,
+                    "asset": { "name": u.asset.name, "size": u.asset.size },
+                    "source": u.source,
+                })),
             }
         }
         "install-client-update" => {
-            use tauri_plugin_updater::UpdaterExt;
-            let updater = app.updater().map_err(|e| BridgeError::updater_network(e.to_string()))?;
-            let update = updater.check().await.map_err(|e| BridgeError::updater_network(e.to_string()))?
-                .ok_or_else(|| BridgeError::not_found("已是最新版本"))?;
-            update.download_and_install(|_, _| {}, || {}).await.map_err(|e| BridgeError::updater_signature(e.to_string()))?;
-            Ok(serde_json::json!({ "ok": true, "installed": update.version }))
+            // 安装链：check_latest 复核（UpToDate 拒绝空装）→ download_to_temp
+            // 下载（sha256 校验在 updater_client::download_to_temp 内完成：
+            // None = 依次取 GitHub digest 缓存 / <url>.sha256 边车，无哈希时
+            // 元数据 size + 安装器 >50MB 下限兜底——见其 doc）→ 平台分支
+            // （Windows 静默安装 + 自动重启；mac/linux 诚实降级）。
+            let current = env!("CARGO_PKG_VERSION").to_string();
+            let outcome = updater_client::check_latest(&current).await.map_err(updater_err_to_bridge)?;
+            let upd = match outcome {
+                CheckOutcome::Available(u) => u,
+                CheckOutcome::UpToDate => return Err(BridgeError::not_found("已是最新版本")),
+            };
+            let next = upd.next.clone();
+            // 下载进度经 `client-update-progress` {received,total} 事件发给
+            // 页面（垫片在菜单行尾就地显示百分比；emit 只借 &self，跨 await 安全）。
+            // RV9 P1 节流：流式下载每 chunk 都回调（100Mbps ≈ 800 次/s），
+            // UI 只显示百分比——按「≥1% 增量或 ≥200ms」节流后再 emit，
+            // 事件频率从百级/秒压到 ≤5 次/s。
+            let emit_app = app.clone();
+            let mut last_emit: Option<(u64, std::time::Instant)> = None;
+            let asset = upd.asset;
+            let path = updater_client::download_to_temp(&asset, move |received: u64, total: u64| {
+                let now = std::time::Instant::now();
+                let fire = match last_emit {
+                    None => true,
+                    Some((prev_recv, prev_at)) => {
+                        let pct_gain = u64::checked_div(
+                            received.saturating_sub(prev_recv).saturating_mul(100),
+                            total,
+                        )
+                        .unwrap_or(0);
+                        pct_gain >= 1 || now.duration_since(prev_at).as_millis() >= 200
+                    }
+                };
+                if fire {
+                    last_emit = Some((received, now));
+                    let _ = emit_app.emit(
+                        "client-update-progress",
+                        serde_json::json!({ "received": received, "total": total }),
+                    );
+                }
+            }, None)
+            .await
+            .map_err(updater_err_to_bridge)?;
+
+            // ---- 平台分支 -----------------------------------------------------
+            // Windows（唯一发版目标，tauri.conf.json bundle.targets=["nsis"]）：
+            // 静默安装参数 `/S /R /UPDATE`，语义引安装器脚本（nsis/installer-template.nsi，
+            // vendor 自 tauri-bundler 2.11.4）与 tauri-plugin-updater 2.10.1
+            // install_inner 的 Quiet 形参（["/S","/R"] + "/UPDATE"）：
+            //   · /S —— NSIS 原生静默。页面函数不执行 → PageLeaveReinstall 的
+            //     reinst_uninstall（installer-template.nsi:362）永不可达，旧
+            //     卸载器根本不会被调用；被动模式（/P）下 /UPDATE 也直接
+            //     reinst_done 跳过旧版卸载（:334-336），两条路都是「只覆盖文件」。
+            //   · /UPDATE —— 更新模式（.onInit :503-506 解析）：跳过 WebView2
+            //     段（:576，升级机必有）；卸载器侧保留快捷方式/自启/绝不删
+            //     %APPDATA%（un.* :838/:879/:885-899 的 $UpdateMode 守卫）——
+            //     v0.5.1 起的修复版卸载器（识别 /KEEP_APP_DATA/--updated，
+            //     commits 0d568947/6a7dc82a）之上再加一层保险。
+            //   · /R —— .onInstSuccess（:758-769）静默装完 RunAsUser 自动重启
+            //     应用，实现「下载并安装」一键闭环。
+            //   数据安全结论：/S 下 Install section 只写 $INSTDIR 程序文件
+            //   （:653-756），用户数据（~/.dsh、%APPDATA%\dsh-desktop）不在
+            //   写入面；不传任何卸载/清数据参数即保数据。
+            // 退出时序/文件锁：bundler utils.nsh 的 CheckIfAppIsRunning 在
+            //   静默/被动模式下发现本进程仍在运行会直接 KillProcessCurrentUser
+            //   后 Sleep 500 继续写文件（文件锁随进程终止释放）——因此这里先
+            //   spawn 安装器（detached），再走 quit 同款正常退出路径：同步
+            //   supervisor.shutdown（Job Object 杀内核树）→ app.exit(0) 触发
+            //   RunEvent::Exit 收尾锁文件。即使安装器抢先硬杀本进程：内核树
+            //   受 Job Object KILL_ON_JOB_CLOSE（kernel-process/job_object.rs:29）
+            //   OS 级收割，单实例锁有陈锁回收兜底，均无泄漏。
+            #[cfg(windows)]
+            {
+                let mut installer = std::process::Command::new(&path);
+                installer.args(["/S", "/R", "/UPDATE"]);
+                installer.spawn().map_err(|e| BridgeError::internal(format!("启动安装器失败: {e}")))?;
+                if let Some(state) = app.try_state::<AppState>() {
+                    if let Some(sv) = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+                        sv.shutdown();
+                    }
+                }
+                app.exit(0);
+                Ok(serde_json::json!({ "ok": true, "installing": next }))
+            }
+            // macOS：DMG 无法静默安装（hdiutil attach + cp .app 理论可行，但
+            // 权限/盘符卸载/Applications 替换确认的边缘形态多，不做半吊子自动
+            // 化）——诚实降级：open DMG，返回 {manual:true}，垫片提示
+            // 「已下载 vX，请拖入 Applications 完成更新」。
+            #[cfg(target_os = "macos")]
+            {
+                std::process::Command::new("open")
+                    .arg(&path)
+                    .spawn()
+                    .map_err(|e| BridgeError::internal(format!("打开 DMG 失败: {e}")))?;
+                Ok(serde_json::json!({ "ok": true, "manual": true, "version": next }))
+            }
+            // Linux：AppImage 自替换。运行中的 AppImage 挂的是旧 inode，
+            // rename(2) 原子换路径不影响运行实例——chmod +x 后 rename 覆盖
+            // current_exe 即完成「下载到固定位置替换自身」；失败（目标目录
+            // 只读等）降级 open 所在目录 + {manual:true} 指引，如实返回形态。
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let exe = std::env::current_exe()
+                    .map_err(|e| BridgeError::internal(format!("定位当前可执行文件失败: {e}")))?;
+                let replaced = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).is_ok()
+                    && std::fs::rename(&path, &exe).is_ok();
+                if !replaced {
+                    if let Some(dir) = exe.parent() {
+                        let _ = open_in_explorer(dir);
+                    }
+                }
+                Ok(serde_json::json!({ "ok": true, "replaced": replaced, "manual": !replaced, "version": next }))
+            }
         }
         other => Err(BridgeError::invalid_arg(format!("未知菜单动作：{other}"))),
     }
@@ -153,151 +246,53 @@ pub(super) fn main_window(app: &AppHandle) -> Result<tauri::WebviewWindow, Bridg
     app.get_webview_window("main").ok_or_else(|| BridgeError::not_found("主窗不存在"))
 }
 
-/// 菜单 toggle 动作 → settings.json 键（Electron updater.loadSettings 同键）。
+/// 更新链错误归一：Offline（双源均不可达）用面向用户的友好文案 +
+/// E_UPDATER_NETWORK；其余按 updater_client 的 From 映射（HashMismatch →
+/// E_UPDATER_SIGNATURE fail-closed、Io → internal 等，错误类型信息经
+/// Display 保留），不重复发明映射。
+fn updater_err_to_bridge(e: super::updater_client::UpdaterError) -> BridgeError {
+    match e {
+        super::updater_client::UpdaterError::Offline(m) => {
+            BridgeError::updater_network(format!("无法连接更新源（GitHub/Gitee 均不可达），请检查网络后从右上角 ⋯ 菜单重试（{m}）"))
+        }
+        other => other.to_bridge(),
+    }
+}
+
+/// 菜单 toggle 动作 → settings.json 键（前三者 Electron updater.loadSettings
+/// 同键；autoInstallUpdates 为 Tauri 版新键——自动装更新会重启应用）。
 fn toggle_key(action: &str) -> &'static str {
     match action {
         "toggle-notify" => "notifyOnTurnEnd",
         "toggle-close-to-tray" => "closeToTray",
+        "toggle-auto-update" => "autoInstallUpdates",
         _ => "showBalanceDock",
     }
 }
 
+/// 各开关缺省值：Electron 三键沿 `s.x !== false` 缺省 true；autoInstallUpdates
+/// 缺省 **false**——自动下载安装会中断运行中的会话并重启应用，必须用户显式
+/// 开启（⋯ 菜单「自动安装客户端更新」）。
+fn key_default(key: &str) -> bool {
+    !matches!(key, "autoInstallUpdates")
+}
+
+/// 读 settings.json 布尔键（显式缺省）。损坏/缺失回落 default。
+pub(super) fn setting_bool_or(store: &shell_core::SettingsStore, key: &str, default: bool) -> bool {
+    store.get(key).ok().flatten().and_then(|v| v.as_bool()).unwrap_or(default)
+}
+
 /// 读 settings.json 布尔键（Electron `s.x !== false` 缺省 true 同口径）。
 pub(super) fn setting_bool(store: &shell_core::SettingsStore, key: &str) -> bool {
-    store.get(key).ok().flatten().and_then(|v| v.as_bool()).unwrap_or(true)
+    setting_bool_or(store, key, true)
 }
 
 /// 读-改-写布尔开关（Electron toggle-* 语义）：取反写回，返回新值。
+/// 缺省值按 [`key_default`]（autoInstallUpdates 缺省 false，其余 true）。
 fn toggle_setting(store: &shell_core::SettingsStore, key: &str) -> Result<bool, shell_core::settings::SettingsError> {
-    let next = !setting_bool(store, key);
+    let next = !setting_bool_or(store, key, key_default(key));
     store.set(key, serde_json::json!(next))?;
     Ok(next)
-}
-
-/// npm registry latest 版本查询（无 HTTP 依赖：子进程拉取；npmmirror 优先、
-/// npmjs 兜底——Electron 更新链双源同思路，国内网络优先镜像）。
-///
-/// `E_AGENT_UPDATE_NETWORK`：agent 更新链自用码，已登记
-/// contracts/error-codes.md §1（2026-08-22 原则审查清偿登记；码值自始未变）。
-const E_AGENT_UPDATE_NETWORK: &str = "E_AGENT_UPDATE_NETWORK";
-
-fn npm_latest_version(pkg: &str) -> Result<String, BridgeError> {
-    for host in ["registry.npmmirror.com", "registry.npmjs.org"] {
-        let url = format!("https://{host}/{pkg}/latest");
-        if let Some(v) = http_get_version(&url) {
-            return Ok(v);
-        }
-    }
-    Err(BridgeError::new(E_AGENT_UPDATE_NETWORK, "npm registry 查询失败（npmmirror/npmjs 均不可达）"))
-}
-
-/// 单源查询：Windows 走 PowerShell Invoke-RestMethod（壳内既定子进程模式，
-/// copy_text/open_http_url 同口径），其余平台 curl + 首个 "version" 字段提取。
-fn http_get_version(url: &str) -> Option<String> {
-    if url.contains('\'') {
-        return None; // 防御（URL 由本函数拼装，正常不含单引号）
-    }
-    #[cfg(windows)]
-    let output = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            &format!("$ProgressPreference='SilentlyContinue';try{{(Invoke-RestMethod -Uri '{url}' -TimeoutSec 8).version}}catch{{exit 2}}"),
-        ])
-        .creation_flags_no_window()
-        .output();
-    #[cfg(not(windows))]
-    let output = std::process::Command::new("curl")
-        .args(["-sf", "--max-time", "8", url])
-        .output();
-    let out = output.ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    #[cfg(windows)]
-    let version = text; // PS 已提取 .version 字符串
-    #[cfg(not(windows))]
-    let version = extract_json_version(&text);
-    // 版本串形态约束：非空、无空白、长度 sane（PS 错误对象字符串/HTML 错误页防御）。
-    if version.is_empty() || version.len() > 64 || version.chars().any(char::is_whitespace) {
-        return None;
-    }
-    Some(version)
-}
-
-/// 从 npm packument 文本提取首个 "version" 字段值（首个即顶层版本；与
-/// supervisor::read_kernel_version 同款文本手术，不引 JSON DOM 依赖）。
-/// Windows 的 PS 路径不消费（Invoke-RestMethod 已提取 .version），仅
-/// 非 Windows curl 路径与单测使用。
-#[cfg_attr(windows, allow(dead_code))]
-fn extract_json_version(doc: &str) -> String {
-    let Some(pos) = doc.find("\"version\"") else { return String::new() };
-    let Some(colon) = doc[pos..].find(':') else { return String::new() };
-    let rest = &doc[pos + colon..];
-    let Some(q1) = rest.find('"') else { return String::new() };
-    let body = &rest[q1 + 1..];
-    let Some(len) = body.find('"') else { return String::new() };
-    body[..len].to_string()
-}
-
-/// 版本段解析：(数字前缀, 是否数字段, 是否带预发布后缀, 原始段)。
-/// 缺失段（None）按数字 0 处理（1.0 == 1.0.0）；空串/非数字开头是文本段。
-fn version_seg(s: Option<&str>) -> (f64, bool, bool, String) {
-    match s {
-        None => (0.0, true, false, String::new()),
-        Some(s) => {
-            let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if digits.is_empty() {
-                (f64::NAN, false, false, s.to_string())
-            } else {
-                let has_pre = s.len() > digits.len();
-                (digits.parse().unwrap_or(f64::NAN), true, has_pre, s.to_string())
-            }
-        }
-    }
-}
-
-/// 版本比较（Electron scripts/lib/versions.js compareVersions 的 Rust 移植，
-/// 语义单一来源，逐条对齐）：
-/// · 数值分段比较（0.12.2 > 0.2.1），段数不限；缺失段按 0（1.0 == 1.0.0）；
-/// · 忽略前导 v（v0.2.3 == 0.2.3）；
-/// · 段先按数字前缀比较（0.2.4-beta > 0.2.3）；
-/// · 数字前缀相等时：无预发布后缀 > 有后缀（0.2.3 > 0.2.3-beta）；
-/// · 两段都带后缀按字符串比较（alpha < beta < rc）；
-/// · 数字段 > 纯文本段。
-fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    fn strip_v(s: &str) -> &str {
-        s.strip_prefix('v').unwrap_or(s)
-    }
-    let pa: Vec<&str> = strip_v(a).split('.').collect();
-    let pb: Vec<&str> = strip_v(b).split('.').collect();
-    for i in 0..pa.len().max(pb.len()) {
-        let x = version_seg(pa.get(i).copied());
-        let y = version_seg(pb.get(i).copied());
-        match (x.1, y.1) {
-            (true, true) => {
-                if x.0 != y.0 {
-                    return if x.0 < y.0 { Ordering::Less } else { Ordering::Greater };
-                }
-                if x.2 != y.2 {
-                    return if x.2 { Ordering::Less } else { Ordering::Greater }; // 有后缀 < 无后缀
-                }
-                if x.2 && x.3 != y.3 {
-                    return if x.3 < y.3 { Ordering::Less } else { Ordering::Greater };
-                }
-            }
-            (true, false) => return Ordering::Greater, // 数字段 > 纯文本段
-            (false, true) => return Ordering::Less,
-            (false, false) => {
-                if x.3 != y.3 {
-                    return if x.3 < y.3 { Ordering::Less } else { Ordering::Greater };
-                }
-            }
-        }
-    }
-    Ordering::Equal
 }
 
 #[cfg(test)]
@@ -305,7 +300,8 @@ mod tests {
     use super::*;
 
     /// ⋯ 菜单 toggle：读-改-写 settings 往返（缺省 true → false → true），
-    /// 读-改-写不破坏同文件其他键，损坏形态（非布尔值）回落缺省 true。
+    /// 读-改-写不破坏同文件其他键，损坏形态（非布尔值）回落缺省；
+    /// autoInstallUpdates 缺省 false（改动系统行为的开关必须显式开启）。
     #[test]
     fn menu_toggle_setting_roundtrip() {
         let mut path = std::env::temp_dir();
@@ -328,53 +324,20 @@ mod tests {
         store.set("showBalanceDock", serde_json::json!("oops")).unwrap();
         assert!(setting_bool(&store, "showBalanceDock"));
         assert!(!toggle_setting(&store, "showBalanceDock").unwrap());
+        // autoInstallUpdates：缺省 false → 首次 toggle 后 true。
+        assert!(!setting_bool_or(&store, "autoInstallUpdates", key_default("autoInstallUpdates")));
+        assert!(toggle_setting(&store, "autoInstallUpdates").unwrap());
+        assert_eq!(store.get("autoInstallUpdates").unwrap(), Some(serde_json::json!(true)));
         let _ = std::fs::remove_file(&path);
     }
 
-    /// 菜单 toggle 动作 → settings.json 键映射（Electron 同键）。
+    /// 菜单 toggle 动作 → settings.json 键映射（Electron 同键 + 新键）。
     #[test]
     fn menu_toggle_key_mapping() {
         assert_eq!(toggle_key("toggle-notify"), "notifyOnTurnEnd");
         assert_eq!(toggle_key("toggle-close-to-tray"), "closeToTray");
         assert_eq!(toggle_key("toggle-balance"), "showBalanceDock");
-    }
-
-    /// npm packument 版本提取（首个 "version" 字段即顶层版本）。
-    #[test]
-    fn extract_json_version_npm_doc() {
-        let doc = r#"{"_id":"@deepseek-ai/dsh","name":"@deepseek-ai/dsh","version":"0.1.0-rc.9","dist":{"tarball":"https://x/y.tgz"}}"#;
-        assert_eq!(extract_json_version(doc), "0.1.0-rc.9");
-        assert_eq!(extract_json_version("{\"error\":\"not found\"}"), "");
-        assert_eq!(extract_json_version(""), "");
-    }
-
-    /// 版本比较（Electron scripts/lib/versions.js 同语义，注释里的规则逐条锚定）
-    /// + 真实回归案例：npmmirror latest 0.1.0-rc.7 < 内置 0.1.0-rc.8 → 无更新。
-    #[test]
-    fn compare_versions_semantics() {
-        use std::cmp::Ordering::*;
-        // 数值分段比较。
-        assert_eq!(compare_versions("0.12.2", "0.2.1"), Greater);
-        assert_eq!(compare_versions("0.2.1", "0.12.2"), Less);
-        // 缺失段按 0。
-        assert_eq!(compare_versions("1.0", "1.0.0"), Equal);
-        // 忽略前导 v。
-        assert_eq!(compare_versions("v0.2.3", "0.2.3"), Equal);
-        // 数字前缀优先：预发布的高段仍大于低段正式版。
-        assert_eq!(compare_versions("0.2.4-beta", "0.2.3"), Greater);
-        // 无后缀 > 有后缀。
-        assert_eq!(compare_versions("0.2.3", "0.2.3-beta"), Greater);
-        // 后缀按字符串比较：alpha < beta < rc。
-        assert_eq!(compare_versions("0.2.3-alpha", "0.2.3-beta"), Less);
-        assert_eq!(compare_versions("0.2.3-beta", "0.2.3-rc"), Less);
-        // rc.N 序号比较（rc.8 > rc.7）。
-        assert_eq!(compare_versions("0.1.0-rc.8", "0.1.0-rc.7"), Greater);
-        // 数字段 > 纯文本段。
-        assert_eq!(compare_versions("1.2.3", "1.2.x"), Greater);
-        // 真实回归：registry 落后于内置包 → 不得报「可更新」。
-        assert_eq!(compare_versions("0.1.0-rc.7", "0.1.0-rc.8"), Less, "降级误报防护");
-        // 真实正向：registry 更新 → 报「可更新」。
-        assert_eq!(compare_versions("0.1.0", "0.1.0-rc.8"), Greater);
+        assert_eq!(toggle_key("toggle-auto-update"), "autoInstallUpdates");
     }
 
     /// 菜单 quit 语义 = 托盘退出（lib.rs setup_tray 同款）：先 supervisor
@@ -393,79 +356,108 @@ mod tests {
         assert!(sh < ex, "先 shutdown 后 exit（Job Object 杀树语义）: {seg}");
     }
 
-    /// check-agent-update 需求变更锚点：不再裁撤（菜单保留「检查 dsh 更新…」），
-    /// 走 npm latest 对比返回 {current,latest,hasUpdate}。
+    /// check-agent-update 退役锚点（v0.5.3）：分支与整条 npm latest 比对链
+    /// （npm_latest_version/http_get_version/extract_json_version/
+    /// compare_versions/E_AGENT_UPDATE_NETWORK）不得回潮——内核随客户端
+    /// 整体分发，无独立更新链。（只查实现段：退役名单本身出现在测试里是
+    /// 自引用，不构成残留。）
     #[test]
-    fn check_agent_update_uses_npm_latest_not_cut() {
+    fn agent_update_chain_fully_retired() {
         let src = include_str!("menu.rs");
-        let seg = src
-            .split("\"check-agent-update\" =>")
+        let code = src
+            .split("#[tauri::command]")
             .nth(1)
-            .and_then(|s| s.split("\"reload\" =>").next())
-            .expect("check-agent-update 分支");
-        assert!(seg.contains("npm_latest_version"), "最简可行链：npm latest 对比");
-        assert!(!seg.contains("BridgeError::cut"), "不得再返回 E_CUT_FEATURE");
-        assert!(seg.contains("\"hasUpdate\""), "返回契约必须带 hasUpdate");
+            .and_then(|s| s.split("#[cfg(test)]").next())
+            .expect("实现段（menu_action 起、测试前止）");
+        assert!(!code.contains("\"check-agent-update\" =>"), "check-agent-update 分支必须删除");
+        for gone in [
+            "npm_latest_version",
+            "http_get_version",
+            "extract_json_version",
+            "fn compare_versions",
+            "E_AGENT_UPDATE_NETWORK",
+        ] {
+            assert!(!code.contains(gone), "退役链残留在 menu.rs: {gone}");
+        }
     }
 
-    /// 版本比较器边界补强（「打开后各种 bug」防御轮）：
-    /// · rc(高段) > release(低段)：0.1.0 → 0.1.1-rc.1 的真实升级路径不得漏报；
-    /// · 完全相等（含同 rc 串）；
-    /// · 坏格式（空串/纯文本 unknown/空段）不 panic、语义稳定——
-    ///   read_kernel_version 失败回 "unknown"、网络提取失败回 "" 都真实存在。
+    /// check-client-update 源码形态锚点（updater_client 是网络依赖模块，
+    /// 无法在单测离线验证——沿用 include_str! 形态断言法）：
+    /// · 必须以 CARGO_PKG_VERSION 为当前版本 await updater_client::check_latest
+    ///   （双源 latest 单一来源，不再走 tauri-plugin-updater 端点门控）；
+    /// · 网络失败经 updater_err_to_bridge 归一（Offline → E_UPDATER_NETWORK +
+    ///   「GitHub/Gitee 均不可达」友好文案，见 helper 段）；
+    /// · UpToDate → {ok,upToDate:true}；Available → {current,next,notes,
+    ///   asset:{name,size},source}（垫片就地回显消费）。
     #[test]
-    fn compare_versions_edges_rc_release_equal_and_malformed() {
-        use std::cmp::Ordering::*;
-        // rc(更高段) > release(更低段)：内置 0.1.0 → npm latest 0.1.1-rc.1 必须报可更新。
-        assert_eq!(compare_versions("0.1.1-rc.1", "0.1.0"), Greater, "高段 rc 不得被漏报为无更新");
-        assert_eq!(compare_versions("0.1.0", "0.1.1-rc.1"), Less);
-        // 同号对照（既有语义）：release > rc。
-        assert_eq!(compare_versions("0.1.1", "0.1.1-rc.1"), Greater);
-        // 完全相等：同串、同 rc 串、v 前缀。
-        assert_eq!(compare_versions("0.5.1", "0.5.1"), Equal);
-        assert_eq!(compare_versions("0.1.1-rc.1", "0.1.1-rc.1"), Equal);
-        assert_eq!(compare_versions("v0.5.1", "0.5.1"), Equal);
-        // 坏格式：空串 vs 空串 / unknown vs unknown → 相等（无更新，不误报）。
-        assert_eq!(compare_versions("", ""), Equal);
-        assert_eq!(compare_versions("unknown", "unknown"), Equal);
-        // 数字段 vs 坏格式：真实版本永远大于 "unknown"/""（不会把垃圾判成可更新）。
-        assert_eq!(compare_versions("unknown", "0.1.0"), Less);
-        assert_eq!(compare_versions("", "0.1.0"), Less);
-        assert_eq!(compare_versions("0.1.0", "unknown"), Greater);
-        // 空段（"0..1"）按文本段处理：文本段 < 数字段（既有语义锚定，不 panic）。
-        assert_eq!(compare_versions("0..1", "0.0.1"), Less);
-    }
-
-    /// check/install-client-update 源码形态锚点（Tauri updater 命令依赖
-    /// AppHandle，无法在单测构造——沿用 include_str! 形态断言法）：
-    /// · check-client-update：未配置 DSH_UPDATER_ENDPOINT 必须先拦截并返回
-    ///   结构化「channel:"none"+指引」（v0.5.1 诚实化：不再抛面向开发者的
-    ///   updater_config 错误文案），防发版前点了菜单走默认通道拿不可预期更新；
-    /// · install-client-update：必须 check() 到 Some 才 download_and_install
-    ///   （不得跳过校验直装），下载/签名失败归一 updater_signature。
-    #[test]
-    fn client_update_commands_shape_guards() {
+    fn client_update_check_calls_updater_client_check_latest() {
         let src = include_str!("menu.rs");
         let check = src
             .split("\"check-client-update\" =>")
             .nth(1)
             .and_then(|s| s.split("\"install-client-update\" =>").next())
             .expect("check-client-update 分支");
-        let cfg = check.find("DSH_UPDATER_ENDPOINT").expect("必须先查通道环境变量");
-        let net = check.find("updater.check()").expect("必须联网 check");
-        assert!(cfg < net, "先查配置再联网（省一次无效网络往返）");
-        assert!(check.contains("\"channel\": \"none\""), "未开通返回结构化 channel:none");
-        assert!(check.contains("Releases"), "未开通须给出手动下载指引");
+        assert!(check.contains("updater_client::check_latest"), "必须直连 updater_client::check_latest（U1 契约）");
+        assert!(check.contains("env!(\"CARGO_PKG_VERSION\")"), "当前版本取编译期 CARGO_PKG_VERSION");
+        assert!(check.contains(".await"), "check_latest 是 async 契约（直 await，不 spawn_blocking）");
+        assert!(check.contains("updater_err_to_bridge"), "错误经 updater_err_to_bridge 归一");
         assert!(check.contains("\"upToDate\": true"), "无更新返回 upToDate:true");
+        for field in ["\"current\"", "\"next\"", "\"notes\"", "\"asset\"", "\"source\""] {
+            assert!(check.contains(field), "返回契约必须带 {field}");
+        }
+        assert!(!check.contains("DSH_UPDATER_ENDPOINT"), "旧端点门控已随 updater 插件链退役");
+        assert!(!check.contains("UpdaterExt"), "不再走 tauri-plugin-updater");
+        // 离线文案锚点（helper 段）：Offline 专用友好文案 + UPDATER_NETWORK 码，
+        // 其余错误按 updater_client 的 From 映射（HashMismatch → SIGNATURE）。
+        let helper = src
+            .split("fn updater_err_to_bridge")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n").next())
+            .expect("updater_err_to_bridge 段");
+        assert!(helper.contains("GitHub/Gitee 均不可达"), "离线文案须含双源不可达指引");
+        assert!(helper.contains("updater_network"), "Offline 归一 updater_network");
+        assert!(helper.contains("to_bridge()"), "其余错误走 updater_client 既定映射（不重复发明）");
+    }
+
+    /// install-client-update 源码形态锚点：
+    /// · 必须先 check_latest 复核，UpToDate 拒绝空装（not_found 明确报错）；
+    /// · 下载必须经 updater_client::download_to_temp（sha256 校验在其内
+    ///   完成：digest 缓存/边车/大小下限——调用形态即校验路径），进度经
+    ///   client-update-progress 事件；
+    /// · Windows 分支顺序锚定：spawn 安装器(/S /R /UPDATE) → supervisor
+    ///   shutdown → app.exit(0)（quit 同语义，防「先退出后 spawn」把安装器
+    ///   一起带走，也防「只 spawn 不退出」文件锁死锁）。
+    #[test]
+    fn client_update_install_downloads_then_exits_gracefully() {
+        let src = include_str!("menu.rs");
         let install = src
             .split("\"install-client-update\" =>")
             .nth(1)
             .and_then(|s| s.split("other =>").next())
             .expect("install-client-update 分支");
-        let chk = install.find("updater.check()").expect("必须先 check");
-        let dl = install.find("download_and_install").expect("必须走 download_and_install");
-        assert!(chk < dl, "先 check 后下载安装（不得跳过更新检测直装）");
-        assert!(install.contains("ok_or_else(|| BridgeError::not_found(\"已是最新版本\"))"), "无更新时明确报错而非空装");
-        assert!(install.contains("updater_signature"), "下载/签名失败归一 updater_signature");
+        // 调用形态锚定（注释里也会提到函数名，必须找真实调用形）。
+        let chk = install.find("updater_client::check_latest(&current)").expect("必须先 check_latest 复核");
+        let dl = install.find("updater_client::download_to_temp(&asset").expect("必须经 download_to_temp 下载（含 sha256 校验）");
+        assert!(chk < dl, "先检查后下载（UpToDate 拒绝空装）");
+        assert!(install.contains("BridgeError::not_found(\"已是最新版本\")"), "无更新时明确报错而非空装");
+        assert!(install.contains(".await"), "download_to_temp 是 async 契约");
+        assert!(install.contains("\"client-update-progress\""), "下载进度必须经事件发出");
+        assert!(install.contains("\"received\"") && install.contains("\"total\""), "进度载荷 {{received,total}}");
+        // Windows 静默参数 + 退出时序（只锚定 #[cfg(windows)] 代码块，注释里
+        // 的参数/时序说明不参与匹配）。
+        let win = install
+            .split("#[cfg(windows)]")
+            .nth(1)
+            .and_then(|s| s.split("#[cfg(target_os = \"macos\")]").next())
+            .expect("windows 安装分支");
+        let sp = win.find(".args([\"/S\", \"/R\", \"/UPDATE\"])").expect("Windows 静默安装参数 /S /R /UPDATE");
+        let sh = win.find("sv.shutdown()").expect("退出前必须同步杀内核树");
+        let ex = win.find("app.exit(0)").expect("必须退出本进程交给安装器");
+        assert!(dl < install.find("#[cfg(windows)]").unwrap_or(usize::MAX), "先下载后启动安装器");
+        assert!(sp < sh && sh < ex, "spawn 安装器 → 杀内核树 → exit（quit 同语义）");
+        // 哈希校验 fail-closed 由 download_to_temp 的 UpdaterError::HashMismatch
+        // → From 映射 E_UPDATER_SIGNATURE 保证（updater_client.rs 自测覆盖），
+        // menu 侧不吞错误：错误链必须走 updater_err_to_bridge。
+        assert!(install.contains("updater_err_to_bridge"), "下载错误不得吞/改写（保 HashMismatch→SIGNATURE 映射）");
     }
 }

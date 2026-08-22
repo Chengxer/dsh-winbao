@@ -69,6 +69,6 @@ bash ../scripts/smoke-installed.sh                 # ③ 安装布局冒烟（�
 | 状态 | 末代 0.4.x（Releases 可下，仅维护） | **v0.5.x 预览线经 CI 发布**（v0.5.0 win-x64 起；v0.5.1 起三平台六资产） |
 | 用户数据 | `%APPDATA%/dsh-desktop` + `~/.dsh` | 同路径同 schema（升级零迁移，装回旧目录） |
 | 内核自动更新 | 有（overlay 链） | **已删除**（随客户端发版） |
-| 客户端自动更新 | 无哈希/签名校验 | tauri-plugin-updater（minisign 签名链） |
+| 客户端自动更新 | 无哈希/签名校验 | 自研双源更新链（updater_client：GitHub/Gitee Releases + sha256 digest/边车校验 fail-closed） |
 | 页面桥 | preload contextBridge | initialization_script 垫片（签名逐字一致） |
 | 启动稳定性 | guardedBoot 瀑布 | 同语义三层瀑布 + 恢复页兜底 + panic 隔离 |

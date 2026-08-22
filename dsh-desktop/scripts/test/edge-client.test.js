@@ -95,8 +95,18 @@ function loadClient(bridgeOverrides) {
   });
 
   let dockComponent = null;
+  // dsh-balance 槽注册走 ctx.slots.inject(key, factory)（一方包正确姿势，
+  // 消除「conversation 大 bundle 未就绪时 slots.register 硬抛 slot is not
+  // declared」的冷启动竞态，见 lib/client.js apply 注释）：mock 的 inject
+  // 立即求值 factory，落到与旧 register 相同的捕获路径，断言语义不变。
   const fakeCtx = {
-    slots: { register(slotInfo, Component) { dockComponent = Component; } },
+    slots: {
+      register(slotInfo, Component) { dockComponent = Component; },
+      inject(key, factory) {
+        if (key !== 'conversation.composer.dock') throw new Error('unexpected slot key: ' + key);
+        factory();
+      },
+    },
     effect(cb) { cb(); },
   };
   mod.apply(fakeCtx);

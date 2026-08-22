@@ -138,6 +138,7 @@ pub fn open_float_window(app: &tauri::AppHandle, kernel_url: &str, session_id: &
     .initialization_script(&mode_script)
     .initialization_script(&preset_script)
     .initialization_script(FLOAT_BAR_SCRIPT)
+    .initialization_script(FLOAT_WATCHDOG_SCRIPT)
     .on_navigation(|url| url.as_str().starts_with("http://127.0.0.1"))
     .build()
     .map_err(|e| BridgeError::internal(format!("浮窗创建: {e}")))?;
@@ -196,6 +197,65 @@ const FLOAT_BAR_SCRIPT: &str = r#"
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', inject);
   else inject();
+})();
+"#;
+
+/// 浮窗活性看门狗（FW1 白屏双保险的壳层一半）：
+/// - initialization_script 通道（AddScriptToExecuteOnDocumentCreated），每次
+///   导航/reload 必执行，不依赖 eval 时序；
+/// - 3s 后 body 仍无任何子元素（内核未监听/重启窗口期导航失败、SPA 挂掉）
+///   → 自动 reload 一次（sessionStorage 记次数，每窗最多一次）；
+/// - reload 后 3s 仍死 → 可见错误卡（重试/关闭），绝不留纯白屏；
+/// - about:blank 预导航文档直接跳过（protocol 守卫）。
+const FLOAT_WATCHDOG_SCRIPT: &str = r#"
+(function(){
+  if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
+  var FLAG = '__dsh_float_watchdog_reloaded__';
+  function flag(){
+    try { return sessionStorage.getItem(FLAG) === '1'; } catch (e) { return false; }
+  }
+  function setFlag(v){
+    try { if (v) sessionStorage.setItem(FLAG, '1'); else sessionStorage.removeItem(FLAG); } catch (e) {}
+  }
+  function alive(){
+    try { return !!(document.body && document.body.childElementCount > 0); } catch (e) { return false; }
+  }
+  function showError(){
+    if (document.getElementById('__dsh_float_load_error__')) return;
+    var d = document.createElement('div');
+    d.id = '__dsh_float_load_error__';
+    d.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:flex;flex-direction:column;' +
+      'align-items:center;justify-content:center;gap:12px;background:#0b1220;color:#e6ecff;' +
+      'font:14px "Segoe UI","Microsoft YaHei",sans-serif;text-align:center;padding:24px';
+    var t = document.createElement('div'); t.textContent = '浮窗页面加载失败';
+    var sub = document.createElement('div');
+    sub.style.cssText = 'color:#8b9ac4;font-size:12px;line-height:18px';
+    sub.textContent = '页面长时间无内容（内核可能正在启动或重启），自动重试一次仍未恢复。';
+    var btns = document.createElement('div'); btns.style.cssText = 'display:flex;gap:10px';
+    var retry = document.createElement('button');
+    retry.textContent = '重试';
+    retry.style.cssText = 'min-width:88px;padding:6px 14px;border:1px solid #3a4656;border-radius:8px;background:#1a2332;color:#e6ecff;cursor:pointer;font-size:13px';
+    retry.onclick = function(){ setFlag(false); location.reload(); };
+    var close = document.createElement('button');
+    close.textContent = '关闭浮窗';
+    close.style.cssText = retry.style.cssText;
+    close.onclick = function(){
+      try {
+        if (window.dshDesktop && window.dshDesktop.floatWindow && window.dshDesktop.floatWindow.close) {
+          window.dshDesktop.floatWindow.close();
+        } else if (window.close) { window.close(); }
+      } catch (e) {}
+    };
+    btns.appendChild(retry); btns.appendChild(close);
+    d.appendChild(t); d.appendChild(sub); d.appendChild(btns);
+    (document.body || document.documentElement).appendChild(d);
+    document.title = '浮窗加载失败';
+  }
+  setTimeout(function(){
+    if (alive()) { setFlag(false); return; }
+    if (!flag()) { setFlag(true); location.reload(); return; }
+    showError();
+  }, 3000);
 })();
 "#;
 
@@ -419,6 +479,33 @@ mod tests {
         assert!(parse_url("http://127.0.0.1:51731/").is_ok());
         assert!(parse_url("not a url").is_err());
         // scheme 不设限（围栏在 on_navigation 层）；只测形态拒绝。
+    }
+
+    /// FW1 白屏双保险——壳层看门狗形态锚点：
+    /// - 3s 活性探测 + reload 恰好一次（sessionStorage 防抖）+ 二次失败错误卡；
+    /// - about:blank 预导航守卫（init script 在导航前文档也会执行一次）；
+    /// - 错误卡必须可关闭（优先桥 floatWindow.close，退化 window.close）。
+    #[test]
+    fn float_watchdog_script_shape() {
+        assert!(FLOAT_WATCHDOG_SCRIPT.contains("3000"), "3s 活性探测: {FLOAT_WATCHDOG_SCRIPT}");
+        assert!(FLOAT_WATCHDOG_SCRIPT.contains("location.reload()"), "死后必须自动 reload: {FLOAT_WATCHDOG_SCRIPT}");
+        assert!(FLOAT_WATCHDOG_SCRIPT.contains("__dsh_float_watchdog_reloaded__"), "reload 只做一次（标记）: {FLOAT_WATCHDOG_SCRIPT}");
+        assert!(FLOAT_WATCHDOG_SCRIPT.contains("__dsh_float_load_error__"), "二次失败可见错误卡: {FLOAT_WATCHDOG_SCRIPT}");
+        assert!(FLOAT_WATCHDOG_SCRIPT.contains("floatWindow.close"), "错误卡可关窗（桥优先）: {FLOAT_WATCHDOG_SCRIPT}");
+        assert!(FLOAT_WATCHDOG_SCRIPT.contains("location.protocol"), "预导航 about:blank 守卫: {FLOAT_WATCHDOG_SCRIPT}");
+    }
+
+    /// 看门狗必须接进浮窗 builder（initialization_script 通道，reload 后仍生效）。
+    #[test]
+    fn float_window_builder_wires_watchdog_shape() {
+        let src = include_str!("windows.rs");
+        let seg = src
+            .split("pub fn open_float_window")
+            .nth(1)
+            .and_then(|s| s.split("/// URL 解析 helper").next())
+            .expect("open_float_window 函数体");
+        assert!(seg.contains(".initialization_script(FLOAT_WATCHDOG_SCRIPT)"), "浮窗必须注入看门狗: {seg}");
+        assert!(seg.contains(".initialization_script(BRIDGE_SHIM_JS)"), "桥垫片不得回退丢失: {seg}");
     }
 
     /// 主窗 CloseRequested 语义（0.5.0）：拦截默认销毁 → 隐藏留托盘。

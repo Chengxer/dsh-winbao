@@ -34,7 +34,7 @@ const state = {
   dshWorkspaces: [], selectedDshWorkspaceId: null,
   historyBySession: new Map(), historyRequests: new Map(), pendingReplies: new Map(), pendingRpc: new Map(), liveReplies: new Map(),
   draft: null, error: '', workspaceLoad: 0, branchAnchors: new Map(savedBranchAnchors), cardPositions: new Map(savedCardPositions), collapsedCardIds: new Set(savedCollapsedCards),
-  dragging: false, canvasGesture: false, canvasRefreshAfter: 0, canvasViewInitialized: false, canvasCamera: { x: 0, y: 0 },
+  dragging: false, canvasGesture: false, canvasRefreshAfter: 0, detailRefreshAfter: 0, canvasViewInitialized: false, canvasCamera: { x: 0, y: 0 },
   expandedMessageIds: new Set(),
 }
 
@@ -125,11 +125,180 @@ function messagesFromEvents(events) {
 async function loadThreadHistory() {}
 
 function canReplaceView() {
-  return state.draft === null && !state.dragging && !state.canvasGesture && Date.now() >= state.canvasRefreshAfter && !document.activeElement?.matches('textarea')
+  return state.draft === null && !state.dragging && !state.canvasGesture && Date.now() >= state.canvasRefreshAfter && !shouldDeferDetailRender(state, Date.now()) && !document.activeElement?.matches('textarea')
 }
 
 function deferCanvasRefresh(delay = 700) {
   state.canvasRefreshAfter = Math.max(state.canvasRefreshAfter, Date.now() + delay)
+}
+
+// Detail-view scroll decisions live in pure helpers (time and storage are
+// injected) so the gating logic is unit-testable without a DOM or kernel.
+// The impure wiring sits directly below them.
+function shouldDeferDetailRender(state, now, urgent = false) {
+  // Event-driven renders wait while the user scrolls the detail view.
+  // Urgent events — a pending reply settling — must never be dropped, so
+  // they bypass the gate entirely.
+  if (urgent) return false
+  return state.mode === 'thread' && Number.isFinite(state.detailRefreshAfter) && now < state.detailRefreshAfter
+}
+
+function computeRestoreScroll(saved, container) {
+  // Clamp the remembered offset against what the container can currently
+  // show. Right after a render or reload the content may still be shorter
+  // than its final height (images, code blocks), so the pin retries as the
+  // layout grows instead of silently dropping the position.
+  const top = saved?.top
+  if (typeof top !== 'number' || !Number.isFinite(top) || top < 0) return null
+  const scrollHeight = Number.isFinite(container?.scrollHeight) ? container.scrollHeight : 0
+  const clientHeight = Number.isFinite(container?.clientHeight) ? container.clientHeight : 0
+  return Math.min(top, Math.max(0, scrollHeight - clientHeight))
+}
+
+function nextDetailScrollTop(remembered, element, lastProgrammaticTop) {
+  // Decide the authoritative offset from a scroll event or a pre-render sync:
+  // a value we programmatically put there — possibly a clamp hit while the
+  // content was still short — is not a user scroll and must not overwrite the
+  // remembered position. Any different value is a genuine user scroll.
+  if (typeof lastProgrammaticTop === 'number' && element.scrollTop === lastProgrammaticTop) return remembered
+  return element.scrollTop
+}
+
+function readDetailScroll(storage, threadId) {
+  if (storage === null || storage === undefined || typeof threadId !== 'string') return null
+  try {
+    const value = JSON.parse(storage.getItem(`dsh-synapse:detail-scroll:v1:${threadId}`))
+    return typeof value?.top === 'number' && Number.isFinite(value.top) && value.top >= 0 ? { top: value.top } : null
+  } catch { return null }
+}
+
+function writeDetailScroll(storage, threadId, top) {
+  if (storage === null || storage === undefined || typeof threadId !== 'string') return
+  if (typeof top !== 'number' || !Number.isFinite(top) || top < 0) return
+  try { storage.setItem(`dsh-synapse:detail-scroll:v1:${threadId}`, JSON.stringify({ top: Math.round(top) })) } catch { /* Quota exceeded or storage disabled. */ }
+}
+
+function forgetDetailScroll(storage, threadId) {
+  if (storage === null || storage === undefined || typeof threadId !== 'string') return
+  try { storage.removeItem(`dsh-synapse:detail-scroll:v1:${threadId}`) } catch { /* Storage may be disabled. */ }
+}
+
+function readPersistedDetailView(storage) {
+  if (storage === null || storage === undefined) return null
+  try {
+    const value = JSON.parse(storage.getItem('dsh-synapse:detail-view:v1'))
+    if (value?.mode !== 'thread' || typeof value.activeId !== 'string') return null
+    return { mode: 'thread', activeId: value.activeId }
+  } catch { return null }
+}
+
+function writePersistedDetailView(storage, view) {
+  if (storage === null || storage === undefined) return
+  try { storage.setItem('dsh-synapse:detail-view:v1', JSON.stringify(view)) } catch { /* Storage may be full or disabled. */ }
+}
+
+function clearPersistedDetailView(storage) {
+  if (storage === null || storage === undefined) return
+  try { storage.removeItem('dsh-synapse:detail-view:v1') } catch { /* Storage may be disabled. */ }
+}
+
+let detailRefreshTimer = 0
+function deferDetailRefresh(delay = 700) {
+  state.detailRefreshAfter = Math.max(state.detailRefreshAfter, Date.now() + delay)
+  if (detailRefreshTimer !== 0) window.clearTimeout(detailRefreshTimer)
+  // Catch-up render once the user stops scrolling: deferred event renders
+  // are only delayed, never lost.
+  detailRefreshTimer = window.setTimeout(() => {
+    detailRefreshTimer = 0
+    if (state.mode === 'thread' && canReplaceView()) renderPreservingDetailScroll()
+  }, Math.max(0, state.detailRefreshAfter - Date.now()))
+}
+
+function safeSessionStorage() {
+  try { return sessionStorage } catch { return null }
+}
+
+// Authoritative detail scroll. render() replaces the whole DOM subtree, so a
+// fresh .detail-scroll element always starts at scrollTop 0 and its value is
+// only trusted when no restore is still in flight — otherwise an event
+// flood between two renders would read 0 and lose the user's position.
+const detailScroll = { threadId: null, top: 0 }
+let detailPinPending = false
+let detailPinGeneration = 0
+let detailLastProgrammaticTop = null
+let detailScrollObserver = null
+let detailScrollTimer = 0
+const DETAIL_SCROLL_PIN_WINDOW = 300
+
+function syncDetailScrollFromElement(element) {
+  if (detailPinPending) return
+  if (!(element instanceof HTMLElement) || element.dataset.threadId !== detailScroll.threadId) return
+  // Same echo rule as the scroll listener: a value we programmatically put
+  // there (possibly a clamp while content is short) is not a user scroll.
+  const top = nextDetailScrollTop(detailScroll.top, element, detailLastProgrammaticTop)
+  if (top === detailScroll.top) return
+  detailScroll.top = top
+  writeDetailScroll(safeSessionStorage(), detailScroll.threadId, top)
+}
+
+function applyDetailScroll(container) {
+  if (container.dataset.threadId !== detailScroll.threadId) return
+  const next = computeRestoreScroll({ top: detailScroll.top }, container)
+  if (next === null || container.scrollTop === next) return
+  detailLastProgrammaticTop = next
+  container.scrollTop = next
+}
+
+function stopDetailScrollPin() {
+  if (detailScrollTimer !== 0) { window.clearTimeout(detailScrollTimer); detailScrollTimer = 0 }
+  detailScrollObserver?.disconnect()
+  detailScrollObserver = null
+  detailPinPending = false
+}
+
+function pinDetailScroll() {
+  const container = document.querySelector('.detail-scroll')
+  if (!(container instanceof HTMLElement)) return
+  if (detailScroll.threadId !== container.dataset.threadId) {
+    const saved = readDetailScroll(safeSessionStorage(), container.dataset.threadId)
+    detailScroll.threadId = container.dataset.threadId
+    detailScroll.top = saved?.top ?? 0
+  }
+  const generation = ++detailPinGeneration
+  stopDetailScrollPin()
+  detailPinPending = true
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      if (generation !== detailPinGeneration) return
+      const current = document.querySelector('.detail-scroll')
+      if (current !== container || !container.isConnected) { stopDetailScrollPin(); return }
+      applyDetailScroll(container)
+      detailPinPending = false
+      if (typeof ResizeObserver === 'undefined') return
+      // Content can keep growing after the first two frames (images and
+      // code blocks finishing their layout); keep re-pinning on layout
+      // shifts until the pin window closes.
+      detailScrollObserver = new ResizeObserver(() => applyDetailScroll(container))
+      detailScrollObserver.observe(container)
+      for (const child of container.children) detailScrollObserver.observe(child)
+      detailScrollTimer = window.setTimeout(stopDetailScrollPin, DETAIL_SCROLL_PIN_WINDOW)
+    })
+  })
+}
+
+// Survives iframe reloads (kernel restarts reload the host page and with it
+// this frame): the first map open after boot returns to the conversation the
+// user was reading, at the persisted scroll offset.
+let persistedDetailView = null
+function restorePersistedDetailView() {
+  if (persistedDetailView === null || state.workspace === null) return
+  const view = persistedDetailView
+  persistedDetailView = null
+  const thread = state.workspace.threads.find(item => item.id === view.activeId)
+  if (thread === undefined) return
+  state.activeId = thread.id
+  state.mode = 'thread'
+  render()
 }
 
 function currentDshWorkspace() {
@@ -244,6 +413,7 @@ async function archiveThread(thread) {
       }
     }
     state.workspace.threads = state.workspace.threads.filter(item => !removed.has(item.id))
+    for (const id of removed) forgetDetailScroll(safeSessionStorage(), id)
     for (const key of [...state.cardPositions.keys()]) {
       if ([...removed].some(id => key.startsWith(`${id}:`))) state.cardPositions.delete(key)
     }
@@ -862,12 +1032,11 @@ function renderThread() {
   if (thread === null) return renderCanvas()
   const messages = messagesFor(thread)
   const waiting = state.pendingReplies.has(thread.dshSessionId)
-  return `<section class="detail-view"><header class="detail-head"><div class="detail-head-title"><div class="detail-head-meta"><span class="detail-badge">${thread.parentId === null ? '会话' : '分支'}</span>${thread.dshSessionTitle ?? thread.title ? `<span class="detail-subtitle">${escapeHtml(thread.dshSessionTitle ?? thread.title)}</span>` : ''}</div><h1>${escapeHtml(questionFor(thread))}</h1></div><div class="detail-head-actions"><button data-action="open-dsh" data-thread="${thread.id}" title="在原生对话中打开此会话">在 DSH 中打开</button><button data-action="open-branch" data-thread="${thread.id}" title="基于最新回答创建分支">创建分支</button><button class="primary" data-action="show-canvas">返回画布</button></div></header><div class="detail-scroll">${messages.map(message => threadMessage(thread, message)).join('') || '<div class="note-empty">等待这条会话的第一条消息。</div>'}</div><form class="message-composer" data-compose="${thread.id}"><textarea maxlength="4000" placeholder="继续当前会话…" ${waiting ? 'disabled' : ''}></textarea><button class="primary" type="submit" ${waiting ? 'disabled' : ''}>${waiting ? '等待回复' : '发送'}</button></form></section>`
+  return `<section class="detail-view"><header class="detail-head"><div class="detail-head-title"><div class="detail-head-meta"><span class="detail-badge">${thread.parentId === null ? '会话' : '分支'}</span>${thread.dshSessionTitle ?? thread.title ? `<span class="detail-subtitle">${escapeHtml(thread.dshSessionTitle ?? thread.title)}</span>` : ''}</div><h1>${escapeHtml(questionFor(thread))}</h1></div><div class="detail-head-actions"><button data-action="open-dsh" data-thread="${thread.id}" title="在原生对话中打开此会话">在 DSH 中打开</button><button data-action="open-branch" data-thread="${thread.id}" title="基于最新回答创建分支">创建分支</button><button class="primary" data-action="show-canvas">返回画布</button></div></header><div class="detail-scroll" data-thread-id="${escapeHtml(thread.id)}">${messages.map(message => threadMessage(thread, message)).join('') || '<div class="note-empty">等待这条会话的第一条消息。</div>'}</div><form class="message-composer" data-compose="${thread.id}"><textarea maxlength="4000" placeholder="继续当前会话…" ${waiting ? 'disabled' : ''}></textarea><button class="primary" type="submit" ${waiting ? 'disabled' : ''}>${waiting ? '等待回复' : '发送'}</button></form></section>`
 }
 
 function render() {
-  const detail = state.mode === 'thread' ? document.querySelector('.detail-scroll') : null
-  const detailScrollTop = detail instanceof HTMLElement ? detail.scrollTop : null
+  if (state.mode === 'thread') syncDetailScrollFromElement(document.querySelector('.detail-scroll'))
   const cardScrollTops = new Map()
   if (state.mode === 'canvas') {
     // Key by the unique card id: every card of a session shares data-thread,
@@ -891,10 +1060,11 @@ function render() {
     const answer = app.querySelector(`.thread-card[data-card-id="${CSS.escape(cardId)}"] .thread-answer`)
     if (answer instanceof HTMLElement) answer.scrollTop = scrollTop
   }
-  if (detailScrollTop !== null) window.requestAnimationFrame(() => {
-    const nextDetail = document.querySelector('.detail-scroll')
-    if (nextDetail instanceof HTMLElement) nextDetail.scrollTop = detailScrollTop
-  })
+  if (state.mode === 'thread') pinDetailScroll()
+  else stopDetailScrollPin()
+  const detailThread = state.mode === 'thread' ? currentThread() : null
+  if (detailThread !== null) writePersistedDetailView(safeSessionStorage(), { mode: 'thread', activeId: detailThread.id })
+  else if (state.mode === 'canvas') clearPersistedDetailView(safeSessionStorage())
 }
 
 function renderPreservingDetailScroll() {
@@ -1033,6 +1203,39 @@ app.addEventListener('wheel', event => {
   zoomCanvas(viewport, state.zoom + (event.deltaY < 0 ? .05 : -.05), event.clientX, event.clientY)
 }, { passive: false })
 
+// Layer 2 against the projection event flood: while the user scrolls the
+// detail view, defer every event-driven re-render and catch up once they
+// stop, so the wheel never fights a full DOM replacement.
+const detailScrollTarget = target => (target instanceof Element ? target.closest('.detail-scroll') : null)
+app.addEventListener('wheel', event => {
+  if (detailScrollTarget(event.target) !== null) deferDetailRefresh()
+}, { passive: true })
+app.addEventListener('touchmove', event => {
+  if (detailScrollTarget(event.target) !== null) deferDetailRefresh()
+}, { passive: true })
+app.addEventListener('pointerdown', event => {
+  // Also covers dragging the scrollbar, which emits no wheel events.
+  if (detailScrollTarget(event.target) !== null) deferDetailRefresh()
+})
+const DETAIL_SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '])
+window.addEventListener('keydown', event => {
+  if (state.mode !== 'thread' || !DETAIL_SCROLL_KEYS.has(event.key)) return
+  if (event.target instanceof Element && event.target.closest('textarea, input, select') !== null) return
+  deferDetailRefresh()
+})
+app.addEventListener('scroll', event => {
+  // scroll does not bubble; capture on #app still sees it. This keeps the
+  // authoritative offset current (and persisted) for the next render, which
+  // replaces the element and therefore cannot rely on its own scrollTop.
+  const container = event.target
+  if (!(container instanceof Element) || !container.classList.contains('detail-scroll')) return
+  const threadId = container.dataset?.threadId
+  if (typeof threadId !== 'string') return
+  detailScroll.threadId = threadId
+  detailScroll.top = nextDetailScrollTop(detailScroll.top, container, detailLastProgrammaticTop)
+  writeDetailScroll(safeSessionStorage(), threadId, detailScroll.top)
+}, true)
+
 // Track pointer-down so the card click handler can tell a plain click from a
 // text-selection or drag gesture; acting on the latter would re-render and
 // wipe the user's selection.
@@ -1158,6 +1361,7 @@ window.addEventListener('message', event => {
     state.mode = 'canvas'
     render()
     window.requestAnimationFrame(() => post('synapse:map-ready'))
+    restorePersistedDetailView()
   }
   if (data.type === 'synapse:theme') {
     document.documentElement.dataset.theme = data.dark === true ? 'dark' : 'light'
@@ -1201,6 +1405,7 @@ window.addEventListener('message', event => {
   if (data.type === 'synapse:bridge-error') { settleRpc(data.requestId, undefined, new Error(data.message)); if (data.requestId === undefined) setError(data.message) }
 })
 
+persistedDetailView = readPersistedDetailView(safeSessionStorage())
 post('synapse:request-current')
 refreshSummaries().catch(setError)
 let polling = false

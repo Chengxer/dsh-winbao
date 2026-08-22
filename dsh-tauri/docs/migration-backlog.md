@@ -6,16 +6,16 @@
 
 ## 第一波（紧急/高价值）
 
-- [ ] **C3 内核与壳日志落盘（S-M，最紧急）**：supervisor 全走 println/eprintln，GUI 进程 stdout 丢弃；`userData/logs/dsh-web.log` 无人写恒空——**safe-overlay 崩溃自愈层实际失效**（无日志可解析）、诊断报告无附件。落点：spawn_kernel 的 stdout/stderr 线程追加写日志（4MB 封顶语义照搬 Electron capLogFile）+ boot/路由日志写 desktop.log。是 C6/C14 的前置。
-- [ ] **C1 会话完成通知全链（M）**：session-watcher crate 已写好但零接线；shim 已监听 notification-jump 但无人发射；notifyOnTurnEnd 是死开关。落点：sidecar `session-watch` 长驻子命令复用 payload session-watcher.js（stdout 行协议）→ Rust 消费 NotifyThrottle/CurrentSessionTracker + notification。需补 30s/会话+15s 全局限流。
-- [ ] **C2 会话完成即刷余额（S，C1 后一行接线）**：balance.rs trigger_fetch 挂 turn-end 事件（W3 挂账点 docs/balance-architecture.md:210）。
-- [ ] **C11 托盘差距+closeToTray 假开关（S）**：CloseRequested 无条件进托盘，设置/菜单 toggle 无实效——close 分支读 settings；托盘补会话通知 checkbox 与更新入口；首隐藏气泡。
+- [x] **C3 内核与壳日志落盘（S-M）**（2026-08-22：logging.rs 极早期落盘+panic hook+指针文件；supervisor stdout/stderr→dsh-web.log、file_log→desktop.log 经 append_capped 4MB 轮转+凭据脱敏 scrub_secrets；B2+RV8 P1-4 合并）：supervisor 全走 println/eprintln，GUI 进程 stdout 丢弃；`userData/logs/dsh-web.log` 无人写恒空——**safe-overlay 崩溃自愈层实际失效**（无日志可解析）、诊断报告无附件。落点：spawn_kernel 的 stdout/stderr 线程追加写日志（4MB 封顶语义照搬 Electron capLogFile）+ boot/路由日志写 desktop.log。是 C6/C14 的前置。
+- [x] **C1 会话完成通知全链（M）**（2026-08-22 完成：session-watcher CLI 行协议 + session_notify.rs Electron 保真门控 + 30s/15s 双层限流 + 通知跳转主窗定向；N2 对抗验收 32 测 + 四 P1 修复（重启风暴退避/emit_to 注释修正+垫片 isMainWindow 守卫/C2 30s 节流/模块公开））：session-watcher crate 已写好但零接线；shim 已监听 notification-jump 但无人发射；notifyOnTurnEnd 是死开关。落点：sidecar `session-watch` 长驻子命令复用 payload session-watcher.js（stdout 行协议）→ Rust 消费 NotifyThrottle/CurrentSessionTracker + notification。需补 30s/会话+15s 全局限流。
+- [x] **C2 会话完成即刷余额（S）**（2026-08-22：trigger_fetch_throttled 挂 turn-end 首行，30s 节流与轮询环/强制路径四路互不冲突[TA15 竞态实证]）：balance.rs trigger_fetch 挂 turn-end 事件（W3 挂账点 docs/balance-architecture.md:210）。
+- [ ] **C11 托盘差距（S，2026-08-22 半开）**：左键唤起主窗（Win/Linux）已落（T1）；closeToTray 假开关与托盘会话通知 checkbox、首隐藏气泡未做。
 - [ ] **C10 宠物窗三件套（S）**：位置记忆/最小化自动弹出（pet_set_auto_open 只写不读）/默认右下角。
 - [ ] **C16 页面 console.error 落 page_error（S）**：smoke 全在 grep 这些词，排障价值高；垫片包 console.error（5s 节流）。
 
 ## 第二波（体验补全）
 
-- [ ] **C4 更新链激活（S 纯配置+CI）**：minisign 密钥对→secrets→CI 产 latest.json+.sig→端点注入；或正式裁撤并删菜单项。
+- [x] **C4 更新链激活（S）**（2026-08-22 改写：**双源 releases + sha256 路线**，非 minisign——updater_client.rs（GitHub digest/边车校验 fail-closed、Gitee 单源无锚拒绝、跨源换源重试）+ menu.rs 安装链 + CI sha256 边车/mirror-gitee + verify-update-sources.mjs；check-agent-update 退役）
 - [ ] **C5 文件预览静态服务（S-M）**：preview-server 加绝对路径+fence 路由，app_init 回填 staticPort（dsh-client-file-changes 的站内 HTML 预览当前降级）。
 - [ ] **C8 备份/诊断导出系统对话框（S）**：tauri-plugin-dialog save/open。
 - [ ] **C9 拖拽路径回填（S-M）**：onDragDropEvent→file.path（shim 已读恒空）。
@@ -30,11 +30,11 @@
 
 ## 专项（既定规划）
 
-- [ ] **C17 WSL 完整托管（L）**：进行中（contracts/wsl-backend.md 设计 + JS 半边实现已启动）。
+- [ ] **C17 WSL 完整托管（L，进行中）**：JS 半边（0202fa8d）+ Rust 半边（X1，X1b 验尸确认 7 项全完成：wsl-backend crate/ensure_installed 原子切换/三层收割/慢环熔断三件/SliceBudget 睡眠安全/koffi 契约）均已落；**真机验证清单待用户重启开启虚拟化**（bcdedit hypervisorlaunchtype auto）。
 
 ## 风险（迁移了但语义漂移）
 
-- [ ] **浮窗与主窗共享 localStorage**：float_session_preset 写 dsh.sessions.current 覆盖主窗选中态（Electron 用 persist:dsh-float 隔离）。落点：浮窗独立 data_directory 或 URL 参数传会话（S-M）。
+- [ ] **浮窗与主窗共享 localStorage（半开）**：FW1 已修浮窗白屏（看门狗+mount-then-hide）；localStorage 隔离（Electron persist:dsh-float 等价）未做，float_session_preset 覆盖主窗选中态风险仍在。落点：浮窗独立 data_directory 或 URL 参数传会话（S-M）。
 
 ## 有意裁撤（勿动）
 

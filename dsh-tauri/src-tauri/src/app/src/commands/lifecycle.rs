@@ -10,7 +10,7 @@ use tauri::{AppHandle, Manager, State};
 use crate::AppState;
 
 use super::common::{main_window_only, open_http_url, NoWindow};
-use super::menu::setting_bool;
+use super::menu::{setting_bool, setting_bool_or};
 
 /// 更新源仓库（Electron client-updater DEFAULT_REPOS 同源；⋯ 菜单「更新源」展示+复制）。
 pub const REPO_URLS: (&str, &str) = (
@@ -43,6 +43,9 @@ pub fn app_init(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
         "notifyOnTurnEnd": setting_bool(&store, "notifyOnTurnEnd"),
         "closeToTray": setting_bool(&store, "closeToTray"),
         "showBalanceDock": setting_bool(&store, "showBalanceDock"),
+        // 自动装更新缺省 false（menu.rs key_default 同源；client-update-available
+        // 事件命中时垫片据此决定是否直接走 install 流程）。
+        "autoInstallUpdates": setting_bool_or(&store, "autoInstallUpdates", false),
         "repoUrls": { "github": REPO_URLS.0, "gitee": REPO_URLS.1 },
     }))
 }

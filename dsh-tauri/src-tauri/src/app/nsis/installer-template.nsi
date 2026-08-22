@@ -670,6 +670,16 @@ Section Install
     File /a "/oname={{this.[1]}}" "{{no-escape @key}}"
   {{/each}}
 
+  ; B1 修复防线：D3DCOMPILER_47.dll 必须旁路安装在 exe 同目录（tauri.conf.json
+  ; resources 已声明；WebView2 运行时在缺少该系统组件的机器——LTSC/精简版/Server
+  ; 无桌面体验——上加载失败会导致应用进程入口报「丢失 D3DCOMPILER_47.dll」，
+  ; Windows 加载器优先搜索应用目录，旁路副本即可救活）。此处仅校验：若 resources
+  ; 配置回退导致未装上且系统本身也缺，给非阻断警告提示精简系统风险。
+  IfFileExists "$INSTDIR\D3DCOMPILER_47.dll" d3dc_ok
+  IfFileExists "$SYSDIR\D3DCompiler_47.dll" d3dc_ok
+    DetailPrint "WARN: D3DCOMPILER_47.dll 未随包安装且系统缺失——WebView2 在精简系统上可能无法启动"
+  d3dc_ok:
+
   ; Copy external binaries
   {{#each binaries}}
     File /a "/oname={{this}}" "{{no-escape @key}}"

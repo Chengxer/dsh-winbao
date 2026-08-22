@@ -16,4 +16,7 @@ pub mod error;
 pub mod shim;
 
 pub use error::BridgeError;
+// 根级再导出：错误码常量表（`bridge::error::codes` 的别名）。updater_client
+// （U1）按 `bridge::codes` 路径消费——别名让两条路径等价，不改 error.rs 结构。
+pub use error::codes;
 pub use shim::BRIDGE_SHIM_JS;

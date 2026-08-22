@@ -3,6 +3,14 @@
  * showing a loading placeholder while the chunk script loads and an error +
  * retry affordance on failure. Used by the built-in tab/viewer descriptors.
  *
+ * Load failures (kernel down → `client module system unavailable`, network
+ * blips, …) stay on the error state with the manual retry button, but the
+ * view also subscribes to the chunk's shared auto-retry loop
+ * ({@link ensureChunkAutoRetry}): a waiting line shows the live attempt
+ * count, and when the loop reports `ready` the view re-loads and recovers
+ * WITHOUT user action — the 0.5.0 "sidebar bricked after kernel restart"
+ * fix (see chunk-availability.ts).
+ *
  * Contract note: {@link lazyChunkComponent} returns a plain render-prop
  * function — the descriptor contract is `component: (props) => ReactNode`,
  * and the repo renders descriptors BOTH ways: Sidebar calls
@@ -11,7 +19,7 @@
  * all state lives in the inner {@link LazyChunkView} component.
  */
 import { createElement, useEffect, useState, type ComponentType, type ReactNode } from 'react'
-import { loadChunk, type ChunkExports, type ChunkName } from './chunk-loader.ts'
+import { ensureChunkAutoRetry, loadChunk, type ChunkExports, type ChunkName } from './chunk-loader.ts'
 import { t } from './locales.ts'
 import css from './sidebar.module.css'
 
@@ -26,26 +34,43 @@ function LazyChunkView<P>({ chunk, pick, props }: LazyChunkViewProps<P>): ReactN
   const [attempt, setAttempt] = useState(0)
   const [state, setState] = useState<
     | { status: 'loading' }
-    | { status: 'error'; message: string }
+    | { status: 'error'; message: string; autoAttempt?: number }
     | { status: 'ready'; Comp: ComponentType<any> }
   >({ status: 'loading' })
 
   useEffect(() => {
     let cancelled = false
+    let stopAutoRetry: (() => void) | undefined
     setState({ status: 'loading' })
     loadChunk(chunk).then((mod) => {
       if (cancelled) return
       const Comp = pick(mod)
       if (Comp === undefined) {
+        // Build inconsistency (not transient): manual retry only.
         setState({ status: 'error', message: `[dsh-better-sidebar] chunk "${chunk}" is missing its component` })
         return
       }
       setState({ status: 'ready', Comp })
     }).catch((error: unknown) => {
       if (cancelled) return
-      setState({ status: 'error', message: error instanceof Error ? error.message : String(error) })
+      setState({ status: 'error', message: error instanceof Error ? error.message : String(error), autoAttempt: 1 })
+      // Auto-recover in the background (shared per-chunk loop; cleaned up on
+      // unmount / effect re-run — see chunk-loader.ts).
+      stopAutoRetry = ensureChunkAutoRetry(chunk, (event) => {
+        if (cancelled) return
+        if (event.ready) {
+          // Loop re-loaded the chunk: re-run this effect (loadChunk now
+          // resolves from cache) and render — no user action needed.
+          setAttempt(current => current + 1)
+          return
+        }
+        setState((prev) => prev.status === 'error' ? { ...prev, autoAttempt: event.attempt } : prev)
+      })
     })
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      stopAutoRetry?.()
+    }
   }, [chunk, pick, attempt])
 
   if (state.status === 'loading') {
@@ -55,6 +80,9 @@ function LazyChunkView<P>({ chunk, pick, props }: LazyChunkViewProps<P>): ReactN
     return (
       <div className={css.editorError}>
         <span>{state.message}</span>
+        {state.autoAttempt !== undefined && (
+          <span>{t('chunkAutoRetryWaiting', { n: state.autoAttempt })}</span>
+        )}
         <button
           type="button"
           className={css.terminalRetry}

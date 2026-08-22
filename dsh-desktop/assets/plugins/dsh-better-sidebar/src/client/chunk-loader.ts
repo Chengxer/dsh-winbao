@@ -43,7 +43,26 @@
  * re-fetches and re-executes the current chunk scripts on the next lazy
  * open. Chunk-only source edits still need a manual page refresh (the HMR
  * poll watches only client.js).
+ *
+ * Auto-retry (0.5.0 kernel-restart fix, see chunk-availability.ts): when a
+ * load fails — typically `client module system unavailable` while the
+ * kernel process is down — views subscribe through
+ * {@link ensureChunkAutoRetry} to ONE shared loop per chunk that probes
+ * with exponential backoff until the module system and chunk come back,
+ * then hot-recovers the view without user action. Loops (and the single
+ * document visibility listener) are cleaned up when the last view goes
+ * away and on {@link resetChunks}, so no timer outlives its views.
  */
+import {
+  createChunkRetryLoop,
+  isModuleSystemAvailable,
+  moduleSystemUnavailableMessage,
+  type ChunkRetryEvent,
+  type ChunkRetryLoop,
+} from './chunk-availability.ts'
+
+export type { ChunkRetryEvent } from './chunk-availability.ts'
+
 export type ChunkName = 'terminal' | 'editor'
 
 /** The module exports a chunk factory provides (namespace-ish record). */
@@ -169,8 +188,8 @@ export function loadChunk(name: ChunkName): Promise<ChunkExports> {
     const test = testLoaders.get(name)
     if (test !== undefined) return test()
     const modules = moduleSystem()
-    if (modules === undefined) {
-      throw new Error(`[dsh-better-sidebar] chunk "${name}": client module system unavailable`)
+    if (modules === undefined || !isModuleSystemAvailable(globalThis)) {
+      throw new Error(moduleSystemUnavailableMessage(name))
     }
     await scriptLoader(CHUNK_URL(name))
     const factory = chunkRegistry()[name]
@@ -186,12 +205,87 @@ export function loadChunk(name: ChunkName): Promise<ChunkExports> {
 }
 
 /**
+ * One auto-retry loop per chunk name (module-level singleton: any number of
+ * mounted lazy views for the same chunk share one loop, one timer) — the
+ * dedup that keeps HMR/re-mounts from stacking retry rounds.
+ */
+const retryLoops = new Map<ChunkName, ChunkRetryLoop>()
+
+/** The single document visibility listener poking all live loops (lazy). */
+let detachVisibilityPoke: (() => void) | undefined
+
+function ensureVisibilityPoke(): void {
+  if (detachVisibilityPoke !== undefined) return
+  if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return
+  const onVisible = (): void => {
+    if (document.visibilityState !== 'visible') return
+    for (const loop of retryLoops.values()) loop.poke()
+  }
+  document.addEventListener('visibilitychange', onVisible)
+  detachVisibilityPoke = (): void => {
+    document.removeEventListener('visibilitychange', onVisible)
+    detachVisibilityPoke = undefined
+  }
+}
+
+function dropVisibilityPokeIfIdle(): void {
+  if (retryLoops.size === 0 && detachVisibilityPoke !== undefined) detachVisibilityPoke()
+}
+
+function retryLoopFor(name: ChunkName): ChunkRetryLoop {
+  let loop = retryLoops.get(name)
+  if (loop === undefined) {
+    loop = createChunkRetryLoop(name, {
+      attemptLoad: async (): Promise<void> => { await loadChunk(name) },
+    })
+    retryLoops.set(name, loop)
+    ensureVisibilityPoke()
+  }
+  return loop
+}
+
+function dropRetryLoopIfIdle(name: ChunkName, loop: ChunkRetryLoop): void {
+  if (retryLoops.get(name) === loop && !loop.active) {
+    retryLoops.delete(name)
+    dropVisibilityPokeIfIdle()
+  }
+}
+
+/**
+ * Subscribe to the chunk's auto-retry loop after a failed load. The loop
+ * probes `__DSH_MODULES__` (cheap check) and re-attempts the load every
+ * round with exponential backoff (2s → 30s cap, unlimited); events update
+ * the view's "waiting" copy, `ready: true` tells it to re-load and
+ * hot-recover. Returns the unsubscribe — the view's effect cleanup calls
+ * it; when the LAST view of a chunk unsubscribes the loop (and its timer)
+ * is dropped entirely.
+ */
+export function ensureChunkAutoRetry(
+  name: ChunkName,
+  onEvent: (event: ChunkRetryEvent) => void,
+): () => void {
+  const loop = retryLoopFor(name)
+  const unsubscribe = loop.subscribe(onEvent)
+  let active = true
+  return () => {
+    if (!active) return
+    active = false
+    unsubscribe()
+    dropRetryLoopIfIdle(name, loop)
+  }
+}
+
+/**
  * Drop all chunk state for a fresh plugin activation (HMR-safe): clear the
- * in-memory cache and any test-registry entries, so the next lazy open
- * re-fetches and re-executes the current chunk scripts (the registry slots
- * are overwritten by the re-execution — no cleanup needed).
+ * in-memory cache, any test-registry entries, and every auto-retry loop
+ * (their pending timers are cancelled), so the next lazy open re-fetches
+ * and re-executes the current chunk scripts (the registry slots are
+ * overwritten by the re-execution — no cleanup needed).
  */
 export function resetChunks(): void {
+  for (const loop of retryLoops.values()) loop.dispose()
+  retryLoops.clear()
+  dropVisibilityPokeIfIdle()
   cache.clear()
   testLoaders.clear()
   externalsRequire = undefined

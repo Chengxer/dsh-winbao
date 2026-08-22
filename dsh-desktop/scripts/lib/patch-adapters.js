@@ -49,8 +49,16 @@ const { patchSessionManage } = require('../patch-session-manage');
 const { patchOpenProjectDir } = require('../patch-open-project-dir');
 const { patchSessionPersistence } = require('../patch-session-persistence');
 const { patchToolSourceCompat } = require('./tool-source-patch');
+// 会话孤儿进程清理（C2：session-manage 注入区扩展，deleteSession 后杀子进程树）。
+const { patchSessionOrphans } = require('./patch-session-orphans');
 // pi-ai opencode-go 模型目录补丁（opencode-go.json 纯数据补充）。
 const { patchPiAiOpencodeGoModels } = require('../patch-pi-ai-opencode-go-models');
+// 设置写入韧性（PR5：v0.5.2「添加供应商没反应/灰」两层根治——孤儿锁自愈 +
+// 设置页命名空间自愈 + settings-conflict 静默重试）。
+const {
+  patchAtomicWriteOrphanLock,
+  patchSettingsModelsResilience,
+} = require('./patch-settings-write-resilience');
 
 // ---------------------------------------------------------------------------
 // 文本模型自动识图补丁（原 main.js applyImageSendFix 内联 transform）。
@@ -503,6 +511,327 @@ function transformTerminalInterruptEscalation(src, file) {
   return { status: 'changed', src: src.replace(INTERRUPT_ESCALATION_ANCHOR, INTERRUPT_ESCALATION_INJECTION) };
 }
 
+// ---------------------------------------------------------------------------
+// agent-preset 未知 id 回落补丁（0.5.0 存量用户 resume 变砖修复）。
+//
+// 根因（真实用户 0.5.0 反馈）：Electron 老版本随包装过 minimal-win 预设，
+// 用户 profile/会话 header 引用了它；0.5.0 Tauri 版内核 dsh-agent-presets 的
+// roster 只有 standard/code/minimal/cordis，resolve() 查无此 id 即抛
+// UnknownPresetError，resume 硬失败且无任何回落——会话永久变砖（第二轮白屏）。
+//
+// 修法：resolve() 的「查无此 id」分支改为 warn 降级回落（minimal-win→语义
+// 最近的 minimal；其余未知 id→保底 standard；回落目标必须真实存在于 roster），
+// 回落时 console.warn 中文日志（原 id / 回落目标 / 原因 / 原错误 message，保留
+// 原错误对象信息便于诊断）。roster 全空或回落目标也缺失时维持原样抛错（此时
+// 无可回落，硬抛是对的）。只动「Unknown」：PresetMountError（组合文件损坏 =
+// 部署真坏了）不经本补丁、保持硬抛。
+// 目标双文件：lib/index.js（运行时经 exports "." 实际加载的唯一入口）与同源
+// 的 lib/invariant.js（无人加载，一并覆盖防未来消费方；两文件锚点文本一致）。
+// 上游修复意向：上游在 resolve()/resume 链内置同款回落后，本补丁经 already /
+// anchor-missing 自然退役（参照 vision-key-fix 休眠先例）。
+// ---------------------------------------------------------------------------
+const AGENT_PRESET_FALLBACK_MARKER = 'dsh-desktop fix: agent-preset-fallback';
+const AGENT_PRESET_FALLBACK_ANCHOR = '\t\tconst found = presets.find((preset) => preset.id === wanted);\n\t\tif (found === void 0) throw new UnknownPresetError(wanted, presets.map((preset) => preset.id));\n\t\treturn found;';
+const AGENT_PRESET_FALLBACK_INJECTION = [
+  '\t\tconst found = presets.find((preset) => preset.id === wanted);',
+  '\t\tif (found === void 0) {',
+  '\t\t\t// dsh-desktop fix: agent-preset-fallback — a session or profile may reference a',
+  '\t\t\t// preset id this deployment no longer ships (0.5.0 dropped the Electron-era',
+  '\t\t\t// "minimal-win"). A hard UnknownPresetError here bricks resume forever; fall',
+  '\t\t\t// back to the closest semantic preset and warn instead. Only "unknown id"',
+  '\t\t\t// degrades — a PresetMountError (broken composition) stays a loud failure.',
+  '\t\t\tconst availableIds = presets.map((preset) => preset.id);',
+  '\t\t\tconst fallbackId = wanted === "minimal-win" && availableIds.includes("minimal") ? "minimal" : availableIds.includes("standard") ? "standard" : void 0;',
+  '\t\t\tconst fallback = fallbackId === void 0 ? void 0 : presets.find((preset) => preset.id === fallbackId);',
+  '\t\t\tif (fallback !== void 0) {',
+  '\t\t\t\tconst originalError = new UnknownPresetError(wanted, availableIds);',
+  '\t\t\t\tconsole.warn(`[dsh] agent-presets 预设回落：引用的预设 "${wanted}" 在当前安装中不存在（可用：${availableIds.join(", ") || "无"}），已自动回落到语义最近的预设 "${fallback.id}"（原因：该预设随版本升级移除，回落规则 minimal-win→minimal、其余未知 id→standard）。会话将以回落预设继续恢复，建议在预设选择中重新挑选。原始错误：${originalError.message}`);',
+  '\t\t\t\treturn fallback;',
+  '\t\t\t}',
+  '\t\t\tthrow new UnknownPresetError(wanted, presets.map((preset) => preset.id));',
+  '\t\t}',
+  '\t\treturn found;',
+].join('\n');
+
+function transformAgentPresetFallback(src, file) {
+  if (src.includes(AGENT_PRESET_FALLBACK_MARKER)) return { status: 'already' };
+  if (!src.includes(AGENT_PRESET_FALLBACK_ANCHOR)) {
+    return { status: 'anchor-missing', detail: '未找到 agent-presets resolve 抛错锚点（版本可能已变化），跳过 ' + file };
+  }
+  // 函数替换器：注入文本含 ${...} 模板字面量，规避 String.replace 对 $ 序列的替换语义。
+  return { status: 'changed', src: src.replace(AGENT_PRESET_FALLBACK_ANCHOR, () => AGENT_PRESET_FALLBACK_INJECTION) };
+}
+
+// ---------------------------------------------------------------------------
+// prompt-context-literal 补丁（context/section 文本里的字面 {{...}} 不再炸整轮）。
+//
+// 根因（真实用户现场）：内核 dsh-system-prompt 的 interpolate() 对所有 section
+// 与 context 文本做 {{name}} 插值扫描，VARIABLE_NAME=/^[a-z][a-z0-9_]*$/：字面量
+// {{state.gold}}（graph-memory 从图数据库 recall 出的节点/episode 内容，属不可信
+// 数据而非模板作者手笔）名字带点 → malformed 硬抛 → 整轮 prompt 组装失败，会话
+// 每轮必瘫。这是「不可信数据进了模板插值器」的经典注入类问题：任何把动态/用户
+// 数据拼进 context 的插件都会中招。
+//
+// 修法：name 不合法（含点、大写、空格等）时不再硬抛，改为 console.warn（附
+// kind / context 名 / 原文字面组 / 邻近片段）+ 按字面透传该组，渲染继续。
+// **只放宽 name-invalid，不放宽 unknown-variable**（下一分支 {{合法名}} 但变量
+// 未注册保持硬抛）：不合法名字出现在 context 文本里几乎必然是数据碰巧长得像
+// 模板（DB 内容、用户粘贴文本），透传即用户本意；而合法名字的 {{name}} 是刻意的
+// 模板作者语法（dsh-workspace-anchor 的 section 就有意引用 {{cwd}}），引用了未
+// 注册变量是真实作者错误，静默透传会把真错误漏成悄悄不渲染的文本——必须响亮。
+// value===void 0 分支同理不动（合法引用取到 undefined 属装配期真错误）。
+// 与 graph-memory 插件侧 defuseTemplateGroups（打断 {{ / }} 序列，护存量 DB）
+// 互补：插件净化护住本插件，内核放宽兜住其他一切动态数据源。
+// 上游修复意向：上游在 interpolate 内置同款「无效名透传 + warn」后，本补丁经
+// already / anchor-missing 自然退役（参照 vision-key-fix 休眠先例）。
+// ---------------------------------------------------------------------------
+const PROMPT_CONTEXT_LITERAL_MARKER = 'dsh-desktop fix: prompt-context-literal';
+// 锚点 = interpolate() 的 name-invalid 抛错整行（含上一行 const name 取组名，
+// 双行保证唯一；dsh-system-prompt lib/index.js:117-118 逐字抄录）。
+const PROMPT_CONTEXT_LITERAL_ANCHOR = '\t\tconst name = group[0].slice(2, -2);\n\t\tif (!VARIABLE_NAME.test(name)) throw new Error(`malformed prompt variable reference "{{${name}}}" in ${kind} "${input.name}" (variable names match ${String(VARIABLE_NAME)})`);';
+const PROMPT_CONTEXT_LITERAL_INJECTION = [
+  '\t\tconst name = group[0].slice(2, -2);',
+  '\t\tif (!VARIABLE_NAME.test(name)) {',
+  '\t\t\t// dsh-desktop fix: prompt-context-literal — context/section text is often',
+  '\t\t\t// untrusted data (graph-memory recalls DB node/episode content verbatim),',
+  '\t\t\t// so a stored literal like {{state.gold}} reaching this scanner is not a',
+  '\t\t\t// template authoring error. Pass the group through verbatim and warn instead',
+  '\t\t\t// of killing the whole prompt assembly. Only the invalid-name case is',
+  '\t\t\t// relaxed: the unknown-variable throw below stays loud, because a valid',
+  '\t\t\t// {{name}} that resolves to nothing IS a real author error',
+  '\t\t\t// (dsh-workspace-anchor sections intentionally reference {{cwd}}).',
+  '\t\t\tconsole.warn(`[dsh] system-prompt: ${kind} "${input.name}" carries literal "${group[0]}" which is not a variable reference (names match ${String(VARIABLE_NAME)}); passing through unchanged. Fragment: ${JSON.stringify(text.slice(open, open + 32))}`);',
+  '\t\t\tresult += text.slice(last, open) + group[0];',
+  '\t\t\tlast = open + group[0].length;',
+  '\t\t\tcontinue;',
+  '\t\t}',
+].join('\n');
+
+function transformPromptContextLiteral(src, file) {
+  if (src.includes(PROMPT_CONTEXT_LITERAL_MARKER)) return { status: 'already' };
+  if (!src.includes(PROMPT_CONTEXT_LITERAL_ANCHOR)) {
+    return { status: 'anchor-missing', detail: '未找到 dsh-system-prompt interpolate 抛错锚点（版本可能已变化），跳过 ' + file };
+  }
+  // 函数替换器：注入文本含 ${...} 模板字面量，规避 String.replace 对 $ 序列的替换语义。
+  return { status: 'changed', src: src.replace(PROMPT_CONTEXT_LITERAL_ANCHOR, () => PROMPT_CONTEXT_LITERAL_INJECTION) };
+}
+
+// ---------------------------------------------------------------------------
+// K1 根因修复（2026-08）：「credentials service is absent」偶发于桌面端。
+//
+// 根因链（字节级证据见 scripts/test/unit-fallback-heal-isolation.test.js）：
+//   1. `$DSH_HOME/profiles/node_modules/@deepseek-ai/*` fallback junction 曾被
+//      指向一个后来被删除的安装（活体现场：全部指向已不存在的
+//      `%TEMP%\dsh-portable-sandbox\...`）；
+//   2. `healProfilesModuleFallback`（dsh-app-boot）是「单点中断、整体放弃」：
+//      写链接循环里任何一个名字抛错（Windows AV/EPERM 瞬时锁、真实目录占位、
+//      双安装并发 heal 的 EEXIST 竞态）→ 整轮 heal 中止 → 半套 fallback 树
+//      （受保护核心 dsh-base/dsh-web-app 恰在 BFS 序前段已写好，而
+//      dsh-credentials-local 之类的宿主组合服务条目留在悬空/被占状态）；
+//   3. loader-isolation 补丁把「非受保护条目导入/激活失败」静默降级为
+//      stderr 标记 + 跳过 → boot 照常成功 → 用户直到在模型设置页保存
+//      API key 才看到 apiproxy 的「credentials service is absent」。
+// 网页端不共享 `%TEMP%`/双安装现场，故表现为「桌面端偶发」。
+//
+// 三层修复（均为幂等纯变换）：
+//   a. fallback-heal-isolation（dsh-app-boot）：单个坏名字就地重试后跳过并打
+//      `[fallback-heal] entry <name> failed: ...` 标记，其余名字照常 heal——
+//      半套树窗口从「整轮放弃」缩小到「恰好那一个坏名字」；
+//   b. credentials-initial-retry（dsh-credentials-local）：activate 首读的
+//      stat/readFile 对 Windows 瞬时 EBUSY/EPERM/EACCES 重试 3 次（递增退避），
+//      「AV 锁瞬时报错 → 激活失败 → 静默缺席」的触发面收窄；
+//   c. credentials-absent-guidance（dsh-host-apiproxy）：报错文案追加修复指引，
+//      即使降级态发生，用户看到的也是「重启一次自动修复」而不是死谜语。
+// ---------------------------------------------------------------------------
+
+// a. fallback heal 单点容错。
+const FALLBACK_HEAL_ISOLATION_MARKER = 'dsh-desktop heal isolation: one stale fallback entry must not abort the whole heal';
+const FALLBACK_HEAL_LOOP_OLD = [
+  '\tfor (const [packageName, target] of links) {',
+  '\t\tconst link = join(modulesDir, packageName);',
+  '\t\tmkdirSync(dirname(link), { recursive: true });',
+  '\t\tensureSymlink(link, target);',
+  '\t}',
+].join('\n');
+const FALLBACK_HEAL_LOOP_NEW = [
+  '\tfor (const [packageName, target] of links) {',
+  '\t\tconst link = join(modulesDir, packageName);',
+  '\t\tmkdirSync(dirname(link), { recursive: true });',
+  '\t\t// ' + FALLBACK_HEAL_ISOLATION_MARKER + ' (K1): a single bad entry must',
+  '\t\t// not abort the whole heal — a half-healed fallback tree leaves host-',
+  '\t\t// composition services (e.g. dsh-credentials-local) silently absent and',
+  '\t\t// the user only finds out when saving an API key. Retry the move in',
+  '\t\t// place (Windows AV/EPERM transients, concurrent-heal EEXIST races),',
+  '\t\t// then isolate the one name and keep healing the rest.',
+  '\t\ttry {',
+  '\t\t\tensureSymlink(link, target);',
+  '\t\t} catch (healError) {',
+  '\t\t\tlet healed = false;',
+  '\t\t\tfor (let healRetry = 0; healRetry < 3; healRetry += 1) {',
+  '\t\t\t\ttry {',
+  '\t\t\t\t\tensureSymlink(link, target);',
+  '\t\t\t\t\thealed = true;',
+  '\t\t\t\t\tbreak;',
+  '\t\t\t\t} catch {}',
+  '\t\t\t}',
+  '\t\t\tif (!healed) process.stderr.write(`[fallback-heal] entry ${packageName} failed: ${healError instanceof Error ? healError.message : String(healError)}\\n`);',
+  '\t\t}',
+  '\t}',
+].join('\n');
+
+function transformFallbackHealIsolation(src, file) {
+  if (src.includes(FALLBACK_HEAL_ISOLATION_MARKER) && src.includes('[fallback-heal] entry ')) return { status: 'already' };
+  if (!src.includes(FALLBACK_HEAL_LOOP_OLD)) {
+    return { status: 'anchor-missing', detail: '未找到 fallback heal 写链接循环锚点（版本可能已变更），跳过 ' + file };
+  }
+  return { status: 'changed', src: src.replace(FALLBACK_HEAL_LOOP_OLD, FALLBACK_HEAL_LOOP_NEW) };
+}
+
+// b. credentials-local activate 首读的瞬时文件错误重试。
+const CREDENTIALS_INITIAL_RETRY_MARKER = 'dsh-desktop compat: transient initial credentials read retries';
+const CREDENTIALS_LOAD_INITIAL_OLD = [
+  '\t\tlet text;',
+  '\t\ttry {',
+  '\t\t\ttext = await readFile(this.spec.filename, "utf8");',
+  '\t\t} catch (error) {',
+  '\t\t\tif (!isENOENT(error)) throw error;',
+  '\t\t\treturn;',
+  '\t\t}',
+].join('\n');
+const CREDENTIALS_LOAD_INITIAL_NEW = [
+  '\t\tlet text;',
+  '\t\ttry {',
+  '\t\t\t// ' + CREDENTIALS_INITIAL_RETRY_MARKER + ' (K1): Windows AV/indexer can hold',
+  '\t\t\t// the document through a transient EBUSY/EPERM/EACCES at exactly the boot read;',
+  '\t\t\t// a failed activation silently drops the credentials service for the whole',
+  '\t\t\t// session (loader isolation), so retry transient failures before giving up.',
+  '\t\t\ttext = await readInitialDocumentWithRetry(this.spec.filename);',
+  '\t\t} catch (error) {',
+  '\t\t\tif (!isENOENT(error)) throw error;',
+  '\t\t\treturn;',
+  '\t\t}',
+].join('\n');
+const CREDENTIALS_OWNER_STAT_OLD = '\t\tmode = (await stat(filename)).mode;';
+const CREDENTIALS_OWNER_STAT_NEW = '\t\tmode = (await statInitialWithRetry(filename)).mode;';
+const CREDENTIALS_HELPERS_ANCHOR = [
+  '/** Whether a filesystem error means absence; every non-ENOENT failure must surface. */',
+  'function isENOENT(error) {',
+  '\treturn error?.code === "ENOENT";',
+  '}',
+].join('\n');
+const CREDENTIALS_HELPERS_CODE = [
+  'async function statInitialWithRetry(filename) {',
+  '\tfor (let attempt = 0; ; attempt += 1) {',
+  '\t\ttry {',
+  '\t\t\treturn await stat(filename);',
+  '\t\t} catch (error) {',
+  '\t\t\tif (attempt >= 2 || !isTransientInitialReadError(error)) throw error;',
+  '\t\t\tawait new Promise((resolve) => setTimeout(resolve, 120 * (attempt + 1)));',
+  '\t\t}',
+  '\t}',
+  '}',
+  'async function readInitialDocumentWithRetry(filename) {',
+  '\tfor (let attempt = 0; ; attempt += 1) {',
+  '\t\ttry {',
+  '\t\t\treturn await readFile(filename, "utf8");',
+  '\t\t} catch (error) {',
+  '\t\t\tif (attempt >= 2 || !isTransientInitialReadError(error)) throw error;',
+  '\t\t\tawait new Promise((resolve) => setTimeout(resolve, 120 * (attempt + 1)));',
+  '\t\t}',
+  '\t}',
+  '}',
+  'function isTransientInitialReadError(error) {',
+  '\treturn error?.code === "EBUSY" || error?.code === "EPERM" || error?.code === "EACCES";',
+  '}',
+].join('\n');
+
+function transformCredentialsInitialRetry(src, file) {
+  if (src.includes(CREDENTIALS_INITIAL_RETRY_MARKER) && src.includes('readInitialDocumentWithRetry')) return { status: 'already' };
+  if (!src.includes(CREDENTIALS_LOAD_INITIAL_OLD) || !src.includes(CREDENTIALS_OWNER_STAT_OLD) || !src.includes(CREDENTIALS_HELPERS_ANCHOR)) {
+    return { status: 'anchor-missing', detail: '未找到 credentials 首读锚点（版本可能已变更），跳过 ' + file };
+  }
+  let out = src.replace(CREDENTIALS_LOAD_INITIAL_OLD, CREDENTIALS_LOAD_INITIAL_NEW);
+  out = out.replace(CREDENTIALS_OWNER_STAT_OLD, CREDENTIALS_OWNER_STAT_NEW);
+  out = out.replace(CREDENTIALS_HELPERS_ANCHOR, CREDENTIALS_HELPERS_ANCHOR + '\n\n' + CREDENTIALS_HELPERS_CODE);
+  return { status: 'changed', src: out };
+}
+
+// c. apiproxy「credentials service is absent」报错文案追加修复指引。
+const CREDENTIALS_ABSENT_GUIDANCE_MARKER = 'dsh-desktop compat: credentials-absent guidance';
+const CREDENTIALS_ABSENT_OLD = 'message: "credentials service is absent: this deployment does not mount a credential provider (e.g. @deepseek-ai/dsh-credentials-local) in its composition",';
+const CREDENTIALS_ABSENT_NEW = [
+  '\t\t\t// ' + CREDENTIALS_ABSENT_GUIDANCE_MARKER + ' (K1): the absent provider is almost always a',
+  '\t\t\t// half-healed profile module fallback (`~/.dsh/profiles/node_modules`), not a',
+  '\t\t\t// broken deployment — tell the user the one-step remedy instead of a riddle.',
+  '\t\t\tmessage: "credentials service is absent: this deployment does not mount a credential provider (e.g. @deepseek-ai/dsh-credentials-local) in its composition — a required plugin failed to load this boot; restart DSH Desktop once to auto-repair the profile module fallback, then save the key again —— 请完全退出并重启 DSH Desktop 一次（启动链会自动修复），再重新保存密钥",',
+].join('\n');
+
+function transformCredentialsAbsentGuidance(src, file) {
+  if (src.includes(CREDENTIALS_ABSENT_GUIDANCE_MARKER)) return { status: 'already' };
+  if (!src.includes(CREDENTIALS_ABSENT_OLD)) {
+    return { status: 'anchor-missing', detail: '未找到 credentialsAbsent 报错文案锚点（版本可能已变更），跳过 ' + file };
+  }
+  return { status: 'changed', src: src.replace(CREDENTIALS_ABSENT_OLD, CREDENTIALS_ABSENT_NEW) };
+}
+
+// ---------------------------------------------------------------------------
+// 设备未授权指引（2026-08 用户实机反馈）：DeepSeek 服务端 403 风控原文
+// 「This device is not authorized. Please contact the administrator or try
+// again later.」经 dsh-llm-deepseek 透传，前端红框只显示这句英文死谜语——
+// 用户既不知道是凭据/风控问题，也不知道该干什么（点「重试」无用、重装无用）。
+// 本补丁在 401/403 且报文命中设备授权/风控特征时追加中文可操作指引。
+// 一般性 401（密钥填错，已有 INVALID_CREDENTIAL 链路文案）不追加，防噪音。
+// ---------------------------------------------------------------------------
+const DEVICE_AUTH_GUIDANCE_MARKER = 'dsh-desktop compat: device-auth guidance';
+// 双形态锚点（A1 验证：上游 rc.1 重构了非 2xx 块——3-tab + response.text() +
+// JSON.parse；rc.8 及更早为 2-tab + response.json()。V2 优先，V1 兜底）。
+const DEVICE_AUTH_THROW_ANCHOR_V2 = [
+  '\t\t\tif (!response.ok) {',
+  '\t\t\t\tlet message = `DeepSeek API error (HTTP ${response.status})`;',
+  '\t\t\t\tlet providerError;',
+  '\t\t\t\tconst rawResponse = await response.text();',
+  '\t\t\t\ttry {',
+  '\t\t\t\t\tproviderError = JSON.parse(rawResponse).error;',
+  '\t\t\t\t\tif (providerError?.message) message = providerError.message;',
+  '\t\t\t\t} catch {}',
+].join('\n');
+const DEVICE_AUTH_THROW_ANCHOR = [
+  '\t\tif (!response.ok) {',
+  '\t\t\tlet message = `DeepSeek API error (HTTP ${response.status})`;',
+  '\t\t\tlet providerError;',
+  '\t\t\ttry {',
+  '\t\t\t\tproviderError = (await response.json()).error;',
+  '\t\t\t\tif (providerError?.message) message = providerError.message;',
+  '\t\t\t} catch {}',
+].join('\n');
+/** 指引注入体（indent = 抛错块 if 体的缩进层级；注释/if/message 行随层）。 */
+function deviceAuthGuidanceBlock(indent) {
+  const inner = indent + '\t';
+  return [
+    indent + '// ' + DEVICE_AUTH_GUIDANCE_MARKER + ': a provider-side device/risk-control',
+    indent + '// rejection (e.g. "This device is not authorized. Please contact the',
+    indent + '// administrator or try again later.") is a credential problem the client',
+    indent + '// cannot retry or reinstall its way out of — append the actionable remedy',
+    indent + '// so the user is not left with an English riddle.',
+    indent + 'if ((response.status === 401 || response.status === 403) && /not authorized|\\u8bbe\\u5907\\u672a\\u6388\\u6743|contact the administrator|device.{0,24}(unauthorized|not allowed)/i.test(message)) {',
+    inner + 'message += " ——【凭据被 DeepSeek 服务端拒绝（令牌失效或账号设备风控）】请到 chat.deepseek.com 重新登录获取新令牌，在 设置 → 模型 页重新填入 API 密钥后重试；重装客户端或反复点「重试」无效。";',
+    indent + '}',
+  ].join('\n');
+}
+
+function transformDeviceAuthGuidance(src, file) {
+  if (src.includes(DEVICE_AUTH_GUIDANCE_MARKER)) return { status: 'already' };
+  // rc.1/rc.2 形态（3-tab if 体 → 指引 4-tab 基准）。
+  if (src.includes(DEVICE_AUTH_THROW_ANCHOR_V2)) {
+    return { status: 'changed', src: src.replace(DEVICE_AUTH_THROW_ANCHOR_V2, () => DEVICE_AUTH_THROW_ANCHOR_V2 + '\n' + deviceAuthGuidanceBlock('\t\t\t\t')) };
+  }
+  // rc.8 及更早形态（2-tab if 体 → 指引 3-tab 基准）。
+  if (src.includes(DEVICE_AUTH_THROW_ANCHOR)) {
+    return { status: 'changed', src: src.replace(DEVICE_AUTH_THROW_ANCHOR, () => DEVICE_AUTH_THROW_ANCHOR + '\n' + deviceAuthGuidanceBlock('\t\t\t')) };
+  }
+  return { status: 'anchor-missing', detail: '未找到 dsh-llm-deepseek 非 2xx 抛错锚点（双形态 V2/V1 均未命中，版本可能已变更），跳过 ' + file };
+}
+
 module.exports = {
   // runtime-patches 的 9 个 transform（re-export）。其中
   // transformPersistenceAll 不被 registry 直接引用，其消费方是
@@ -531,15 +860,30 @@ module.exports = {
   // 持久 shell 停止修复（abort race + 中断升级）。
   transformPersistentShellAbortRace,
   transformTerminalInterruptEscalation,
+  // agent-preset 未知 id 回落（0.5.0 存量用户 resume 变砖修复）。
+  transformAgentPresetFallback,
+  // dsh-system-prompt 字面量透传（graph-memory {{state.gold}} 模板注入瘫会话修复）。
+  transformPromptContextLiteral,
+  // K1（credentials service is absent 偶发）三层修复。
+  transformFallbackHealIsolation,
+  transformCredentialsInitialRetry,
+  transformCredentialsAbsentGuidance,
+  // 设备未授权（DeepSeek 服务端风控 403）报文追加可操作指引。
+  transformDeviceAuthGuidance,
+  // K1 注入体常量（单测 vm 行为验证用，与 transform 同源；非 marker）。
+  CREDENTIALS_HELPERS_CODE,
   // 包级补丁 node_modules 根应用器（唯一实现）。
   rootAppliers: {
     patchWebSearchBaseUrl,
     patchMenuViewport,
     patchSessionManage,
+    patchSessionOrphans,
     patchOpenProjectDir,
     patchSessionPersistence,
     patchToolSourceCompat,
     patchPiAiOpencodeGoModels,
+    patchAtomicWriteOrphanLock,
+    patchSettingsModelsResilience,
   },
   // 幂等 marker（单一数据源）：registry 与 transform 的 already 判定引用同一常量，
   // 杜绝「marker 跨模块复制漂移」。slot 系 marker 来自 runtime-patches（与 slot
@@ -561,6 +905,12 @@ module.exports = {
     PLUGIN_INVENTORY_TAB_MARKER,
     PERSISTENT_ABORT_RACE_MARKER,
     INTERRUPT_ESCALATION_MARKER,
+    AGENT_PRESET_FALLBACK_MARKER,
+    PROMPT_CONTEXT_LITERAL_MARKER,
+    FALLBACK_HEAL_ISOLATION_MARKER,
+    CREDENTIALS_INITIAL_RETRY_MARKER,
+    CREDENTIALS_ABSENT_GUIDANCE_MARKER,
+    DEVICE_AUTH_GUIDANCE_MARKER,
     ...require('./loader-isolation').markers,
   },
 };

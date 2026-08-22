@@ -159,14 +159,16 @@ pub const POC_PAGE_HTML: &str = r#"<!doctype html>
     try { done('A6 isMaximized 查询', typeof (await B.windowControls.isMaximized()) === 'boolean', 'ok'); }
     catch (e) { done('A6 isMaximized 查询', false, String(e.message || e)); }
 
-    // A7 check-agent-update 最简版本比对（v0.5.0 起非裁撤：回 {ok,current,latest,hasUpdate}；
-    // 需网络访问 npm registry，离线时该项报失败属预期）
-    var a7 = add('A7 check-agent-update 版本比对');
+    // A7 check-client-update 双源 latest 检查（v0.5.3 起替代退役的 npm 内核
+    // 比对链：回 {ok,upToDate} 或 {ok,current,next,notes,asset,source}；
+    // 需网络访问 GitHub/Gitee，离线时该项报失败属预期）
+    var a7 = add('A7 check-client-update 更新检查');
     try {
-      var upd = await B.menu.action('check-agent-update');
-      done('A7 check-agent-update 版本比对', !!(upd && upd.ok && ('hasUpdate' in upd)),
-        'current=' + upd.current + ' latest=' + upd.latest + ' hasUpdate=' + upd.hasUpdate);
-    } catch (e) { done('A7 check-agent-update 版本比对', false, String(e.message || e)); }
+      var upd = await B.menu.action('check-client-update');
+      var hasShape = !!(upd && upd.ok && (('upToDate' in upd) || ('next' in upd)));
+      done('A7 check-client-update 更新检查', hasShape,
+        'upToDate=' + upd.upToDate + ' current=' + upd.current + ' next=' + upd.next + ' source=' + upd.source);
+    } catch (e) { done('A7 check-client-update 更新检查', false, String(e.message || e)); }
 
     // A8 未注册 command 的错误形态（用一个保证不存在的命令名）
     var a8 = add('A8 未注册 command 报错形态');

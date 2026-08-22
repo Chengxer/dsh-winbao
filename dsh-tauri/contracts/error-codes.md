@@ -17,12 +17,13 @@
 | `E_NOT_IMPLEMENTED` | 能力已规划未实装（占位拒绝，非裁撤——区别于 `E_CUT_FEATURE`） | image_paste_save（Phase 3 剪贴板位图） |
 | `E_UNAUTHORIZED` | 调用窗越权：主窗白名单（Electron `pluginManagerIpcAllowed` 同守卫面）外的窗口调插件管理/诊断/备份族或 `restart_service` | app commands（v0.5.2 实装，ipc-commands.md §3.3） |
 | `E_IMAGE_PASTE` | 剪贴板粘贴图落盘失败（dataUrl 缺失/非法、写盘失败） | bridge commands（image_paste_save） |
-| `E_AGENT_UPDATE_NETWORK` | npm registry 版本查询双源（npmmirror/npmjs）均不可达 | menu_action `check-agent-update` 最简比对链 |
+| `E_AGENT_UPDATE_NETWORK` | npm registry 版本查询双源（npmmirror/npmjs）均不可达 | menu_action `check-agent-update` 最简比对链。**已退役（v0.5.3）**：npm 内核检查链随「内核随客户端分发」移除，`check-agent-update` 菜单动作删除；码值保留不复用（历史错误串仍可识别）。客户端更新网络失败现走 `E_UPDATER_NETWORK` |
 
 ## 2. 内核进程域（kernel-process）
 
 | code | 语义 |
 |------|------|
+| `E_NO_HOST` | 垫片本地降级码（非壳侧命令码）：页面运行在浏览器（无 `__TAURI_INTERNALS__` 宿主）时 `window.dshDesktop` 全方法的安全回退——不误报错误、静默降级。仅存在于 bridge-shim.js，IPC 层永不返回 |
 | `E_KERNEL_SPAWN` | vendor-node 或 bin.js 启动失败 |
 | `E_KERNEL_PORT` | 端口占用/安全端口选择失败 |
 | `E_KERNEL_CRASH_LOOP` | 崩溃环触发（连续崩溃超阈值，进入恢复页） |
@@ -53,9 +54,9 @@
 
 | code | 语义 |
 |------|------|
-| `E_UPDATER_SIGNATURE` | minisign 签名校验失败（**Electron 版没有这一层**——Tauri 版新增的安全底线） |
-| `E_UPDATER_NETWORK` | manifest/产物下载失败 |
-| `E_UPDATER_CONFIG` | 更新链未配置（`DSH_UPDATER_ENDPOINT` / `DSH_UPDATER_PUBKEY`，发版 CI 注入；未配置时引导而非静默降级——release-keys.md §4） |
+| `E_UPDATER_SIGNATURE` | 产物完整性校验失败：sha256 哈希不匹配（`UpdaterError::HashMismatch` 映射）。哈希优先级链：显式参数 > GitHub API `digest` 字段 > `.sha256` 边车资产 > size/下限兜底（v0.5.3 双源 releases 路线；minisign 方案已让位——边车+digest 即可信锚，HTTPS 传输） |
+| `E_UPDATER_NETWORK` | 更新源不可达/解析失败：GitHub+Gitee releases/latest 双源并发探测均失败（`Offline`/`SourceUnreachable`/`BadManifest`/`Download` 映射），含「唯一可达源缺本平台资产」场景 |
+| `E_UPDATER_CONFIG` | 更新链内部配置态异常（v0.5.3 起更新源为编译期固定双仓库+运行时免配置，此码仅保留给未来可配置更新源接口的未配置态；`DSH_UPDATER_ENDPOINT`/`DSH_UPDATER_PUBKEY` 环境变量已随 tauri-plugin-updater 通道退役） |
 
 ## 6. 规则
 
@@ -70,3 +71,26 @@
    - 内部监督**事件**（探活失败 `ProbeFailed`、假死可疑 `ZombieSuspect`——
      TCP 通而 HTTP 连续无响应的 #122/#129 形态）——只进 desktop.log，终态
      仍归 `E_KERNEL_CRASH_LOOP`（假死受控重启走崩溃环窗口限次，天然防死循环）。
+
+## 7. WSL 托管域（wsl-backend crate，v0.5.3 随 supervisor WSL 分支实装）
+
+契约：`contracts/wsl-backend.md` §3（新码只追加）。返回面：`wsl_config_save`
+预检失败 `{ok:false,code,error}`（插件展示 `error`，`code` 供程序识别）；
+`wsl_recheck` 强制探测失败进 `status.lastError`。
+
+| code | 语义 | 典型场景 |
+|------|------|----------|
+| `E_WSL_UNAVAILABLE` | WSL 不可用：wsl.exe 缺失 / `wsl -l -q` 无发行版 / 显式 distro 不在实测名单 | 未装 WSL、仅 docker-desktop 系统发行版、UTF-16 残留字符形态「名字」（#126 防御延伸） |
+| `E_WSL_NO_NODE` | 发行版内缺可用 node/npm | configure 探活 `node --version` 失败（登录 shell PATH 无 node） |
+| `E_WSL_DIR_INVALID` | 安装目录非法（契约 §1.3：非绝对路径 / 含空白或 shell 元字符） | 目录被拼进 `sh -lc` 单引号内插——注入面防御 |
+| `E_WSL_PROBE` | WSL 探活失败（configure 之外的探测） | `$HOME` 解析失败、UNC 主机覆盖非法、后端未配置即调用 |
+| `E_WSL_INSTALL` | WSL 内 npm 安装/升级失败（ensure_installed / 版本对齐） | staging 安装超时、入口校验失败、**exit 0 但无 WSL_INSTALL_OK 标记**（issue #87）、安装目录不可创建 |
+
+规则（沿 §6 口径在 WSL 域的投影）：
+
+1. **启动期探测失败不是 command 错误**：走回落路径（issue #54——回落 local
+   继续启动，配置保留），原因进 `wsl_config_get` 的 `fallbackReason`
+   （状态值，不入错误码表）。
+2. 保存期预检失败**不落盘**（`{"ok":false}` 载荷错误不变更配置）。
+3. 恢复页触达仍只有 `E_KERNEL_CRASH_LOOP` 一个码（§6 规则 4 不破——WSL
+   模式崩溃环/假死/看门狗与 local 共用同一链）。

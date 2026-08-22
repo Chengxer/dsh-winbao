@@ -40,6 +40,20 @@ const ATTACH_LOCAL_REL = path.join('dsh-attachment-local', 'lib', 'index.js');
 // loader 自动隔离补丁目标（cordis-plugin-loader 是 @deepseek-ai scope 下的包）。
 const LOADER_PKG_REL = path.join('cordis-plugin-loader', 'lib', 'index.js');
 const APP_BOOT_PKG_REL = path.join('dsh-app-boot', 'lib', 'index.js');
+// agent-preset 未知 id 回落补丁目标（dsh-agent-presets）：lib/index.js 是运行时
+// 经 exports "." 实际加载的入口；lib/invariant.js 为同源产物（锚点文本一致），
+// 无人加载但一并覆盖，防未来消费方走 /invariant 出口时漏保护。
+const AGENT_PRESET_FALLBACK_PKG_RELS = [
+  path.join('dsh-agent-presets', 'lib', 'index.js'),
+  path.join('dsh-agent-presets', 'lib', 'invariant.js'),
+];
+// prompt 插值 name-invalid 字面透传补丁目标（dsh-system-prompt）：lib/index.js
+// 是运行时经 exports "." 实际加载的入口（interpolate() 所在，锚点 :117-118）。
+// lib/invariant.js 只做注册期变量名/section 名校验（fail() 静默抛），无插值
+// 分支，不覆盖。
+const PROMPT_CONTEXT_LITERAL_PKG_RELS = [
+  path.join('dsh-system-prompt', 'lib', 'index.js'),
+];
 
 /** @deepseek-ai/<pkgRel> 落点（以 node_modules/@deepseek-ai 根为准）。 */
 function mkAi(root, pkgRel) {
@@ -200,6 +214,8 @@ module.exports = {
   ATTACH_LOCAL_REL,
   LOADER_PKG_REL,
   APP_BOOT_PKG_REL,
+  AGENT_PRESET_FALLBACK_PKG_RELS,
+  PROMPT_CONTEXT_LITERAL_PKG_RELS,
   resolvePatchTargets,
   resolveNmRoots,
   // 兼容期旧签名（一个版本周期后删除）。
