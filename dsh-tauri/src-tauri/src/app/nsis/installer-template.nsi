@@ -772,6 +772,24 @@ Function .onInstSuccess
   ${OrIf} ${Silent}
     ${GetOptions} $CMDLINE "/R" $R0
     ${IfNot} ${Errors}
+      ; D3DCOMPILER 就绪守卫（v0.5.3 加固）：杀软（Defender/360 等）在扫描
+      ; 刚解压的 D3DCOMPILER_47.dll 时会短暂阻断首次访问，Windows 把「临时
+      ; 不可读」报告为「文件不存在」→ 弹「丢失 DLL」错误（精简系统用户实机
+      ; 复现）。在启动应用前轮询等待 DLL 变为可读（最多 10s），过了等待期
+      ; 仍然启动（DLL 物理在位，只是扫描慢；启动后第二次加载通常已恢复）。
+      IfFileExists "$INSTDIR\D3DCOMPILER_47.dll" +3
+        ; DLL 不在位（非精简系统场景，System32 里有）→ 直接启动不等待
+        Goto d3d_launch
+      ; DLL 在位 → 轮询等杀软放行（100ms × 100 次 = 最多 10s）
+      StrCpy $R9 0
+      d3d_wait:
+        IntOp $R9 $R9 + 1
+        IntCmp $R9 100 d3d_launch "" ""
+        ClearErrors
+        FileOpen $R8 "$INSTDIR\D3DCOMPILER_47.dll" r
+        IfErrors d3d_wait
+        FileClose $R8
+      d3d_launch:
       ${GetOptions} $CMDLINE "/ARGS" $R0
       nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" "$R0"
     ${EndIf}
