@@ -320,7 +320,7 @@ impl Supervisor {
                     match Arc::clone(&this).spawn_and_wait_ready(port3, &tx, Duration::from_secs(90)) {
                         Ok(url) => {
                             this.guard_incident("rollback-recovered", &format!("回滚到快照 {id} 后恢复启动"));
-                            return this.on_boot_success(url, port3, gen, None);
+                            this.on_boot_success(url, port3, gen, None)
                         }
                         Err(final_err) => {
                             this.guard_incident("boot-failed", &format!("回滚到 {id} 后仍无法启动：{final_err}"));
@@ -329,7 +329,7 @@ impl Supervisor {
                     }
                 }
                 None => {
-                    this.guard_incident("boot-failed", &format!("启动失败且无可回滚快照（首次运行或快照耗尽）"));
+                    this.guard_incident("boot-failed", "启动失败且无可回滚快照（首次运行或快照耗尽）");
                     this.enter_recovery(&tx, "启动失败且无可回滚快照（可在恢复页重试）");
                 }
             }
@@ -495,7 +495,7 @@ impl Supervisor {
     }
 
     /// koffi 预检：失败时启用 picker-browse 降级 overlay（Electron runKoffiPreflight
-    /// + enablePickerBrowseOverlay 的合并语义；缓存简化为 settings 布尔——每次
+    /// 与 enablePickerBrowseOverlay 的合并语义；缓存简化为 settings 布尔——每次
     /// 冒烟 ~100ms 级，签名级缓存随出包验证再评估）。
     #[cfg(windows)]
     fn run_koffi_preflight(&self) {
@@ -792,8 +792,10 @@ impl Supervisor {
                         return;
                     }
                 }
+                // SocketAddr::from(([u8;4], u16)) 是全函数——等价于
+                // "127.0.0.1:{port}" 解析成功路径，但不留生产 unwrap。
                 let tcp_ok = std::net::TcpStream::connect_timeout(
-                    &format!("127.0.0.1:{port}").parse().unwrap(),
+                    &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
                     Duration::from_secs(2),
                 )
                 .is_ok();

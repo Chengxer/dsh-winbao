@@ -14,6 +14,7 @@
 //! 1. `PORTABLE_EXECUTABLE_DIR`（portable 启动器运行时注入）存在 → userData = `<该目录>/data`；
 //! 2. exe 同级存在 `portable.marker` 标记文件（zip 便携版无启动器注入环境
 //!    变量，分发 zip 内置该标记）→ userData = `<exe 目录>/data`。
+//!
 //! 开发/冒烟重定向统一走 `DSH_TAURI_USERDATA`（data-flow.md §5.1 覆盖通道表；
 //! Electron 线的 `DSH_DESKTOP_USERDATA` 不在本线消费，同名 helper 已随清偿移除）。
 

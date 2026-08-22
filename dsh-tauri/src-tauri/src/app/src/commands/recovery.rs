@@ -81,7 +81,7 @@ pub fn recovery_restart(app: AppHandle) -> Result<serde_json::Value, BridgeError
 }
 
 #[tauri::command]
-pub fn recovery_open_logs(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
+pub fn recovery_open_logs(_app: AppHandle) -> Result<serde_json::Value, BridgeError> {
     let dir = shell_core::DshPaths::resolve().logs;
     let _ = std::fs::create_dir_all(&dir);
     open_in_explorer(&dir)

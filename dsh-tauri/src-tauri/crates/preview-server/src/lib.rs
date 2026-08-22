@@ -79,9 +79,7 @@ fn handle(mut stream: TcpStream, root: &Path) {
     if let Some(payload) = path.strip_prefix("/__diag/") {
         let msg = percent_decode(payload);
         eprintln!("[diag-fetch] {msg}");
-        let head = format!(
-            "HTTP/1.0 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
-        );
+        let head = "HTTP/1.0 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
         let _ = stream.write_all(head.as_bytes()).and_then(|_| stream.write_all(b"ok")).and_then(|_| stream.flush());
         return;
     }

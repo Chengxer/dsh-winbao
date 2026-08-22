@@ -71,10 +71,10 @@ fn cleanup_expired_paste_files(dir: &std::path::Path) -> usize {
         for entry in rd.flatten() {
             if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
                 if let Ok(age) = modified.elapsed() {
-                    if age.as_secs() > 7 * 86400 {
-                        if std::fs::remove_file(entry.path()).is_ok() {
-                            removed += 1;
-                        }
+                    if age.as_secs() > 7 * 86400
+                        && std::fs::remove_file(entry.path()).is_ok()
+                    {
+                        removed += 1;
                     }
                 }
             }

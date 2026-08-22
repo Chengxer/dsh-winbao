@@ -362,10 +362,10 @@ fn route_one_event(app: &tauri::AppHandle, ev: SupervisorEvent) {
                     let store = shell_core::SettingsStore::new(state.paths.settings.clone());
                     let _ = store.set("lastWebPort", serde_json::json!(port));
                 }
-                let _ = commands::navigate_main(&app, &url);
+                let _ = commands::navigate_main(app, &url);
                 if let Some(w) = app.get_webview_window("main") {
                     let diag_base = { let u = app.state::<AppState>().loading_url.lock().unwrap_or_else(|p| p.into_inner()).clone(); let mut o = String::new(); if let Some(pos) = u.rfind('/') { o = u[..pos].to_string(); } o };
-                    match w.eval(&format!("window.__DIAG_BASE__={:?}; window.__TAURI_INTERNALS__.invoke('current_session',{{sessionId:'[diag] t0'}}).then(function(){{fetch(window.__DIAG_BASE__+'/__diag/t0-invoke-OK')}},function(err){{fetch(window.__DIAG_BASE__+'/__diag/t0-invoke-REJECT-'+encodeURIComponent(String(err&&err.message||err)))}})", diag_base)) {
+                    match w.eval(format!("window.__DIAG_BASE__={:?}; window.__TAURI_INTERNALS__.invoke('current_session',{{sessionId:'[diag] t0'}}).then(function(){{fetch(window.__DIAG_BASE__+'/__diag/t0-invoke-OK')}},function(err){{fetch(window.__DIAG_BASE__+'/__diag/t0-invoke-REJECT-'+encodeURIComponent(String(err&&err.message||err)))}})", diag_base)) {
                         Ok(_) => eprintln!("[diag] t0 eval OK"),
                         Err(e) => eprintln!("[diag] t0 eval ERR: {e}"),
                     }
@@ -391,7 +391,7 @@ fn route_one_event(app: &tauri::AppHandle, ev: SupervisorEvent) {
                 let _ = app.emit("kernel-fail", serde_json::json!({ "reason": "内核反复异常退出" }));
                 if let Some(state) = app.try_state::<AppState>() {
                     let recovery = state.recovery_url.lock().unwrap_or_else(|p| p.into_inner()).clone();
-                    let _ = commands::navigate_main(&app, &recovery);
+                    let _ = commands::navigate_main(app, &recovery);
                 }
                 let _ = app.notification().builder()
                     .title("DSH Desktop")
@@ -425,6 +425,7 @@ fn locate_repo_root(candidates: &[std::path::PathBuf]) -> Option<std::path::Path
 ///   2. 开发态：CARGO_MANIFEST_DIR 向上（编译检出内 dsh-desktop）；
 ///   3. 打包态：exe 所在目录向上，含 resources/ 子布局（安装根/dsh-desktop
 ///      与 安装根/resources/dsh-desktop 两种产物形态）。
+///
 /// CARGO_MANIFEST_DIR 是编译机绝对路径，在用户机上必然不存在——打包态
 /// 只有 exe 相对布局可靠。
 fn find_repo_root() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
@@ -794,7 +795,7 @@ fn inject_diag_probe(app: tauri::AppHandle) {
         if let Some(state) = app.try_state::<AppState>() {
             let u = state.loading_url.lock().unwrap_or_else(|p| p.into_inner()).clone();
             if let Some(pos) = u.rfind('/') {
-                let _ = win.eval(&format!("window.__DIAG_BASE__={:?}", &u[..pos]));
+                let _ = win.eval(format!("window.__DIAG_BASE__={:?}", &u[..pos]));
             }
         }
         match win.eval(probe) {
@@ -885,8 +886,6 @@ mod repo_root_tests {
 
 #[cfg(test)]
 mod panic_hook_tests {
-    use super::*;
-
     #[test]
     fn panic_payload_str_variants() {
         assert_eq!(crate::supervisor::panic_payload_str(&"boom"), "boom");

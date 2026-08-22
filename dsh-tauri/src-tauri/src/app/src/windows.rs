@@ -38,7 +38,13 @@ pub fn create_main_window(
     let mut b = tauri::webview::WebviewWindowBuilder::new(
         app,
         "main",
-        WebviewUrl::External(loading_url.parse::<tauri::Url>().expect("loading url")),
+        // url 解析失败走既有 Result 通道（上层 setup `?`），不在主窗创建
+        // 路径留 panic——「客户端必须能打开」原则。
+        WebviewUrl::External(
+            loading_url
+                .parse::<tauri::Url>()
+                .map_err(tauri::Error::InvalidUrl)?,
+        ),
     )
     .title("DSH Desktop")
     .min_inner_size(980.0, 600.0)

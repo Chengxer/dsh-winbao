@@ -313,12 +313,12 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let store = shell_core::SettingsStore::new(&path);
         // 缺省 true（Electron `s.x !== false` 同口径）。
-        assert_eq!(setting_bool(&store, "notifyOnTurnEnd"), true);
+        assert!(setting_bool(&store, "notifyOnTurnEnd"));
         // 翻转并持久化：true → false。
-        assert_eq!(toggle_setting(&store, "notifyOnTurnEnd").unwrap(), false);
+        assert!(!toggle_setting(&store, "notifyOnTurnEnd").unwrap());
         assert_eq!(store.get("notifyOnTurnEnd").unwrap(), Some(serde_json::json!(false)));
         // 显式 false 再翻：false → true（读文件真值，非内存态）。
-        assert_eq!(toggle_setting(&store, "notifyOnTurnEnd").unwrap(), true);
+        assert!(toggle_setting(&store, "notifyOnTurnEnd").unwrap());
         assert_eq!(store.get("notifyOnTurnEnd").unwrap(), Some(serde_json::json!(true)));
         // 读-改-写不破坏同文件其他键。
         store.set("lastWebPort", serde_json::json!(51731)).unwrap();
@@ -326,8 +326,8 @@ mod tests {
         assert_eq!(store.get("lastWebPort").unwrap(), Some(serde_json::json!(51731)));
         // 非布尔值（损坏形态）回落缺省 true，toggle 后写回正常布尔。
         store.set("showBalanceDock", serde_json::json!("oops")).unwrap();
-        assert_eq!(setting_bool(&store, "showBalanceDock"), true);
-        assert_eq!(toggle_setting(&store, "showBalanceDock").unwrap(), false);
+        assert!(setting_bool(&store, "showBalanceDock"));
+        assert!(!toggle_setting(&store, "showBalanceDock").unwrap());
         let _ = std::fs::remove_file(&path);
     }
 
