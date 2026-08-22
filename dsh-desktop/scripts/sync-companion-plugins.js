@@ -37,6 +37,7 @@ const { applyAll } = require('./integration/patch-runner');
 const { getSpecsByCli } = require('./lib/patch-registry');
 const { reconcileProfileBundles, createEntryListYamlParser } = require('./lib/profile-reconcile');
 const { PluginStateStore } = require('./plugin-core/lib/state-store');
+const { syncHubRecognition } = require('./lib/hub-registry');
 const {
   ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK,
   ensureDisabledPatchEntry, removeLegacyMarketplacePatchLines,
@@ -295,6 +296,18 @@ function syncPlugins(home, dryRun, dshPkgDir) {
   } else {
     log('补丁层无变化（全部条目已存在）');
   }
+
+  // hotplug-hub 识别登记（与 main.js 运行时同步共用 scripts/lib/hub-registry.js
+  // 唯一实现）：profile dependencies（hub 桌面端插件清单来源）+ packs 指针包
+  // （hub lib/CLI status 来源）。幂等、健康零写入；dry-run 只计算不落盘。
+  syncHubRecognition({
+    home,
+    profileDir,
+    assetsRoot: path.join(__dirname, '..', 'assets', 'plugins'),
+    removedIds,
+    dryRun,
+    log: (m) => log(m),
+  });
 }
 
 // ---------------------------------------------------------------------------

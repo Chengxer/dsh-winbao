@@ -20,6 +20,7 @@ const crypto = require('node:crypto');
 
 const { writeFileAtomic } = require('../lib/patch-io');
 const { COMPANION_PLUGINS } = require('../lib/companion-plugins');
+const { syncHubRecognition } = require('../lib/hub-registry');
 const { CORE_BUNDLE_NAMES } = require('../../profile-manifest');
 const { isPatchListValid, verifyBundleDir } = require('../../profile-bundle-heal');
 const { dedupePatchEntries } = require('../../profile-patch-heal');
@@ -397,6 +398,17 @@ function createPluginSync(ctx) {
         writeFileAtomic(patchFile, registration.patch);
         log('已同步配套插件到 web profile: ' + COMPANION_PLUGINS.map((p) => p.id).join(', '));
       }
+
+      // 第八步：hotplug-hub 识别登记（profile dependencies + packs 指针包；
+      // 幂等、健康零写入）。hub 桌面端插件清单只认 dependencies 键，lib/CLI
+      // 的 status 只认 packs 目录 —— 不补这两处，内置件对 hub 全隐形。
+      syncHubRecognition({
+        home,
+        profileDir,
+        assetsRoot: path.join(appDir, 'assets', 'plugins'),
+        removedIds,
+        log: (m) => log(m),
+      });
     } catch (err) {
       log('同步配套插件失败: ' + err.message);
     }
