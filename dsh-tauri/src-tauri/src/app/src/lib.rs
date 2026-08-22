@@ -133,16 +133,25 @@ fn chrono_like_now() -> String {
 
 pub fn run() {
     install_panic_hook();
-    tauri::Builder::default()
-        // 第二实例拉起（用户双击图标而应用已在跑）：聚焦既有主窗而非报错退出。
-        // 必须注册在最前（官方要求）；shell-core 单实例锁保留为跨窗体兜底。
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+    let mut builder = tauri::Builder::default();
+    // 第二实例拉起（用户双击图标而应用已在跑）：聚焦既有主窗而非报错退出。
+    // 必须注册在最前（官方要求）；shell-core 单实例锁保留为跨窗体兜底。
+    //
+    // 测试隔离门控（DSH_TAURI_TEST_ISOLATION=1）：插件层互斥体名取自编译期
+    // identifier（机器全局），不随 DSH_HOME/DSH_TAURI_USERDATA 沙箱化——机器上
+    // 已有任一同标识实例（如正式安装版）时，隔离测试件会被误判为第二实例秒退
+    // （实测：target/release 冒烟与 smoke-installed.sh 在正式版运行期间全灭）。
+    // 门控下仅依赖 shell-core 文件锁（随 userdata 隔离），生产路径零变化。
+    if std::env::var("DSH_TAURI_TEST_ISOLATION").ok().as_deref() != Some("1") {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();
                 let _ = w.unminimize();
                 let _ = w.set_focus();
             }
-        }))
+        }));
+    }
+    builder
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
@@ -337,9 +346,17 @@ fn route_events(app: tauri::AppHandle, rx: std::sync::mpsc::Receiver<SupervisorE
         let h = app.clone();
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || route_one_event(&h, ev)));
         if r.is_err() {
-            eprintln!("[route] 事件路由 panic（已隔离，继续处理后续事件）");
+            route_log("[route] 事件路由 panic（已隔离，继续处理后续事件）".to_string());
         }
     }
+}
+
+/// 路由层日志：stderr + logs/desktop.log 双写（v0.5.2 真机实测：安装态 GUI
+/// 子系统无控制台，stderr 无人接收，logs 目录从未被创建——恢复页/托盘的
+/// 「打开日志」是空目录，崩溃环与看门狗事件无从取证）。
+fn route_log(msg: String) {
+    eprintln!("{msg}");
+    supervisor::file_log(&msg);
 }
 
 fn route_one_event(app: &tauri::AppHandle, ev: SupervisorEvent) {
@@ -348,9 +365,9 @@ fn route_one_event(app: &tauri::AppHandle, ev: SupervisorEvent) {
                 // boot 步骤结果必须落日志（此前只 emit 给 loading 页不打日志，
                 // 「启动受阻」类误报在 app.log 中不可见、无法取证）。
                 if ok {
-                    eprintln!("[route] boot 步骤 {name} OK（{ms}ms）");
+                    route_log(format!("[route] boot 步骤 {name} OK（{ms}ms）"));
                 } else {
-                    eprintln!("[route] boot 步骤 {name} FAIL（{ms}ms）: {}", error.as_deref().unwrap_or("未知失败"));
+                    route_log(format!("[route] boot 步骤 {name} FAIL（{ms}ms）: {}", error.as_deref().unwrap_or("未知失败")));
                 }
                 let _ = app.emit("boot-step", serde_json::json!({ "name": name, "ok": ok, "ms": ms, "error": error }));
             }
@@ -366,8 +383,8 @@ fn route_one_event(app: &tauri::AppHandle, ev: SupervisorEvent) {
                 if let Some(w) = app.get_webview_window("main") {
                     let diag_base = { let u = app.state::<AppState>().loading_url.lock().unwrap_or_else(|p| p.into_inner()).clone(); let mut o = String::new(); if let Some(pos) = u.rfind('/') { o = u[..pos].to_string(); } o };
                     match w.eval(format!("window.__DIAG_BASE__={:?}; window.__TAURI_INTERNALS__.invoke('current_session',{{sessionId:'[diag] t0'}}).then(function(){{fetch(window.__DIAG_BASE__+'/__diag/t0-invoke-OK')}},function(err){{fetch(window.__DIAG_BASE__+'/__diag/t0-invoke-REJECT-'+encodeURIComponent(String(err&&err.message||err)))}})", diag_base)) {
-                        Ok(_) => eprintln!("[diag] t0 eval OK"),
-                        Err(e) => eprintln!("[diag] t0 eval ERR: {e}"),
+                        Ok(_) => route_log("[diag] t0 eval OK".to_string()),
+                        Err(e) => route_log(format!("[diag] t0 eval ERR: {e}")),
                     }
                 }
                 if let Some(w) = app.get_webview_window("main") {
@@ -383,11 +400,11 @@ fn route_one_event(app: &tauri::AppHandle, ev: SupervisorEvent) {
                 inject_diag_probe(app.clone());
             }
             SupervisorEvent::KernelExit { code, .. } => {
-                eprintln!("[route] 内核退出 code={code:?}");
+                route_log(format!("[route] 内核退出 code={code:?}"));
             }
             SupervisorEvent::CrashLoop { crashes } => {
                 // 崩溃环路由此前零日志：真机排障时「频繁重启」在日志里不可见。
-                eprintln!("[route] 崩溃环触发（累计 {crashes} 次），主窗转恢复页");
+                route_log(format!("[route] 崩溃环触发（累计 {crashes} 次），主窗转恢复页"));
                 let _ = app.emit("kernel-fail", serde_json::json!({ "reason": "内核反复异常退出" }));
                 if let Some(state) = app.try_state::<AppState>() {
                     let recovery = state.recovery_url.lock().unwrap_or_else(|p| p.into_inner()).clone();
@@ -399,11 +416,11 @@ fn route_one_event(app: &tauri::AppHandle, ev: SupervisorEvent) {
                     .show();
             }
             SupervisorEvent::ProbeFailed { consecutive } => {
-                eprintln!("[route] 探活失败 ×{consecutive}");
+                route_log(format!("[route] 探活失败 ×{consecutive}"));
             }
             SupervisorEvent::ZombieSuspect { consecutive } => {
                 // 假死形态（#122/#129）：TCP 通、HTTP 无响应——日志可区分于崩溃重启。
-                eprintln!("[route] 内核假死可疑 ×{consecutive}（端口通、HTTP 无响应）");
+                route_log(format!("[route] 内核假死可疑 ×{consecutive}（端口通、HTTP 无响应）"));
             }
             SupervisorEvent::StateChanged(_) => {}
         }

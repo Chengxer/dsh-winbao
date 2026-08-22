@@ -40,6 +40,24 @@ pub fn recovery_reload(app: AppHandle) -> Result<serde_json::Value, BridgeError>
             navigate_main(&app, &url)?;
             return Ok(serde_json::Value::Null);
         }
+        // 崩溃环/无内核 URL 态（v0.5.2 真机死锁复现）：此前仅导航 loading 页，
+        // 不复位崩溃环也不重启 boot 链——旧世代看门狗仍在计时，5 分钟后
+        // enter_recovery_tx 因「已在 CrashLoop」幂等抑制换页事件，主窗永久
+        // 停在「正在启动 DSH 内核…」，无任何用户出路。与「重启内核」同路径：
+        // 复位崩溃环 + 重启 boot 链（复用 supervisor_tx，事件路由不断链）。
+        let preferred = state.last_port.load(std::sync::atomic::Ordering::Relaxed);
+        let tx = state
+            .supervisor_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        match tx {
+            Some(tx) => sv.recovery_restart_with_port(tx, u16::try_from(preferred).ok()),
+            None => {
+                let (tx, _rx) = std::sync::mpsc::channel();
+                sv.recovery_restart_with_port(tx, u16::try_from(preferred).ok());
+            }
+        }
     } else {
         // 内核从未装配（装配失败转恢复页后的重试）：重新装配并回 loading 页。
         crate::start_supervisor(app.clone()).map_err(BridgeError::internal)?;
@@ -104,5 +122,22 @@ mod tests {
         assert!(seg.contains("supervisor_tx"), "必须复用装配通道 supervisor_tx: {seg}");
         assert!(seg.contains("recovery_restart_with_port"), "必须走带优先端口的重启入口");
         assert!(seg.contains("last_port"), "优先复用上次内核端口（origin 稳定）");
+    }
+
+    /// 恢复页「重新加载」在崩溃环态（无内核 URL）必须走与「重启内核」同
+    /// 路径的复位重启（v0.5.2 真机死锁回归锚点）：此前仅导航 loading 页，
+    /// 崩溃环未复位 + 旧世代看门狗超时后 enter_recovery_tx 幂等抑制换页 →
+    /// 主窗永久停在「正在启动 DSH 内核…」（真机复现：坏 .env 触发崩溃环后
+    /// 点「重新加载」，5 分钟看门狗开火但页面零变化）。
+    #[test]
+    fn recovery_reload_crashloop_restarts_boot_shape() {
+        let src = include_str!("recovery.rs").replace("\r\n", "\n");
+        let seg = src
+            .split("pub fn recovery_reload")
+            .nth(1)
+            .and_then(|s| s.split("pub fn recovery_restart").next())
+            .expect("recovery_reload 段");
+        assert!(seg.contains("recovery_restart_with_port"), "无内核 URL 时必须复位崩溃环并重启 boot 链");
+        assert!(seg.contains("supervisor_tx"), "必须复用装配通道（事件路由不断链）");
     }
 }

@@ -946,6 +946,23 @@ fn log_line(msg: &str) {
         .unwrap_or(0);
     let (h, m, sec) = ((secs / 3600) % 24, (secs / 60) % 60, secs % 60);
     println!("[supervisor {h:02}:{m:02}:{sec:02}] {msg}");
+    file_log(&format!("[supervisor {h:02}:{m:02}:{sec:02}] {msg}"));
+}
+
+/// 落盘日志（logs/desktop.log）：supervisor/路由事件双写（stdout + 文件）。
+/// v0.5.2 真机实测发现：GUI 子系统无控制台，println/eprintln 在安装态无人
+/// 接收；而 desktop.log 此前仅被诊断（diag-export）读取、无任何写入方——
+/// 崩溃环/看门狗触发后排障时「打开日志」是空目录，恢复页「请导出日志反馈」
+/// 无从取证。追加写失败静默（日志绝不影响主流程）。
+pub fn file_log(line: &str) {
+    use std::io::Write;
+    let dir = shell_core::DshPaths::resolve().logs;
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("desktop.log"))
+        .and_then(|mut f| writeln!(f, "{} {}", crate::chrono_like_now(), line));
 }
 
 #[cfg(windows)]
