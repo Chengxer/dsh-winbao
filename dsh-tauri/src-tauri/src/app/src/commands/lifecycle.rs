@@ -9,7 +9,7 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::AppState;
 
-use super::common::{open_http_url, NoWindow};
+use super::common::{main_window_only, open_http_url, NoWindow};
 use super::menu::setting_bool;
 
 /// 更新源仓库（Electron client-updater DEFAULT_REPOS 同源；⋯ 菜单「更新源」展示+复制）。
@@ -148,7 +148,10 @@ pub fn current_session(state: State<AppState>, session_id: String) -> Result<ser
 }
 
 #[tauri::command]
-pub fn restart_service(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
+pub fn restart_service(app: AppHandle, window: tauri::WebviewWindow) -> Result<serde_json::Value, BridgeError> {
+    // 主窗白名单（Electron chrome:restart-service 挂 pluginManagerIpcAllowed
+    // 的同款守卫）：浮窗/宠物窗的内核页不得触发内核重启。
+    main_window_only(&window)?;
     let state = app.state::<AppState>();
     let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
     let sv = sv.ok_or_else(|| BridgeError::internal("supervisor 未初始化"))?;

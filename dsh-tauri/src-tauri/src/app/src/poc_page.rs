@@ -131,14 +131,20 @@ pub const POC_PAGE_HTML: &str = r#"<!doctype html>
       done('A3 app_init invoke', !!info.appVersion, 'appVersion=' + info.appVersion + ' shell=' + info.shell);
     } catch (e) { done('A3 app_init invoke', false, String(e.message || e)); }
 
-    // A4 事件下行（app_init 会发 balance-changed；先监听再调用）
-    var a4 = add('A4 事件下行 balance-changed');
-    var got = false;
-    window.addEventListener('dsh-balance-changed', function (e) {
-      if (!got) { got = true; done('A4 事件下行 balance-changed', true, 'detail=' + JSON.stringify(e.detail)); }
+    // A4 事件下行（window-maximized，自动 toggle 两轮触发再还原）。
+    // （原 A4 监听 balance-changed 已废：v0.5.1 余额收口后事件由 balance
+    //   轮询环生产，PoC 模式不启动 supervisor——无生产者，恒失败。）
+    var a4 = add('A4 事件下行 window-maximized');
+    var got4 = false;
+    B.windowControls.onMaximizeChange(function (isMax) {
+      if (!got4) { got4 = true; done('A4 事件下行 window-maximized', typeof isMax === 'boolean', 'isMaximized=' + isMax); }
     });
-    try { await B.getInfo(); } catch (e) {}
-    setTimeout(function () { if (!got) done('A4 事件下行 balance-changed', false, '3s 内未收到事件'); }, 3000);
+    try {
+      await B.windowControls.toggleMaximize();
+      await new Promise(function (r) { setTimeout(r, 600); });
+      await B.windowControls.toggleMaximize();
+    } catch (e) {}
+    setTimeout(function () { if (!got4) done('A4 事件下行 window-maximized', false, '4s 内未收到事件'); }, 4000);
 
     // A5 onMaximizeChange 订阅
     var a5 = add('A5 onMaximizeChange 订阅');
@@ -153,13 +159,14 @@ pub const POC_PAGE_HTML: &str = r#"<!doctype html>
     try { done('A6 isMaximized 查询', typeof (await B.windowControls.isMaximized()) === 'boolean', 'ok'); }
     catch (e) { done('A6 isMaximized 查询', false, String(e.message || e)); }
 
-    // A7 裁撤项返回 E_CUT_FEATURE（错误码链路）
-    var a7 = add('A7 check-agent-update 裁撤');
-    try { await B.menu.action('check-agent-update'); done('A7 check-agent-update 裁撤', false, '应拒绝却成功'); }
-    catch (e) {
-      var msg = String(e.message || e);
-      done('A7 check-agent-update 裁撤', msg.indexOf('E_CUT_FEATURE') >= 0, msg);
-    }
+    // A7 check-agent-update 最简版本比对（v0.5.0 起非裁撤：回 {ok,current,latest,hasUpdate}；
+    // 需网络访问 npm registry，离线时该项报失败属预期）
+    var a7 = add('A7 check-agent-update 版本比对');
+    try {
+      var upd = await B.menu.action('check-agent-update');
+      done('A7 check-agent-update 版本比对', !!(upd && upd.ok && ('hasUpdate' in upd)),
+        'current=' + upd.current + ' latest=' + upd.latest + ' hasUpdate=' + upd.hasUpdate);
+    } catch (e) { done('A7 check-agent-update 版本比对', false, String(e.message || e)); }
 
     // A8 未注册 command 的错误形态（用一个保证不存在的命令名）
     var a8 = add('A8 未注册 command 报错形态');
@@ -170,7 +177,7 @@ pub const POC_PAGE_HTML: &str = r#"<!doctype html>
     var a9 = add('A9 参数序列化（echo_json）');
     try {
       var payload = { arr: [1, 2, { k: '中文' }], n: 3.5, b: true };
-      var out = await window.__TAURI_INTERNALS__.invoke('echo_json', { payload: payload });
+      var out = await window.__TAURI_INTERNALS__.invoke('poc_echo_json', { payload: payload });
       var ok = JSON.stringify(out) === JSON.stringify(payload);
       done('A9 参数序列化（echo_json）', ok, ok ? '往返一致' : JSON.stringify(out));
     } catch (e) { done('A9 参数序列化（echo_json）', false, String(e.message || e)); }

@@ -18,7 +18,7 @@ pub struct ChannelMapping {
     pub cut: bool,
 }
 
-/// 全量映射表（41 通道，提取自 main.js，见 contracts/ipc-commands.md §2）。
+/// 全量映射表（43 通道，提取自 main.js，见 contracts/ipc-commands.md §2）。
 pub const CHANNELS: &[ChannelMapping] = &[
     // ---- Phase 1：核心生命周期 ----
     m("chrome:init", "app_init", false, false),
@@ -82,7 +82,7 @@ const fn c(e: &'static str, t: &'static str) -> ChannelMapping {
     ChannelMapping { electron: e, tauri: t, phase: 0, fire_and_forget: false, cut: true }
 }
 
-/// Electron 通道名 → Tauri command 名（含 8 个 fire-and-forget）。
+/// Electron 通道名 → Tauri command 名（含 7 个 fire-and-forget）。
 pub fn tauri_command_for(electron_channel: &str) -> Option<&'static str> {
     CHANNELS.iter().find(|c| c.electron == electron_channel).map(|c| c.tauri)
 }

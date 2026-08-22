@@ -10,6 +10,19 @@ pub fn terr(e: tauri::Error) -> BridgeError {
     BridgeError::internal(e.to_string())
 }
 
+/// 主窗白名单（ipc-commands.md §3.3；Electron `pluginManagerIpcAllowed` 同语义）：
+/// 插件管理/诊断/备份族与 restart_service 仅接受主窗 label 的调用——浮窗/宠物窗
+/// 等其他窗口加载的内核页不得触发装/卸插件与重启内核。Tauri command 拿不到
+/// 原生 origin（远程页经 capability `remote.urls` 已限 127.0.0.1），白名单在
+/// 命令实现层按 `WebviewWindow` label 判定（bridge crate 不依赖 tauri，故落此处）。
+pub fn main_window_only(window: &tauri::WebviewWindow) -> Result<(), BridgeError> {
+    if window.label() == "main" {
+        Ok(())
+    } else {
+        Err(BridgeError::unauthorized(format!("该通道仅主窗可调（调用窗：{}）", window.label())))
+    }
+}
+
 /// 系统浏览器打开 http(s) URL。
 pub fn open_http_url(url: &str) -> Result<serde_json::Value, BridgeError> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {

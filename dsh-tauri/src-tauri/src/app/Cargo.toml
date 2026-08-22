@@ -22,7 +22,8 @@ kernel-process = { path = "../../crates/kernel-process" }
 preview-server = { path = "../../crates/preview-server" }
 shell-core = { path = "../../crates/shell-core" }
 fence = { path = "../../crates/fence" }
-session-watcher = { path = "../../crates/session-watcher" }
+# session-watcher（通知限流决策逻辑）为 Phase 3 通知链预留，当前 app 零引用
+# ——不加依赖（防「声明即接线」假象）；接线时随通知链一起引入。
 tauri-plugin-single-instance = "2.4.3"
 
 [dev-dependencies]

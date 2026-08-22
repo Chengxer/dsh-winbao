@@ -42,7 +42,7 @@ assets/plugins/<id>/
 
 1. 运行在内核 Web UI 页面（`http://127.0.0.1:<port>`）上，与内核前端同源同上下文。
 2. 可依赖的宿主 API 白名单：
-   - `window.dshDesktop.*`（本壳桥，48 方法）
+   - `window.dshDesktop.*`（本壳桥，49 方法）
    - `window.__DSH_FLOAT__` / `window.__DSH_PET__`（模式全局）
    - window CustomEvent：`dsh-balance-changed` / `dsh-pet-state`
    - 标准浏览器 API + 内核前端自身暴露的稳定挂点

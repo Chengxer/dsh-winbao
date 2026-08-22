@@ -19,6 +19,7 @@ pub mod codes {
     pub const CUT_FEATURE: &str = "E_CUT_FEATURE";
     pub const TIMEOUT: &str = "E_TIMEOUT";
     pub const NOT_IMPLEMENTED: &str = "E_NOT_IMPLEMENTED";
+    pub const UNAUTHORIZED: &str = "E_UNAUTHORIZED";
     // §2 内核进程域（kernel-process）
     pub const KERNEL_SPAWN: &str = "E_KERNEL_SPAWN";
     pub const KERNEL_PORT: &str = "E_KERNEL_PORT";
@@ -99,6 +100,12 @@ impl BridgeError {
     /// 能力已规划未实装（§1；占位拒绝，非裁撤）。
     pub fn not_implemented(what: impl Into<String>) -> Self {
         Self::new(codes::NOT_IMPLEMENTED, what)
+    }
+
+    /// 调用窗越权（§1；Electron pluginManagerIpcAllowed 语义——插件管理/
+    /// 诊断/备份族仅主窗 label 可调）。
+    pub fn unauthorized(what: impl Into<String>) -> Self {
+        Self::new(codes::UNAUTHORIZED, what)
     }
 
     /// 就绪行未在期限内出现 / 内核未就绪（§2）。
@@ -187,6 +194,7 @@ mod tests {
         assert_eq!(CUT_FEATURE, "E_CUT_FEATURE");
         assert_eq!(TIMEOUT, "E_TIMEOUT");
         assert_eq!(NOT_IMPLEMENTED, "E_NOT_IMPLEMENTED");
+        assert_eq!(UNAUTHORIZED, "E_UNAUTHORIZED");
         assert_eq!(KERNEL_SPAWN, "E_KERNEL_SPAWN");
         assert_eq!(KERNEL_PORT, "E_KERNEL_PORT");
         assert_eq!(KERNEL_CRASH_LOOP, "E_KERNEL_CRASH_LOOP");
@@ -211,6 +219,7 @@ mod tests {
     #[test]
     fn convenience_constructors_carry_contract_codes() {
         assert_eq!(BridgeError::not_implemented("x").code, codes::NOT_IMPLEMENTED);
+        assert_eq!(BridgeError::unauthorized("x").code, codes::UNAUTHORIZED);
         assert_eq!(BridgeError::kernel_not_ready("x").code, codes::KERNEL_NOT_READY);
         assert_eq!(BridgeError::fence_root("x").code, codes::FENCE_ROOT);
         assert_eq!(BridgeError::updater_config("x").code, codes::UPDATER_CONFIG);

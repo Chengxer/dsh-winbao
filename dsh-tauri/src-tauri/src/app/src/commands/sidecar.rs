@@ -4,11 +4,11 @@
 //! Rust 编排侧，业务全在 Node sidecar（plugin-contract.md §3）。
 
 use bridge::BridgeError;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WebviewWindow};
 
 use crate::AppState;
 
-use super::common::{chrono_now, dirs_docs, NoWindow};
+use super::common::{chrono_now, dirs_docs, main_window_only, NoWindow};
 
 /// sidecar 全局串行锁：同一时刻只允许一个 CLI 进程（withPatchWrite 只在单进程内
 /// 串行；跨进程并发会竞写 cordis.patch.yml——Review#2 修复）。
@@ -41,45 +41,53 @@ pub fn run_sidecar(app: &AppHandle, args: &[&str]) -> Result<serde_json::Value, 
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2：插件管理（sidecar 转发）
+// Phase 2：插件管理（sidecar 转发；主窗白名单——Electron pluginManagerIpcAllowed）
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn plugin_list(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
+pub fn plugin_list(app: AppHandle, window: WebviewWindow) -> Result<serde_json::Value, BridgeError> {
+    main_window_only(&window)?;
     run_sidecar(&app, &["plugin-list"])
 }
 #[tauri::command]
-pub fn plugin_set_enabled(id: String, enabled: bool, app: AppHandle) -> Result<serde_json::Value, BridgeError> {
+pub fn plugin_set_enabled(id: String, enabled: bool, app: AppHandle, window: WebviewWindow) -> Result<serde_json::Value, BridgeError> {
+    main_window_only(&window)?;
     run_sidecar(&app, &["plugin-set-enabled", &id, if enabled { "1" } else { "0" }])
 }
 #[tauri::command]
-pub fn plugin_uninstall(id: String, app: AppHandle) -> Result<serde_json::Value, BridgeError> {
+pub fn plugin_uninstall(id: String, app: AppHandle, window: WebviewWindow) -> Result<serde_json::Value, BridgeError> {
+    main_window_only(&window)?;
     run_sidecar(&app, &["plugin-uninstall", &id])
 }
 #[tauri::command]
-pub fn plugin_restore(id: String, app: AppHandle) -> Result<serde_json::Value, BridgeError> {
+pub fn plugin_restore(id: String, app: AppHandle, window: WebviewWindow) -> Result<serde_json::Value, BridgeError> {
+    main_window_only(&window)?;
     run_sidecar(&app, &["plugin-restore", &id])
 }
 #[tauri::command]
-pub fn plugin_check_updates(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
+pub fn plugin_check_updates(app: AppHandle, window: WebviewWindow) -> Result<serde_json::Value, BridgeError> {
+    main_window_only(&window)?;
     run_sidecar(&app, &["plugin-check-updates"])
 }
 #[tauri::command]
-pub fn plugin_update(id: String, app: AppHandle) -> Result<serde_json::Value, BridgeError> {
+pub fn plugin_update(id: String, app: AppHandle, window: WebviewWindow) -> Result<serde_json::Value, BridgeError> {
+    main_window_only(&window)?;
     run_sidecar(&app, &["plugin-update", &id])
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3：诊断 / 备份（sidecar 转发）
+// Phase 3：诊断 / 备份（sidecar 转发；主窗白名单同上——Electron 同款守卫面）
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn diag_run(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
+pub fn diag_run(app: AppHandle, window: WebviewWindow) -> Result<serde_json::Value, BridgeError> {
+    main_window_only(&window)?;
     run_sidecar(&app, &["diag-run"])
 }
 
 #[tauri::command]
-pub fn diag_export(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
+pub fn diag_export(app: AppHandle, window: WebviewWindow) -> Result<serde_json::Value, BridgeError> {
+    main_window_only(&window)?;
     // Electron 语义：主进程选路径（对话框）。Tauri Phase 3 用固定日志目录 + 时间戳。
     let dir = shell_core::DshPaths::resolve().logs;
     let _ = std::fs::create_dir_all(&dir);
@@ -89,29 +97,34 @@ pub fn diag_export(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
 }
 
 #[tauri::command]
-pub fn diag_validate(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
+pub fn diag_validate(app: AppHandle, window: WebviewWindow) -> Result<serde_json::Value, BridgeError> {
+    main_window_only(&window)?;
     run_sidecar(&app, &["diag-validate"])
 }
 
 #[tauri::command]
-pub fn diag_order(app: AppHandle) -> Result<serde_json::Value, BridgeError> {
+pub fn diag_order(app: AppHandle, window: WebviewWindow) -> Result<serde_json::Value, BridgeError> {
+    main_window_only(&window)?;
     run_sidecar(&app, &["diag-order"])
 }
 
 #[tauri::command]
-pub fn diag_order_apply(order: Vec<String>, app: AppHandle) -> Result<serde_json::Value, BridgeError> {
+pub fn diag_order_apply(order: Vec<String>, app: AppHandle, window: WebviewWindow) -> Result<serde_json::Value, BridgeError> {
+    main_window_only(&window)?;
     let json = serde_json::to_string(&order).map_err(|e| BridgeError::internal(e.to_string()))?;
     run_sidecar(&app, &["diag-order-apply", &json])
 }
 
 #[tauri::command]
-pub fn diag_remove_bundle(names: Vec<String>, app: AppHandle) -> Result<serde_json::Value, BridgeError> {
+pub fn diag_remove_bundle(names: Vec<String>, app: AppHandle, window: WebviewWindow) -> Result<serde_json::Value, BridgeError> {
+    main_window_only(&window)?;
     let json = serde_json::to_string(&names).map_err(|e| BridgeError::internal(e.to_string()))?;
     run_sidecar(&app, &["diag-remove-bundle", &json])
 }
 
 #[tauri::command]
-pub fn backup_export(label: Option<String>, app: AppHandle) -> Result<serde_json::Value, BridgeError> {
+pub fn backup_export(label: Option<String>, app: AppHandle, window: WebviewWindow) -> Result<serde_json::Value, BridgeError> {
+    main_window_only(&window)?;
     // Electron 语义：对话框选路径。Tauri：固定到「文档」目录 + 时间戳名。
     let docs = dirs_docs();
     let _ = std::fs::create_dir_all(&docs);
@@ -121,7 +134,8 @@ pub fn backup_export(label: Option<String>, app: AppHandle) -> Result<serde_json
 }
 
 #[tauri::command]
-pub fn backup_restore(preview: bool, token: Option<String>, app: AppHandle) -> Result<serde_json::Value, BridgeError> {
+pub fn backup_restore(preview: bool, token: Option<String>, app: AppHandle, window: WebviewWindow) -> Result<serde_json::Value, BridgeError> {
+    main_window_only(&window)?;
     if preview {
         // Electron 语义：主进程选文件。Tauri：读最近一次导出的备份文件（日志/文档目录）。
         let docs = dirs_docs();
@@ -192,5 +206,39 @@ mod tests {
             .expect("run_sidecar 函数体");
         assert!(seg.contains("Command::new(&sv.node_exe)"), "锚点漂移（改了 spawn 写法需同步测试）: {seg}");
         assert!(seg.contains(".creation_flags_no_window()"), "sidecar spawn 必须抑制终端窗: {seg}");
+    }
+
+    /// 主窗白名单（ipc-commands.md §3.3；Electron pluginManagerIpcAllowed 同守卫面）：
+    /// 插件管理六通道 + 诊断/备份族 + restart_service 必须逐个前置 main_window_only
+    /// （浮窗/宠物窗内核页不得装/卸插件与重启内核）。WSL 三通道对齐 Electron 不设守卫。
+    #[test]
+    fn sidecar_family_commands_are_main_window_gated() {
+        let src = include_str!("sidecar.rs").replace("\r\n", "\n");
+        for cmd in [
+            "plugin_list", "plugin_set_enabled", "plugin_uninstall", "plugin_restore", "plugin_check_updates", "plugin_update",
+            "diag_run", "diag_export", "diag_validate", "diag_order", "diag_order_apply", "diag_remove_bundle",
+            "backup_export", "backup_restore",
+        ] {
+            let seg = src
+                .split(&format!("pub fn {cmd}"))
+                .nth(1)
+                .and_then(|s| s.split("\n}").next())
+                .unwrap_or_else(|| panic!("{cmd} 函数体缺失"));
+            assert!(
+                seg.contains("main_window_only(&window)?"),
+                "{cmd} 必须前置主窗白名单（Electron pluginManagerIpcAllowed 同面）: {seg}"
+            );
+        }
+        // restart_service 同守卫（Electron chrome:restart-service 挂同款 guard）。
+        let life = include_str!("lifecycle.rs").replace("\r\n", "\n");
+        let seg = life
+            .split("pub fn restart_service")
+            .nth(1)
+            .and_then(|s| s.split("\n}").next())
+            .expect("restart_service 函数体");
+        assert!(seg.contains("main_window_only(&window)?"), "restart_service 必须前置主窗白名单: {seg}");
+        // 未加守卫的通道不得误引（wsl 三通道对齐 Electron 不设守卫）。
+        let wsl = include_str!("wsl.rs");
+        assert!(!wsl.contains("main_window_only"), "WSL 三通道 Electron 原版无守卫，不得私自加严");
     }
 }

@@ -1,6 +1,6 @@
 //! 垫片 JS 的嵌入与静态自检。
 //!
-//! `dist/bridge-shim.js` 是 contracts/bridge-api.md 的页面侧实现（48 方法），
+//! `dist/bridge-shim.js` 是 contracts/bridge-api.md 的页面侧实现（49 方法），
 //! 编进二进制后由 app 层作为 `initialization_script` 注入每个页面。
 
 /// 垫片 JS 全文。

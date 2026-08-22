@@ -34,7 +34,8 @@ dsh web 进程启动时按序叠加：
 
 ```
 State（期望态：插件清单 + 开关 + 版本）
-  │  唯一写入方：sidecar-orchestrator（Rust 编排 + Node sidecar 执行）
+  │  唯一写入方：Rust 装配层编排（app supervisor boot 链 + commands/sidecar
+  │  `run_sidecar`）→ Node sidecar 执行（单一数据流的编排/执行分工）
   ▼
 Patch（叠加树落盘：overlay 布局 + home patch 用户层条目 + 文本手术）
   │  唯一写入方：sync-companion-plugins --with-patches（Node）
@@ -119,7 +120,8 @@ app 启动
 | 粘贴临时 | `%TEMP%/dsh-paste/` | 同路径 |
 
 > 设置文件沿用 updater.js 的 JSON schema（含已裁撤字段如 kernelUpdate.skipVersion：
-> 读取时忽略并清理，不报错——**向前兼容旧用户目录**）。
+> 读取时忽略不删除——**回退兼容**，旧用户目录可安全回退 Electron 版；壳侧活跃
+> 写键见 settings.json 各消费方）。
 
 ### 5.1 环境覆盖通道（生产与测试两套，优先级从高到低）
 

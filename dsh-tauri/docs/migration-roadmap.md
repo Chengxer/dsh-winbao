@@ -129,8 +129,10 @@ Rust 壳（7 个单向依赖的 crate）+ Node sidecar（复用 `dsh-desktop/scr
 
 ## Phase 2 —— sidecar 全链路（插件体系等价迁移）
 
-- sidecar-orchestrator 实装：boot 时序 Repair→Sync→Presets→Patches→Preflight
-  （Node 侧复用 scripts/，Rust 侧编排 + 超时 + 失败诊断上报）。
+- boot 时序编排实装：Repair→Sync→Presets→Patches→Preflight 五步
+  （Node 侧 `sidecar/cli.js boot` 复用 scripts/；Rust 编排在 app supervisor
+  瀑布 + 看门狗承载。原计划的 sidecar-orchestrator crate 已裁撤——职责被
+  supervisor/commands 直接吸收，2026-08 分层重审定案）。
 - 脚本抽出：把 Electron main.js 内联的 heal/preset 逻辑抽成 `dsh-tauri/sidecar/` 独立入口
   （Electron 版不动——新文件按契约脚本名组织）。
 - 插件管理六通道 + supervision 探活（PR #121 的 supervision 层语义：unref 陷阱已修）。

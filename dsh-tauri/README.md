@@ -34,14 +34,13 @@ dsh-tauri/
 ├── scripts/            # stage-payload.sh（打包暂存）/ smoke-installed.sh（安装布局冒烟）
 ├── ui/                 # frontendDist（静态页；主窗运行时导航到 127.0.0.1）
 └── src-tauri/
-    ├── crates/         # 7 个单向依赖 crate（不依赖 tauri 运行时，独立单测）
+    ├── crates/         # 6 个单向依赖 crate（不依赖 tauri 运行时，独立单测）
     │   ├── shell-core/          # 路径/设置（损坏自愈）/run-state/单实例
     │   ├── kernel-process/      # spawn 规格/就绪行/Job Object 杀树/崩溃环/环境白名单
     │   ├── bridge/              # 错误 + 通道映射 + 垫片 JS（dist/bridge-shim.js）
     │   ├── fence/               # 文件围栏（越界拒绝）
     │   ├── preview-server/      # 127.0.0.1 只读静态服务 + /__diag/ 诊断端点
-    │   ├── session-watcher/     # 通知限流 + 聚焦豁免 + 当前会话
-    │   └── sidecar-orchestrator/# boot 时序 + sidecar 命令
+    │   └── session-watcher/     # 通知限流 + 聚焦豁免（Phase 3 通知链预留，未接线）
     └── src/app/        # 装配根（lib/supervisor/commands/windows/pages/nsis）
 ```
 

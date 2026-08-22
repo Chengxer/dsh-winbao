@@ -16,8 +16,7 @@ dsh-tauri/
 │   │   ├── bridge            dshDesktop 垫片 JS + initialization_script
 │   │   ├── fence             文件围栏（zstd 首帧 cwd）+ file-open/revert
 │   │   ├── preview-server    127.0.0.1 静态页 + /__diag/ 诊断端点
-│   │   ├── session-watcher   zstd 会话日志监视 + 通知限流
-│   │   └── sidecar-orchestrator  boot 时序契约（Node 脚本编排规格）
+│   │   └── session-watcher   通知限流/聚焦豁免决策逻辑（Phase 3 通知链接线目标，当前未接线零消费者；sidecar-orchestrator crate 已于 2026-08 分层重审裁撤——boot 编排由 app supervisor + Node sidecar boot 子命令直接承载）
 │   └── src/app/        装配根（只做接线：lib.rs / supervisor / commands / windows / pages）
 ├── sidecar/cli.js      Node sidecar 单一入口（复用 dsh-desktop/scripts，零逻辑重写）
 └── scripts/            stage-payload.sh（打包暂存）/ smoke-installed.sh（安装布局冒烟）
@@ -132,7 +131,7 @@ v0.5.0 起发版前的固定验证管线，**5/5 全过才允许出包**（任�
 
 | # | 检测路 | 命令 | 覆盖什么 | v0.5.0 实测 |
 |---|--------|------|----------|-------------|
-| 1 | Rust 全量 | `cargo test --workspace` | 契约审计（注册⊆契约）/ 瀑布破坏性实测 / 围栏与围栏逃逸 / 崩溃环状态机 | 18 套件 142/0（CI 跳 4 集成例 → 138） |
+| 1 | Rust 全量 | `cargo test --workspace` | 契约审计（注册⊆契约）/ 瀑布破坏性实测 / 围栏与围栏逃逸 / 崩溃环状态机 | 全绿 177/0（其中 1 例本地 ignored；CI 跳集成例，以实际输出为准） |
 | 2 | sidecar 真机 | `node --test sidecar/cli.test.js` | boot 顺序契约 / 插件六通道 / 诊断备份 roundtrip（沙箱 home） | 13/13 |
 | 3 | 共享脚本回归 | `node --test scripts/test/unit-*.test.js`（dsh-desktop） | Electron 线同源的补丁引擎 / 伴随插件同步 / compat 行为契约 | 69 文件 899 过（3 挂为壳退役后壳文件引用残留，Electron 线测试债） |
 | 4 | NSIS 钩子编译 | `makensis` 全量编译 installerHooks.nsh | 安装器卡死类缺陷的静态防线（宏展开 / 栈平衡 / MessageBox 语法） | 0 错误 0 警告 |
@@ -155,7 +154,7 @@ v0.5.0 起发版前的固定验证管线，**5/5 全过才允许出包**（任�
 
 | 层 | 命令 | 规模（v0.5.0 实测） |
 |----|------|------|
-| Rust 全量（crates+app，含契约审计/瀑布破坏性实测） | `cargo test --workspace` | 142（CI 跳 4 集成例 → 138） |
+| Rust 全量（crates+app，含契约审计/瀑布破坏性实测） | `cargo test --workspace` | 177（其中 1 例本地 ignored；CI 跳集成例，以实际输出为准） |
 | sidecar（boot 顺序/插件通道/诊断） | `node --test sidecar/cli.test.js` | 13 |
 | 共享 Node 脚本（Electron 线同源回归） | `node --test scripts/test/unit-*.test.js` | 69 文件 899 过（3 挂为壳退役残留） |
 | NSIS 钩子编译 | makensis 全量编译 | 0 错 0 警 |

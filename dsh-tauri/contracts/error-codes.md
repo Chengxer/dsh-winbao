@@ -12,9 +12,10 @@
 | `E_INTERNAL` | 壳内部未分类错误 | 任何 crate |
 | `E_INVALID_ARG` | 参数校验失败（含超长/类型错） | bridge 参数校验 |
 | `E_NOT_FOUND` | 目标不存在（窗口/插件/会话/文件） | 各 command |
-| `E_CUT_FEATURE` | 该能力在 Tauri 版已裁撤（内核自动更新、GPU 守卫、自研客户端更新链） | menu_action 等 |
+| `E_CUT_FEATURE` | 该能力在 Tauri 版已裁撤（GPU 守卫 `guard:action` 预留位、自研客户端更新链） | 命令位保留（v0.5.2 起无活跃返回方——`check-agent-update` 已改最简版本比对） |
 | `E_TIMEOUT` | 下游超时（内核 HTTP / sidecar 探活） | kernel-process / sidecar |
 | `E_NOT_IMPLEMENTED` | 能力已规划未实装（占位拒绝，非裁撤——区别于 `E_CUT_FEATURE`） | image_paste_save（Phase 3 剪贴板位图） |
+| `E_UNAUTHORIZED` | 调用窗越权：主窗白名单（Electron `pluginManagerIpcAllowed` 同守卫面）外的窗口调插件管理/诊断/备份族或 `restart_service` | app commands（v0.5.2 实装，ipc-commands.md §3.3） |
 | `E_IMAGE_PASTE` | 剪贴板粘贴图落盘失败（dataUrl 缺失/非法、写盘失败） | bridge commands（image_paste_save） |
 | `E_AGENT_UPDATE_NETWORK` | npm registry 版本查询双源（npmmirror/npmjs）均不可达 | menu_action `check-agent-update` 最简比对链 |
 
@@ -27,7 +28,7 @@
 | `E_KERNEL_CRASH_LOOP` | 崩溃环触发（连续崩溃超阈值，进入恢复页） |
 | `E_KERNEL_NOT_READY` | 就绪行未在期限内出现 |
 
-## 3. Sidecar / 插件域（sidecar-orchestrator，沿用 #121 码表）
+## 3. Sidecar / 插件域（沿用 #121 码表；Rust 编排在 app commands/sidecar + supervisor，执行在 Node sidecar cli.js）
 
 | code | 语义 |
 |------|------|
