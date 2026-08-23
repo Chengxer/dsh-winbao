@@ -28,10 +28,12 @@
 //              供 preflight 只读体检复用；
 //   requires   宿主能力依赖（见 host-capabilities.js）；
 //   cli        CLI 同步期（sync-companion-plugins.js --with-patches）是否也应用；
-//              cli:true 共 11 项（= 8 个 HEAD 原有补丁 + slot-error-isolation
+//              cli:true 共 17 项（= 8 个 HEAD 原有补丁 + slot-error-isolation
 //              + session-persistence + tool-source-compat / pi-ai-opencode-go-models
-//              两个数据完整性补丁）；image-send/vision-key 与 guard 组为 false，
-//              仅桌面壳运行时应用；
+//              / pi-ai-credits / pi-ai-reasoning-defaults 四个数据完整性补丁
+//              + bundle-arrival-retry / agent-loop-scheduler-guard 两个内核
+//              韧性补丁）；
+//              image-send/vision-key 与 guard 组为 false，仅桌面壳运行时应用；
 //   failPolicy 'warn'（失配告警跳过，多数现状）| 'degrade'（失配降级 +
 //              升级提示）| 'fatal'（仅 build 期保留）；作用于规格级异常
 //              （applyAll 的 catch 分支），逐文件/逐根异常由下层吸收并计入
@@ -62,6 +64,8 @@ const {
   APP_BOOT_PKG_REL,
   AGENT_PRESET_FALLBACK_PKG_RELS,
   PROMPT_CONTEXT_LITERAL_PKG_RELS,
+  API_GATEWAY_ABSENT_PKG_REL,
+  PICKER_AUTO_PKG_REL,
 } = require('./patch-target-resolver');
 
 const {
@@ -92,6 +96,10 @@ const {
   transformCredentialsAbsentGuidance,
   // 设备未授权（DeepSeek 服务端风控 403）报文追加可操作指引。
   transformDeviceAuthGuidance,
+  // E1（apiProxy 缺席 → /api 全裸 404）缺席分支改错误信封 + 修复指引。
+  transformApiGatewayAbsent,
+  // W1 问题四：WSL 内目录选择器强制 browse（zenity 窗口在 WSLg 里不可见）。
+  transformDirectoryPickerWslBrowse,
   rootAppliers,
 } = require('./patch-adapters');
 
@@ -116,6 +124,8 @@ const {
   CREDENTIALS_INITIAL_RETRY_MARKER,
   CREDENTIALS_ABSENT_GUIDANCE_MARKER,
   DEVICE_AUTH_GUIDANCE_MARKER,
+  API_GATEWAY_ABSENT_MARKER,
+  WSL_PICKER_BROWSE_MARKER,
   LOADER_TREE_ISOLATION_MARKER,
   LOADER_ACTIVATION_ISOLATION_MARKER,
   FAIL_LOUD_ISOLATION_MARKER,
@@ -695,6 +705,32 @@ const PATCH_SPECS = [
     },
   },
   {
+    // api-gateway 缺席指引（E1，v0.5.2 用户反馈「/api/agentPreset.list HTTP 404
+    // 整个桌面端都没法用」）：api-gateway 插件（dsh-host-apiproxy）本 boot 加载
+    // 失败（K1 半树窗口砸中网关）时，dsh-client-connection 的 /api fallback 对
+    // 所有方法回裸 404，前端各面只见英文 transport failure 谜语。补丁把缺席
+    // 分支改为 POST → 200 + internal 错误信封（客户端 rpcErrorSchema 闭合
+    // union，非 internal 新 code 会 parse 失败）+ 中英一步修复指引（退出重启
+    // 一次自愈）；非 POST 腿保留 404 契约。见 patch-adapters E1 注释。
+    id: 'api-gateway-absent-guidance',
+    group: 'guard',
+    order: 155,
+    kind: 'file',
+    layout: 'guard',
+    wslLayout: 'guard',
+    pkgRel: API_GATEWAY_ABSENT_PKG_REL,
+    transform: transformApiGatewayAbsent,
+    marker: API_GATEWAY_ABSENT_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: 'api 网关缺席报错指引',
+      doneLog: (file) => '已把缺席裸 404 改为错误信封+修复指引 ' + file,
+      failLog: (file, err) => 'api 网关缺席报错指引失败(' + file + '): ' + err.message,
+    },
+  },
+  {
     id: 'plugin-inventory-tab-merge',
     group: 'guard',
     order: 160,
@@ -850,6 +886,31 @@ const PATCH_SPECS = [
     failLog: (root, err) => 'opencode-go 模型目录补丁失败(' + root + '): ' + err.message,
   },
   // -------------------------------------------------------------------------
+  // pi-ai 余额判定前置补丁（F2，第三方模型接入反馈）：opencode 等第三方
+  // provider 欠费返回 401 + CreditsError("Insufficient balance")，
+  // classifyPiAiError 的 401→AUTH 判定行排在 isQuotaExceededError 之前 →
+  // 客户端投影「API key is invalid」，把欠费误报成 key 无效。调换两行顺序
+  // （余额在前），真 401（无余额关键词）仍判 AUTH。此前仅 patch-deps
+  // （postinstall）应用，node_modules 刷新即静默丢失——v0.5.3 payload 与 dev
+  // 树实测均缺失，现补进 boot 期注册表幂等自愈。锚点失配（上游重排判定）
+  // 自动退役。见 scripts/patch-pi-ai-credits.js。
+  // -------------------------------------------------------------------------
+  {
+    id: 'pi-ai-credits',
+    group: 'package',
+    order: 231,
+    kind: 'root',
+    layout: 'nm-roots',
+    wslLayout: 'nm-roots',
+    apply: rootAppliers.patchPiAiCredits,
+    marker: null,
+    requires: [],
+    failPolicy: 'warn',
+    cli: true,
+    successLog: (root) => 'pi-ai 余额判定补丁: 已应用到 ' + root,
+    failLog: (root, err) => 'pi-ai 余额判定补丁失败(' + root + '): ' + err.message,
+  },
+  // -------------------------------------------------------------------------
   // 设置写入韧性补丁（PR5，v0.5.2「添加供应商没反应/灰」两层根治）：
   //   1) 孤儿锁自愈（dsh-atomic-write）——内核持锁窗口内被强杀留下
   //      settings.yaml.lock 孤儿，此后该机所有设置写入 2s 超时失败（页面只读
@@ -892,6 +953,97 @@ const PATCH_SPECS = [
     cli: true,
     successLog: (root) => '设置页韧性补丁: 已应用到 ' + root,
     failLog: (root, err) => '设置页韧性补丁失败(' + root + '): ' + err.message,
+  },
+  // -------------------------------------------------------------------------
+  // pi-ai 手声明路由思考档位默认补丁（F4，v0.5.3「第三方思考强度不生效」
+  // 根治）：设置页「添加自定义供应商」的模型条目从不写 reasoningEfforts 字典
+  //（上游 UI 有意不设 provider 级控件），而 dsh-llm-pi-ai 的
+  // resolveModelReasoning 对未声明字典的条目回落「继承内置 catalog 同 id 条目」
+  // ——手声明路由无 catalog 基条目 → 恒 reasoning:false → 思考强度控件永不
+  // 出现、显式档位报 UNSUPPORTED_REASONING_EFFORT；v0.5.3 又把 PiAiAdapter
+  // 整类豁免出 dsh-third-party-thinking（豁免正确——插件假档位会被原生校验
+  // 拒绝），旁路同断。补丁令手声明条目（无 base）未声明字典时回落标准
+  // OpenAI 档位字典（off=不发字段；low/medium/high 直通，三个可手声明协议的
+  // wire 映射原生消费）：控件开箱即用，未选档位不发任何字段（严格网关安全），
+  // catalog 条目与显式声明字典的语义不变。锚点失配（上游重构该函数）自动
+  // 退役。见 scripts/patch-pi-ai-reasoning-defaults.js。
+  // -------------------------------------------------------------------------
+  {
+    id: 'pi-ai-reasoning-defaults',
+    group: 'package',
+    order: 244,
+    kind: 'root',
+    layout: 'nm-roots',
+    wslLayout: 'nm-roots',
+    apply: rootAppliers.patchPiAiReasoningDefaults,
+    marker: null,
+    requires: [],
+    failPolicy: 'warn',
+    cli: true,
+    successLog: (root) => 'pi-ai 思考档位默认补丁: 已应用到 ' + root,
+    failLog: (root, err) => 'pi-ai 思考档位默认补丁失败(' + root + '): ' + err.message,
+  },
+
+  // -------------------------------------------------------------------------
+  // 插件 client bundle 到达瞬态失败重试补丁（E2/问题A，v0.5.3 用户实测
+  // 「Failed to load plugins ... dsh-better-sidebar: bundle script
+  // /plugins/dsh-better-sidebar/client.js?rev... failed to load」）。
+  //
+  // 报错来自 dsh-client-modules 浏览器半边 defaultLoadBundle 的 script error
+  // 事件——HTTP 取回失败（404/连接拒绝），非模块表失败（#124/PD1 形态另有
+  // client-compat 修）。?rev= 仅缓存击穿、serveBundle 不校验，同进程 404 只能
+  // 是请求时 readFile 失败：杀软扫描锁（安装/升级后全新文件首读正处扫描窗口）
+  // 或插件目录被并发替换（升级 sync / 插件中心 / hub 运行时更新）；跨进程窗口
+  // 是内核重启刻意复用同端口、旧页面惰性 import 撞上换代间隙。arrive() 把单次
+  // 失败当终态 → loader entry 永久 failed 直到整页刷新。补丁双端修：浏览器半边
+  // script error 有界退避重试（4 试 300/900/2700ms + retry= 击穿参数），内核半边
+  // serveBundle 对瞬态错误码（ENOENT/EPERM/EBUSY/EACCES/ETIMEDOUT）短重试 3 次
+  // 后才 404。见 scripts/lib/bundle-arrival-retry-patch.js。
+  // -------------------------------------------------------------------------
+  {
+    id: 'bundle-arrival-retry',
+    group: 'package',
+    order: 245,
+    kind: 'root',
+    layout: 'nm-roots',
+    wslLayout: 'nm-roots',
+    apply: rootAppliers.patchBundleArrivalRetry,
+    marker: null,
+    requires: [],
+    failPolicy: 'warn',
+    cli: true,
+    successLog: (root) => 'bundle 到达重试补丁: 已应用到 ' + root,
+    failLog: (root, err) => 'bundle 到达重试补丁失败(' + root + '): ' + err.message,
+  },
+
+  // -------------------------------------------------------------------------
+  // 工具调度器缺席防崩补丁（E2/问题B，v0.5.3 用户实测 issue #147 同款
+  // 「Cannot read properties of undefined (reading 'prepare')」——
+  // dsh-agent-loop/lib/index.js:193 的 ctx.tools[TOOL_RUNTIME_SCHEDULER].prepare）。
+  //
+  // V8 报错形态实证：报 'prepare' 说明 ctx.tools 是对象但符号字段取值 undefined
+  //（若 ctx.tools 本身 undefined 报的是 reading 'Symbol(...)'）。该符号是
+  // Symbol(...)（副本唯一）：进程内出现第二份 dsh-tools 模块实例（插件自带嵌套
+  // 副本）时两份符号互不相认 → undefined → 工具步中途炸；另一形态是 ctx.tools
+  // 被替代实现顶替。补丁双端修：dsh-agent-loop 四处裸读改为解析器（私有符号 →
+  // Symbol.for 全局镜像 → 带修复指引的显式错误，不伪造工具结果），dsh-tools
+  // ToolRuntime 补挂 Symbol.for 进程全局镜像——跨副本查询经镜像真正命中。
+  // 见 scripts/lib/scheduler-guard-patch.js。
+  // -------------------------------------------------------------------------
+  {
+    id: 'agent-loop-scheduler-guard',
+    group: 'package',
+    order: 246,
+    kind: 'root',
+    layout: 'nm-roots',
+    wslLayout: 'nm-roots',
+    apply: rootAppliers.patchSchedulerGuard,
+    marker: null,
+    requires: [],
+    failPolicy: 'warn',
+    cli: true,
+    successLog: (root) => '调度器防崩补丁: 已应用到 ' + root,
+    failLog: (root, err) => '调度器防崩补丁失败(' + root + '): ' + err.message,
   },
 
   // -------------------------------------------------------------------------
@@ -957,6 +1109,41 @@ const PATCH_SPECS = [
       alreadyLog: alreadySkip,
       doneLog: (file) => '已让非法变量名字面透传 + warn（unknown-variable 仍硬抛） ' + file,
       failLog: (file, err) => 'prompt 字面量透传补丁失败(' + file + '): ' + err.message,
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // W1 问题四（2026-08，真实 WSL2 实机）：目录选择器在 WSL 内误判 native。
+  //
+  // dsh-host-directory-picker-auto 的 resolveDirectoryPickerBackend 在
+  // platform=linux + DISPLAY 在场（WSLg 默认 DISPLAY=:0）+ PATH 有 zenity 时
+  // 判 "native"——zenity 窗口弹在 WSLg 的 Linux 桌面会话，Windows 用户看不见
+  // （表现为「点选择目录没反应」）。补丁在 SSH 分支后注入 WSL 判定：
+  // WSL_INTEROP / WSL_DISTRO_NAME（Microsoft 注入的 WSL 标记，Linux 裸机
+  // 不可能有）任一在场即强制 "browse"（网页交互，Windows 浏览器直接可见）。
+  // WSL 模式主战场是 wslLayout（agent 两副本经 UNC 写穿）；本地 Windows 副本
+  // platform=win32 走 native 不受影响（补丁分支不触发）。上游 resolver 内置
+  // 同款判定后经 already / anchor-missing 自然退役。cli:false（对齐
+  // agent-preset-fallback 先例：桌面壳 boot 链全量应用，CLI 同步期不碰）。
+  // -------------------------------------------------------------------------
+  {
+    id: 'wsl-picker-browse',
+    group: 'runtime',
+    order: 260,
+    kind: 'file',
+    layout: 'runtime-local',
+    wslLayout: 'wsl',
+    pkgRel: PICKER_AUTO_PKG_REL,
+    transform: transformDirectoryPickerWslBrowse,
+    marker: WSL_PICKER_BROWSE_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: 'WSL 目录选择器补丁',
+      alreadyLog: alreadySkip,
+      doneLog: (file) => '已让 WSL 内目录选择强制 browse（zenity 窗口在 WSLg 不可见） ' + file,
+      failLog: (file, err) => 'WSL 目录选择器补丁失败(' + file + '): ' + err.message,
     },
   },
 ];

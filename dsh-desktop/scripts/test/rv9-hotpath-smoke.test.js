@@ -69,7 +69,11 @@ function read(p) { return fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n'); }
 // ---- 6. 垫片：信封解包 / 心跳 5s / 拖放悬停层幂等 ----
 {
   const src = read(path.join(DSH_TAURI, 'src-tauri/crates/bridge/dist/bridge-shim.js'));
-  check('心跳 5s interval + visibilitychange 补报（单监听）', (src.match(/setInterval\(function \(\) \{ send\('renderer_heartbeat'\)/g) || []).length === 1);
+  // F3（2026-08）起新契约：心跳载荷携带页面自报可见性 { hidden: document.hidden }
+  //（壳侧 stall_exempt 豁免链依赖）；单监听形态 = 命名 heartbeat 函数 +
+  // 恰好一个 setInterval(heartbeat, 5000) + visibilitychange 复报。
+  check('心跳 5s interval（单监听）+ 载荷带 hidden（F3 契约）', (src.match(/setInterval\(heartbeat, 5000\)/g) || []).length === 1 && /send\('renderer_heartbeat', \{ hidden/.test(src));
+  check('心跳 visibilitychange 补报（复用同一 heartbeat，不另起监听）', /document\.addEventListener\('visibilitychange', function \(\) \{\s*if \(!document\.hidden\) heartbeat\(\);/.test(src));
   check('悬停层幂等（单一 DOM id，enter 创建/leave+drop 移除）', src.includes("var DROP_HINT_ID = '__dsh_drop_hint__'") && src.includes('getElementById(DROP_HINT_ID)'));
   check('currentSession 3s 轮询变化才发（不发常驻流量）', /var id = parsed[\s\S]*?if \(id && id !== last\)/.test(src));
 }

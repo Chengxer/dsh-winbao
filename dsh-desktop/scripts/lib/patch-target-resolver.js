@@ -54,6 +54,13 @@ const AGENT_PRESET_FALLBACK_PKG_RELS = [
 const PROMPT_CONTEXT_LITERAL_PKG_RELS = [
   path.join('dsh-system-prompt', 'lib', 'index.js'),
 ];
+// api-gateway 缺席指引补丁目标（dsh-client-connection）：lib/index.js 是运行时
+// 经 exports "." 实际加载的唯一入口（/api 前缀路由 + fallback fetch 所在），
+// apply() 的 apiProxy 缺席分支即锚点。
+const API_GATEWAY_ABSENT_PKG_REL = path.join('dsh-client-connection', 'lib', 'index.js');
+// W1 问题四（WSL 目录选择器误判 native）补丁目标：adaptive 选择器的
+// resolver 所在入口（resolveDirectoryPickerBackend 锚点 :65）。
+const PICKER_AUTO_PKG_REL = path.join('dsh-host-directory-picker-auto', 'lib', 'index.js');
 
 /** @deepseek-ai/<pkgRel> 落点（以 node_modules/@deepseek-ai 根为准）。 */
 function mkAi(root, pkgRel) {
@@ -216,6 +223,8 @@ module.exports = {
   APP_BOOT_PKG_REL,
   AGENT_PRESET_FALLBACK_PKG_RELS,
   PROMPT_CONTEXT_LITERAL_PKG_RELS,
+  API_GATEWAY_ABSENT_PKG_REL,
+  PICKER_AUTO_PKG_REL,
   resolvePatchTargets,
   resolveNmRoots,
   // 兼容期旧签名（一个版本周期后删除）。

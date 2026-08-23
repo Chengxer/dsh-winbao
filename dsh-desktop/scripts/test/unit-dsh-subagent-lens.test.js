@@ -530,3 +530,89 @@ test('同步文件清单覆盖：插件文件均在 PLUGIN_FILES/SYNC_SUBDIRS �
     assert.ok(fs.statSync(path.join(PLUGIN_DIR, 'lib', f)).isFile(), 'lib 内不应有嵌套目录: ' + f);
   }
 });
+
+// ---------------------------------------------------------------------------
+// 8) M1（2026-08「开多了子代理后不稳定、白屏」）：增量扫描缓存。
+//
+// 根因链配套：内核 Session.events 数组常驻只追加，展开行 1.2s tick 与
+// 父会话流式重渲染对同一数组的重复全量重扫是 O(N²) CPU+GC 放大器。
+// activityFromEventsCached 按「数组身份 + 已扫长度」增量续扫；聚合条
+// stripSummaryCached 按节点表身份 + 尺寸（1s 窗）节流。以下断言缓存版
+// 与全量版**语义等价**且增量路径正确。
+// ---------------------------------------------------------------------------
+function callEventM1(callId, name, args, seq) {
+  return { type: 'tool/call', seq, data: { callId, name, arguments: JSON.stringify(args) } };
+}
+function resultEventM1(callId, isError, seq) {
+  return { type: 'tool/result', seq, data: { message: { source: { callId }, content: [{ type: 'tool-result', isError }] } } };
+}
+
+test('activityFromEventsCached：与全量版语义等价（命令/文件/错误标记）', () => {
+  const events = [
+    callEventM1('a1', 'bash', { command: 'ls' }, 1),
+    callEventM1('a2', 'read', { file_path: 'C:/x.js' }, 2),
+    callEventM1('a3', 'subagent', { description: 'd' }, 3),
+    resultEventM1('a1', true, 4),
+  ];
+  const fresh = lens.activityFromEvents(events, { commandChars: 400 });
+  const cached = lens.activityFromEventsCached(events, { commandChars: 400 });
+  jsonEq([...cached.commands].map((c) => ({ c: c.command, e: !!c.error })), [...fresh.commands].map((c) => ({ c: c.command, e: !!c.error })));
+  jsonEq(cached.fileSeeds, fresh.fileSeeds);
+  assert.equal(cached.commands.length, 1, '非活动工具（subagent）不产命令');
+  assert.equal(cached.commands[0].error, true, 'tool/result 错误标记回写');
+  // 非数组输入直通全量版
+  jsonEq(lens.activityFromEventsCached(null, {}), { commands: [], fileSeeds: [] });
+});
+
+test('activityFromEventsCached：追加增量（只扫新增段）+ 迟到错误回写旧条目', () => {
+  const events = [callEventM1('c1', 'bash', { command: 'git status' }, 1)];
+  const first = lens.activityFromEventsCached(events, { commandChars: 400 });
+  assert.equal(first.commands.length, 1);
+  // 追加两条（内核 appendLive 语义：同一数组 push）——增量路径覆盖新增段。
+  events.push(callEventM1('c2', 'pwsh', { command: 'dir' }, 2), resultEventM1('c1', true, 3));
+  const second = lens.activityFromEventsCached(events, { commandChars: 400 });
+  assert.equal(second.commands.length, 2, '增量续扫必须含新增命令');
+  assert.equal(second.commands[0].command, 'git status');
+  assert.equal(second.commands[0].error, true, '迟到的错误标记必须回写旧条目对象');
+  // 与全量重扫等价
+  const fresh = lens.activityFromEvents(events, { commandChars: 400 });
+  jsonEq([...second.commands].map((c) => ({ c: c.command, e: !!c.error })), [...fresh.commands].map((c) => ({ c: c.command, e: !!c.error })));
+});
+
+test('activityFromEventsCached：数组换新（窗口重建）与配置漂移自动失效', () => {
+  const e1 = [callEventM1('k1', 'bash', { command: 'a'.repeat(900) }, 1)];
+  const s1 = lens.activityFromEventsCached(e1, { commandChars: 400 });
+  assert.equal(s1.commands[0].truncated, true, '400 字符截断生效');
+  // 同一数组不同 commandChars → 缓存失效全量重扫
+  const s2 = lens.activityFromEventsCached(e1, { commandChars: 800 });
+  assert.equal(s2.commands[0].command.length, 800, '配置漂移后按新长度截断');
+  // 新数组身份（installWindow 整体换新）→ WeakMap 天然失效
+  const e2 = [callEventM1('k2', 'bash', { command: 'echo new' }, 1)];
+  const s3 = lens.activityFromEventsCached(e2, { commandChars: 400 });
+  assert.equal(s3.commands[0].command, 'echo new');
+});
+
+test('stripSummaryCached：摘要缓存 + 尺寸变化即时重算', () => {
+  const mkChat = (n) => {
+    const nodes = new Map();
+    for (let i = 0; i < n; i++) {
+      nodes.set('k' + i, { kind: 'tool-call', data: { root: { callId: 'r' + i, name: 'bash', argsRaw: JSON.stringify({ command: 'cmd ' + i }), subCalls: [] } } });
+    }
+    return { nodes };
+  };
+  const chat = mkChat(2);
+  const o = { commandChars: 400, maxItems: 50 };
+  const s1 = lens.stripSummaryCached(chat, o);
+  assert.equal(s1.commandCount, 2, '两个 bash 根块');
+  // 同一节点表、尺寸未变、1s 窗内 → 复用缓存对象（引用相等）
+  const s2 = lens.stripSummaryCached(chat, o);
+  assert.equal(s1, s2, '尺寸未变 1s 窗内应复用缓存摘要');
+  // 新节点入表（尺寸变化）→ 立即重算
+  chat.nodes.set('k2', { kind: 'tool-call', data: { root: { callId: 'r2', name: 'bash', argsRaw: JSON.stringify({ command: 'cmd 2' }), subCalls: [] } } });
+  const s3 = lens.stripSummaryCached(chat, o);
+  assert.notEqual(s3, s2, '尺寸变化必须立即重算');
+  assert.equal(s3.commandCount, 3);
+  // 空快照（无节点表）直通降级
+  const s0 = lens.stripSummaryCached(null, o);
+  assert.equal(s0.commandCount, 0);
+});

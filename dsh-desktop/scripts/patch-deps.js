@@ -42,8 +42,15 @@ main();
 
 // 顺带应用 dsh-llm-pi-ai 余额判定补丁：opencode 等第三方 provider 余额不足时返回
 // 401 + CreditsError，dsh 原本一律判 AUTH 并显示 "API key is invalid"，误导用户。
-// 见 patch-pi-ai-credits.js（幂等，失败只告警不中断）。
-require('./patch-pi-ai-credits.js');
+// 见 patch-pi-ai-credits.js（幂等，失败只告警不中断）。boot 期经 patch-registry
+// （pi-ai-credits 条目）幂等重应用，此处覆盖 postinstall 后新装的 dev node_modules。
+try {
+  const { patchPiAiCredits } = require('./patch-pi-ai-credits.js');
+  const n = patchPiAiCredits(path.join(root, 'node_modules'), (m) => console.log('[patch-deps] ' + m));
+  if (n > 0) console.log('[patch-deps] pi-ai 余额判定补丁已应用（dev node_modules）');
+} catch (err) {
+  console.log('[patch-deps] pi-ai 余额判定补丁跳过: ' + (err && err.message ? err.message : err));
+}
 
 // 顺带应用 Menu portal 视口补丁（issue #36）：预设很多时弹层顶部条目被裁掉。
 // 开发模式（npm start）直接打 dev node_modules；打包由 after-pack 与启动时
@@ -124,4 +131,43 @@ try {
   if (n > 0) console.log('[patch-deps] opencode-go 模型目录补丁已应用（dev node_modules）');
 } catch (err) {
   console.log('[patch-deps] opencode-go 模型目录补丁跳过: ' + (err && err.message ? err.message : err));
+}
+
+// pi-ai 手声明路由思考档位默认（F4：v0.5.3「第三方思考强度不生效」——自定义
+// 供应商模型条目无 reasoningEfforts 字典时 pi-ai 回落 reasoning:false，思考强度
+// 控件永不出现；手声明条目回落标准 OpenAI 档位字典，开箱即用且未选档位不发
+// 字段）。开发模式（npm start / postinstall）直接打 dev node_modules；运行副本
+// 由 patch-registry（桌面壳启动 + CLI 同步）覆盖（幂等，锚点失配只告警不中断）。
+try {
+  const { patchPiAiReasoningDefaults } = require('./patch-pi-ai-reasoning-defaults');
+  const n = patchPiAiReasoningDefaults(path.join(root, 'node_modules'), (m) => console.log('[patch-deps] ' + m));
+  if (n > 0) console.log('[patch-deps] pi-ai 思考档位默认补丁已应用（dev node_modules）');
+} catch (err) {
+  console.log('[patch-deps] pi-ai 思考档位默认补丁跳过: ' + (err && err.message ? err.message : err));
+}
+
+// 插件 client bundle 到达瞬态失败重试（E2/问题A：杀软扫描锁/插件目录并发替换/
+// 内核换代复用同端口的单次 404 被 arrive() 当终态 → 「Failed to load plugins」
+// 横幅直到整页刷新）。浏览器半边 script 重试 + serveBundle 读盘瞬态码短重试。
+// 开发模式（npm start / postinstall）直接打 dev node_modules；运行副本由
+// patch-registry（桌面壳启动 + CLI 同步）覆盖（幂等，锚点失配只告警不中断）。
+try {
+  const { patchBundleArrivalRetry } = require('./lib/bundle-arrival-retry-patch');
+  const n = patchBundleArrivalRetry(path.join(root, 'node_modules'), (m) => console.log('[patch-deps] ' + m));
+  if (n > 0) console.log('[patch-deps] bundle 到达重试补丁已应用（dev node_modules）');
+} catch (err) {
+  console.log('[patch-deps] bundle 到达重试补丁跳过: ' + (err && err.message ? err.message : err));
+}
+
+// 工具调度器缺席防崩（E2/问题B：issue #147 同款 reading 'prepare'——
+// Symbol() 副本唯一，进程内第二份 dsh-tools 实例（插件嵌套副本）符号互不相认
+// → ctx.tools[TOOL_RUNTIME_SCHEDULER] undefined → 工具步中途炸）。agent-loop
+// 四处裸读改解析器（私有符号 → Symbol.for 全局镜像 → 显式错误），dsh-tools
+// 补挂全局镜像。运行副本由 patch-registry（桌面壳启动 + CLI 同步）覆盖。
+try {
+  const { patchSchedulerGuard } = require('./lib/scheduler-guard-patch');
+  const n = patchSchedulerGuard(path.join(root, 'node_modules'), (m) => console.log('[patch-deps] ' + m));
+  if (n > 0) console.log('[patch-deps] 调度器防崩补丁已应用（dev node_modules）');
+} catch (err) {
+  console.log('[patch-deps] 调度器防崩补丁跳过: ' + (err && err.message ? err.message : err));
 }

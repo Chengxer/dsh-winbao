@@ -146,7 +146,8 @@ test('D. pkgRel/pkgRels 被 patch-target-resolver 常量覆盖（白名单外新
 });
 
 test('E. order 全局唯一、组内升序、补丁间依赖序成立', () => {
-  assert.equal(PATCH_SPECS.length, 38, 'spec 总数应为 38（PR5 设置写入韧性 ×2）');
+  // 44 = 43（E2 后）+ wsl-picker-browse（W1 问题四，order 260）。
+  assert.equal(PATCH_SPECS.length, 44, 'spec 总数应为 44（E2 +2 后再 + wsl-picker-browse）');
   const orders = PATCH_SPECS.map((s) => s.order);
   assert.equal(new Set(orders).size, orders.length, 'order 必须全局唯一');
   const byId = Object.fromEntries(PATCH_SPECS.map((s) => [s.id, s]));
@@ -203,9 +204,9 @@ test('E3. device-auth 154 与 credentials-absent 153 相邻无干扰', () => {
   );
 });
 
-test('F. cli:true 恰为 13 项；failPolicy ∈ {warn,degrade}', () => {
+test('F. cli:true 恰为 17 项；failPolicy ∈ {warn,degrade}', () => {
   const cliSpecs = registry.getSpecsByCli();
-  assert.equal(cliSpecs.length, 13, 'cli:true 数量应与既有断言一致（13，PR5 +2）');
+  assert.equal(cliSpecs.length, 17, 'cli:true 数量应与既有断言一致（17，E2 +2 内核韧性补丁）');
   for (const s of cliSpecs) assert.equal(s.cli, true);
   for (const spec of PATCH_SPECS) {
     assert.ok(
@@ -216,6 +217,23 @@ test('F. cli:true 恰为 13 项；failPolicy ∈ {warn,degrade}', () => {
   const byId = Object.fromEntries(PATCH_SPECS.map((s) => [s.id, s]));
   assert.equal(byId['slot-error-isolation'].failPolicy, 'degrade', '唯一 degrade 档应仍是 slot-error-isolation');
 });
+
+test('F2. E2 两个内核韧性补丁字段契约（root + nm-roots + cli + warn）', () => {
+  const byId = Object.fromEntries(PATCH_SPECS.map((s) => [s.id, s]));
+  for (const id of ['bundle-arrival-retry', 'agent-loop-scheduler-guard']) {
+    assert.ok(byId[id], `${id} 必须登记`);
+    assert.equal(byId[id].kind, 'root', `${id} 应为 root 应用器形态`);
+    assert.equal(byId[id].layout, 'nm-roots');
+    assert.equal(byId[id].wslLayout, 'nm-roots');
+    assert.equal(byId[id].cli, true, `${id} 应 cli:true（内核包目标，CLI 同步同样需要）`);
+    assert.equal(byId[id].failPolicy, 'warn');
+    assert.equal(byId[id].marker, null, `${id} 无幂等 marker（root 应用器内嵌 marker 判定）`);
+  }
+  // order 唯一性已由 E 守卫；此处锚定 245/246（pi-ai-reasoning-defaults 244 之后）。
+  assert.equal(byId['bundle-arrival-retry'].order, 245);
+  assert.equal(byId['agent-loop-scheduler-guard'].order, 246);
+});
+
 
 test('G. group 一致性：词表 + guard 组约束', () => {
   const groups = new Set(PATCH_SPECS.map((s) => s.group));

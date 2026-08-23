@@ -91,20 +91,24 @@ test('防护类补丁与包级补丁均已登记（无遗漏 apply*）', () => {
     'settings-section-guard', 'workspace-search-rail-fix', 'plugin-inventory-tab-merge',
     'web-search-baseurl', 'menu-viewport', 'session-manage', 'open-project-dir',
     'session-persistence', 'tool-source-compat', 'pi-ai-opencode-go-models',
+    'pi-ai-credits', 'pi-ai-reasoning-defaults',
     'atomic-write-orphan-lock', 'settings-models-resilience',
+    'bundle-arrival-retry', 'agent-loop-scheduler-guard',
   ];
   for (const id of expected) assert.ok(ids.has(id), `遗漏补丁 ${id}`);
 });
 
-test('getSpecsByCli：返回 13 个 cli:true 补丁（8 runtime + 3 数据完整性 + 2 设置写入韧性）', () => {
+test('getSpecsByCli：返回 17 个 cli:true 补丁（8 runtime + 5 数据完整性 + 2 设置写入韧性 + 2 内核韧性）', () => {
   const specs = getSpecsByCli();
-  assert.equal(specs.length, 13, 'cli 清单应恰为 13 项');
+  assert.equal(specs.length, 17, 'cli 清单应恰为 17 项');
   const expected = new Set([
     'slot-legacy-key', 'slot-unkeyed-compat', 'slot-error-isolation',
     'runtime-flash-fix', 'prompt-expose-fix', 'shell-description-compat',
     'code-mode-compat', 'attachment-mime-trust', 'session-persistence',
-    'tool-source-compat', 'pi-ai-opencode-go-models',
+    'tool-source-compat', 'pi-ai-opencode-go-models', 'pi-ai-credits',
+    'pi-ai-reasoning-defaults',
     'atomic-write-orphan-lock', 'settings-models-resilience',
+    'bundle-arrival-retry', 'agent-loop-scheduler-guard',
   ]);
   assert.deepEqual(new Set(specs.map((s) => s.id)), expected, 'cli 清单 id 集合不符');
   for (const s of specs) assert.equal(s.cli, true, `${s.id} 应标记 cli:true`);
@@ -140,8 +144,12 @@ test('getSpecsByCli：每个 spec 的 transform/apply 与 patch-adapters 导出�
     'session-persistence': adapters.rootAppliers.patchSessionPersistence,
     'tool-source-compat': adapters.rootAppliers.patchToolSourceCompat,
     'pi-ai-opencode-go-models': adapters.rootAppliers.patchPiAiOpencodeGoModels,
+    'pi-ai-credits': adapters.rootAppliers.patchPiAiCredits,
+    'pi-ai-reasoning-defaults': adapters.rootAppliers.patchPiAiReasoningDefaults,
     'atomic-write-orphan-lock': adapters.rootAppliers.patchAtomicWriteOrphanLock,
     'settings-models-resilience': adapters.rootAppliers.patchSettingsModelsResilience,
+    'bundle-arrival-retry': adapters.rootAppliers.patchBundleArrivalRetry,
+    'agent-loop-scheduler-guard': adapters.rootAppliers.patchSchedulerGuard,
   };
   for (const spec of getSpecsByCli()) {
     if (spec.kind === 'root') {

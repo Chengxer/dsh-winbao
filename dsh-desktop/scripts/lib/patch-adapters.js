@@ -53,12 +53,27 @@ const { patchToolSourceCompat } = require('./tool-source-patch');
 const { patchSessionOrphans } = require('./patch-session-orphans');
 // pi-ai opencode-go 模型目录补丁（opencode-go.json 纯数据补充）。
 const { patchPiAiOpencodeGoModels } = require('../patch-pi-ai-opencode-go-models');
+// pi-ai 余额判定前置补丁（F2：第三方 provider 欠费 401+CreditsError 误判 AUTH
+// →「API key is invalid」；此前仅 postinstall 应用，node_modules 刷新即丢，v0.5.3
+// payload 实测缺失，补进 boot 期注册表幂等自愈）。
+const { patchPiAiCredits } = require('../patch-pi-ai-credits');
+// pi-ai 手声明路由思考档位默认（F4：v0.5.3「第三方思考强度不生效」——自定义
+// 供应商模型条目无 reasoningEfforts 字典时 pi-ai 回落 reasoning:false，控件
+// 永不出现；手声明条目回落标准 OpenAI 档位字典，开箱即用且未选档位不发字段）。
+const { patchPiAiReasoningDefaults } = require('../patch-pi-ai-reasoning-defaults');
 // 设置写入韧性（PR5：v0.5.2「添加供应商没反应/灰」两层根治——孤儿锁自愈 +
 // 设置页命名空间自愈 + settings-conflict 静默重试）。
 const {
   patchAtomicWriteOrphanLock,
   patchSettingsModelsResilience,
 } = require('./patch-settings-write-resilience');
+// 插件 client bundle 到达瞬态失败重试（E2/问题A：bundle script ... failed to
+// load 单次 404/换内核即永久失败——浏览器半边 script 重试 + serveBundle 读盘
+// 瞬态码短重试）。
+const { patchBundleArrivalRetry } = require('./bundle-arrival-retry-patch');
+// 工具调度器缺席防崩（E2/问题B：reading 'prepare'——agent-loop 跨副本解析守卫 +
+// dsh-tools Symbol.for 全局镜像）。
+const { patchSchedulerGuard } = require('./scheduler-guard-patch');
 
 // ---------------------------------------------------------------------------
 // 文本模型自动识图补丁（原 main.js applyImageSendFix 内联 transform）。
@@ -832,6 +847,119 @@ function transformDeviceAuthGuidance(src, file) {
   return { status: 'anchor-missing', detail: '未找到 dsh-llm-deepseek 非 2xx 抛错锚点（双形态 V2/V1 均未命中，版本可能已变更），跳过 ' + file };
 }
 
+// ---------------------------------------------------------------------------
+// wsl-picker-browse 补丁（W1 问题四，2026-08）：目录选择器在 WSL 内误判 native。
+//
+// 根因（真实 WSL2 实机）：dsh-host-directory-picker-auto 的
+// resolveDirectoryPickerBackend 在 platform=linux 且 DISPLAY 在场（WSLg 默认
+// 设 DISPLAY=:0）且 PATH 上有 zenity/kdialog 时判 "native"——zenity 窗口弹在
+// WSLg 的 Linux 桌面会话里，Windows 用户看不见，表现为「点选择目录没反应」。
+//
+// 修法：检测到 WSL 环境标记（WSL_INTEROP / WSL_DISTRO_NAME，WSL 内 Microsoft
+// 注入、Linux 裸机不可能有）时强制返回 "browse"（网页内浏览交互，Windows
+// 浏览器直接可见）。非 WSL 的 Linux 裸机行为不变（真在 Linux 桌面前的用户
+// zenity 仍是最优交互）。
+// 上游修复意向：上游 resolver 内置同款 WSL 判定后，本补丁经 already /
+// anchor-missing 自然退役（参照 vision-key-fix 休眠先例）。
+// ---------------------------------------------------------------------------
+const WSL_PICKER_BROWSE_MARKER = 'dsh-desktop fix: WSL picker must browse, not zenity into WSLg';
+// 锚点 = resolveDirectoryPickerBackend 的 SSH 分支行（该函数唯一出现处，
+// dsh-host-directory-picker-auto lib/index.js:65 逐字抄录）。
+const WSL_PICKER_ANCHOR = '\tif (present(facts.env.SSH_CONNECTION) || present(facts.env.SSH_TTY)) return "browse";';
+const WSL_PICKER_INJECTION = [
+  '\tif (present(facts.env.SSH_CONNECTION) || present(facts.env.SSH_TTY)) return "browse";',
+  '\t// ' + WSL_PICKER_BROWSE_MARKER + ': under WSL (WSLg) DISPLAY=:0 is always set and',
+  '\t// zenity/kdialog exist on PATH, so the resolver would mount the native backend —',
+  '\t// but the chooser window opens in the Linux session desktop the Windows user',
+  '\t// never sees. WSL_INTEROP/WSL_DISTRO_NAME are Microsoft-injected WSL markers',
+  '\t// (never present on bare Linux), so force the web browse flow there.',
+  '\tif (present(facts.env.WSL_INTEROP) || present(facts.env.WSL_DISTRO_NAME)) return "browse";',
+].join('\n');
+
+function transformDirectoryPickerWslBrowse(src, file) {
+  if (src.includes(WSL_PICKER_BROWSE_MARKER)) return { status: 'already' };
+  if (!src.includes(WSL_PICKER_ANCHOR)) {
+    return { status: 'anchor-missing', detail: '未找到 directory-picker-auto SSH 分支锚点（版本可能已变化），跳过 ' + file };
+  }
+  return { status: 'changed', src: src.replace(WSL_PICKER_ANCHOR, () => WSL_PICKER_INJECTION) };
+}
+
+// ---------------------------------------------------------------------------
+// api-gateway 缺席指引补丁（E1，2026-08 v0.5.2 用户反馈）：
+// 「报错: 加载提供方目录失败: transport failure for /api/agentPreset.list:
+//   HTTP 404，整个桌面端都没法用了」。
+//
+// 根因链（与 K1 credentials 缺席同族）：
+//   1. `/api` 前缀路由由 dsh-client-connection 注册，其 fallback fetch 里
+//      `if (apiProxy === void 0) return 404` —— api-gateway 插件
+//      （@deepseek-ai/dsh-host-apiproxy，提供 ctx.apiProxy）一旦本 boot
+//      加载/激活失败（半套 profile fallback 树 + loader-isolation 静默跳过
+//      非保护核心，即 K1 的半树窗口恰好砸中网关本身），**所有** /api 方法
+//      一律裸 404；
+//   2. 前端每个面（模型设置页 llm.providers、预设 agentPreset.list、会话
+//      session.list…）首载即炸，各面只显示「transport failure … HTTP 404」
+//      英文死谜语，用户观感即「整个桌面端都没法用了」且无路可走。
+//   注意：agentPresets 服务缺席 / 预设目录缺失都不产生 404——apiproxy 的
+//   handler 在服务缺席时返回空目录 ok，scanRoot 对 ENOENT 返回 []；此 404
+//   只能来自 apiProxy 服务整体缺席。
+//
+// 修法：缺席分支对 POST（unary 调用腿）改为回 200 + 错误信封——code 用
+// "internal"（客户端 rpcErrorSchema 是闭合 discriminated union，新 code 会
+// 在 client 侧 parse 失败换一种谜语），message 携带中英双语的一步修复指引
+// （完全退出重启一次，boot 链会重 heal 模块回落树；不愈再重装）。rpcId 回
+// 读请求体回显（客户端 callUnary 校验 echo）。非 POST 腿（SSE 打开器）保留
+// 原 404，与其传输契约一致。上游内置同款缺席指引后本补丁经 already /
+// anchor-missing 自然退役。
+// ---------------------------------------------------------------------------
+const API_GATEWAY_ABSENT_MARKER = 'dsh-desktop compat: api-gateway-absent';
+// 锚点 = apply() fallback fetch 的 apiProxy 缺席三分支（payload rc.2 逐字节；
+// 三行联合在文件内唯一，toFetchHandler(apiProxy) 全文件仅此一处）。
+const API_GATEWAY_ABSENT_ANCHOR = [
+  '\t\tconst apiProxy = ctx.get("apiProxy");',
+  '\t\tif (apiProxy === void 0) return new Response("not found", { status: 404 });',
+  '\t\treturn toFetchHandler(apiProxy).fetch(request);',
+].join('\n');
+const API_GATEWAY_ABSENT_INJECTION = [
+  '\t\tconst apiProxy = ctx.get("apiProxy");',
+  '\t\tif (apiProxy === void 0) {',
+  '\t\t\t// ' + API_GATEWAY_ABSENT_MARKER + ' (E1): the api-gateway plugin',
+  '\t\t\t// (@deepseek-ai/dsh-host-apiproxy) can fail to load on a half-healed',
+  '\t\t\t// profile module fallback (the K1 family). The old bare 404 read as',
+  '\t\t\t// "transport failure … HTTP 404" on EVERY surface at once with no way',
+  '\t\t\t// forward. Unary POSTs now get a well-formed error envelope with the',
+  '\t\t\t// one-step remedy instead; non-POST legs (SSE openers) keep the 404,',
+  '\t\t\t// matching their transport contract.',
+  '\t\t\tif (request.method !== "POST") return new Response("not found", { status: 404 });',
+  '\t\t\tlet rpcId = INVALID_REQUEST_RPC_ID;',
+  '\t\t\ttry {',
+  '\t\t\t\tconst body = await request.json();',
+  '\t\t\t\tif (typeof body?.rpcId === "string") rpcId = RpcId(body.rpcId);',
+  '\t\t\t} catch {}',
+  '\t\t\treturn errorResponse(rpcId, {',
+  '\t\t\t\tcode: "internal",',
+  '\t\t\t\tmessage: "api gateway service is absent: the API gateway plugin (@deepseek-ai/dsh-host-apiproxy) failed to load this boot, so every /api method answers with this error — fully exit and restart DSH Desktop once (the boot chain auto-repairs the profile module fallback), and reinstall only if it persists —— 桌面端后端服务（API 网关）本次启动未能加载，所有接口暂不可用：请完全退出并重启 DSH Desktop 一次（启动链会自动修复），若仍报此错请重装。",',
+  '\t\t\t\tdetails: {}',
+  '\t\t\t});',
+  '\t\t}',
+  '\t\treturn toFetchHandler(apiProxy).fetch(request);',
+].join('\n');
+
+function transformApiGatewayAbsent(src, file) {
+  // CRLF 归一化匹配（对齐 loader-isolation 先例）；写回保持原 EOL。
+  const crlf = src.includes('\r\n');
+  const text = crlf ? src.replace(/\r\n/g, '\n') : src;
+  // 幂等判定 = marker 存在 且 新形态注入体存在（仅 marker 残留的损坏文件必须重注入）。
+  if (text.includes(API_GATEWAY_ABSENT_MARKER) && text.includes('code: "internal",') && text.includes('api gateway service is absent')) {
+    return { status: 'already' };
+  }
+  if (!text.includes(API_GATEWAY_ABSENT_ANCHOR)) {
+    return { status: 'anchor-missing', detail: '未找到 dsh-client-connection apiProxy 缺席分支锚点（版本可能已变更），跳过 ' + file };
+  }
+  // 函数替换器：注入文本含 ${...} 无，但保持与同族补丁一致的防御式替换语义。
+  const out = text.replace(API_GATEWAY_ABSENT_ANCHOR, () => API_GATEWAY_ABSENT_INJECTION);
+  return { status: 'changed', src: crlf ? out.replace(/\n/g, '\r\n') : out };
+}
+
 module.exports = {
   // runtime-patches 的 9 个 transform（re-export）。其中
   // transformPersistenceAll 不被 registry 直接引用，其消费方是
@@ -870,6 +998,10 @@ module.exports = {
   transformCredentialsAbsentGuidance,
   // 设备未授权（DeepSeek 服务端风控 403）报文追加可操作指引。
   transformDeviceAuthGuidance,
+  // E1（apiProxy 缺席 → /api 全裸 404 → 桌面端整体不可用）缺席分支改错误信封 + 指引。
+  transformApiGatewayAbsent,
+  // W1 问题四：WSL 内目录选择器强制 browse（zenity 窗口在 WSLg 里不可见）。
+  transformDirectoryPickerWslBrowse,
   // K1 注入体常量（单测 vm 行为验证用，与 transform 同源；非 marker）。
   CREDENTIALS_HELPERS_CODE,
   // 包级补丁 node_modules 根应用器（唯一实现）。
@@ -882,8 +1014,12 @@ module.exports = {
     patchSessionPersistence,
     patchToolSourceCompat,
     patchPiAiOpencodeGoModels,
+    patchPiAiCredits,
+    patchPiAiReasoningDefaults,
     patchAtomicWriteOrphanLock,
     patchSettingsModelsResilience,
+    patchBundleArrivalRetry,
+    patchSchedulerGuard,
   },
   // 幂等 marker（单一数据源）：registry 与 transform 的 already 判定引用同一常量，
   // 杜绝「marker 跨模块复制漂移」。slot 系 marker 来自 runtime-patches（与 slot
@@ -911,6 +1047,8 @@ module.exports = {
     CREDENTIALS_INITIAL_RETRY_MARKER,
     CREDENTIALS_ABSENT_GUIDANCE_MARKER,
     DEVICE_AUTH_GUIDANCE_MARKER,
+    API_GATEWAY_ABSENT_MARKER,
+    WSL_PICKER_BROWSE_MARKER,
     ...require('./loader-isolation').markers,
   },
 };
