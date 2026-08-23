@@ -56,8 +56,8 @@ const LEGACY_1K_CAP_MODELS = new Set(['glm-4v-flash', 'glm-4.1v-thinking-flash']
  */
 const MAX_TOKENS_REJECTED = /returned 400/;
 export const Config = z.object({
-    enabled: z.boolean().default(true)
-        .description('Master switch — false disables image admission, automatic attach-image recognition, the view_image tool, and the prompt section (natively multimodal models are untouched)'),
+    enabled: z.boolean().default(false)
+        .description('Master switch (default OFF) — false disables image admission, automatic attach-image recognition, the view_image tool, and the prompt section (natively multimodal models are untouched); turn it on in Settings → 识图插件（view_image）'),
     baseURL: z.string().default(DEFAULT_BASE_URL)
         .description('OpenAI-compatible endpoint base URL (…/chat/completions is appended)'),
     apiKey: z.string().role('secret').default('')
@@ -398,9 +398,10 @@ export function apply(ctx, config) {
             ? Math.min(cfg.maxTokens ?? 2048, 1024)
             : cfg.maxTokens ?? 2048;
         return {
-            // 总开关：默认 true（保持现状，不破坏既有用户）。false = 视觉能力
-            // 整体停用：不承认 image 输入、不做识别替换、撤下工具与提示段。
-            enabled: cfg.enabled ?? true,
+            // 总开关：默认 false（用户要求内置识图默认关闭；可在设置页打开）。
+            // settings 路径下 scope.get() 已按 schema 解析出布尔值，此处的 ??
+            // 仅覆盖 settings 注册失败的降级路径（组合配置未显式给出时同样默认关）。
+            enabled: cfg.enabled ?? false,
             baseURL,
             model,
             fallbackModels,

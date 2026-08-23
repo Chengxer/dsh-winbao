@@ -159,9 +159,9 @@ window.__ModuleLoader__.load({
         return jsx("div", { children: snap.status === "loading" ? L.loading : L.unavailable });
       }
 
-      // 总开关：读快照、写 scope（即时热生效，不经保存按钮）。默认开——
-      // snap.value.enabled 只在用户显式关过时才是 false（宿主 schema 默认 true）。
-      const enabledOn = !(((snap.value || {}).enabled) === false);
+      // 总开关：读快照、写 scope（即时热生效，不经保存按钮）。默认关——
+      // 宿主 schema 默认 enabled=false；快照未解析出显式 true 一律视为关。
+      const enabledOn = ((snap.value || {}).enabled) === true;
       const setEnabled = async (on) => {
         setToggling(true);
         try {
@@ -378,9 +378,9 @@ window.__ModuleLoader__.load({
       function VisionImageButton({ inputActions, input }) {
         const fileRef = react.useRef(null);
         // 总开关关闭时整颗按钮消失（返回 null）：图片通道此时在宿主侧也已
-        // 停用，留着入口只会让用户撞上「模型不支持图片输入」。快照未就绪
-        // （loading/unavailable）时保守显示——默认开，不因瞬时状态闪没。
-        const enabledSnap = useScope((s) => (s.status === "ready" ? ((s.value || {}).enabled !== false) : true));
+        // 停用，留着入口只会让用户撞上「模型不支持图片输入」。默认关：快照
+        // 未就绪（loading/unavailable）时保守隐藏，就绪且显式开启才显示。
+        const enabledSnap = useScope((s) => (s.status === "ready" ? ((s.value || {}).enabled === true) : false));
         const actions = inputActions || {};
         if (!enabledSnap) return null;
         const disabled = !canAttach || typeof actions.addImages !== "function" || typeof actions.setDraft !== "function";

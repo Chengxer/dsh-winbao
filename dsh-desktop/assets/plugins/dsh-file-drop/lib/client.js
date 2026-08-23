@@ -14,8 +14,14 @@
 //      · 文本/代码 → 内容注入；图片（内核未接管时）/ 二进制 / 超大 → 路径提示。
 //   3. 壳层拖放事件 client-file-drop（Tauri：Rust 侧 drag-drop → bridge 转发，
 //      载荷 {files:[{path,name,size}]}；WebView2 下 HTML5 drop 不达页面，这是
-//      桌面拖入的主通道）→ 路径提示注入；若载荷带内容（dataUrl/base64，F1
-//      后续可选增强）则自动转入官方附件管道。
+//      桌面拖入的主通道）→ M3 拖拽=粘贴 统一：内核白名单图片（png/jpg/
+//      jpeg/webp/gif，单图 ≤3.5MB）经宿主半边同源路由 /dsh-file-drop/
+//      read-image 读成 dataUrl，与「直接粘贴图片」「📎 选择图片」走完全相同
+//      的官方附件管道（conversation.createDraftImages + inputActions
+//      .addImages —— 内核粘贴处理器 intakeImages 的同一落点）与同一限额
+//      裁决（planPickedFiles 镜像 intakeImages：类型/张数/单图/合计）；
+//      读失败/超限/非白名单/文本/二进制 → 维持既有路径提示注入，零回归。
+//      载荷自带内容（dataUrl/base64）时免读直接转 File 进同一管道。
 //   4. 全部交互 try/catch 静默降级（插件惯例），失败经就地红字/浮动 toast
 //      给用户可见错误文案。
 //
@@ -53,6 +59,13 @@
     maxImagesPerMessage: 20,                   // 单条消息图片数上限
     maxMessageImageBytes: 100 * 1024 * 1024,   // 单条消息图片合计上限
     maxImageDimension: 2000,                   // 单边像素上限（模型路由约束）
+  };
+
+  // 内核附件白名单：扩展名 → MIME（壳层 client-file-drop 载荷只有路径没有
+  // MIME，按扩展名推导候补；真实类型以宿主读回后的魔数嗅探为准）。
+  var RAIL_IMAGE_EXT_MIME = {
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp', '.gif': 'image/gif',
   };
 
   function extOf(name) {
@@ -296,6 +309,29 @@
     }
   }
 
+  /**
+   * 壳层 client-file-drop 条目二分（M3 拖拽=粘贴 统一，纯函数）：
+   *   rail —— 内核白名单扩展名且体积未超单图上限的图片：读内容后进官方
+   *           附件管道（与粘贴 intakeImages、📎 选择器同一 ingest）；自带
+   *           内容（dataUrl/base64）的条目无论扩展名一律进 rail 通道
+   *          （类型过滤在 File 物化后按真实 MIME 复核，不过再回退 hint）；
+   *   hint —— 其余（文本/二进制/非白名单图/超大图）：维持既有路径提示语义。
+   */
+  function planBridgeEntries(entries, limits) {
+    var lim = limits || KERNEL_LIMITS;
+    var out = { rail: [], hint: [] };
+    if (!entries || entries.length === 0) return out;
+    for (var i = 0; i < entries.length; i++) {
+      var e = entries[i] || {};
+      if (e.dataUrl || e.base64) { out.rail.push(e); continue; }
+      var mime = RAIL_IMAGE_EXT_MIME[extOf(e.name || '')];
+      var size = e.size == null ? 0 : Number(e.size) || 0;
+      if (mime && size <= lim.maxImageBytes) out.rail.push(e);
+      else out.hint.push(e);
+    }
+    return out;
+  }
+
   // 暴露纯逻辑供测试；生产无副作用。
   var core = {
     TEXT_MAX_BYTES: TEXT_MAX_BYTES,
@@ -316,6 +352,8 @@
     dropKeys: dropKeys,
     dedupeEntries: dedupeEntries,
     planPickedFiles: planPickedFiles,
+    planBridgeEntries: planBridgeEntries,
+    RAIL_IMAGE_EXT_MIME: RAIL_IMAGE_EXT_MIME,
     addToOfficialRail: addToOfficialRail,
   };
   if (typeof window !== 'undefined') {
@@ -387,11 +425,12 @@
   // —— 壳层 client-file-drop 消费（F1 契约：Rust 拖放 → 垫片 window
   //    CustomEvent('client-file-drop', {detail:{files:[{path,name,size}]}})，
   //    与 dsh-balance-changed 同款派发面）。宽容 detail 形态 + 与 HTML5
-  //    drop 双报去重。载荷若带 dataUrl/base64（F1 后续可选）则转 File 进
-  //    官方附件管道。 ——
+  //    drop 双报去重。M3 统一：白名单图片（路径载荷经宿主路由读内容 /
+  //    内容载荷免读）→ 官方附件管道（与粘贴、选择器同一 ingest 与限流）；
+  //    其余与全部失败项 → 合并路径提示块（既有语义）。 ——
   var dropSeen = Object.create(null);
 
-  /** dataUrl/base64 → File（F1 载荷可选携带内容时的转换；失败返回 null）。 */
+  /** dataUrl/base64 → File（内容载荷与宿主读回共用；失败返回 null）。 */
   function fileFromContent(entry) {
     try {
       var dataUrl = entry.dataUrl || entry.base64;
@@ -407,42 +446,85 @@
     } catch (_e) { return null; }
   }
 
+  /**
+   * 路径载荷读内容：POST 同源宿主路由 /dsh-file-drop/read-image（宿主半边
+   * lib/index.js 注册：回环限定 + 白名单 + 3.5MB + 魔数嗅探）→ dataUrl →
+   * File。任何失败（路由缺席/file:// 残留壳/超限/类型不符）→ resolve(null)，
+   * 调用侧回退路径提示，不抛错。
+   */
+  function readImageViaHost(entry) {
+    if (!entry || !entry.path || typeof fetch !== 'function') return null;
+    var job;
+    try {
+      job = fetch('/dsh-file-drop/read-image', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: entry.path, name: entry.name || '', size: entry.size }),
+      });
+    } catch (_e) { return null; }
+    if (!job || typeof job.then !== 'function') return null;
+    return job.then(function (r) { return r.json(); }).then(function (res) {
+      if (!res || res.ok !== true || typeof res.dataUrl !== 'string') return null;
+      return fileFromContent({ dataUrl: res.dataUrl, name: entry.name || '拖入图片', mediaType: res.mediaType });
+    }).catch(function () { return null; });
+  }
+
+  /** 附件栏既有张数（内核 intakeImages 用 attachments.length 同位校验）。 */
+  function railCountOf(env) {
+    var n = Number(env && env.railCount);
+    return isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+  }
+
+  /** 合并路径提示块注入（列表为空时零副作用）。 */
+  function injectHintEntries(list) {
+    try {
+      if (!list || list.length === 0) return;
+      var composer = findComposer();
+      if (!injectIntoComposer(composer, core.buildDropHint(list))) {
+        showToast('未找到会话输入框，文件路径未能附加', true);
+      }
+    } catch (_e) { /* 提示注入失败静默降级 */ }
+  }
+
   function handleBridgeDrop(detail) {
     try {
       var entries = core.normalizeDropPayload(detail);
       if (entries.length === 0) return;
       entries = core.dedupeEntries(entries, dropSeen, Date.now(), 1500);
       if (entries.length === 0) return;
-      // 分流：带内容的（若有）→ 官方附件管道；纯路径 → 合并路径提示块。
-      var pathOnly = [];
-      var contentJobs = [];
-      for (var i = 0; i < entries.length; i++) {
+      var plan = core.planBridgeEntries(entries);
+      var hintEntries = plan.hint.slice();
+      if (plan.rail.length === 0) { injectHintEntries(hintEntries); return; }
+      // rail 候选 → File：内容载荷免读直转；路径载荷经宿主路由读回。
+      var railEntries = plan.rail;
+      var jobs = [];
+      for (var i = 0; i < railEntries.length; i++) {
         (function (entry) {
-          if (entry.dataUrl || entry.base64) {
-            var p = fileFromContent(entry);
-            if (p && typeof p.then === 'function') contentJobs.push(p.catch(function () { return null; }));
-          } else {
-            pathOnly.push(entry);
-          }
-        })(entries[i]);
+          var p = (entry.dataUrl || entry.base64) ? fileFromContent(entry) : readImageViaHost(entry);
+          jobs.push(p && typeof p.then === 'function' ? p.catch(function () { return null; }) : Promise.resolve(null));
+        })(railEntries[i]);
       }
-      if (contentJobs.length > 0) {
-        Promise.all(contentJobs).then(function (files) {
-          var usable = [];
-          for (var j = 0; j < files.length; j++) {
-            if (files[j] && core.isKernelImageType(files[j].type)) usable.push(files[j]);
-          }
-          if (usable.length === 0) return;
-          var r = core.addToOfficialRail(currentRailEnv(), usable);
-          if (!r.ok) showToast(r.error || '图片附件加入失败', true);
-        }).catch(function (_e) { /* 内容转换失败静默 */ });
-      }
-      if (pathOnly.length > 0) {
-        var composer = findComposer();
-        if (!injectIntoComposer(composer, core.buildDropHint(pathOnly))) {
-          showToast('未找到会话输入框，文件路径未能附加', true);
+      Promise.all(jobs).then(function (files) {
+        var env = currentRailEnv();
+        var pending = [];
+        for (var j = 0; j < files.length; j++) {
+          if (files[j] && core.isKernelImageType(files[j].type)) pending.push({ file: files[j], entry: railEntries[j] });
+          else hintEntries.push(railEntries[j]); // 读失败/真实类型非白名单 → 回退提示
         }
-      }
+        if (pending.length > 0) {
+          // 与粘贴同款限额裁决（镜像 intakeImages：类型/张数/单图/合计）。
+          var pick = core.planPickedFiles(pending.map(function (p) { return p.file; }), railCountOf(env));
+          for (var e2 = 0; e2 < pick.errors.length; e2++) showToast(pick.errors[e2].message, true);
+          var r = pick.rail.length > 0 ? core.addToOfficialRail(env, pick.rail) : { ok: true };
+          if (!r.ok) showToast(r.error || '图片附件加入失败', true);
+          for (var q = 0; q < pending.length; q++) {
+            // 未进栏（限额拒绝/管道忙）的条目回退路径提示——拖拽本就带路径，
+            // 比 paste 的纯红字拒绝多保留一条 agent 可读后路，不丢信息。
+            if (pick.rail.indexOf(pending[q].file) === -1 || !r.ok) hintEntries.push(pending[q].entry);
+          }
+        }
+        injectHintEntries(hintEntries);
+      }).catch(function (_e) { injectHintEntries(hintEntries); });
     } catch (_e) { /* 整链失败静默降级 */ }
   }
 
@@ -598,12 +680,15 @@
       var setErr = state[1];
 
       // 会话上下文登记：drop/bridge 路径也能用官方附件管道。
+      // railCount（附件栏既有张数）随每次渲染刷新——桥层图片统一进栏时
+      // 与内核粘贴 intakeImages 的 attachments.length 同位校验张数上限。
       useEffect(function () {
         var env = {
           conversation: (function () {
             try { return ctx.get('conversation'); } catch (_e) { return undefined; }
           })(),
           inputActions: inputActions,
+          railCount: input && Array.isArray(input.imageIds) ? input.imageIds.length : 0,
         };
         railEnvRef = env;
         return function () { if (railEnvRef === env) railEnvRef = null; };

@@ -521,9 +521,9 @@ test("wrapService：无 resolveModelInfo 方法 → undefined 不抛错", () => 
 });
 
 // —— 总开关（enabled）：默认值 / 读写往返 / 关闭时各面停用 ——
-test("Config：enabled 默认 true（不破坏既有用户）", () => {
-  assert.equal(Config({}).enabled, true); // 无存储节 → schema 默认开
-  assert.equal(Config({ baseURL: "https://x" }).enabled, true); // 其它字段存在亦然
+test("Config：enabled 默认 false（内置识图默认关闭，用户可在设置页打开）", () => {
+  assert.equal(Config({}).enabled, false); // 无存储节 → schema 默认关
+  assert.equal(Config({ baseURL: "https://x" }).enabled, false); // 其它字段存在亦然
 });
 
 test("Config：enabled 读写往返（存 false 读 false，再存 true 读 true）", () => {
@@ -531,12 +531,12 @@ test("Config：enabled 读写往返（存 false 读 false，再存 true 读 true
   let stored = {};
   const write = (patch) => { stored = { ...stored, ...patch }; };
   const read = () => Config(stored);
-  assert.equal(read().enabled, true); // 初始：无覆盖 → 默认开
-  write({ enabled: false });
-  assert.equal(read().enabled, false); // 关 → 落盘 → 读回 false
-  assert.equal(read().model, "glm-4.6v-flash"); // 开关与 VLM 配置互不干扰
+  assert.equal(read().enabled, false); // 初始：无覆盖 → 默认关
   write({ enabled: true });
-  assert.equal(read().enabled, true); // 再开 → 读回 true（往返闭合）
+  assert.equal(read().enabled, true); // 开 → 落盘 → 读回 true
+  assert.equal(read().model, "glm-4.6v-flash"); // 开关与 VLM 配置互不干扰
+  write({ enabled: false });
+  assert.equal(read().enabled, false); // 再关 → 读回 false（往返闭合）
   // JSON 序列化往返（YAML/JSON 存储同构）
   assert.equal(Config(JSON.parse(JSON.stringify({ enabled: false }))).enabled, false);
 });
