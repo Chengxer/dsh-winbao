@@ -7,7 +7,7 @@
  *  2. 全局记忆（原 dsh-memory 的 5 个 memory_* 工具，数据路径不变）
  *  3. graph-memory 检测与自动装配（plugin-src 有源码且未装配时自动写入
  *     profile bundle + link + junction；已装配则只读状态与 SQLite 统计）
- *  4. dsh-market（dshmarket）检测：已装 → 状态；未装 → 设置页提醒安装
+ *  4. dsh-community-market 检测：已装 → 状态；未装 → 设置页提醒安装
  *  5. 自身更新检查：读 GitHub 仓库 package.json 的 version 对比本地版本
  *     （raw.githubusercontent + jsDelivr CDN 双源，规避 GitHub API 限流 403）
  *
@@ -1846,7 +1846,7 @@ const START_DELAY_MS = 1500
 /** 单次版本查询超时。 */
 const FETCH_TIMEOUT_MS = 10 * 1000
 const GRAPH_MEMORY_PKG = 'graph-memory'
-const MARKET_PKG = 'dshmarket'
+const MARKET_PKG = 'dsh-community-market'
 
 /** 本插件版本（动态读包内 package.json，避免与发布流程双维护）。 */
 function selfVersion() {
@@ -1978,7 +1978,7 @@ export function mountGraphMemoryLocked() {
   return { ok: true, already: false, restartNeeded: true, source: src.version ?? null }
 }
 
-/** dsh-market（dshmarket）检测：已装 → 状态；未装 → 安装提示。 */
+/** dsh-community-market（内置市场）检测：已装 → 状态；未装 → 安装提示。 */
 function dshMarketStatus() {
   const manifest = manifestOf()
   const bundles = Array.isArray(manifest.dsh?.profile?.bundles) ? manifest.dsh.profile.bundles : []
@@ -1994,7 +1994,7 @@ function dshMarketStatus() {
     inBundles,
     nodeModules: pkg !== null,
     installHint: `dsh plugin --profile ${PROFILE_NAME} add ${MARKET_PKG}`,
-    repo: 'https://github.com/dsh-market/dsh-market',
+    repo: 'https://github.com/anywhere-labs/deepseek-harness-desktop/tree/master/dsh-community-market',
   }
 }
 
