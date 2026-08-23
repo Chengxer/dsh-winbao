@@ -42,6 +42,17 @@ impl SingleInstanceGuard {
                 Ok(Self { path, released: false })
             }
             Err(_) => {
+                // 陈锁回收前的收敛窗口：`create_new` 成功到写 PID 之间存在微秒级
+                // 空文件窗口，并发第二实例若此刻把空文件当「内容不可读」的陈锁
+                // 回收，就会双持有者（ta15 八进程并发 CI 实测 denied<7 的根因）。
+                // 先给空文件一个短暂填 PID 的机会，再按陈锁判定——既不误杀活锁，
+                // 也不放过真陈锁（崩溃残留空文件 50ms 后仍空 → 照常回收）。
+                for _ in 0..5 {
+                    match fs::metadata(&path) {
+                        Ok(m) if m.len() > 0 => break,
+                        _ => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    }
+                }
                 if stale_lock(&path) {
                     let _ = fs::remove_file(&path);
                     return Self::acquire(&path);
