@@ -32,10 +32,40 @@ import {
   IconPdfOutline16,
   IconHtmlOutline16,
 } from '../icons.tsx'
-import type { ComponentType } from 'react'
+import type { ComponentType, ReactNode } from 'react'
 import type { FileViewerDescriptor, FileViewerProps } from '../service.ts'
 import { t } from '../locales.ts'
 import css from '../sidebar.module.css'
+
+/**
+ * Read-only plain-text fallback used when the editor chunk cannot load: the
+ * content is already in props (fsRead strategy fetched it through the host),
+ * so the file stays viewable (a <pre> with the truncation banner) while the
+ * chunk's auto-retry keeps working toward the real CodeMirror editor.
+ */
+function TextFallback(props: FileViewerProps): ReactNode {
+  const content = props.content ?? ''
+  return (
+    <>
+      {props.truncated === true && <div className={css.editorBanner}>{t('truncation')}</div>}
+      <pre
+        style={{
+          margin: 0,
+          flex: '1 1 auto',
+          minHeight: 0,
+          overflow: 'auto',
+          font: 'var(--dsw-font-markdown-code-block-small, 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace)',
+          whiteSpace: 'pre-wrap',
+          overflowWrap: 'anywhere',
+          padding: '10px 14px',
+          userSelect: 'text',
+        }}
+      >
+        {content}
+      </pre>
+    </>
+  )
+}
 
 /**
  * Lazy wrapper over the chunk-resident viewer component. The `pick`
@@ -43,7 +73,11 @@ import css from '../sidebar.module.css'
  * on it); the cast bridges the chunk exports record to the descriptor prop
  * shape (the view reads only its own subset of FileViewerProps).
  */
-const LazyTextEditor = lazyChunkComponent<FileViewerProps>('editor', (mod) => mod.TextEditor as ComponentType<FileViewerProps> | undefined)
+const LazyTextEditor = lazyChunkComponent<FileViewerProps>(
+  'editor',
+  (mod) => mod.TextEditor as ComponentType<FileViewerProps> | undefined,
+  TextFallback,
+)
 
 /** The 6 built-in file viewer descriptors. */
 export function builtinViewers(): readonly FileViewerDescriptor[] {

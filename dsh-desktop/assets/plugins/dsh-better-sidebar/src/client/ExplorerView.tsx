@@ -253,9 +253,15 @@ export function ExplorerView(props: {
         open={rowMenu !== null}
         onClose={() => { setRowMenu(null) }}
         items={[
-          // Download applies to files only (the host route refuses directories).
+          // Download / external open apply to files only (the host route refuses
+          // directories; the shell bridge only exists inside DSH Desktop).
           ...(rowMenu?.isDir === false
-            ? [{ id: 'download', label: t('download'), icon: <IconDownloadOutline16 size={14} /> }]
+            ? [
+              ...(typeof globalThis !== 'undefined' && typeof (globalThis as { dshDesktop?: { openPath?: unknown } }).dshDesktop?.openPath === 'function'
+                ? [{ id: 'openExternal', label: t('openExternal'), icon: <IconFolderOpen16 size={14} /> }]
+                : []),
+              { id: 'download', label: t('download'), icon: <IconDownloadOutline16 size={14} /> },
+            ]
             : []),
           { id: 'relative', label: t('copyRelative'), icon: <IconCopyOutline16 size={14} /> },
           { id: 'absolute', label: t('copyAbsolute'), icon: <IconCopyOutline16 size={14} /> },
@@ -264,6 +270,11 @@ export function ExplorerView(props: {
           const target = rowMenu
           if (target === null) return
           setRowMenu(null)
+          if (id === 'openExternal') {
+            // DSH Desktop shell: open with the OS default app (file_open fence).
+            ;(globalThis as { dshDesktop?: { openPath?: (path: string) => void } }).dshDesktop?.openPath?.(target.path)
+            return
+          }
           if (id === 'download') {
             downloadFile(target.path)
             return

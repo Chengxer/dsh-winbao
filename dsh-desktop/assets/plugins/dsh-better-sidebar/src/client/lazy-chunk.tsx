@@ -28,9 +28,13 @@ interface LazyChunkViewProps<P> {
   /** Module-level-stable selector (an inline lambda would re-trigger the effect). */
   pick: (mod: ChunkExports) => ComponentType<P> | undefined
   props: P
+  /** Read-only fallback renderer used while the chunk cannot load (the file's
+   *  content is already in `props` for fsRead viewers, so the user ALWAYS sees
+   *  something; the auto-retry keeps trying for the real editor behind it). */
+  fallback?: (props: P) => ReactNode
 }
 
-function LazyChunkView<P>({ chunk, pick, props }: LazyChunkViewProps<P>): ReactNode {
+function LazyChunkView<P>({ chunk, pick, props, fallback }: LazyChunkViewProps<P>): ReactNode {
   const [attempt, setAttempt] = useState(0)
   const [state, setState] = useState<
     | { status: 'loading' }
@@ -77,6 +81,29 @@ function LazyChunkView<P>({ chunk, pick, props }: LazyChunkViewProps<P>): ReactN
     return <div className={css.editorPlaceholder}>{t('loading')}</div>
   }
   if (state.status === 'error') {
+    // A fallback renderer (read-only preview) keeps the file VIEWABLE while the
+    // chunk is unavailable — the banner explains the degradation and the retry
+    // still targets the real editor.
+    if (fallback !== undefined) {
+      return (
+        <>
+          <div className={css.editorBanner}>
+            <span>{t('chunkFallbackNotice')}</span>
+            {state.autoAttempt !== undefined && (
+              <span>{t('chunkAutoRetryWaiting', { n: state.autoAttempt })}</span>
+            )}
+            <button
+              type="button"
+              className={css.terminalRetry}
+              onClick={() => { setAttempt(current => current + 1) }}
+            >
+              {t('terminalRetry')}
+            </button>
+          </div>
+          {fallback(props)}
+        </>
+      )
+    }
     return (
       <div className={css.editorError}>
         <span>{state.message}</span>
@@ -109,9 +136,10 @@ function LazyChunkView<P>({ chunk, pick, props }: LazyChunkViewProps<P>): ReactN
 export function lazyChunkComponent<P extends object>(
   chunk: ChunkName,
   pick: (mod: ChunkExports) => ComponentType<P> | undefined,
+  fallback?: (props: P) => ReactNode,
 ): (props: P) => ReactNode {
   return (props: P) => createElement(
     LazyChunkView as ComponentType<LazyChunkViewProps<P>>,
-    { chunk, pick, props },
+    { chunk, pick, props, fallback },
   )
 }

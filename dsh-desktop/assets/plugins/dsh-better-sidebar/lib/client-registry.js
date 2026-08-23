@@ -1639,6 +1639,9 @@ window.__ModuleLoader__.load({
 			terminalConnectFailed: "终端多次连接失败",
 			terminalRetry: "重试",
 			chunkAutoRetryWaiting: "正在等待后端就绪，将自动恢复…（第 {n} 次尝试）",
+			fsReadRetryWaiting: "后端暂时不可达，正在自动重试读取…（第 {n} 次）",
+			chunkFallbackNotice: "编辑器组件暂不可用，已切换为只读预览",
+			openExternal: "用系统应用打开",
 			preview: "预览",
 			edit: "编辑",
 			refresh: "刷新",
@@ -1860,6 +1863,9 @@ window.__ModuleLoader__.load({
 			terminalConnectFailed: "Terminal failed to connect repeatedly",
 			terminalRetry: "Retry",
 			chunkAutoRetryWaiting: "Waiting for the backend to come back — recovering automatically… (attempt {n})",
+			fsReadRetryWaiting: "Backend temporarily unreachable — re-reading automatically… (attempt {n})",
+			chunkFallbackNotice: "Editor component unavailable — showing read-only preview",
+			openExternal: "Open with system app",
 			preview: "Preview",
 			edit: "Edit",
 			refresh: "Refresh",
@@ -2894,11 +2900,18 @@ window.__ModuleLoader__.load({
 							setRowMenu(null);
 						},
 						items: [
-							...rowMenu?.isDir === false ? [{
-								id: "download",
-								label: t("download"),
-								icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconDownloadOutline16, { size: 14 })
-							}] : [],
+							...rowMenu?.isDir === false ? [
+								...(typeof globalThis !== "undefined" && typeof globalThis.dshDesktop?.openPath === "function" ? [{
+									id: "openExternal",
+									label: t("openExternal"),
+									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconFolderOpen16, { size: 14 })
+								}] : []),
+								{
+									id: "download",
+									label: t("download"),
+									icon: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconDownloadOutline16, { size: 14 })
+								}
+							] : [],
 							{
 								id: "relative",
 								label: t("copyRelative"),
@@ -2914,6 +2927,10 @@ window.__ModuleLoader__.load({
 							const target = rowMenu;
 							if (target === null) return;
 							setRowMenu(null);
+							if (id === "openExternal") {
+								globalThis.dshDesktop?.openPath?.(target.path);
+								return;
+							}
 							if (id === "download") {
 								downloadFile(target.path);
 								return;
@@ -3021,18 +3038,58 @@ window.__ModuleLoader__.load({
 		function EditorHost(props) {
 			const { ctx, store, scope, path, title } = props;
 			const [load, setLoad] = (0, react.useState)({ status: "loading" });
+			const [attempt, setAttempt] = (0, react.useState)(0);
+			const failCountRef = (0, react.useRef)(0);
+			const failKeyRef = (0, react.useRef)("");
+			const loadRef = (0, react.useRef)(load);
+			loadRef.current = load;
+			const visible = props.visible !== false;
+			const prevVisibleRef = (0, react.useRef)(visible);
+			(0, react.useEffect)(() => {
+				if (!prevVisibleRef.current && visible && loadRef.current.status === "error") {
+					setAttempt((a) => a + 1);
+				}
+				prevVisibleRef.current = visible;
+			}, [visible]);
 			(0, react.useEffect)(() => {
 				let cancelled = false;
+				let retryTimer;
 				const controller = new AbortController();
 				setLoad({ status: "loading" });
+				const succeed = () => {
+					failCountRef.current = 0;
+				};
+				const fail = (error) => {
+					if (cancelled) return;
+					const retryable = error instanceof SidebarApiError && (error.code === "network" || error.code === "http");
+					const key = `${scope.sessionId}|${path}`;
+					if (failKeyRef.current !== key) {
+						failKeyRef.current = key;
+						failCountRef.current = 0;
+					}
+					setLoad({
+						status: "error",
+						message: error instanceof Error ? error.message : String(error),
+						retryable,
+						autoAttempt: retryable ? failCountRef.current + 1 : void 0
+					});
+					if (retryable) {
+						failCountRef.current += 1;
+						retryTimer = window.setTimeout(() => {
+							if (!cancelled) setAttempt((a) => a + 1);
+						}, nextDelayMs(failCountRef.current));
+					}
+				};
 				const mediaUrlOf = () => mediaUrl(scope, path);
 				const apply = (action) => {
 					if (cancelled) return;
 					switch (action.kind) {
 						case "binary":
+							succeed();
 							setLoad({ status: "binary" });
 							return;
 						case "render":
+							succeed();
 							setLoad({
 								status: "ready",
 								viewer: action.viewer,
@@ -3045,6 +3102,7 @@ window.__ModuleLoader__.load({
 						case "customLoad":
 							action.viewer.load?.(path, scope, controller.signal).then((data) => {
 								if (cancelled) return;
+								succeed();
 								setLoad({
 									status: "ready",
 									viewer: action.viewer,
@@ -3052,15 +3110,13 @@ window.__ModuleLoader__.load({
 								});
 							}).catch((error) => {
 								if (cancelled) return;
-								setLoad({
-									status: "error",
-									message: error instanceof Error ? error.message : String(error)
-								});
+								fail(error);
 							});
 							return;
-						case "fetchFsRead":
+							case "fetchFsRead":
 							api.fsRead(scope, path).then((result) => {
 								if (cancelled) return;
+								succeed();
 								const outcome = planFsReadOutcome(action.viewer, {
 									binary: result.kind === "binary",
 									content: result.kind === "text" ? result.content : "",
@@ -3070,25 +3126,24 @@ window.__ModuleLoader__.load({
 								apply(outcome);
 							}).catch((error) => {
 								if (cancelled) return;
-								setLoad({
-									status: "error",
-									message: error instanceof Error ? error.message : String(error)
-								});
+								fail(error);
 							});
 							return;
-					}
+							}
 				};
 				apply(planFirstMatch(ctx.betterSidebar?.matchFileViewer(path), mediaUrlOf));
 				return () => {
 					cancelled = true;
+					if (retryTimer !== void 0) window.clearTimeout(retryTimer);
 					controller.abort();
 				};
-			}, [
+				}, [
 				scope.sessionId,
 				scope.cwd,
 				path,
-				ctx
-			]);
+				ctx,
+				attempt
+				]);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: sidebar_module_css_default.editor,
 				children: [
@@ -3104,9 +3159,22 @@ window.__ModuleLoader__.load({
 						className: sidebar_module_css_default.editorPlaceholder,
 						children: t("loading")
 					}),
-					load.status === "error" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					load.status === "error" && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: sidebar_module_css_default.editorError,
-						children: load.message
+						children: [
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: load.message }),
+							load.autoAttempt !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								children: t("fsReadRetryWaiting", { n: load.autoAttempt })
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: sidebar_module_css_default.terminalRetry,
+								onClick: () => {
+									setAttempt((a) => a + 1);
+								},
+								children: t("terminalRetry")
+							})
+						]
 					}),
 					load.status === "binary" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(BinaryDownload, {
 						scope,
@@ -3141,7 +3209,7 @@ window.__ModuleLoader__.load({
 		* `createElement`. The wrapper function body therefore contains no hooks;
 		* all state lives in the inner {@link LazyChunkView} component.
 		*/
-		function LazyChunkView({ chunk, pick, props }) {
+		function LazyChunkView({ chunk, pick, props, fallback }) {
 			const [attempt, setAttempt] = (0, react.useState)(0);
 			const [state, setState] = (0, react.useState)({ status: "loading" });
 			(0, react.useEffect)(() => {
@@ -3191,19 +3259,43 @@ window.__ModuleLoader__.load({
 				className: sidebar_module_css_default.editorPlaceholder,
 				children: t("loading")
 			});
-			if (state.status === "error") return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: sidebar_module_css_default.editorError,
-				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: state.message }), state.autoAttempt !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-					children: t("chunkAutoRetryWaiting", { n: state.autoAttempt })
-				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-					type: "button",
-					className: sidebar_module_css_default.terminalRetry,
-					onClick: () => {
-						setAttempt((current) => current + 1);
-					},
-					children: t("terminalRetry")
-				})]
-			});
+			if (state.status === "error") {
+				if (fallback !== void 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, {
+					children: [
+						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							className: sidebar_module_css_default.editorBanner,
+							children: [
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: t("chunkFallbackNotice") }),
+								state.autoAttempt !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									children: t("chunkAutoRetryWaiting", { n: state.autoAttempt })
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									type: "button",
+									className: sidebar_module_css_default.terminalRetry,
+									onClick: () => {
+										setAttempt((current) => current + 1);
+									},
+									children: t("terminalRetry")
+								})
+							]
+						}),
+						fallback(props)
+					]
+				});
+				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					className: sidebar_module_css_default.editorError,
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: state.message }), state.autoAttempt !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						children: t("chunkAutoRetryWaiting", { n: state.autoAttempt })
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+						type: "button",
+						className: sidebar_module_css_default.terminalRetry,
+						onClick: () => {
+							setAttempt((current) => current + 1);
+						},
+						children: t("terminalRetry")
+					})]
+				});
+			}
 			return (0, react.createElement)(state.Comp, props);
 		}
 		/**
@@ -3216,11 +3308,12 @@ window.__ModuleLoader__.load({
 		* @param chunk - the chunk name (see chunk-loader.ts).
 		* @param pick - select the component from the chunk's exports.
 		*/
-		function lazyChunkComponent(chunk, pick) {
+		function lazyChunkComponent(chunk, pick, fallback) {
 			return (props) => (0, react.createElement)(LazyChunkView, {
 				chunk,
 				pick,
-				props
+				props,
+				fallback
 			});
 		}
 		//#endregion
@@ -6074,12 +6167,13 @@ window.__ModuleLoader__.load({
 					order: -1,
 					hidden: true,
 					dedupeKey: (tab) => tab.path,
-					component: ({ ctx, store, scope, tab }) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EditorHost, {
+					component: ({ ctx, store, scope, tab, visible }) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EditorHost, {
 						ctx,
 						store,
 						scope,
 						path: tab.path ?? "",
-						title: tab.title
+						title: tab.title,
+						visible
 					})
 				},
 				{
@@ -6381,7 +6475,32 @@ window.__ModuleLoader__.load({
 		* on it); the cast bridges the chunk exports record to the descriptor prop
 		* shape (the view reads only its own subset of FileViewerProps).
 		*/
-		const LazyTextEditor = lazyChunkComponent("editor", (mod) => mod.TextEditor);
+		function TextFallback(props) {
+			const content = props.content ?? "";
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, {
+				children: [
+					props.truncated === true && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: sidebar_module_css_default.editorBanner,
+						children: t("truncation")
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("pre", {
+						style: {
+							margin: 0,
+							flex: "1 1 auto",
+							minHeight: 0,
+							overflow: "auto",
+							font: "var(--dsw-font-markdown-code-block-small, 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace)",
+							whiteSpace: "pre-wrap",
+							overflowWrap: "anywhere",
+							padding: "10px 14px",
+							userSelect: "text"
+						},
+						children: content
+					})
+				]
+			});
+		}
+		const LazyTextEditor = lazyChunkComponent("editor", (mod) => mod.TextEditor, TextFallback);
 		/** The 6 built-in file viewer descriptors. */
 		function builtinViewers() {
 			return [
