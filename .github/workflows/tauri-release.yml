@@ -1246,7 +1246,7 @@ jobs:
 
           ## 详细更新日志
 
-          见 [CHANGELOG.md](https://github.com/myYangyunfan/dsh_desktop/blob/tauri/modular/dsh-tauri/CHANGELOG.md)
+          见 [CHANGELOG.md](https://github.com/myYangyunfan/dsh_desktop/blob/main/dsh-tauri/CHANGELOG.md)
           EOF
 
       - name: Upload assets to Release

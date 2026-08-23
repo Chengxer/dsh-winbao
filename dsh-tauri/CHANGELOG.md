@@ -1,4 +1,31 @@
-# Changelog — DSH Desktop（Tauri 版，`tauri/modular` 分支）
+# Changelog — DSH Desktop（Tauri 版，主线架构 v0.5.0 起）
+
+## [0.5.4] — 2026-08-23
+
+### 修复（用户实测反馈驱动）
+- **多 agent 客户端卡顿/白屏根治（本次硬门禁）**：根因链=内核 UI `Session.events`/`conversation.inputs` 无上限累积 → WebView2 渲染进程 OOM → 白屏。三层收口：①**治本** `session-event-bound` 补丁——events 有界保留（2000 封顶、turn 对齐裁旧、复用 replaceWindow 同时封顶 inputs/contexts）+ `Session.dispose()` 实装（切/删会话释放内存）；②崩溃自愈三级梯（eval reload → CoreWebView2.Reload → 浏览器进程级 Navigate，重生死渲染进程）；③ reload 无限循环熔断（连续 navigate 救不活 → 升级到内核重启逃生梯）。压测：8 Session×4000 事件下内存斜率趋平（此前线性堆积）
+- **v0.5.3 后对话报「registration.adapter.prepareCall is not a function」**：真因=内核 rc.7→rc.2 引入 `adapter.prepareCall` 契约，openclaw-bridge 的 `OpenAiCompatAdapter` 依赖基类方法，profile fallback junction 陈旧指向旧内核时原型链缺方法 → 裸抛。`adapter-prepare-call-guard` 补丁：缺失时回落基类语义 + 升级/重装指引告警，不再崩整轮
+- **#154/#155 崩溃环四根因**：EADDRINUSE 4311 端口竞态（wait_port_free + 换随机端口）· safe-boot overlay 裸 `@` 包名引号化（幂等修既有脏文件）· 杀软 EBUSY 有限重试 + 可读错误 · 前端 45s 看门狗兜底出口（不再无限转圈）
+- **WSL 后端五问题根治（用户反馈）**：内核 spawn 缺 `--expose-internals`（双处补齐：本地 node_args + WSL server_cmd）· npm install OOM（`NODE_OPTIONS=--max-old-space-size=8192` export 形态 + env -u 不再误清）· file_open 无 WSL 分支（Linux 路径 → `\\wsl.localhost\<distro>` UNC + xdg-open 回落）· 目录选择器误判 zenity（WSL 环境强制 browse）· 配套插件裸包名解析（随 expose-internals 自动恢复）。**实机验证通过**（内核 wsl.exe spawn + 零安装秒进）
+- **WSL 首装进度提示（安装体验）**：首次切 WSL 后端 npm install 内核 agent（600+ 依赖数分钟）期间 UI 误显「正在重启内核」——install_cmd 首行 `echo WSL_INSTALL_STARTED` 立即触发 BootStep + 页面中文标签「安装内核 agent（首次需几分钟）」
+- **第三方模型思考强度不生效（F4）**：自定义供应商从不写 `reasoningEfforts` 字典 + pi-ai 对无字典路由恒 `reasoning:false` → `pi-ai-reasoning-defaults` 补丁回落标准档 {low/medium/high}（未选不发字段，严格网关安全），mock 端点三协议 wire 实测通过
+- **#156 pnpm 锁死回归**：v0.5.3 把 34 个内置件写 profile dependencies 锁死 pnpm——写入口径彻底删除，改只删不写的 `cleanLegacyProfileDependencies`（配套件名∧精确 semver∧非插件中心更新位形，绝不误删用户自装），升级即自愈
+- **侧边栏文件查看三连修**：fsRead 失败终态无重试 + 重点击同文件被 dedupe 吞掉 + chunk 失败无兜底 → 指数退避重试/重可见重拉/内联 `<pre>` 预览；顺带修返回按钮双入口漂移（lib/client.js vs client-registry.js）
+- **synapse 画布拖累主对话**：三态按需激活（不点开零轮询零渲染零事件）+ 热路径收敛（rAF 合帧/节流/扇入/process 120 上限）
+- **拖拽图片 ≠ 粘贴**：统一走 `createDraftImages`+`inputActions.addImages` 同一 ingest（零剪切板污染），魔数嗅探 + 白名单 + 限额
+- **offpeak 周末误判高峰（#158）**：isPeak 补星期维度（北京日历日，周末全天空闲），不溯及既往
+- **插件保护中心读面（G1 迁移补齐）**：guard:action 从「裁撤」改实装——status/check/incident/resolve-incident 四查询（写动作仍走守护瀑布自动面防竞态）
+
+### 新增
+- **dsh-reasoning-effort 插件内置**（上游 HanaAyane/dsh-reasoning-effort v0.6.2，MIT）：Codex 风格「模型+推理强度」滑块，档位读模型目录 reasoning.efforts（只读诊断自定义 provider 给 copy-ready 指引）；退役脆弱的 dsh-third-party-thinking（fake 档位注入旁路）
+- **dsh-community-market 替换 dshmarket**：3 目录源适配器 + npm 完整性校验 + 失败回滚；桥接插件补 4 壳层服务；旧市场退役链（特征门防误删用户自装）
+- **智能 Node 三级解析链**：系统 node≥22 → 内置 vendor → 清晰报错转恢复页（便携版「打不开」兜底）+ CI 便携 node.exe 在位门禁
+- **dsh-vision 默认关闭**（设置页可开）、**宠物窗最小化自动弹出**接线（设置持久化后真正生效）
+
+### 工程
+- 20+ 子代理 review 大军：18 路核对 + 补丁面/壳生命周期/跨平台/契约/迁移/模块化 6 路深度审查，缺陷全收口（dry-run 落盘、fs-atomic 丢错误码、quotePatchScalarValues 误伤 flow 定界符、probe_loop 误杀新内核、ta15 跨平台门控等）
+- 契约对齐：bridge-api 49→53 方法、ipc-commands 43 通道、error-codes 内核三码语义澄清、seam 三角色标注规划态
+- 门禁：cargo 649 全绿 + node 1624 全绿；补丁计数 47/33/18 对账
 
 ## [0.5.3] — 2026-08-22
 
