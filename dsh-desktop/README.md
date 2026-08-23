@@ -101,14 +101,13 @@
 - **默认关闭**：避免向百炼等严格校验请求体的第三方 API 注入 `reasoning_effort` 导致接口报错。
 - 仅当 provider 支持时才开启；字段名可改为 provider 要求的名称，留空表示只显示档位、不注入参数。
 
-## 插件市场（Zat-DSH Engine）
+## 插件市场（dsh-community-market）
 
-- **v0.3.6 起**：设置 → 插件 →「插件市场」由 **[Zat-DSH Engine](https://github.com/mishibeikejie/zat-dsh-engine)**（MIT License）完全提供，替换旧版内置市场。
-- **社区全量目录**：实时搜索 GitHub `dsh-plugin` 主题下的 1700+ 社区插件，12 个分类，中英双语介绍（内置 999 条中文简介，新插件由当前模型即时翻译）。
-- **一键安装 / 更新 / 卸载 / 启停**：基于官方 `dsh plugin` profile 机制（底层 pnpm），多插件仓库支持图形化选择；安装前冲突检测 + 健康报告 + 失败自动回滚 + 最近已知可用备份。
-- **网络自适应**：系统代理 → 直连 → `gh-proxy.com` 镜像 → 内置 fetch 兜底，无需 VPN。
-- **自带自更新**：市场自身发现新版本时在标题旁显示更新按钮。
-- 该插件随桌面端打包在 `assets/plugins/zat-dsh-engine`（含 LICENSE 与双语 README），启动时自动同步为 web profile bundle。
+- **市场整体切换**：设置 → 插件 → 市场页由 **[dsh-community-market](https://github.com/anywhere-labs/deepseek-harness-desktop/tree/master/dsh-community-market)**（anywhere-labs/deepseek-harness-desktop，MIT License）提供——开放目录源架构：内置 **DSH 1024Store** 与 **dshfind** 两个合作目录适配器 + 标准 HTTP 目录源，任何人都可以按公开 Schema（`docs/schemas/`）提供、接入和使用插件目录源；目录收录不代表审核或推荐。
+- **搜索与安装**：分类/关键词搜索，一键安装走 npm registry 精确版本 + 完整性校验（tarball SHA 校验、禁装产品包/生命周期脚本防护），安装失败自动回滚；启停 / 卸载与安装回执管理。
+- **桌面服务桥**：随包内置 `dsh-market-desktop-bridge` 配套插件，为市场提供 `desktopProfiles` / `desktopPnpm` / `desktopPlugins` / `desktopActions` 四个 host 服务——包操作转 `dsh plugin` CLI 重入（含 pnpm 兼容恢复），启停读写 `cordis.patch.yml`（与壳层插件管理页双向兼容），重启经壳层监管通道（`window.dshDesktop.restartService`）原地拉起。
+- 市场与桥以 bundle 形式随桌面端分发（`assets/plugins/dsh-community-market` + `assets/plugins/dsh-market-desktop-bridge`），启动时自动同步进 web profile；历史内置市场（zat-dsh-engine → dshmarket）的存量装配由同步链一次性退役清理。
+- 上游市场的目录源契约与适配器开发文档见包内 `docs/`（catalog-provider-contract / catalog-adapter-guide / install-and-uninstall）。
 
 ## 侧边栏工作台（dsh-better-sidebar）
 

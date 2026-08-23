@@ -6,6 +6,14 @@ DeepSeek Harness（dsh）的 Windows 桌面客户端：内置独立 Node 运行�
 
 ## [Unreleased]
 
+### 插件市场整体替换：dshmarket → dsh-community-market（F5）
+
+- **内置市场切换为上游 DSH Desktop 同款社区市场**：`assets/plugins/dsh-community-market`（源码构建自 [anywhere-labs/deepseek-harness-desktop](https://github.com/anywhere-labs/deepseek-harness-desktop) 的 `dsh-community-market`，MIT）——开放目录源架构（内置 DSH 1024Store / dshfind 两个合作目录适配器 + 标准 HTTP 目录源，用户自行添加与启用）、契约 schema 校验的目录快照、npm registry 精确版本 + 完整性校验安装（禁装产品包/生命周期脚本防护、失败自动回滚）、安装回执与启停管理。宿主半边挂 `/api/community-market/*` 十条路由；客户端半边（`window.__ModuleLoader__` CJS bundle）注册设置页市场 tab + 侧栏入口 + 全屏 overlay。
+- **新增配套桥接插件 `dsh-market-desktop-bridge`（本仓库内置）**：上游市场在其 DSH Plugin Desktop 壳层环境赖以工作的四个 cordis 服务（`desktopProfiles` / `desktopPnpm` / `desktopPlugins` / `desktopActions`）由桥提供——`desktopPnpm` 重新调起启动本 host 的 dsh CLI 跑 `dsh plugin add/remove`（`dshArgv` 锚点与 pnpm 兼容语义移植自原 dshmarket 的 dsh-cli）；`desktopPlugins` 的启停读写 web profile 的 `cordis.patch.yml`，文件格式与壳层 patch-surgery `togglePluginInPatch` 双向兼容（关闭 = insert 内层条目迁出为顶层 `disabled: true` 块；启用 = 移除禁用行，带 name 的块保留为激活登记）；`desktopActions.requestRestart` 在受监管环境下为 no-op，实际重启由市场客户端补丁转接壳层桥。
+- **构建与适配（源码 → 产物）**：esbuild 直出宿主 ESM bundle（`@deepseek-ai/*` + ajv/semver/yaml 外部化，经 profile vendor 同步与运行时闭包解析）+ 客户端 CJS bundle（上游 tsdown banner/footer 同构包装）；契约 schema JSON 构建期内联（上游运行期相对读 `docs/schemas/` 在 bundle 布局下层级错位）；sharp 换惰性解析 shim（调用期先按常规解析、再锚定 dsh CLI 入口同级取运行时二进制，缺二进制时按单图降级、绝不在加载期崩插件）；客户端产物打 `[desktop-restart-fix]` 补丁（重启转接 `window.dshDesktop.restartService()` 壳层原地监管重启，等价原 patch-dshmarket-restart 方案，脚本化为 `scripts/patch-community-market-restart.js`，市场重构建后需重跑）。
+- **dshmarket 退役**：删除 `assets/plugins/dshmarket/` 与 `scripts/patch-dshmarket-restart.js`；`COMPANION_PLUGINS` 换登记 `community-market` + `market-desktop-bridge`；同步链新增 `removeRetiredDshMarketDir`（profile node_modules 目录 + manifest bundles/dependencies 登记，内置装配特征门防误删用户自装同名包）与 `removeRetiredDshMarketPatchRows`（patch 层 `dsh-market` 行，锚定 `dropBlocksByIds`），三条同步面（壳层 boot / WSL·Linux CLI / 退役清理）共用同一实现；VENDOR_DEPS 增补市场纯 JS 运行时依赖（ajv / ajv-formats / semver / yaml / @deepseek-ai/schemastery / @deepseek-ai/dsh-settings）；dsh-hub 中枢页市场检测切到新包。hub-registry 登记面随 COMPANION_PLUGINS 自动适配。
+- **测试**：新增 `unit-community-market.test.js`（产物加载 / settings 命名空间与十条路由注册 / state 骨架 / 同源守卫 / 客户端包装与注入清单对齐）与 `unit-market-desktop-bridge.test.js`（patch 手术解析与幂等往返 / CRLF 保真 / 与壳层 patch-surgery 双向兼容 / hub 元数据规则）；sync CLI E2E 5 用例全绿。
+
 ### Tauri 线同步（tauri/modular，2026-08-22 持续优化批次）
 - 内核家族 @deepseek-ai/* 0.1.1-rc.1 → 0.1.1-rc.2（19 pin，纯重发布）；patch 家族扩至 36 项
 - 新增 runtime 补丁：agent-preset-fallback / prompt-context-literal / session-orphans / fallback-heal-isolation / credentials-initial-retry / credentials-absent-guidance / device-auth-guidance（双形态锚点）
