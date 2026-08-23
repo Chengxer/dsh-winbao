@@ -134,9 +134,32 @@ pub fn page_error(state: State<AppState>, message: String) -> Result<serde_json:
     Ok(serde_json::Value::Null)
 }
 
+/// 页面心跳（契约 §4）：计数 + 页面自报可见性落盘。
+///
+/// F3（2026-08 用户反馈「隔几分钟重新加载一遍」）：心跳载荷新增可选
+/// `hidden`（bridge-shim 携带 document.hidden）。可见且未最小化的窗口仍
+/// 可能被 WebView2（Chromium 原生遮挡跟踪）判为 hidden——被其他窗口完全
+/// 遮挡/锁屏/RDP 断开时 Win32 原生 API 失明，此时 5s 心跳被节流到 ~1/min
+/// 不是挂死，lib.rs 心跳监测据此（AppState.hb_page_hidden）豁免停摆判定。
+/// 仅**主窗**心跳计入该标志（浮窗/宠物窗的 hidden 状态不代表主窗页面）；
+/// `hidden` 缺省（KernelReady 探针 `{}` 调用形态）不改动标志——探针只证明
+/// 页面活着，不携带可见性信息。
 #[tauri::command]
-pub fn renderer_heartbeat(state: State<AppState>) -> Result<serde_json::Value, BridgeError> {
+pub fn renderer_heartbeat(
+    state: State<AppState>,
+    window: tauri::WebviewWindow,
+    hidden: Option<bool>,
+) -> Result<serde_json::Value, BridgeError> {
     state.heartbeats.fetch_add(1, Ordering::Relaxed);
+    if window.label() == "main" {
+        // 主窗专属计数（M1，2026-08「多子代理白屏」）：lib.rs 的停摆监测与
+        // C2c 探针据此判定**主窗页面**死活——全局 heartbeats 会被浮窗/宠物
+        // 窗心跳淹没，主窗渲染进程单独死亡时停摆永不触发。
+        state.hb_main.fetch_add(1, Ordering::Relaxed);
+        if let Some(h) = hidden {
+            state.hb_page_hidden.store(h, Ordering::Relaxed);
+        }
+    }
     Ok(serde_json::Value::Null)
 }
 

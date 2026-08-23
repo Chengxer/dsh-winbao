@@ -64,11 +64,26 @@ pub fn open_in_explorer(dir: &std::path::Path) -> Result<serde_json::Value, Brid
     Ok(serde_json::Value::Null)
 }
 
-/// 主窗导航（evaluate_script location.href——万金油且可靠）。
+/// 主窗导航：页内 eval location.href 优先（页面活着时最廉价）；eval 通道
+/// 失败（渲染进程崩溃 / webview 已销毁——ExecuteScript 无处执行）回退原生
+/// Navigate（CoreWebView2.Navigate，浏览器进程执行，与渲染进程死活无关）。
+/// M1（2026-08「多子代理白屏」）：崩溃环换页 / KernelReady 换页都经过这里，
+/// eval 恒 no-op 也要「成功」的旧形态会把死渲染进程的主窗钉死在白屏——
+/// 连恢复页都到不了。
 pub fn navigate_main(app: &AppHandle, url: &str) -> Result<(), BridgeError> {
     let win = app.get_webview_window("main").ok_or_else(|| BridgeError::not_found("主窗不存在"))?;
     let js = format!("try{{location.href={}}}catch(e){{}}", serde_json::to_string(url).unwrap_or_else(|_| "\"\"".into()));
-    win.eval(&js).map_err(terr)
+    match win.eval(&js) {
+        Ok(()) => Ok(()),
+        Err(eval_err) => {
+            let parsed: tauri::Url = url
+                .parse()
+                .map_err(|e| BridgeError::internal(format!("导航 URL 解析失败（{url}）: {e}")))?;
+            win.navigate(parsed).map_err(|nav_err| {
+                BridgeError::internal(format!("主窗导航失败（eval: {eval_err}; navigate: {nav_err}）"))
+            })
+        }
+    }
 }
 
 /// 原子写：tmp + rename。
@@ -272,5 +287,36 @@ mod tests {
             }
             None => assert_eq!(docs, std::path::PathBuf::from("."), "无 home 时保持当前目录降级"),
         }
+    }
+
+    /// 形态锚点（M1 2026-08「多子代理白屏」）：navigate_main 的页内 eval 通道
+    /// 失败（渲染进程崩溃——ExecuteScript 无处执行）必须回退原生 navigate
+    ///（浏览器进程级，与渲染进程死活无关）。此前 eval 结果被 map_err 单通道
+    /// 吞掉：崩溃环换页 / KernelReady 换页在渲染进程死后全部 no-op，主窗
+    /// 钉死白屏——连恢复页都到不了。
+    #[test]
+    fn navigate_main_has_native_fallback_shape() {
+        let src = include_str!("common.rs").replace("\r\n", "\n");
+        let seg = src
+            .split("pub fn navigate_main")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n\n/// 原子写").next())
+            .expect("navigate_main 函数体");
+        assert!(
+            seg.contains("win.eval(&js)"),
+            "页内 eval 优先通道保留（活页面最廉价）: {seg}"
+        );
+        assert!(
+            seg.contains("match win.eval(&js)"),
+            "eval 结果必须被检查（match 分流，不得单通道 map_err）: {seg}"
+        );
+        assert!(
+            seg.contains("win.navigate(parsed)"),
+            "eval 失败必须回退原生 navigate（死渲染进程唯一可救通道）: {seg}"
+        );
+        assert!(
+            seg.contains("tauri::Url"),
+            "回退通道必须走 tauri::Url（WebviewWindow::navigate 入参类型）: {seg}"
+        );
     }
 }

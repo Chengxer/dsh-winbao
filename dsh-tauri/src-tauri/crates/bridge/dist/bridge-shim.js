@@ -112,10 +112,18 @@
   listeners.jump.push(function (jump) { if (jump) pendingJump = jump; });
 
   // ---- 心跳：5s + visibilitychange 补报（契约 §4）----
-  send('renderer_heartbeat');
-  setInterval(function () { send('renderer_heartbeat'); }, 5000);
+  // F3（2026-08）：心跳载荷携带页面自报可见性（document.hidden）。原生窗口
+  // 可见 ≠ 页面可见：被其他窗口完全遮挡/锁屏/RDP 断开时，Win32 is_visible
+  // 恒真，而 WebView2（Chromium 原生遮挡跟踪）会把页面判 hidden，5 分钟后
+  // 进入 intensive throttling——5s 心跳定时器退化 ~1/min（甚至冻结）。壳侧
+  // 若不知情会按「心跳停摆」误 location.reload()，且每次重载后 5 分钟节流
+  // 宽限一过又复发（v0.5.3 用户实测「隔几分钟重新加载一遍」）。壳侧据此
+  // 豁免失联计数（lib.rs stall_exempt / renderer_heartbeat 命令）。
+  function heartbeat() { send('renderer_heartbeat', { hidden: !!(document && document.hidden) }); }
+  heartbeat();
+  setInterval(heartbeat, 5000);
   document.addEventListener('visibilitychange', function () {
-    if (!document.hidden) send('renderer_heartbeat');
+    if (!document.hidden) heartbeat();
   });
 
   // ---- 页面异常上报（契约 §4）----

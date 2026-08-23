@@ -38,6 +38,16 @@ pub struct AppState {
     pub loading_url: Mutex<String>,
     pub recovery_url: Mutex<String>,
     pub heartbeats: AtomicU32,
+    /// **主窗专属**心跳计数（M1，2026-08「多子代理白屏」）：垫片注入所有
+    /// 窗口（浮窗/宠物窗照发 renderer_heartbeat），全局 `heartbeats` 会被
+    /// 其他窗口淹没——主窗渲染进程单独死亡（多子代理 OOM 崩溃形态）时全局
+    /// 计数照常增长，停摆判定（watch_renderer_heartbeat）与 C2c 探针永远
+    /// 误判「页面活着」。主窗页面的死活必须盯主窗自己的心跳。
+    pub hb_main: AtomicU32,
+    /// 主窗页面**自报** hidden（F3，2026-08）：心跳载荷携带 document.hidden。
+    /// 原生窗口可见≠页面可见——被其他窗口完全遮挡/锁屏/RDP 断开时 Win32
+    /// is_visible 恒真，只有页面（Chromium 原生遮挡跟踪）知道自己在 hidden。
+    pub hb_page_hidden: std::sync::atomic::AtomicBool,
     pub page_errors: AtomicU32,
     pub current_session: Mutex<Option<String>>,
     pub last_port: AtomicU32,
@@ -57,6 +67,8 @@ impl AppState {
             loading_url: Mutex::new(String::new()),
             recovery_url: Mutex::new(String::new()),
             heartbeats: AtomicU32::new(0),
+            hb_main: AtomicU32::new(0),
+            hb_page_hidden: std::sync::atomic::AtomicBool::new(false),
             page_errors: AtomicU32::new(0),
             current_session: Mutex::new(None),
             last_port: AtomicU32::new(0),
@@ -500,12 +512,15 @@ fn kernel_ready_navigate(app: tauri::AppHandle, url: String) {
     std::thread::spawn(move || {
         let Some(state) = app.try_state::<AppState>() else { return };
         let Some(w) = app.get_webview_window("main") else { return };
-        let before = state.heartbeats.load(Ordering::Relaxed);
+        // 探针回执盯主窗专属计数 hb_main（M1）：探针 eval 打进主窗，回执也
+        // 只该来自主窗——全局计数会被浮窗/宠物窗心跳淹没（主窗死、浮窗活
+        // 时探针被误判「页面活」→ 跳过换页 → 主窗钉死白屏）。
+        let before = state.hb_main.load(Ordering::Relaxed);
         // 轻量探针：页面向壳回发一次心跳计数（bridge 垫片 renderer_heartbeat
         // 通道——内核页有 __TAURI_INTERNALS__ invoke 能力）。
         let _ = w.eval("try{window.__TAURI_INTERNALS__.invoke('renderer_heartbeat',{})}catch(e){}");
         std::thread::sleep(std::time::Duration::from_millis(800));
-        if state.heartbeats.load(Ordering::Relaxed) > before {
+        if state.hb_main.load(Ordering::Relaxed) > before {
             route_log(format!("[route] 重启风暴渲染抑制：距上次换页 <{KERNEL_NAV_SUPPRESS_WINDOW_MS}ms 且页面存活，跳过整页换页（{url}）"));
         } else {
             route_log(format!("[route] 重启风暴渲染抑制：页面探针无响应，执行整页换页（{url}）"));
@@ -1017,28 +1032,110 @@ fn heartbeat_timer_active(visible: Option<bool>, minimized: Option<bool>) -> boo
     visible.unwrap_or(true) && !minimized.unwrap_or(false)
 }
 
+/// 失联豁免联合判定（纯函数，可单测）：原生不可见/最小化 **或** 页面自报
+/// hidden（F3 第三形态，2026-08 用户反馈「隔几分钟重新加载一遍」）任一
+/// 成立即豁免停摆计数。
+///
+/// 页面自报 hidden 的必要性：可见且未最小化的窗口仍可能被 WebView2
+/// （Chromium 原生遮挡跟踪）判为 hidden——被其他窗口**完全遮挡** / 锁屏 /
+/// RDP 断开时，Win32 `is_visible` 恒真、`is_minimized` 恒假，壳侧原生 API
+/// 全部失明；页面 hidden 5 分钟后进入 intensive throttling（5s 心跳定时器
+/// 退化 ~1/min，甚至冻结），4×10s 停摆判定误开火 → `location.reload()`，
+/// 重载后 5 分钟节流宽限一过又复发——用户侧即「隔几分钟重新加载一遍」。
+/// 页面 hidden 期间心跳仍低速到达（~1/min，载荷带 hidden=true，见
+/// bridge-shim.js 心跳段与 renderer_heartbeat 命令），据此豁免；真挂死由
+/// 内核探活环与可见期兜底（同「宁可漏判停摆也不误杀节流页」哲学）。
+fn stall_exempt(visible: Option<bool>, minimized: Option<bool>, page_hidden: bool) -> bool {
+    !heartbeat_timer_active(visible, minimized) || page_hidden
+}
+
+// ---------------------------------------------------------------------------
+// M1（2026-08「多子代理后不稳定、直接白屏」根治）：渲染进程崩溃感知恢复梯。
+//
+// 故障链（证据）：多子代理 = 多会话事件流常驻内核 UI（dsh-client-runtime
+// Session.events 只追加无上限、Session 实例 dispose() 恒 no-op 常驻）→ 渲染
+// 进程内存随流式事件线性增长 → WebView2 渲染进程 OOM 崩溃 → 页面 JS 引擎
+// 整体消亡 → 白屏。此时壳侧**所有 JS 通道都是 no-op**：
+//   - wry 0.55.1（webview2/mod.rs）没有任何 CoreWebView2 ProcessFailed 处理
+//     ——渲染进程崩溃事件无人监听；
+//   - tauri 2.11.5 WebviewEvent 枚举仅 DragDrop（tauri-2.11.5/src/app.rs:202）
+//     ——壳侧没有崩溃回调面；
+//   - ExecuteScript（= WebviewWindow::eval）目标是渲染进程——进程已死则
+//     无处执行；navigate_main 的 location.href eval、旧停摆恢复的
+//     location.reload() eval 全部失效。
+// 唯一能检测「渲染进程死了」的信号是心跳停摆（垫片 setInterval 随进程消亡），
+// 唯一能救活死渲染进程的动作是**浏览器进程级**原语：CoreWebView2.Reload /
+// Navigate（tauri WebviewWindow::reload / navigate，wry webview2 直接调
+// ICoreWebView2 对应方法，不经渲染进程）。
+// ---------------------------------------------------------------------------
+
+/// 渲染层恢复动作（升级梯，纯函数可单测）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RendererRecoveryAction {
+    /// 第 1 级：页内 JS reload——页面活着但定时器/事件环挂死时最廉价。
+    EvalReload,
+    /// 第 2 级：原生 reload（CoreWebView2.Reload）——渲染进程已死、eval
+    /// 无处执行时的强恢复。
+    NativeReload,
+    /// 第 3 级：原生重导航到内核 URL（CoreWebView2.Navigate）——reload 仍
+    /// 不奏效的终级重建（渲染进程反复崩溃 / 文档钉死在崩溃错误页等形态）。
+    NativeNavigate,
+}
+
+/// 升级梯推进（纯函数，可单测）：停摆连续触发而心跳未恢复时逐级上升，
+/// 封顶 NativeNavigate（保持重试，不放弃——白屏必须有人持续救）。
+fn next_recovery_action(stage: u32) -> RendererRecoveryAction {
+    match stage {
+        0 => RendererRecoveryAction::EvalReload,
+        1 => RendererRecoveryAction::NativeReload,
+        _ => RendererRecoveryAction::NativeNavigate,
+    }
+}
+
+/// 恢复导航目标（第 3 级用）：优先 supervisor 现值（WSL `--port 0` 端口漂移
+/// 后仍准确）；supervisor 缺席/未就绪时退主窗当前 URL——`WebviewWindow::url`
+/// 读的是浏览器进程持有的 Source，与渲染进程死活无关。
+fn kernel_url_for_recovery(app: &tauri::AppHandle, win: &tauri::WebviewWindow) -> tauri::Url {
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Some(sv) = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+            if let Some(u) = sv.kernel_url() {
+                if let Ok(parsed) = u.parse::<tauri::Url>() {
+                    return parsed;
+                }
+            }
+        }
+    }
+    win.url().unwrap_or_else(|_| tauri::Url::parse("http://127.0.0.1").expect("静态回退 URL 必达"))
+}
+
 fn watch_renderer_heartbeat(app: tauri::AppHandle) {
     let gen = HEARTBEAT_WATCHER_GEN.fetch_add(1, Ordering::Relaxed) + 1;
     std::thread::spawn(move || {
         // 宽限：等第一条心跳到达（或 60s 超时进入持续监测）。
+        // 盯**主窗专属**计数 hb_main（M1）：垫片注入所有窗口、全体都在发
+        // renderer_heartbeat，全局计数会被浮窗/宠物窗淹没——主窗渲染进程
+        // 单独死亡（多子代理 OOM 形态）时全局计数照常增长，停摆永不触发。
         let baseline = app
             .try_state::<AppState>()
-            .map(|s| s.heartbeats.load(Ordering::Relaxed))
+            .map(|s| s.hb_main.load(Ordering::Relaxed))
             .unwrap_or(0);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_secs(5));
             if let Some(state) = app.try_state::<AppState>() {
-                if state.heartbeats.load(Ordering::Relaxed) > baseline {
+                if state.hb_main.load(Ordering::Relaxed) > baseline {
                     break;
                 }
             }
         }
         let mut last = app
             .try_state::<AppState>()
-            .map(|s| s.heartbeats.load(Ordering::Relaxed))
+            .map(|s| s.hb_main.load(Ordering::Relaxed))
             .unwrap_or(0);
         let mut stall: u32 = 0;
+        // 恢复梯当前级（M1）：0=eval reload / 1=原生 reload / 2=原生重导航；
+        // 心跳恢复即复位（下次停摆从最廉价动作重来）。
+        let mut stage: u32 = 0;
         loop {
             std::thread::sleep(std::time::Duration::from_secs(10));
             // 代数交替：有更晚的监测线程接岗 → 本线程退出（防重启循环下线程只增不减）。
@@ -1047,31 +1144,58 @@ fn watch_renderer_heartbeat(app: tauri::AppHandle) {
             }
             let Some(state) = app.try_state::<AppState>() else { return };
             let Some(win) = app.get_webview_window("main") else { return };
-            // 不可见/最小化窗口定时器被节流（与 Electron 判定口径一致）——
-            // 不计失联。最小化必须单独判：Win32 语义下最小化窗口
-            // IsWindowVisible 恒真，只判 is_visible 会漏（详见
-            // heartbeat_timer_active 文档；2026-08 最小化 7 分钟真机复现）。
-            if !heartbeat_timer_active(win.is_visible().ok(), win.is_minimized().ok()) {
+            // 豁免联合判定（含 F3 第三形态，见 stall_exempt 文档）：
+            // 原生不可见/最小化 **或** 页面自报 hidden 任一成立即不计失联。
+            if stall_exempt(
+                win.is_visible().ok(),
+                win.is_minimized().ok(),
+                state.hb_page_hidden.load(Ordering::Relaxed),
+            ) {
                 stall = 0;
-                last = state.heartbeats.load(Ordering::Relaxed);
+                // 计数口径对齐 M1：失联判定盯 hb_main，豁免复位也必须复位到
+                // hb_main（复位到全局 heartbeats 会造成一拍的假「有进展」，
+                // 虽下一轮自愈，口径混用留给后人必炸）。
+                last = state.hb_main.load(Ordering::Relaxed);
                 continue;
             }
-            let now = state.heartbeats.load(Ordering::Relaxed);
+            let now = state.hb_main.load(Ordering::Relaxed);
             if now == last {
                 stall += 1;
             } else {
                 stall = 0;
                 last = now;
+                stage = 0; // 心跳恢复 → 恢复梯复位（下次停摆从最廉价动作重来）。
             }
             if stall >= 4 {
                 // 落盘（v0.5.2 教训：GUI 安装态 eprintln 无人接收——自动重载
                 // 是用户可感知事件，desktop.log 必须留痕，否则「页面自己刷了/
                 // 流式被打断」在「打开日志」里无从取证）。
+                // M1 恢复梯：eval reload 对已死渲染进程是 no-op（ExecuteScript
+                // 无处执行），连续停摆必须升级到浏览器进程级原生 reload /
+                // 重导航——否则多子代理 OOM 崩溃后的白屏永远无人救。
+                let action = next_recovery_action(stage);
+                let action_name = match action {
+                    RendererRecoveryAction::EvalReload => "页内 eval reload",
+                    RendererRecoveryAction::NativeReload => "原生 reload（CoreWebView2.Reload）",
+                    RendererRecoveryAction::NativeNavigate => "原生重导航（CoreWebView2.Navigate → 内核 URL）",
+                };
                 route_log(format!(
-                    "[renderer-recovery] 可见主窗心跳停摆 {}0 秒，自动重载页面",
-                    stall
+                    "[renderer-recovery] 可见主窗心跳停摆 {}0 秒（疑似渲染进程崩溃/挂死），执行第 {} 级恢复：{action_name}",
+                    stall,
+                    stage + 1
                 ));
-                let _ = win.eval("try{location.reload()}catch(e){}");
+                let outcome: Result<(), tauri::Error> = match action {
+                    RendererRecoveryAction::EvalReload => win.eval("try{location.reload()}catch(e){}"),
+                    RendererRecoveryAction::NativeReload => win.reload(),
+                    RendererRecoveryAction::NativeNavigate => {
+                        let target = kernel_url_for_recovery(&app, &win);
+                        win.navigate(target)
+                    }
+                };
+                if let Err(e) = outcome {
+                    route_log(format!("[renderer-recovery] 恢复动作执行失败（升级梯将继续）：{e}"));
+                }
+                stage = (stage + 1).min(2);
                 stall = 0;
             }
         }
@@ -1166,21 +1290,24 @@ mod heartbeat_watcher_tests {
     }
 
     /// 形态锚点（C 路径误重载修复，2026-08）：监测循环的失联豁免必须经
-    /// heartbeat_timer_active 判定（含 is_minimized）——只判 is_visible 时，
-    /// Win32 语义下最小化窗口 IsWindowVisible 恒真，WebView2 对 hidden 页面
-    /// 5 分钟后 intensive throttling（5s 心跳退化为 ~1/min）→ stall 4×10s
-    /// 判停摆 → 每 ~40s location.reload()（最小化 7 分钟真机复现）。
+    /// stall_exempt（heartbeat_timer_active + 页面自报 hidden 联合判定）——
+    /// 只判 is_visible 时，Win32 语义下最小化窗口 IsWindowVisible 恒真，
+    /// WebView2 对 hidden 页面 5 分钟后 intensive throttling（5s 心跳退化为
+    /// ~1/min）→ stall 4×10s 判停摆 → 每 ~40s location.reload()（最小化
+    /// 7 分钟真机复现）；F3 第三形态：可见未最小化但被完全遮挡/锁屏时，
+    /// 原生 API 失明，必须叠加页面自报 hidden 豁免。
     #[test]
     fn heartbeat_watcher_exempt_check_covers_minimized_shape() {
-        let src = include_str!("lib.rs");
+        // 仓库检出为 CRLF，多行锚点按 \n 归一。
+        let src = include_str!("lib.rs").replace("\r\n", "\n");
         let seg = src
             .split("fn watch_renderer_heartbeat")
             .nth(1)
             .and_then(|s| s.split("\n}\n\n/// 诊断探针").next())
             .expect("watch_renderer_heartbeat 函数体");
         assert!(
-            seg.contains("heartbeat_timer_active(win.is_visible().ok(), win.is_minimized().ok())"),
-            "失联豁免必须走 heartbeat_timer_active（含最小化判定）: {seg}"
+            seg.contains("stall_exempt(\n                win.is_visible().ok(),\n                win.is_minimized().ok(),\n                state.hb_page_hidden.load(Ordering::Relaxed),\n            )"),
+            "失联豁免必须走 stall_exempt 联合判定（原生可见性 + 页面自报 hidden）: {seg}"
         );
         assert!(
             !seg.contains("win.is_visible().unwrap_or(true)"),
@@ -1202,6 +1329,135 @@ mod heartbeat_watcher_tests {
         assert!(heartbeat_timer_active(None, Some(false)), "可见性未知 + 未最小化：按有效");
         assert!(!heartbeat_timer_active(None, Some(true)), "可见性未知 + 最小化：豁免");
         assert!(heartbeat_timer_active(Some(true), None), "最小化未知：按未最小化（与 balance 同默认）");
+    }
+
+    /// stall_exempt 决策表（F3，2026-08）：页面自报 hidden 时**无条件豁免**
+    /// ——原生可见且未最小化的窗口（遮挡/锁屏/RDP 断开形态）心跳被节流到
+    /// ~1/min 不是挂死，4×10s 停摆判定不得开火（v0.5.3 用户「隔几分钟
+    /// 重新加载一遍」主因）。
+    #[test]
+    fn stall_exempt_decision_table() {
+        use super::stall_exempt;
+        // 原生口径全绿 + 页面自报可见 → 正常计失联（真挂死仍能救）。
+        assert!(!stall_exempt(Some(true), Some(false), false), "可见未最小化且页面自报可见：计失联");
+        // F3 形态：原生口径全绿但页面自报 hidden（遮挡/锁屏/RDP）→ 豁免。
+        assert!(stall_exempt(Some(true), Some(false), true), "可见未最小化但页面 hidden：必须豁免（WebView2 遮挡节流）");
+        // 原生口径已豁免的形态，页面自报任意值都保持豁免。
+        assert!(stall_exempt(Some(false), Some(false), false), "不可见：豁免");
+        assert!(stall_exempt(Some(true), Some(true), false), "最小化：豁免");
+        assert!(stall_exempt(Some(true), Some(true), true), "最小化且页面 hidden：豁免");
+        assert!(stall_exempt(Some(false), None, true), "不可见且页面 hidden：豁免");
+        // 查询失败（None）+ 页面自报可见 → 按有效计（不误杀）。
+        assert!(!stall_exempt(None, None, false), "查询失败且页面自报可见：按有效计");
+    }
+
+    /// 形态锚点（F3 链路闭合）：shim 心跳载荷必须携带 document.hidden，
+    /// 命令面 renderer_heartbeat 必须接收并落 AppState.hb_page_hidden——
+    /// 页面自报可见性链路任何一环缺失，豁免判定就退回原生口径（遮挡
+    /// 形态必误杀）。
+    #[test]
+    fn page_hidden_flag_pipeline_shape() {
+        let shim = include_str!("../../../crates/bridge/dist/bridge-shim.js");
+        assert!(
+            shim.contains("renderer_heartbeat', { hidden"),
+            "shim 心跳载荷必须携带 hidden（document.hidden）: 见 bridge-shim.js 心跳段"
+        );
+        let cmd = include_str!("commands/lifecycle.rs");
+        assert!(
+            cmd.contains("hb_page_hidden.store"),
+            "renderer_heartbeat 必须把页面自报 hidden 落 AppState.hb_page_hidden"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M1（2026-08「开多了子代理后不稳定、直接白屏」）回归锚点。
+    //
+    // 根因链：多子代理 = 多会话事件流常驻内核 UI（dsh-client-runtime
+    // Session.events 只追加无上限、Session 实例常驻不释放）→ 渲染进程内存
+    // 随流式增长 → WebView2 渲染进程 OOM 崩溃 → 白屏。壳侧检测/恢复链
+    // 此前全断：wry 0.55.1 无 ProcessFailed 处理（webview2/mod.rs 零 crash
+    // 代码）、tauri 2.11.5 WebviewEvent 仅 DragDrop（app.rs:202）、唯一检测器
+    // 心跳停摆的恢复动作是 eval reload——ExecuteScript 对死渲染进程是 no-op。
+    // -----------------------------------------------------------------------
+
+    /// 升级梯决策表（纯函数）：0→eval reload、1→原生 reload、≥2 封顶原生
+    /// 重导航（保持重试不放弃——白屏必须有人持续救）。
+    #[test]
+    fn next_recovery_action_ladder_table() {
+        use super::{next_recovery_action, RendererRecoveryAction};
+        assert_eq!(next_recovery_action(0), RendererRecoveryAction::EvalReload, "首停摆：最廉价页内 reload");
+        assert_eq!(next_recovery_action(1), RendererRecoveryAction::NativeReload, "二停摆：原生 reload（eval 已证明无效）");
+        assert_eq!(next_recovery_action(2), RendererRecoveryAction::NativeNavigate, "三停摆起：原生重导航封顶");
+        assert_eq!(next_recovery_action(9), RendererRecoveryAction::NativeNavigate, "持续停摆保持第 3 级重试");
+    }
+
+    /// 形态锚点（M1 核心）：停摆恢复必须带升级梯，且梯上必须有**浏览器进程
+    /// 级**原语（win.reload / win.navigate——CoreWebView2.Reload/Navigate，与
+    /// 渲染进程死活无关）；恢复动作的执行结果必须检查并落日志（eval no-op
+    /// 形态此前被 `let _` 静默吞掉，白屏无从取证）。心跳恢复后梯必须复位。
+    #[test]
+    fn renderer_recovery_ladder_shape() {
+        let src = include_str!("lib.rs").replace("\r\n", "\n");
+        let seg = src
+            .split("fn watch_renderer_heartbeat")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n\n/// 诊断探针").next())
+            .expect("watch_renderer_heartbeat 函数体");
+        assert!(
+            seg.contains("next_recovery_action(stage)"),
+            "停摆开火必须走升级梯决策: {seg}"
+        );
+        assert!(
+            seg.contains("win.eval(\"try{location.reload()}catch(e){}\")"),
+            "第 1 级页内 reload 保留（页面活但挂死形态最廉价）: {seg}"
+        );
+        assert!(seg.contains("win.reload()"), "第 2 级必须原生 reload（死渲染进程唯一可救通道之一）: {seg}");
+        assert!(seg.contains("win.navigate(target)"), "第 3 级必须原生重导航: {seg}");
+        assert!(
+            seg.contains("if let Err(e) = outcome"),
+            "恢复动作失败必须落日志（不得 let _ 静默吞）: {seg}"
+        );
+        assert!(
+            seg.contains("stage = 0;"),
+            "心跳恢复必须复位升级梯（下次停摆从最廉价动作重来）: {seg}"
+        );
+        // 恢复导航目标优先 supervisor 现值（WSL --port 0 端口漂移后仍准确）。
+        let helper = src
+            .split("fn kernel_url_for_recovery")
+            .nth(1)
+            .and_then(|s| s.split("fn watch_renderer_heartbeat").next())
+            .expect("kernel_url_for_recovery 函数体");
+        assert!(
+            helper.contains("sv.kernel_url()") && helper.contains("win.url()"),
+            "导航目标必须 supervisor 现值优先、主窗当前 URL 兜底: {helper}"
+        );
+    }
+
+    /// 形态锚点（M1 检测面）：停摆判定必须盯**主窗专属**计数 hb_main——垫片
+    /// 注入所有窗口，全局 heartbeats 会被浮窗/宠物窗心跳淹没，主窗渲染进程
+    /// 单独死亡（OOM）时停摆永不触发、白屏无人救。
+    #[test]
+    fn heartbeat_watcher_tracks_main_window_counter_shape() {
+        let src = include_str!("lib.rs").replace("\r\n", "\n");
+        let seg = src
+            .split("fn watch_renderer_heartbeat")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n\n/// 诊断探针").next())
+            .expect("watch_renderer_heartbeat 函数体");
+        assert!(
+            seg.contains("hb_main.load(Ordering::Relaxed)"),
+            "停摆判定必须读主窗专属计数 hb_main: {seg}"
+        );
+        assert!(
+            !seg.contains("state.heartbeats.load"),
+            "不得读全局心跳计数（浮窗/宠物窗心跳会淹没主窗死亡）: {seg}"
+        );
+        // 命令面同步：renderer_heartbeat 必须为主窗心跳单独计数。
+        let cmd = include_str!("commands/lifecycle.rs");
+        assert!(
+            cmd.contains("hb_main.fetch_add"),
+            "renderer_heartbeat 必须递增主窗专属计数 hb_main（仅 label==main）"
+        );
     }
 }
 
@@ -1247,6 +1503,27 @@ mod kernel_nav_suppression_tests {
         // 探针不得阻塞事件路由线程（后台线程）。
         assert!(helper.contains("std::thread::spawn"), "探针须后台线程（路由线程零阻塞）");
         assert!(src.contains("KERNEL_NAV_SUPPRESS_WINDOW_MS: u64 = 90_000"), "90s 窗口常量锚点");
+    }
+
+    /// 形态锚点（M1 检测面）：C2c 探针打进主窗，回执必须盯主窗专属计数
+    /// hb_main——全局 heartbeats 会被浮窗/宠物窗心跳淹没，主窗渲染进程
+    /// 单独死亡时探针被误判「页面活」→ 跳过换页 → 主窗钉死白屏。
+    #[test]
+    fn suppression_probe_reads_main_window_counter_shape() {
+        let src = include_str!("lib.rs").replace("\r\n", "\n");
+        let helper = src
+            .split("fn kernel_ready_navigate")
+            .nth(1)
+            .and_then(|s| s.split("fn route_one_event").next())
+            .expect("kernel_ready_navigate 函数体");
+        assert!(
+            helper.contains("state.hb_main.load(Ordering::Relaxed)"),
+            "探针回执必须读主窗专属计数 hb_main: {helper}"
+        );
+        assert!(
+            !helper.contains("state.heartbeats.load"),
+            "探针不得读全局心跳计数（浮窗心跳会淹没主窗死亡）: {helper}"
+        );
     }
 }
 

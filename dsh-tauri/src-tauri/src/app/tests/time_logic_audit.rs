@@ -458,7 +458,9 @@ fn js_side_timer_anchors() {
     let shim = norm(include_str!("../../../crates/bridge/dist/bridge-shim.js"));
     // 垫片心跳 5s setInterval：睡眠暂停、唤醒续跑——与 Rust 侧 10s 节拍监测
     // 同为中断时钟，无双时钟错配；垫片内无 Date.now（grep 证实）。
-    assert!(shim.contains("setInterval(function () { send('renderer_heartbeat'); }, 5000);"));
+    // F3：心跳载荷携带页面自报 document.hidden（遮挡/锁屏节流豁免链）。
+    assert!(shim.contains("setInterval(heartbeat, 5000);"));
+    assert!(shim.contains("renderer_heartbeat', { hidden"));
     assert!(!shim.contains("Date.now"), "垫片不得使用 Date.now（避免与 setInterval 时基错配）");
     let file_drop = norm(include_str!("../../../../../dsh-desktop/assets/plugins/dsh-file-drop/lib/client.js"));
     // 1.5s 去重窗（Date.now 墙钟）：睡眠使其过期——最坏形态是同一次物理拖放

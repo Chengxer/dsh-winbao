@@ -63,6 +63,11 @@ pub struct Supervisor {
     pub app_dir: PathBuf,
     pub sidecar_cli: PathBuf,
     pub node_exe: PathBuf,
+    /// Node 三级解析链结果（v0.5.4：系统 PATH ≥22 → 内置 vendor → None）。
+    /// `None` = 两级全缺——boot 瀑布首步发清晰 BootStep 错误转恢复页
+    /// （替代旧「sidecar spawn os error 2」不可读形态）；`node_exe` 此时为
+    /// vendor 主名占位（终防线，正常流程到不了 spawn）。
+    pub node_resolved: Option<kernel_process::node_resolve::ResolvedNode>,
     pub bin_js: PathBuf,
     pub kernel_version: String,
     inner: Arc<Mutex<Inner>>,
@@ -101,32 +106,14 @@ struct Inner {
 }
 
 
-/// 带超时的 .output()——D2 诊断「永挂形态」根治：vendor node 调用在
-/// 用户机上可能被 AV/SmartScreen 拦到半死，无超时则 boot 线程永挂
-/// loading 页（连恢复页都不出现）。超时按失败处理，进瀑布/恢复页。
-/// vendor node 可执行名：Windows node.exe，其余平台 node（vendor 目录按
-/// 平台分发双二进制——mac 检出内 node 为 Mach-O；此前硬编码 node.exe，
-/// mac 上内核 spawn 必失败、boot 瀑布终转恢复页）。
-#[cfg(windows)]
-const VENDOR_NODE_NAME: &str = "node.exe";
-#[cfg(not(windows))]
-const VENDOR_NODE_NAME: &str = "node";
-
-/// vendor node 路径解析：按平台选主名，缺失时另一名兜底（检出形态可能只
-/// 带其一；都不在时返回主名，spawn 报错走既有恢复页路径）。
-fn vendor_node_exe(app_dir: &std::path::Path) -> PathBuf {
-    let dir = app_dir.join("vendor").join("node");
-    let primary = dir.join(VENDOR_NODE_NAME);
-    if primary.exists() {
-        return primary;
-    }
-    let alt_name = if cfg!(windows) { "node" } else { "node.exe" };
-    let alt = dir.join(alt_name);
-    if alt.exists() {
-        return alt;
-    }
-    primary
-}
+/// vendor node 路径解析已迁移 `kernel_process::node_resolve`（v0.5.4 三级
+/// 解析链：系统 PATH ≥22 → 内置 vendor → None；vendor 平台主名/备名选择、
+/// 版本解析的单测见该 crate）。此处仅保留语义注记：
+/// - vendor 可执行名 Windows node.exe、其余平台 node（vendor 目录按平台
+///   分发双二进制——mac 检出内 node 为 Mach-O）；
+/// - vendor 调用在用户机上可能被 AV/SmartScreen 拦到半死——`--version`
+///   探测自带 5s 超时（node_resolve::VERSION_PROBE_TIMEOUT），永挂防线
+///   另有 boot 看门狗兜底。
 
 impl Supervisor {
     pub fn new(repo_root: &std::path::Path) -> Self {
@@ -138,6 +125,20 @@ impl Supervisor {
 
     /// 测试构造（wsl.exe 原语注桩——design D7；生产恒 `new` + RealWslInvoker）。
     fn new_with_wsl_invoker(repo_root: &std::path::Path, invoker: Arc<dyn wsl_backend::WslInvoker>) -> Self {
+        Self::new_with_probes(
+            repo_root,
+            invoker,
+            Arc::new(kernel_process::RealNodeProbe) as Arc<dyn kernel_process::NodeProbe>,
+        )
+    }
+
+    /// 全注桩构造（wsl.exe + node 探测双缝——D7 同手法；Node 解析优先级与
+    /// 缺失路径的确定性测试用，生产恒 `new`）。
+    fn new_with_probes(
+        repo_root: &std::path::Path,
+        invoker: Arc<dyn wsl_backend::WslInvoker>,
+        node_probe: Arc<dyn kernel_process::NodeProbe>,
+    ) -> Self {
         let app_dir = repo_root.join("dsh-desktop");
         // sidecar cli 双布局解析：开发检出在 <repo>/dsh-tauri/sidecar/，
         // 安装产物在 <安装根>/resources/sidecar/（repo_root 即 resources）。
@@ -160,9 +161,24 @@ impl Supervisor {
             let cfg = wsl_backend::detect_backend_mode_from_map(&map);
             (cfg.backend == "wsl").then_some(cfg)
         };
+        // ---- Node 三级解析链（v0.5.4 便携版修复/瘦身基础，构造期一次性）：
+        //      系统 PATH 中 ≥22 的 node → 内置 vendor/node → None。便携版在
+        //      无内置 node 的机器上经第一级起死回生；系统有 node 的机器不再
+        //      依赖 91MB 内置二进制（杀软拦截面同步收窄）。----
+        let node_resolved = kernel_process::node_resolve::resolve_node_with(
+            node_probe.as_ref(),
+            kernel_process::node_resolve::existing_vendor_node(&app_dir),
+        );
+        let node_exe = node_resolved
+            .as_ref()
+            .map(|r| r.exe().to_path_buf())
+            // 全缺占位：保持「spawn 报错 → 恢复页」旧错误路径存活（boot 首步
+            // 的清晰错误正常先一步拦截，此处仅终防线）。
+            .unwrap_or_else(|| kernel_process::node_resolve::vendor_node_exe(&app_dir));
         Self {
             sidecar_cli,
-            node_exe: vendor_node_exe(&app_dir),
+            node_exe,
+            node_resolved,
             bin_js: app_dir.join("node_modules").join("@deepseek-ai").join("dsh").join("lib").join("bin.js"),
             kernel_version: read_kernel_version(&app_dir),
             app_dir,
@@ -310,6 +326,28 @@ impl Supervisor {
     fn boot_waterfall(this: Arc<Self>, tx: Sender<SupervisorEvent>, preferred_port: Option<u16>) {
         {
             let gen = this.inner.lock().unwrap_or_else(|p| p.into_inner()).generation;
+            // ---- [-2] Node 三级解析预检（v0.5.4）：系统 PATH ≥22 → 内置
+            //      vendor → 全缺。全缺时清晰报错直接恢复页——旧形态是后续
+            //      sidecar spawn 报「os error 2」，用户无从知道缺的是 Node。
+            //      WSL 模式同样需要 Windows 侧 node 跑 sidecar boot，故本步
+            //      先于 WSL configure。----
+            match &this.node_resolved {
+                Some(r) => log_line(&format!("Node 解析命中：{}", r.label())),
+                None => {
+                    let msg = "未找到可用的 Node.js：既未检测到系统 Node（版本 ≥ 22），安装目录也缺少内置 node（vendor/node/node.exe）。请安装 Node.js 22 或更高版本（https://nodejs.org），或重新下载完整的安装包/便携版。".to_string();
+                    eprintln!("[boot] {msg}");
+                    // last_error 写入必须独立作用域：enter_recovery 内部的
+                    // kill_kernel/state/set_state 都会再取 inner 锁（同下方
+                    // sidecar 失败分支的自死锁教训）。
+                    {
+                        let mut g = this.inner.lock().unwrap_or_else(|p| p.into_inner());
+                        g.last_error = Some(msg.clone());
+                    }
+                    let _ = tx.send(SupervisorEvent::BootStep { name: "node-resolve".into(), ok: false, ms: 0, error: Some(msg) });
+                    this.enter_recovery(&tx, "Node 缺失（系统与内置均无）");
+                    return;
+                }
+            }
             // ---- [-1] WSL 后端解析（契约 §4.2 顺序红线：loading 窗已开 →
             //      configure 探测）。失败回落 local 继续启动（issue #54：不
             //      阻塞、不恢复页、配置保留），原因进 fallback_reason。----
@@ -1407,6 +1445,12 @@ Content-Length: 0
         d
     }
 
+    /// 生产 wsl.exe 原语（Node 解析测试构造用：构造期零 wsl.exe 调用，
+    /// 真实调用仅发生在 WSL boot 分支——本组测试不进入）。
+    fn real_wsl_invoker() -> Arc<dyn wsl_backend::WslInvoker> {
+        Arc::new(wsl_backend::RealWslInvoker) as Arc<dyn wsl_backend::WslInvoker>
+    }
+
     #[test]
     fn kernel_version_from_package_json() {
         let dir = sandbox("ver");
@@ -1423,35 +1467,105 @@ Content-Length: 0
         let _ = std::fs::remove_dir_all(&bad);
     }
 
-    /// vendor node 平台名选择（P0 回归锚点）：本平台主名优先；主名缺失时
-    /// 另一名兜底（检出只带单平台的形态）；两者皆缺返回主名（spawn 报错
-    /// 走既有恢复页路径，不 panic）。
+    /// Node 三级解析链优先级（v0.5.4 P0 回归锚点；vendor 平台主名/备名
+    /// 选择的底层单测在 kernel-process::node_resolve，此处验证 supervisor
+    /// 构造接线）：系统 ≥22 优先 → 过旧/探测失败回落 vendor → 全缺 None。
     #[test]
-    fn vendor_node_exe_prefers_platform_name_with_fallback() {
-        let dir = sandbox("vn");
-        let vdir = dir.join("vendor").join("node");
-        std::fs::create_dir_all(&vdir).unwrap();
+    fn node_resolution_priority_chain() {
+        struct StubNodeProbe {
+            path_hit: Option<PathBuf>,
+            version: Option<String>,
+        }
+        impl kernel_process::NodeProbe for StubNodeProbe {
+            fn find_node_in_path(&self) -> Option<PathBuf> {
+                self.path_hit.clone()
+            }
+            fn node_version(&self, _exe: &std::path::Path) -> Option<String> {
+                self.version.clone()
+            }
+        }
+        let probe = |ver: Option<&str>| {
+            Arc::new(StubNodeProbe {
+                path_hit: Some(PathBuf::from(if cfg!(windows) { r"C:\fake\node.exe" } else { "/fake/node" })),
+                version: ver.map(String::from),
+            }) as Arc<dyn kernel_process::NodeProbe>
+        };
+        let mk = |root: &std::path::Path, with_vendor: bool| -> std::path::PathBuf {
+            let d = root.to_path_buf();
+            if with_vendor {
+                std::fs::create_dir_all(d.join("dsh-desktop").join("vendor").join("node")).unwrap();
+                let name = if cfg!(windows) { "node.exe" } else { "node" };
+                std::fs::write(d.join("dsh-desktop").join("vendor").join("node").join(name), b"").unwrap();
+            }
+            d
+        };
+
+        // ① 系统 ≥22：即便 vendor 在位也优先系统（瘦身/杀软规避口径）。
+        let root = sandbox("nr1");
+        let sv = Supervisor::new_with_probes(&mk(&root, true), real_wsl_invoker(), probe(Some("v24.15.0")));
+        assert!(matches!(&sv.node_resolved, Some(kernel_process::node_resolve::ResolvedNode::System { major: 24, .. })), "系统 node ≥22 优先");
+        assert_eq!(sv.node_exe, sv.node_resolved.as_ref().unwrap().exe(), "node_exe 必须指向命中者");
+        // ② 系统过旧（<22）：回落 vendor。
+        let root2 = sandbox("nr2");
+        let sv2 = Supervisor::new_with_probes(&mk(&root2, true), real_wsl_invoker(), probe(Some("v18.20.4")));
+        assert!(matches!(&sv2.node_resolved, Some(kernel_process::node_resolve::ResolvedNode::Vendor(_))), "过旧系统 node 须回落 vendor");
+        // ③ 系统探测失败（杀软/商店 stub）：回落 vendor。
+        let root3 = sandbox("nr3");
+        let sv3 = Supervisor::new_with_probes(&mk(&root3, true), real_wsl_invoker(), probe(None));
+        assert!(matches!(&sv3.node_resolved, Some(kernel_process::node_resolve::ResolvedNode::Vendor(_))), "探测失败须回落 vendor");
+        // ④ 便携版缺文件形态：无系统 node 且无 vendor → None + 占位 node_exe
+        //    （spawn 失败旧路径终防线在位）。
+        let root4 = sandbox("nr4");
+        let sv4 = Supervisor::new_with_probes(&mk(&root4, false), real_wsl_invoker(), probe(None));
+        assert!(sv4.node_resolved.is_none(), "三级链全空 → None");
         let primary = if cfg!(windows) { "node.exe" } else { "node" };
-        let alt = if cfg!(windows) { "node" } else { "node.exe" };
-        // 只放主名：命中主名。
-        std::fs::write(vdir.join(primary), b"").unwrap();
-        assert_eq!(vendor_node_exe(&dir), vdir.join(primary));
-        // 主名 + 备名都在：仍主名。
-        std::fs::write(vdir.join(alt), b"").unwrap();
-        assert_eq!(vendor_node_exe(&dir), vdir.join(primary));
-        // 只放备名（单平台检出形态）：备名兜底，不再拼死主名。
-        let dir2 = sandbox("vn2");
-        let vdir2 = dir2.join("vendor").join("node");
-        std::fs::create_dir_all(&vdir2).unwrap();
-        std::fs::write(vdir2.join(alt), b"").unwrap();
-        assert_eq!(vendor_node_exe(&dir2), vdir2.join(alt), "主名缺失须兜底另一平台名");
-        // 全缺：返回主名路径（调用方 spawn 失败转恢复页）。
-        let dir3 = sandbox("vn3");
-        std::fs::create_dir_all(dir3.join("vendor").join("node")).unwrap();
-        assert_eq!(vendor_node_exe(&dir3), dir3.join("vendor").join("node").join(primary));
-        for d in [&dir, &dir2, &dir3] {
+        assert_eq!(sv4.node_exe, root4.join("dsh-desktop").join("vendor").join("node").join(primary), "全缺时占位主名路径");
+        for d in [&root, &root2, &root3, &root4] {
             let _ = std::fs::remove_dir_all(d);
         }
+    }
+
+    /// Node 全缺的 boot 瀑布首步行为：清晰 BootStep 错误（name=node-resolve）
+    /// + last_error + 恢复页态——替代旧「sidecar spawn os error 2」。
+    #[test]
+    fn node_missing_boot_step_clear_error() {
+        struct NoNodeProbe;
+        impl kernel_process::NodeProbe for NoNodeProbe {
+            fn find_node_in_path(&self) -> Option<PathBuf> { None }
+            fn node_version(&self, _exe: &std::path::Path) -> Option<String> { None }
+        }
+        // 伪仓库根：无 vendor node → 三级链全空（不依赖本机是否装有 node）。
+        let root = sandbox("nr-miss");
+        std::fs::create_dir_all(root.join("dsh-desktop")).unwrap();
+        let sv: Arc<Supervisor> = Arc::new(Supervisor::new_with_probes(
+            &root,
+            real_wsl_invoker(),
+            Arc::new(NoNodeProbe) as Arc<dyn kernel_process::NodeProbe>,
+        ));
+        assert!(sv.node_resolved.is_none());
+        let (tx, rx) = std::sync::mpsc::channel();
+        Supervisor::boot_waterfall(Arc::clone(&sv), tx, None);
+        // 首个事件即 node-resolve 失败步，错误文案含可操作指引。
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(SupervisorEvent::BootStep { name, ok, error, .. }) => {
+                assert_eq!(name, "node-resolve");
+                assert!(!ok);
+                let e = error.expect("缺失错误必须带 error 文案");
+                assert!(e.contains("Node"), "文案须指明 Node: {e}");
+                assert!(e.contains("vendor/node"), "文案须指出内置路径: {e}");
+            }
+            other => panic!("首个事件应为 node-resolve 失败步: {other:?}"),
+        }
+        assert_eq!(sv.state(), RunState::CrashLoop, "全缺必须立即转恢复页态");
+        assert!(sv.last_error().is_some_and(|e| e.contains("Node")), "last_error 须记录缺失原因");
+        // 随后的事件只能是恢复页信号（CrashLoop），不得再有任何 boot 步
+        // （sidecar 五步等——全缺短路）。
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(SupervisorEvent::CrashLoop { .. }) => {}
+            other => panic!("node-resolve 后应只跟恢复页信号: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "CrashLoop 后不得再有事件");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// 功能集成：真机 boot 链（sidecar 四步）在沙箱 home 上执行。
@@ -1750,6 +1864,32 @@ Content-Length: 0
         assert!(seg.contains("set_process_group_leader(&mut cmd)"), "local 分支 PGID 设置不变");
     }
 
+    /// 形态（v0.5.4 Node 三级解析接线）：构造经 resolve_node_with +
+    /// existing_vendor_node（非硬编码 vendor 路径）；缺失步 name=node-resolve
+    /// 且先于 sidecar boot；spawn 仍经 self.node_exe（命中者注入，spawn_kernel
+    /// local 分支零改动）。
+    #[test]
+    fn node_resolution_wiring_shape() {
+        let src = include_str!("supervisor.rs").replace("\r\n", "\n");
+        let ctor = src
+            .split("fn new_with_probes")
+            .nth(1)
+            .and_then(|s| s.split("pub fn state(").next())
+            .expect("new_with_probes 段");
+        assert!(ctor.contains("kernel_process::node_resolve::resolve_node_with"), "构造必须经三级解析链");
+        assert!(ctor.contains("kernel_process::node_resolve::existing_vendor_node"), "vendor 保底经在位判定");
+        let wf = src
+            .split("fn boot_waterfall")
+            .nth(1)
+            .and_then(|s| s.split("fn on_boot_success").next())
+            .expect("boot_waterfall 段");
+        let node_pos = wf.find("\"node-resolve\"").expect("缺失步 name=node-resolve");
+        let wsl_pos = wf.find("wsl_configure_or_fallback(&this)").expect("WSL configure 步");
+        let sidecar_pos = wf.find("run_sidecar_boot(&tx, gen)").expect("sidecar boot 步");
+        assert!(node_pos < wsl_pos && node_pos < sidecar_pos, "node 预检必须先于 WSL configure 与 sidecar boot（sidecar 也依赖 Windows node）");
+        assert!(wf[node_pos..].contains("enter_recovery"), "全缺须转恢复页");
+    }
+
     /// koffi-preflight 通过判定契约（X2 指出的形态修正）：末行 JSON `ok==true`
     /// 语义——逐字 `{"ok":true}`（WSL 跳过形态）与 `{"ok":true,"skipped":
     /// "no-script"}`（脚本缺失形态）都过；`{"ok":false}`/非 JSON 不过。
@@ -1854,8 +1994,12 @@ Content-Length: 0
                 vec!["Ubuntu-22.04".into()]
             }
             fn spawn_server(&self, _distro: &str, _cmd: &str) -> std::io::Result<Child> {
+                // ping 寿命 300s：必须显著大于热探最坏耗时（50×2.1s≈105s，
+                // 防火墙把回环拒绝慢速化时 connect_timeout 每次等满）+ 测试
+                // 断言窗——此前 90s 在慢拒绝环境下被热探吃光，kill_kernel 时
+                // stub 已自然退出，收割断言必败（环境态竞态，非产品回归）。
                 let mut c = Command::new("cmd");
-                c.args(["/d", "/c", "echo dsh web: http://127.0.0.1:39517 & ping -n 90 127.0.0.1 > nul"]);
+                c.args(["/d", "/c", "echo dsh web: http://127.0.0.1:39517 & ping -n 300 127.0.0.1 > nul"]);
                 c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
                 c.creation_flags_win(); // WinFlags trait 经 use super::* 可见
                 c.spawn()
