@@ -2,11 +2,17 @@
 //!
 //! 对齐 Electron 版 main.js startServer 的最终 spawn 命令：
 //! ```text
-//! <vendor-node> --use-system-ca [--require web-crash-shield.js]
+//! <vendor-node> --use-system-ca --expose-internals [--require web-crash-shield.js]
 //!   <bin.js> web [--patch <overlay>]... [--no-open] --host 127.0.0.1 --port <port>
 //! ```
 //! **参数位置契约**（rc.8 实证）：
-//! - `--use-system-ca` / `--require` 是 **node 级**参数，必须位于 bin.js 之前；
+//! - `--use-system-ca` / `--expose-internals` / `--require` 是 **node 级**参数，
+//!   必须位于 bin.js 之前；
+//! - `--expose-internals`（W1 修复，2026-08）：内核 cordis-plugin-loader 经
+//!   `process.execArgv.includes("--expose-internals")` 才能取到 Node 内部 ESM
+//!   loader（`loader.internal`）——HMR 插件无条件要求它，且 profiles/web 下
+//!   插件的裸包名 import 依赖 internal loader 解析；缺失则内核启动即崩
+//!   （"--expose-internals is required for HMR service"）；
 //! - `web` 是子命令（`--profile web` 的别名）；`--patch` / `--no-open` / `--host` /
 //!   `--port` 是 **web 子命令参数**，必须位于 `web` 之后——放前面会被父级解析器
 //!   拒绝（"error: --profile <name> is required"）；
@@ -52,10 +58,12 @@ pub fn web_args(kernel_version: &str, port: u16, patch_yml: &[std::path::PathBuf
     args
 }
 
-/// node 级参数（对齐 Electron：证书修正 + 崩溃屏蔽 require）。
+/// node 级参数（对齐 Electron：证书修正 + internal loader 暴露 + 崩溃屏蔽 require）。
+/// `--expose-internals`：node 级参数（execArgv），内核 loader 据此取 Node 内部
+/// ESM loader——HMR 服务与 profiles 插件的裸包名 import 都依赖（W1 问题一）。
 /// 崩溃屏蔽文件不存在时不注入（dev 检出兜底，Electron 同款）。
 pub fn node_args(crash_shield: Option<&std::path::Path>) -> Vec<String> {
-    let mut args = vec!["--use-system-ca".to_string()];
+    let mut args = vec!["--use-system-ca".to_string(), "--expose-internals".to_string()];
     if let Some(shield) = crash_shield {
         if shield.exists() {
             args.push("--require".into());
@@ -139,7 +147,7 @@ mod tests {
 
     #[test]
     fn arg_shape_matches_electron() {
-        // Electron：node --use-system-ca bin.js web --patch X --no-open --host 127.0.0.1 --port N
+        // Electron：node --use-system-ca --expose-internals bin.js web --patch X --no-open --host 127.0.0.1 --port N
         let args = web_args("0.1.0-rc.8", 51731, &[PathBuf::from("/ov/cordis.patch.yml")]);
         assert_eq!(
             args,
@@ -162,10 +170,22 @@ mod tests {
     #[test]
     fn node_level_args_before_bin() {
         let spec = SpawnSpec::new("node.exe", "bin.js", "0.1.0-rc.8", 5000, &[]);
-        assert_eq!(spec.node_args, vec!["--use-system-ca"]);
+        // W1 问题一：--expose-internals 必须在场（HMR/internal loader 依赖 execArgv 探测）。
+        assert_eq!(spec.node_args, vec!["--use-system-ca", "--expose-internals"]);
         assert_eq!(spec.web_args.first().map(String::as_str), Some("web"));
         let shield = PathBuf::from("/definitely/missing-shield.js");
-        assert_eq!(node_args(Some(&shield)), vec!["--use-system-ca"], "屏蔽文件不存在时不注入");
+        assert_eq!(
+            node_args(Some(&shield)),
+            vec!["--use-system-ca", "--expose-internals"],
+            "屏蔽文件不存在时不注入"
+        );
+        // 屏蔽文件存在时：require 注入在 expose-internals 之后（同为 node 级、bin.js 之前）。
+        let real = std::env::temp_dir();
+        let shield_arg = real.to_string_lossy().into_owned();
+        assert_eq!(
+            node_args(Some(&real)),
+            vec!["--use-system-ca".to_string(), "--expose-internals".to_string(), "--require".to_string(), shield_arg]
+        );
     }
 
     #[test]

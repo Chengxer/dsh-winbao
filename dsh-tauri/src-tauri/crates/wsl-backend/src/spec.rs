@@ -36,17 +36,26 @@ pub fn agent_pkg_dir(install_dir: &str) -> String {
     format!("{install_dir}/agent/node_modules/{PKG}")
 }
 
-/// 内核 spawn 命令串（契约 §4.3，与 Electron spawnServer 逐参一致）。
+/// 内核 spawn 命令串（契约 §4.3 形态 + W1 两项修复，2026-08）。
 ///
 /// 要点：`cd <dir>` 定工作目录；`echo $$ > dsh.pid` 写登录 shell 自身 pid
-/// （`exec` 后即内核 pid）；`env -u …` 净化宿主残留变量并设 `DSH_HOME=<dir>`
-/// （Windows 环境块不传进 WSL，净化只能在命令串内完成）；`--port 0` 由 WSL 内
-/// OS 分配，实际端口从就绪行解析。
+/// （`exec` 后即内核 pid）；`env -u …` 净化宿主会话残留变量并设
+/// `DSH_HOME=<dir>`（Windows 环境块不传进 WSL，净化只能在命令串内完成）；
+/// `--port 0` 由 WSL 内 OS 分配，实际端口从就绪行解析。
+///
+/// W1 修复：
+/// - `node --expose-internals`（问题一）：node 级参数（bin.js 之前，进
+///   `process.execArgv`）——内核 cordis-plugin-loader 据此取 Node 内部 ESM
+///   loader，HMR 插件无条件要求，profiles/web 插件裸包名 import 也依赖；
+/// - `env -u` 清单**不含 NODE_OPTIONS**（问题二）：登录 shell 加载用户
+///   profile 后 NODE_OPTIONS 是用户自己的堆设置（如 --max-old-space-size），
+///   清掉会让 600+ 依赖的 npm/内核解析 OOM；宿主 Windows 环境块本就不传进
+///   WSL（WSLENV 白名单），无「宿主残留」可清。
 pub fn server_cmd(install_dir: &str, no_open: bool) -> String {
     format!(
         "cd {install_dir} && rm -f dsh.pid && echo $$ > dsh.pid \
-         && exec env -u DSH_WEB_URL -u DSH_SESSION_ID -u DSH_SESSION_JSONL -u DSH_SHELL -u NODE_OPTIONS \
-         DSH_HOME={install_dir} node {} web{} --host 127.0.0.1 --port 0",
+         && exec env -u DSH_WEB_URL -u DSH_SESSION_ID -u DSH_SESSION_JSONL -u DSH_SHELL \
+         DSH_HOME={install_dir} node --expose-internals {} web{} --host 127.0.0.1 --port 0",
         agent_bin(install_dir),
         if no_open { " --no-open" } else { "" }
     )
@@ -60,13 +69,16 @@ pub fn stop_cmd(install_dir: &str) -> String {
     )
 }
 
-/// npm staging 安装 + 原子切换命令串（契约 §4.5，Electron installAgent 同式）。
+/// npm staging 安装 + 原子切换命令串（契约 §4.5，Electron installAgent 同式
+/// + W1 问题二：显式 `NODE_OPTIONS=--max-old-space-size=8192`——@deepseek-ai/dsh
+/// 600+ 依赖的解析树默认 ~2GB 堆会 OOM（真实 WSL2 实机），8GB 上限兜底）。
 /// 成功判定必须含 stdout `WSL_INSTALL_OK` 尾标记（exit 0 ≠ 成功，issue #87）。
 pub fn install_cmd(install_dir: &str, version: &str) -> String {
     let staging_bin = format!("{install_dir}/agent-staging/node_modules/{PKG}/lib/bin.js");
     format!(
         "set -eu; rm -rf {install_dir}/agent-staging; mkdir -p {install_dir}/agent-staging; \
-         cd {install_dir}/agent-staging; export NPM_CONFIG_UPDATE_NOTIFIER=false NPM_CONFIG_FUND=false NPM_CONFIG_AUDIT=false; \
+         cd {install_dir}/agent-staging; export NPM_CONFIG_UPDATE_NOTIFIER=false NPM_CONFIG_FUND=false NPM_CONFIG_AUDIT=false \
+         NODE_OPTIONS=--max-old-space-size=8192; \
          npm install --save-exact --omit=dev --no-audit --no-fund --no-update-notifier {PKG}@{version}; \
          test -f {staging_bin}; cd {install_dir}; \
          if [ -d agent ]; then rm -rf agent-prev; mv agent agent-prev; fi; \
@@ -135,33 +147,40 @@ pub fn parse_unc(path: &str) -> Option<(String, String, String)> {
 mod tests {
     use super::*;
 
-    /// server_cmd 与契约 §4.3 形态逐字符比对（--no-open 门控）。
+    /// server_cmd 形态逐字符比对（--no-open 门控；W1 两项修复锚点）。
     #[test]
     fn server_cmd_matches_contract_shape() {
         let cmd = server_cmd("/home/u/.dsh-desktop", true);
         let expected = concat!(
             "cd /home/u/.dsh-desktop && rm -f dsh.pid && echo $$ > dsh.pid ",
-            "&& exec env -u DSH_WEB_URL -u DSH_SESSION_ID -u DSH_SESSION_JSONL -u DSH_SHELL -u NODE_OPTIONS ",
-            "DSH_HOME=/home/u/.dsh-desktop node ",
+            "&& exec env -u DSH_WEB_URL -u DSH_SESSION_ID -u DSH_SESSION_JSONL -u DSH_SHELL ",
+            "DSH_HOME=/home/u/.dsh-desktop node --expose-internals ",
             "/home/u/.dsh-desktop/agent/node_modules/@deepseek-ai/dsh/lib/bin.js ",
             "web --no-open --host 127.0.0.1 --port 0",
         );
         assert_eq!(cmd, expected);
         // rc.7（无 --no-open）形态：web 后直接 --host。
         assert!(server_cmd("/d", false).contains("web --host 127.0.0.1 --port 0"));
-        // 关键序：cd → rm pid → echo pid → exec env -u → node。
+        // 关键序：cd → rm pid → echo pid → exec env -u → node --expose-internals。
         let positions = [
             cmd.find("cd /home/u/.dsh-desktop").unwrap(),
             cmd.find("rm -f dsh.pid").unwrap(),
             cmd.find("echo $$ > dsh.pid").unwrap(),
             cmd.find("exec env -u DSH_WEB_URL").unwrap(),
             cmd.find("DSH_HOME=/home/u/.dsh-desktop").unwrap(),
+            cmd.find("node --expose-internals").unwrap(),
         ];
         assert!(positions.windows(2).all(|w| w[0] < w[1]), "命令串要素顺序: {cmd}");
-        // 五个 env -u 净化项全在场。
-        for var in ["DSH_WEB_URL", "DSH_SESSION_ID", "DSH_SESSION_JSONL", "DSH_SHELL", "NODE_OPTIONS"] {
+        // 四个 env -u 净化项在场；NODE_OPTIONS 不得清（W1 问题二：用户 WSL
+        // profile 的堆设置被清 → npm/内核解析 OOM；宿主环境块本就不传进 WSL）。
+        for var in ["DSH_WEB_URL", "DSH_SESSION_ID", "DSH_SESSION_JSONL", "DSH_SHELL"] {
             assert!(cmd.contains(&format!("-u {var}")), "缺 env -u {var}");
         }
+        assert!(!cmd.contains("-u NODE_OPTIONS"), "不得 env -u NODE_OPTIONS（用户堆设置会被清掉）");
+        // --expose-internals 是 node 级参数：必须位于 bin.js 之前（execArgv 契约）。
+        let node_pos = cmd.find("node --expose-internals").unwrap();
+        let bin_pos = cmd.find("/lib/bin.js").unwrap();
+        assert!(node_pos < bin_pos, "--expose-internals 必须在 bin.js 之前");
     }
 
     /// stop_cmd 幂等形态（kill 失败吞掉 + rm pid）。
@@ -174,13 +193,15 @@ mod tests {
         assert!(!cmd.contains("--shutdown"), "绝不 wsl --shutdown");
     }
 
-    /// install_cmd：staging → 入口校验 → prev 保留 → 原子 mv → OK 尾标记全在场。
+    /// install_cmd：staging → 入口校验 → prev 保留 → 原子 mv → OK 尾标记全在场；
+    /// NODE_OPTIONS 堆上限显式在场（W1 问题二：600+ 依赖解析 OOM）。
     #[test]
     fn install_cmd_shape() {
         let cmd = install_cmd("/home/u/.dsh-desktop", "0.1.1-rc.1");
         for needle in [
             "set -eu",
             "rm -rf /home/u/.dsh-desktop/agent-staging",
+            "export NPM_CONFIG_UPDATE_NOTIFIER=false NPM_CONFIG_FUND=false NPM_CONFIG_AUDIT=false NODE_OPTIONS=--max-old-space-size=8192",
             "npm install --save-exact --omit=dev --no-audit --no-fund --no-update-notifier @deepseek-ai/dsh@0.1.1-rc.1",
             "test -f /home/u/.dsh-desktop/agent-staging/node_modules/@deepseek-ai/dsh/lib/bin.js",
             "rm -rf agent-prev; mv agent agent-prev",

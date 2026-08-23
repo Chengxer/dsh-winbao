@@ -16,6 +16,8 @@
 
 use bridge::BridgeError;
 use tauri::AppHandle;
+#[cfg(windows)]
+use tauri::Manager;
 
 use super::common::atomic_write;
 
@@ -30,6 +32,66 @@ fn ensure_sane_absolute(path: &str) -> Result<(), BridgeError> {
         return Err(BridgeError::invalid_arg("路径含非法字符"));
     }
     Ok(())
+}
+
+/// WSL Linux 路径判定（纯函数，可单测）：WSL 模式下内核回报的 cwd / 工作区
+/// 路径是 Linux 绝对路径（`/home/u/proj`）——Windows 的 `Path::is_absolute`
+/// 与 fence 围栏都不认识（W1 问题三：「打开项目目录」对 Linux 路径无效）。
+/// 判据：`/` 开头且无引号/控制字符。
+#[cfg(windows)]
+fn is_wsl_linux_path(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.contains('"')
+        && !path.contains('\0')
+        && !path.chars().any(|c| c.is_control())
+}
+
+/// Linux 路径 → explorer 可用的 UNC 形态：`\\wsl.localhost\<distro><path>`
+/// （经 wsl-backend `unc_dir` 构造，与安装目录 UNC 同口径）。
+#[cfg(windows)]
+fn wsl_unc_target(path: &str, distro: &str) -> String {
+    wsl_backend::spec::unc_dir("wsl.localhost", distro, path)
+}
+
+/// file_open 的 WSL 分支（Windows 壳）：Linux 路径不经 Windows fence/explorer
+/// 直接路径，而是映射 UNC 后交 explorer（原生 Windows 窗口）；explorer 拉不起
+/// 时回落 WSL 内 xdg-open（经 wsl.exe -e，单参数 argv 不经 shell 解析）。
+/// 返回 Ok(true) = 已接管打开；Ok(false) = 非 Linux 路径（调用方走本地分支）。
+#[cfg(windows)]
+fn file_open_wsl(path: &str, app: &AppHandle) -> Result<bool, BridgeError> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    if !path.starts_with('/') {
+        return Ok(false);
+    }
+    if !is_wsl_linux_path(path) {
+        return Err(BridgeError::invalid_arg("路径含非法字符"));
+    }
+    // distro 来源：supervisor 运行态 WSL 后端（boot 期 configure 已解析）。
+    let state = app.state::<crate::AppState>();
+    let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let distro = match sv.and_then(|s| s.wsl_active()) {
+        Some(b) => b.distro(),
+        None => {
+            return Err(BridgeError::invalid_arg(format!(
+                "Linux 路径需 WSL 后端在用（当前为 local 模式或未配置），无法打开: {path}"
+            )))
+        }
+    };
+    if distro.is_empty() {
+        return Err(BridgeError::invalid_arg(format!("WSL 发行版未解析，无法打开: {path}")));
+    }
+    let unc = wsl_unc_target(path, &distro);
+    if std::process::Command::new("explorer").arg(&unc).spawn().is_ok() {
+        return Ok(true);
+    }
+    // 回落：WSL 内 xdg-open（wslview → Windows 默认处理器）。
+    std::process::Command::new("wsl.exe")
+        .args(["-d", &distro, "-e", "xdg-open", path])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(BridgeError::from)?;
+    Ok(true)
 }
 
 /// file_open 的路径解析（纯函数，可单测）：home 内走围栏；home 外要求
@@ -53,8 +115,15 @@ fn resolve_openable_path(path: &str) -> Result<std::path::PathBuf, BridgeError> 
 
 #[tauri::command]
 pub fn file_open(path: String, app: AppHandle) -> Result<serde_json::Value, BridgeError> {
-    let cleaned = resolve_openable_path(&path)?;
+    // WSL 分支先行（W1 问题三）：Linux 绝对路径不经 Windows fence，映射 UNC 打开。
+    #[cfg(windows)]
+    {
+        if file_open_wsl(&path, &app)? {
+            return Ok(serde_json::Value::Null);
+        }
+    }
     let _ = &app;
+    let cleaned = resolve_openable_path(&path)?;
     #[cfg(windows)]
     {
         std::process::Command::new("explorer").arg(&cleaned).spawn().map_err(BridgeError::from)?;
@@ -221,5 +290,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_file(&ws);
         let _ = std::fs::remove_file(&special);
+    }
+
+    /// W1 问题三：WSL Linux 路径判定与 UNC 映射（纯函数）。
+    /// `/` 开头的干净路径是 WSL 路径；Windows 路径/相对路径/带引号与控制
+    /// 字符的路径不是（后者交由上层以 invalid_arg 拒绝）。
+    #[cfg(windows)]
+    #[test]
+    fn wsl_linux_path_detection_and_unc_mapping() {
+        assert!(is_wsl_linux_path("/home/u/project"));
+        assert!(is_wsl_linux_path("/opt/dsh"));
+        // 非 / 前缀：Windows 路径 / UNC / 相对路径都不是 WSL Linux 路径。
+        assert!(!is_wsl_linux_path("C:\\Users\\u"));
+        assert!(!is_wsl_linux_path("\\\\wsl.localhost\\Ubuntu\\home\\u"));
+        assert!(!is_wsl_linux_path("relative/x"));
+        assert!(!is_wsl_linux_path(""));
+        // 含引号 / 控制字符：不算合法 WSL 路径（file_open_wsl 转 invalid_arg）。
+        assert!(!is_wsl_linux_path("/home/u/a\"b"));
+        assert!(!is_wsl_linux_path("/home/u/a\u{0007}b"));
+        // UNC 映射：与安装目录 unc_dir 同口径（正斜杠 → 反斜杠）。
+        assert_eq!(wsl_unc_target("/home/u/project", "Ubuntu-24.04"), "\\\\wsl.localhost\\Ubuntu-24.04\\home\\u\\project");
+        assert_eq!(wsl_unc_target("/", "Debian"), "\\\\wsl.localhost\\Debian\\");
     }
 }

@@ -210,16 +210,26 @@ WSL 模式须放宽为 35 分钟（npm 首装 30 分钟超时 + boot 链）—�
 wsl.exe -d <distro> -e sh -lc
   "cd <installDir> && rm -f dsh.pid && echo $$ > dsh.pid \
    && exec env -u DSH_WEB_URL -u DSH_SESSION_ID -u DSH_SESSION_JSONL \
-      -u DSH_SHELL -u NODE_OPTIONS \
+      -u DSH_SHELL \
       DSH_HOME=<installDir> \
-      node <installDir>/agent/node_modules/@deepseek-ai/dsh/lib/bin.js \
+      node --expose-internals \
+      <installDir>/agent/node_modules/@deepseek-ai/dsh/lib/bin.js \
       web [--no-open] --host 127.0.0.1 --port 0"
 ```
 
 - `--no-open` 按内核版本门控（`semver::needs_no_open_flag`，rc.8 起）。
+- `--expose-internals`（W1 问题一，2026-08）：node 级参数（bin.js 之前，
+  进 `process.execArgv`）——内核 cordis-plugin-loader 据此取 Node 内部 ESM
+  loader；缺失则 HMR 插件启动即抛
+  "--expose-internals is required for HMR service"，且 profiles/web 插件
+  裸包名 import 解析不到（internal loader 依赖）。local 模式同款（spawn_spec
+  `node_args()`）。
 - `echo $$ > dsh.pid`：登录 shell 自身 pid 写文件，`exec` 后即内核 pid。
 - **环境净化在命令串内完成**（`env -u`）：WSL 模式不适用 ENV_ALLOWLIST
   （Windows 环境块不传进 WSL；wsl.exe 只透传 WSLENV 白名单变量）。
+  `env -u` 清单**不含 NODE_OPTIONS**（W1 问题二）：登录 shell 加载用户
+  profile 后 NODE_OPTIONS 是用户 WSL 侧自己的堆设置，清掉会让大依赖树
+  npm/内核解析 OOM；宿主 Windows 环境块本就不传进 WSL，无「宿主残留」可清。
 - 就绪行：内核 stdout 经 wsl.exe 管道透传（UTF-8），`ReadyLineParser`
   照常解析 `dsh web: http://127.0.0.1:<port>`。
 - **实际端口 = 就绪行 URL 的端口**（非 spawn 传入值）。spawn_and_wait_ready
@@ -254,10 +264,14 @@ D1 决策「内核版本随客户端发版」在 WSL 模式的等价：**WSL 内
   └─ 版本漂移（客户端升级后首次启动）→ 安装新版本（staging + 原子切换）
 安装（installAgent，30 分钟超时）：
   set -eu; rm -rf <dir>/agent-staging; mkdir -p …; cd …
+  export NPM_CONFIG_UPDATE_NOTIFIER=false NPM_CONFIG_FUND=false \
+         NPM_CONFIG_AUDIT=false NODE_OPTIONS=--max-old-space-size=8192
   npm install --save-exact --omit=dev --no-audit --no-fund --no-update-notifier @deepseek-ai/dsh@<v>
   test -f <staging>/…/bin.js                       ← 入口校验（防半装）
   cd <dir>; [ -d agent ] && { rm -rf agent-prev; mv agent agent-prev; }
   mv agent-staging agent; echo WSL_INSTALL_OK
+（NODE_OPTIONS 堆上限为 W1 问题二修复：600+ 依赖解析默认 ~2GB 堆 OOM，
+2026-08 真实 WSL2 实机实证。）
 失败：清理 staging（15s 短超时），保留现状，报 E_WSL_INSTALL。
 版本号白名单 [A-Za-z0-9._-]+（拼进命令串的注入防御）。
 成功判定必须含 stdout WSL_INSTALL_OK 标记（exit 0 ≠ 成功，issue #87 教训）。
