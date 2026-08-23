@@ -76,7 +76,7 @@ pub fn stop_cmd(install_dir: &str) -> String {
 pub fn install_cmd(install_dir: &str, version: &str) -> String {
     let staging_bin = format!("{install_dir}/agent-staging/node_modules/{PKG}/lib/bin.js");
     format!(
-        "set -eu; rm -rf {install_dir}/agent-staging; mkdir -p {install_dir}/agent-staging; \
+        "set -eu; echo WSL_INSTALL_STARTED; rm -rf {install_dir}/agent-staging; mkdir -p {install_dir}/agent-staging; \
          cd {install_dir}/agent-staging; export NPM_CONFIG_UPDATE_NOTIFIER=false NPM_CONFIG_FUND=false NPM_CONFIG_AUDIT=false \
          NODE_OPTIONS=--max-old-space-size=8192; \
          npm install --save-exact --omit=dev --no-audit --no-fund --no-update-notifier {PKG}@{version}; \
@@ -200,6 +200,7 @@ mod tests {
         let cmd = install_cmd("/home/u/.dsh-desktop", "0.1.1-rc.1");
         for needle in [
             "set -eu",
+            "echo WSL_INSTALL_STARTED",
             "rm -rf /home/u/.dsh-desktop/agent-staging",
             "export NPM_CONFIG_UPDATE_NOTIFIER=false NPM_CONFIG_FUND=false NPM_CONFIG_AUDIT=false NODE_OPTIONS=--max-old-space-size=8192",
             "npm install --save-exact --omit=dev --no-audit --no-fund --no-update-notifier @deepseek-ai/dsh@0.1.1-rc.1",

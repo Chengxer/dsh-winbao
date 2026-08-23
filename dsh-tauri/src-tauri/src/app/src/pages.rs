@@ -131,7 +131,7 @@ pub const LOADING_HTML: &str = r#"<!doctype html>
     } catch (e) {}
   }
   var NAMES = { repair:'自愈检查', sync:'伴随插件同步', presets:'内置预设对账', patches:'运行时补丁', preflight:'就绪预检',
-                'sidecar-boot':'启动链', spawn:'内核拉起' };
+                'sidecar-boot':'启动链', spawn:'内核拉起', 'wsl-install':'安装内核 agent（首次需几分钟）' };
   listen('boot-step', function(p){
     // （listen() 已解包信封，p 即 payload 本体。）
     // 链头重现 = 新一轮自动重试开始（supervisor 瀑布：首拉失败后重跑 boot 链，
