@@ -18,12 +18,23 @@ const LOCK_STALE_MS = 60_000
 // burst of session events costs a single full-state write instead of one per
 // event (issue #13: per-event saves pinned the main thread at ~90% CPU).
 const SAVE_DEBOUNCE_MS = 800
+// M4: while no canvas view is open the projection only feeds workspaces.json
+// (nobody reads it live), so deferred saves relax to this idle window. The
+// view-activation POST flushes pending dirty state immediately so the opening
+// view's catch-up reads everything recorded while silent.
+const IDLE_SAVE_DEBOUNCE_MS = 2_500
 // Growth bounds for the projection store. DSH keeps the full session log;
 // the canvas only needs a bounded tail per thread, so projected messages and
 // folded tool texts are capped instead of growing workspaces.json forever.
 const PROJECTION_THREAD_MESSAGE_LIMIT = 400
 const MAX_PROCESS_TEXT_LENGTH = 4_000
 const PROCESS_TRUNCATED_SUFFIX = '\n——…（已截断）'
+// Folded tool records per assistant message are bounded too: long agentic
+// turns fire hundreds of tool calls, and every capped argument/result pair
+// used to live in workspaces.json forever, so one heavy session could pin
+// megabytes that every full-state save re-serialized. Settled entries drop
+// first; pending calls survive so their results can still land.
+const PROCESS_ENTRY_LIMIT = 120
 
 /** JSON persistence for the Synapse workspace graph. */
 export class WorkspaceStore {
@@ -38,6 +49,8 @@ export class WorkspaceStore {
     this.lockWarned = false
     this.dirty = false
     this.flushTimer = null
+    // M4: true while at least one canvas view is open (see setViewActive).
+    this.viewActive = false
     // In-memory projection indexes keyed by the live thread object: applied
     // sourceSeq set (O(1) duplicate rejection instead of an O(n) scan per
     // event) and the turn/step → assistant-message fold target. Rebuilt
@@ -344,7 +357,31 @@ export class WorkspaceStore {
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null
       void this.flush()
-    }, SAVE_DEBOUNCE_MS)
+    }, this.viewActive ? SAVE_DEBOUNCE_MS : IDLE_SAVE_DEBOUNCE_MS)
+  }
+
+  /**
+   * M4 view activation, reported by the web client through
+   * POST /synapse/api/view-state. Saves run at the fast cadence while a view
+   * is open; going silent re-arms any pending fast flush onto the idle
+   * window; a freshly opened view flushes pending dirty state right away so
+   * its catch-up read never misses what was recorded while closed.
+   */
+  setViewActive(active) {
+    const next = active === true
+    if (this.viewActive === next) return
+    this.viewActive = next
+    if (next) {
+      if (this.dirty) void this.flush()
+      return
+    }
+    if (this.flushTimer !== null) {
+      clearTimeout(this.flushTimer)
+      this.flushTimer = setTimeout(() => {
+        this.flushTimer = null
+        void this.flush()
+      }, IDLE_SAVE_DEBOUNCE_MS)
+    }
   }
 
   /** Persist the current state when dirty, ordered after in-flight mutations. */
@@ -574,6 +611,14 @@ export class WorkspaceStore {
     this.foldTargetCache.delete(thread)
   }
 
+  /** Keep the folded process list within PROCESS_ENTRY_LIMIT entries. */
+  trimProcessEntries(process) {
+    if (process.length < PROCESS_ENTRY_LIMIT) return
+    let index = process.findIndex(entry => entry.result !== null || entry.error !== null)
+    if (index === -1) index = 0
+    process.splice(index, 1)
+  }
+
   /**
    * Fold one tool call or result into the assistant message of its own
    * turn/step, keyed by `callId`, so a tool invocation never becomes a
@@ -585,6 +630,7 @@ export class WorkspaceStore {
     const target = this.foldTarget(thread, event)
     if (target === undefined) return
     const process = target.process ??= []
+    this.trimProcessEntries(process)
     const callId = String(event.type === 'tool/call' ? event.data.callId : event.data.message?.source?.callId ?? '')
     const entry = process.find(item => item.callId === callId)
     if (event.type === 'tool/call') {
@@ -942,6 +988,13 @@ export function apply(ctx, config) {
       const branch = /^\/synapse\/api\/threads\/([0-9a-f-]+)\/branch$/i.exec(path)
       if (branch !== null && req.method === 'POST') return sendJson(res, 201, { thread: await store.branch(branch[1], await readJson(req)) })
       if (path === '/synapse/api/sessions/sync' && req.method === 'POST') { const body = await readJson(req); return sendJson(res, 200, { workspaces: await store.syncSessions(body.sessions, body.removedSessionIds) }) }
+      if (path === '/synapse/api/view-state' && req.method === 'POST') {
+        // M4 activation signal from the web client: fast saves while a canvas
+        // view is open, relaxed debounce while every view stays closed.
+        const body = await readJson(req)
+        store.setViewActive(body.active === true)
+        return sendJson(res, 200, { viewActive: store.viewActive })
+      }
       const messages = /^\/synapse\/api\/threads\/([0-9a-f-]+)\/messages$/i.exec(path)
       if (messages !== null && req.method === 'POST') return sendJson(res, 201, { thread: await store.addMessage(messages[1], (await readJson(req)).text) })
       const thread = /^\/synapse\/api\/threads\/([0-9a-f-]+)$/i.exec(path)

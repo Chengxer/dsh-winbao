@@ -31,12 +31,23 @@ const CAMERA_INSET_X = 56
 const CAMERA_INSET_Y = 56
 const state = {
   summaries: [], workspace: null, activeId: null, mode: 'canvas', zoom: 1, currentDsh: null, sidebarCollapsed: false,
-  dshWorkspaces: [], selectedDshWorkspaceId: null,
+  dshWorkspaces: [], selectedDshWorkspaceId: null, dshWorkspacesSignature: '',
   historyBySession: new Map(), historyRequests: new Map(), pendingReplies: new Map(), pendingRpc: new Map(), liveReplies: new Map(),
   draft: null, error: '', workspaceLoad: 0, branchAnchors: new Map(savedBranchAnchors), cardPositions: new Map(savedCardPositions), collapsedCardIds: new Set(savedCollapsedCards),
   dragging: false, canvasGesture: false, canvasRefreshAfter: 0, detailRefreshAfter: 0, canvasViewInitialized: false, canvasCamera: { x: 0, y: 0 },
   expandedMessageIds: new Set(),
 }
+
+// M4 on-demand activation: false until the host opens the canvas view. While
+// false the app is fully silent — zero fetch, zero postMessage, zero
+// projection poll, zero event-driven render — so a closed canvas never costs
+// the main conversation anything.
+let viewActive = false
+let projectionPollTimer = 0
+// Handle of the pending map-ready handshake frame (cancelled when the view
+// closes before the handshake completes, so a late map-ready can never
+// resurrect an overlay the user already closed).
+let mapReadyFrame = 0
 
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]))
 const formatTime = value => new Date(value).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
@@ -320,6 +331,15 @@ function workspaceChoices() {
   return state.summaries.map(workspace => ({ id: workspace.id, title: workspace.title, path: workspace.cwd, sessionIds: [], source: 'projection' }))
 }
 
+// Structural fingerprint of a DSH workspace list push: identity, title, path
+// and member sessions. Equal fingerprints mean the reload would produce an
+// identical canvas, so the reload (fetch + full render) is skipped.
+function dshWorkspacesSignature(workspaces) {
+  return workspaces
+    .map(workspace => `${workspace.id}|${workspace.title}|${workspace.path ?? ''}|${workspace.sessionIds.join(',')}`)
+    .join(';')
+}
+
 async function threadsForDshWorkspace(workspace) {
   if (workspace.sessionIds.length === 0) return []
   const requested = new Set(workspace.sessionIds)
@@ -342,7 +362,10 @@ async function openDshWorkspace(id, { renderAfter = true } = {}) {
   if (currentThread !== undefined) revealConversationThread(conversationCards(state.workspace.threads), currentThread.id)
   if (renderAfter && canReplaceView()) render()
   await Promise.all(state.workspace.threads.map(thread => loadThreadHistory(thread, false)))
-  if (renderAfter && load === state.workspaceLoad && canReplaceView()) render()
+  // History loads are event-driven (poll/push paths come here too), so the
+  // trailing render coalesces into the frame scheduler instead of stacking
+  // a second full DOM rebuild right after the first.
+  if (renderAfter && load === state.workspaceLoad && canReplaceView()) scheduleRender()
   return true
 }
 
@@ -362,7 +385,7 @@ async function refreshSummaries({ renderAfter = true } = {}) {
   const selected = selectedDshWorkspace()
   if (selected !== undefined && (changed || state.workspace === null)) await openDshWorkspace(selected.id, { renderAfter })
   else if (state.workspace === null && state.summaries.length > 0) await openWorkspace(state.summaries[0].id)
-  else if (renderAfter && changed && canReplaceView()) render()
+  else if (renderAfter && changed && canReplaceView()) scheduleRender()
   return changed
 }
 
@@ -375,11 +398,20 @@ async function openWorkspace(id, { renderAfter = true } = {}) {
   state.activeId = state.workspace.threads.some(thread => thread.id === state.activeId) ? state.activeId : state.workspace.threads[0]?.id ?? null
   if (renderAfter && canReplaceView()) render()
   await Promise.all(state.workspace.threads.map(thread => loadThreadHistory(thread, false)))
-  if (renderAfter && load === state.workspaceLoad && canReplaceView()) render()
+  if (renderAfter && load === state.workspaceLoad && canReplaceView()) scheduleRender()
 }
 
 async function refreshProjection() {
+  // A straggler (e.g. the deferred refresh after submitting a draft) must not
+  // bring fetches back to a closed view.
+  if (!viewActive) return false
+  const hadWorkspace = state.workspace !== null
   const summariesChanged = await refreshSummaries({ renderAfter: false })
+  // refreshSummaries already bootstraps the workspace when it was null (the
+  // M4 activation path) and reloads the selected DSH workspace itself on
+  // summary changes; reloading again right after the bootstrap would double
+  // the catch-up fetches for the identical data.
+  if (!hadWorkspace && state.workspace !== null) return true
   if (!summariesChanged || state.workspace === null || !canReplaceView()) return summariesChanged
   if (state.selectedDshWorkspaceId !== null) await openDshWorkspace(state.selectedDshWorkspaceId)
   else await openWorkspace(state.workspace.id)
@@ -761,6 +793,7 @@ function layoutConversationGraph(cards, threads) {
 function conversationCards(threads) {
   const cards = []
   const cardsByThread = new Map()
+  const threadsById = new Map(threads.map(thread => [thread.id, thread]))
   for (const thread of threads) {
     const messages = messagesFor(thread)
     const turns = []
@@ -830,7 +863,9 @@ function conversationCards(threads) {
     if (card.turnIndex > 0) card.parentId = siblings[card.turnIndex - 1].id
     else {
       const parentCards = cardsByThread.get(card.sourceParentId)
-      const sourceThread = threads.find(thread => thread.id === card.dshThreadId)
+      // Lookup by map instead of a linear `threads.find` per first-turn card:
+      // with N subagent threads this loop ran O(cards × threads) per render.
+      const sourceThread = threadsById.get(card.dshThreadId)
       const firstChildQuestion = siblings?.[0]
       const seedLength = sourceThread?.sourceSeedLength ?? firstChildQuestion?.sourceSeq
       // A fork inherits every parent event before DSH's durable seed boundary.
@@ -874,17 +909,40 @@ function conversationGraphView(cards, collapsedCardIds = state.collapsedCardIds)
   // contains a cycle where two collapsed nodes otherwise hide each other.
   for (const rootId of collapsedCardIds) hiddenIds.delete(rootId)
 
+  // Descendant counts used to run one BFS per card (O(V·E) overall), which
+  // showed up as a per-render CPU spike once the canvas held hundreds of
+  // subagent cards. Cards have a single parentId, so the graph is a forest
+  // and one memoized traversal computes every count in O(V+E). Malformed
+  // metadata can still form a cycle; the memo path detects it and falls
+  // back to the original per-card BFS, which keeps the unique-descendant
+  // semantics (a cycle member counts every other member exactly once).
   const descendantCounts = new Map()
-  for (const card of cards) {
-    const visited = new Set([card.id])
-    const pending = [...(childrenByParent.get(card.id) ?? [])]
-    while (pending.length > 0) {
-      const descendantId = pending.pop()
-      if (visited.has(descendantId)) continue
-      visited.add(descendantId)
-      pending.push(...(childrenByParent.get(descendantId) ?? []))
+  let cyclic = false
+  const descendantsOf = (cardId, visiting) => {
+    const cached = descendantCounts.get(cardId)
+    if (cached !== undefined) return cached
+    if (visiting.has(cardId)) { cyclic = true; return 0 }
+    visiting.add(cardId)
+    let count = 0
+    for (const childId of childrenByParent.get(cardId) ?? []) count += 1 + descendantsOf(childId, visiting)
+    visiting.delete(cardId)
+    descendantCounts.set(cardId, count)
+    return count
+  }
+  for (const card of cards) { if (cyclic) break; descendantsOf(card.id, new Set()) }
+  if (cyclic) {
+    descendantCounts.clear()
+    for (const card of cards) {
+      const visited = new Set([card.id])
+      const pending = [...(childrenByParent.get(card.id) ?? [])]
+      while (pending.length > 0) {
+        const descendantId = pending.pop()
+        if (visited.has(descendantId)) continue
+        visited.add(descendantId)
+        pending.push(...(childrenByParent.get(descendantId) ?? []))
+      }
+      descendantCounts.set(card.id, visited.size - 1)
     }
-    descendantCounts.set(card.id, visited.size - 1)
   }
 
   return {
@@ -1069,6 +1127,38 @@ function render() {
 
 function renderPreservingDetailScroll() {
   render()
+}
+
+// Event-driven renders coalesce into one full render per animation frame.
+// N streaming subagents each used to trigger their own full innerHTML
+// rebuild per event; at 20+ sessions the DOM replacement rate collapsed
+// the frame rate and starved input handling. User-driven paths (clicks,
+// drags, form submits) keep calling render() directly for synchronous
+// feedback — only the message/poll push paths go through the scheduler.
+let scheduledRenderFrame = 0
+let scheduledRenderRetry = 0
+function scheduleRender() {
+  // Silent views never schedule work; the activation catch-up re-renders
+  // everything from fresh data anyway.
+  if (!viewActive) return
+  if (scheduledRenderFrame !== 0) return
+  scheduledRenderFrame = window.requestAnimationFrame(() => {
+    scheduledRenderFrame = 0
+    // requestAnimationFrame never fires while the document is hidden, so
+    // pending renders resume naturally on the visibilitychange catch-up.
+    if (document.hidden) return
+    if (!canReplaceView()) {
+      // A gated moment (drag / detail scroll) must defer, not drop, the
+      // update: retry shortly after the gate window opens.
+      if (scheduledRenderRetry !== 0) window.clearTimeout(scheduledRenderRetry)
+      scheduledRenderRetry = window.setTimeout(() => {
+        scheduledRenderRetry = 0
+        scheduleRender()
+      }, 200)
+      return
+    }
+    renderPreservingDetailScroll()
+  })
 }
 
 function applyCanvasTransform() {
@@ -1357,23 +1447,36 @@ window.addEventListener('message', event => {
   if (event.origin !== window.location.origin || event.data?.source !== 'dsh-synapse') return
   const data = event.data
   if (data.type === 'synapse:map-opened') {
+    // M4: the host opening the canvas is the single activation source. It
+    // performs the full catch-up (host bridge state + projection reload)
+    // before this render handshake, then resumes the M2 throttled realtime.
+    activateView()
     resetCanvasCamera()
     state.mode = 'canvas'
     render()
-    window.requestAnimationFrame(() => post('synapse:map-ready'))
+    mapReadyFrame = window.requestAnimationFrame(() => { mapReadyFrame = 0; post('synapse:map-ready') })
     restorePersistedDetailView()
   }
+  if (data.type === 'synapse:map-closed') deactivateView()
   if (data.type === 'synapse:theme') {
     document.documentElement.dataset.theme = data.dark === true ? 'dark' : 'light'
   }
-  if (data.type === 'synapse:workspaces') {
-    state.dshWorkspaces = Array.isArray(data.workspaces) ? data.workspaces.filter(workspace => typeof workspace?.id === 'string' && typeof workspace.title === 'string' && Array.isArray(workspace.sessionIds)) : []
-    const current = currentDshWorkspace()
-    if (current !== undefined && current.id !== state.selectedDshWorkspaceId) void openDshWorkspace(current.id).catch(setError)
-    else if (state.selectedDshWorkspaceId !== null) void openDshWorkspace(state.selectedDshWorkspaceId).catch(setError)
-    else if (canReplaceView()) render()
+  if (data.type === 'synapse:workspaces' && viewActive) {
+    const workspaces = Array.isArray(data.workspaces) ? data.workspaces.filter(workspace => typeof workspace?.id === 'string' && typeof workspace.title === 'string' && Array.isArray(workspace.sessionIds)) : []
+    // Subagent churn re-delivers this message on every list-snapshot change.
+    // An identical list must not re-run the workspace reload (one fetch per
+    // projection workspace plus two full DOM rebuilds) N times a second.
+    const signature = dshWorkspacesSignature(workspaces)
+    if (signature !== state.dshWorkspacesSignature || state.workspace === null) {
+      state.dshWorkspaces = workspaces
+      state.dshWorkspacesSignature = signature
+      const current = currentDshWorkspace()
+      if (current !== undefined && current.id !== state.selectedDshWorkspaceId) void openDshWorkspace(current.id).catch(setError)
+      else if (state.selectedDshWorkspaceId !== null) void openDshWorkspace(state.selectedDshWorkspaceId).catch(setError)
+      else if (canReplaceView()) scheduleRender()
+    }
   }
-  if (data.type === 'synapse:current-session') {
+  if (data.type === 'synapse:current-session' && viewActive) {
     const previousId = state.currentDsh?.id
     state.currentDsh = data.session
     const thread = currentDshThread()
@@ -1381,10 +1484,10 @@ window.addEventListener('message', event => {
       state.activeId = thread.id
       if (state.workspace !== null) revealConversationThread(conversationCards(state.workspace.threads), thread.id)
     }
-    if (previousId !== data.session?.id) void openCurrentWorkspace().then(opened => { if (!opened && canReplaceView()) render() }).catch(setError)
-    else if (canReplaceView()) render()
+    if (previousId !== data.session?.id) void openCurrentWorkspace().then(opened => { if (!opened && canReplaceView()) scheduleRender() }).catch(setError)
+    else scheduleRender()
   }
-  if (data.type === 'synapse:live-reply' && typeof data.sessionId === 'string') {
+  if (data.type === 'synapse:live-reply' && typeof data.sessionId === 'string' && viewActive) {
     const thread = state.workspace?.threads.find(item => item.dshSessionId === data.sessionId)
     if (thread !== undefined) {
       if (data.running === true) {
@@ -1392,12 +1495,18 @@ window.addEventListener('message', event => {
         // Streaming: patch the live card's answer in place instead of
         // rebuilding the whole canvas on every chunk; a full render reconciles
         // at stream end. The detail view is single-thread, so keep its cheap
-        // throttled full render.
+        // throttled full render — and skip it entirely for streams on
+        // non-active threads, which cannot change the detail output.
         if (state.mode === 'canvas') scheduleLiveCardUpdate(data.sessionId)
-        else if (canReplaceView()) scheduleLiveRender()
+        else if (thread.id === state.activeId && canReplaceView()) scheduleLiveRender()
       } else {
         state.liveReplies.delete(data.sessionId)
-        if (canReplaceView() || state.pendingReplies.has(data.sessionId)) renderPreservingDetailScroll()
+        // A pending user reply settling is urgent (one event per turn, never
+        // a storm): render synchronously, bypassing the detail defer. Every
+        // other stream end coalesces into the frame scheduler so N subagent
+        // streams finishing together cost one render, not N.
+        if (state.pendingReplies.has(data.sessionId)) renderPreservingDetailScroll()
+        else scheduleRender()
       }
     }
   }
@@ -1406,22 +1515,27 @@ window.addEventListener('message', event => {
 })
 
 persistedDetailView = readPersistedDetailView(safeSessionStorage())
-post('synapse:request-current')
-refreshSummaries().catch(setError)
+// M4 on-demand runtime. Loading the iframe no longer pre-fetches summaries,
+// asks the host for its state, or mounts the 1s projection poll: the view
+// boots silent and only activates when the host sends synapse:map-opened.
+// Closing the canvas (synapse:map-closed / page teardown) tears every timer
+// and pending frame back down, so a closed view schedules literally nothing.
 let polling = false
 let liveRenderTimer = 0
 let liveCardFrame = 0
-let liveCardSessionId = null
+const liveCardFrameIds = new Set()
 function scheduleLiveCardUpdate(sessionId) {
-  // Coalesce streaming chunks to one DOM patch per animation frame.
-  liveCardSessionId = sessionId
+  if (!viewActive) return
+  // Coalesce streaming chunks to one DOM patch per animation frame — and
+  // collect every streaming session, so N subagents streaming in the same
+  // frame each get their card patched instead of only the last one.
+  liveCardFrameIds.add(sessionId)
   if (liveCardFrame !== 0) return
   liveCardFrame = window.requestAnimationFrame(() => {
     liveCardFrame = 0
-    if (liveCardSessionId === null) return
-    const id = liveCardSessionId
-    liveCardSessionId = null
-    applyLiveReplyToCard(id)
+    const ids = [...liveCardFrameIds]
+    liveCardFrameIds.clear()
+    for (const id of ids) applyLiveReplyToCard(id)
   })
 }
 function applyLiveReplyToCard(sessionId) {
@@ -1441,17 +1555,60 @@ function applyLiveReplyToCard(sessionId) {
     : `${renderMarkdown(text)}<p class="thread-answer-pending">正在回复</p>`
 }
 function scheduleLiveRender() {
-  if (liveRenderTimer !== 0 || !canReplaceView()) return
+  if (!viewActive || liveRenderTimer !== 0 || !canReplaceView()) return
   liveRenderTimer = window.setTimeout(() => {
     liveRenderTimer = 0
     if (canReplaceView()) renderPreservingDetailScroll()
   }, 120)
 }
 async function pollProjection() {
-  if (polling || document.hidden || !canReplaceView()) return
+  if (polling || !viewActive || document.hidden || !canReplaceView()) return
   polling = true
   try {
     await refreshProjection()
   } finally { polling = false }
 }
-window.setInterval(() => { void pollProjection() }, 1_000)
+function activateView() {
+  if (viewActive) return
+  viewActive = true
+  // Full catch-up first (reusing the M2 refresh path): ask the host to push
+  // its bridge state, reload the projection once, then resume realtime via
+  // the 1s projection poll. The persisted detail view is restored after the
+  // catch-up so its thread is actually loaded on a first-ever open.
+  post('synapse:request-current')
+  refreshProjection()
+    .then(() => restorePersistedDetailView())
+    .catch(setError)
+  if (projectionPollTimer === 0) projectionPollTimer = window.setInterval(() => { void pollProjection() }, 1_000)
+}
+function deactivateView() {
+  if (!viewActive) return
+  viewActive = false
+  // Silence means stopping the sources, not discarding downstream: drop the
+  // poll interval, every pending frame-coalesced render, the live-card patch
+  // frame, the detail throttle and the scroll pin observers. A canvas closed
+  // for hours must leave nothing scheduled behind (no timer, no fetch, no
+  // render). In-flight user RPCs (state.pendingRpc) keep their own 20s
+  // self-cleaning timeouts: their results must still settle.
+  if (projectionPollTimer !== 0) { window.clearInterval(projectionPollTimer); projectionPollTimer = 0 }
+  if (mapReadyFrame !== 0) { window.cancelAnimationFrame(mapReadyFrame); mapReadyFrame = 0 }
+  if (scheduledRenderFrame !== 0) { window.cancelAnimationFrame(scheduledRenderFrame); scheduledRenderFrame = 0 }
+  if (scheduledRenderRetry !== 0) { window.clearTimeout(scheduledRenderRetry); scheduledRenderRetry = 0 }
+  if (liveCardFrame !== 0) { window.cancelAnimationFrame(liveCardFrame); liveCardFrame = 0 }
+  liveCardFrameIds.clear()
+  if (liveRenderTimer !== 0) { window.clearTimeout(liveRenderTimer); liveRenderTimer = 0 }
+  if (detailRefreshTimer !== 0) { window.clearTimeout(detailRefreshTimer); detailRefreshTimer = 0 }
+  stopDetailScrollPin()
+}
+// The frame is going away entirely (tab close, iframe unload): tell the host
+// so it can drop its fast flush cadence for the now-viewerless projection.
+window.addEventListener('pagehide', () => post('synapse:view-unloaded'))
+// While the page is hidden both requestAnimationFrame and the projection
+// poll are paused, so events that arrived in the background would otherwise
+// stay unrendered until the next push. Catch up once on return — an inactive
+// view stays silent, its catch-up happens on the next activation instead.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden || !viewActive) return
+  scheduleRender()
+  void pollProjection()
+})

@@ -302,9 +302,12 @@ test('gates event-driven renders on the detail defer and keeps the pending-reply
   const liveReply = slice(source, "data.type === 'synapse:live-reply'", "if (data.type === 'synapse:forked-session'")
 
   assert.match(gate, /shouldDeferDetailRender\(state, Date\.now\(\)\)/)
-  assert.match(liveReply, /canReplaceView\(\) \|\| state\.pendingReplies\.has\(data\.sessionId\)/)
-  assert.match(liveReply, /renderPreservingDetailScroll\(\)/)
+  // Pending replies settle synchronously (urgent bypass); every other
+  // stream end coalesces into one render per animation frame.
+  assert.match(liveReply, /state\.pendingReplies\.has\(data\.sessionId\)\) renderPreservingDetailScroll\(\)/)
+  assert.match(liveReply, /else scheduleRender\(\)/)
   assert.match(source, /function deferDetailRefresh\(delay = 700\)/)
+  assert.match(source, /function scheduleRender\(\)/)
 })
 
 test('defers re-renders on wheel, touch, pointer and keyboard scrolling', async () => {

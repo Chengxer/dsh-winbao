@@ -60,9 +60,45 @@ window.__ModuleLoader__.load({
         overlay.classList.remove('is-opening')
         overlay.hidden = true
         setView('dialog')
+        // M4: tell the freshly hidden iframe to tear its runtime down (stop
+        // polling, clear timers) and shift the node-side host back to the
+        // silent flush cadence.
+        send('synapse:map-closed')
+        postViewState(false)
       }
       const send = (type, payload) => { frame.contentWindow?.postMessage({ source: 'dsh-synapse', type, ...payload }, location.origin) }
-      let syncQueued = false
+      // --- M4 view-activation signal -----------------------------------------
+      // The canvas view is on demand: while it stays closed the iframe runs
+      // silent and the node-side host relaxes its workspaces.json flush
+      // cadence. viewStateActive starts unknown (null) so boot re-syncs a
+      // host that still remembers active=true from before a host-page reload.
+      let viewStateActive = null
+      const postViewState = active => {
+        if (viewStateActive === active) return
+        viewStateActive = active
+        void fetch('/synapse/api/view-state', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ active }) }).catch(() => {})
+      }
+      // --- push-path throttles -------------------------------------------------
+      // One subscription per session × N streaming subagents means the raw
+      // fan-out below fires many times per token batch. All pushes into the
+      // map iframe go through time-windowed fan-ins so the iframe's render
+      // scheduler receives bounded batches instead of an event storm.
+      const LIVE_FLUSH_MS = 200
+      const BRIDGE_FLUSH_MS = 300
+      const SESSION_SYNC_MIN_INTERVAL_MS = 500
+      // M4: with no view open the sessions/sync POST is pure host-side
+      // bookkeeping (workspaces.json still records everything, just slower),
+      // so its leading/trailing window relaxes.
+      const SESSION_SYNC_IDLE_MIN_INTERVAL_MS = 2_000
+      let liveFlushTimer = 0
+      let bridgeFlushTimer = 0
+      let lastBridgeFlushAt = 0
+      let syncTrailingTimer = 0
+      let syncMicrotaskScheduled = false
+      let lastSyncPostAt = 0
+      let syncPending = false
+      const liveDirty = new Set()
+      const liveSessions = new Map()
       let knownSessionIds = new Set()
       const liveUnsubscribers = new Map()
       const syncLiveSessions = () => {
@@ -72,28 +108,78 @@ window.__ModuleLoader__.load({
           const scope = ctx.sessions.scope(id)
           const session = scope === undefined ? undefined : ctx.sessions.sessionOf(scope)
           if (session === undefined) continue
+          liveSessions.set(id, session)
+          // Publishing only marks the session dirty; the flush sends the
+          // latest snapshot for every dirty session at most once per window.
           const publish = () => {
             if (overlay.hidden) return
-            const state = session.getSnapshot()
-            const text = state.partial?.blocks.filter(block => block.kind === 'text').map(block => block.text).join('\n') ?? ''
-            send('synapse:live-reply', { sessionId: id, running: state.running, text })
+            liveDirty.add(id)
+            scheduleLiveFlush()
           }
           liveUnsubscribers.set(id, session.subscribe(publish))
-          publish()
         }
-        for (const [id, unsubscribe] of liveUnsubscribers) if (!snapshot.ids.includes(id)) { unsubscribe(); liveUnsubscribers.delete(id) }
+        for (const [id, unsubscribe] of liveUnsubscribers) if (!snapshot.ids.includes(id)) { unsubscribe(); liveUnsubscribers.delete(id); liveSessions.delete(id); liveDirty.delete(id) }
+      }
+      const flushLive = () => {
+        liveFlushTimer = 0
+        if (overlay.hidden) { liveDirty.clear(); return }
+        // A hidden host page cannot paint; retry from the visibilitychange
+        // catch-up instead of pushing messages no one renders.
+        if (document.hidden) { scheduleLiveFlush(); return }
+        for (const id of liveDirty) {
+          const session = liveSessions.get(id)
+          if (session === undefined) continue
+          const state = session.getSnapshot()
+          const text = state.partial?.blocks.filter(block => block.kind === 'text').map(block => block.text).join('\n') ?? ''
+          send('synapse:live-reply', { sessionId: id, running: state.running, text })
+        }
+        liveDirty.clear()
+      }
+      const scheduleLiveFlush = () => {
+        if (liveFlushTimer !== 0) return
+        liveFlushTimer = window.setTimeout(flushLive, LIVE_FLUSH_MS)
+      }
+      const flushBridgeSnapshots = () => {
+        bridgeFlushTimer = 0
+        lastBridgeFlushAt = Date.now()
+        if (overlay.hidden || document.hidden) return
+        send('synapse:workspaces', { workspaces: workspaceSnapshot(ctx) })
+        send('synapse:current-session', { session: currentSession(ctx) })
+      }
+      const scheduleBridgeSnapshots = () => {
+        if (bridgeFlushTimer !== 0) return
+        // Leading send keeps opening the map instant; bursts inside the
+        // window coalesce into one trailing send.
+        const elapsed = Date.now() - lastBridgeFlushAt
+        if (elapsed >= BRIDGE_FLUSH_MS) { flushBridgeSnapshots(); return }
+        bridgeFlushTimer = window.setTimeout(flushBridgeSnapshots, BRIDGE_FLUSH_MS - elapsed)
+      }
+      const doSessionSyncPost = () => {
+        syncTrailingTimer = 0
+        if (!syncPending) return
+        syncPending = false
+        lastSyncPostAt = Date.now()
+        const sessions = sessionSnapshot(ctx)
+        const sessionIds = new Set(sessions.map(session => session.id))
+        const removedSessionIds = [...knownSessionIds].filter(id => !sessionIds.has(id))
+        knownSessionIds = sessionIds
+        void fetch('/synapse/api/sessions/sync', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessions, removedSessionIds }) }).catch(() => {})
       }
       const syncSessions = () => {
-        if (syncQueued) return
-        syncQueued = true
-        queueMicrotask(() => {
-          syncQueued = false
-          const sessions = sessionSnapshot(ctx)
-          const sessionIds = new Set(sessions.map(session => session.id))
-          const removedSessionIds = [...knownSessionIds].filter(id => !sessionIds.has(id))
-          knownSessionIds = sessionIds
-          void fetch('/synapse/api/sessions/sync', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessions, removedSessionIds }) }).catch(() => {})
-        })
+        // Leading flush on the microtask boundary keeps the first change
+        // instant; changes inside the window coalesce into one trailing POST
+        // so N subagent bursts cost O(changes/window) requests, not N. The
+        // window widens while every view is closed (M4 silent bookkeeping).
+        syncPending = true
+        if (syncTrailingTimer !== 0 || syncMicrotaskScheduled) return
+        const minInterval = overlay.hidden ? SESSION_SYNC_IDLE_MIN_INTERVAL_MS : SESSION_SYNC_MIN_INTERVAL_MS
+        const elapsed = Date.now() - lastSyncPostAt
+        if (elapsed >= minInterval) {
+          syncMicrotaskScheduled = true
+          queueMicrotask(() => { syncMicrotaskScheduled = false; doSessionSyncPost() })
+        } else {
+          syncTrailingTimer = window.setTimeout(doSessionSyncPost, minInterval - elapsed)
+        }
       }
       const syncTheme = () => {
         const dark = document.body?.hasAttribute?.('data-ds-dark-theme') === true
@@ -104,9 +190,15 @@ window.__ModuleLoader__.load({
         syncLiveSessions()
         syncTheme()
         if (!overlay.hidden) {
-          send('synapse:workspaces', { workspaces: workspaceSnapshot(ctx) })
-          send('synapse:current-session', { session: currentSession(ctx) })
+          scheduleBridgeSnapshots()
         }
+      }
+      const onVisibilityChange = () => {
+        if (document.hidden) return
+        // Catch up everything paused in the background: one bridge snapshot,
+        // then the live fan-in flushes its dirty set.
+        syncCurrentSession()
+        flushLive()
       }
       let mapOpenFallback = 0
       let mapOpening = false
@@ -121,6 +213,9 @@ window.__ModuleLoader__.load({
         window.clearTimeout(mapOpenFallback)
         mapOpening = true
         setView('map')
+        // M4: an open view is an active view — the host flushes at full speed
+        // while someone can actually see the canvas.
+        postViewState(true)
         // Keep the iframe laid out while hidden so its canvas can receive a
         // real scroll offset. display:none would clamp scrollTop back to zero.
         overlay.hidden = false
@@ -134,11 +229,17 @@ window.__ModuleLoader__.load({
       const onFrameLoad = () => {
         syncCurrentSession()
         if (mapOpening) send('synapse:map-opened')
+        // A frame reload while the map is already open (kernel/host-page
+        // restart flows that keep the overlay mounted) boots the iframe back
+        // into its M4 silent state — re-activate it so the visible map
+        // catches up instead of staying blank.
+        else if (!overlay.hidden) send('synapse:map-opened')
       }
       const onMessage = event => {
         if (event.origin !== location.origin || event.data?.source !== 'dsh-synapse') return
         if (event.data.type === 'synapse:close') return close()
         if (event.data.type === 'synapse:map-ready') return showMapOverlay()
+        if (event.data.type === 'synapse:view-unloaded') return postViewState(false)
         if (event.data.type === 'synapse:request-current') {
           send('synapse:workspaces', { workspaces: workspaceSnapshot(ctx) })
           return send('synapse:current-session', { session: currentSession(ctx) })
@@ -183,6 +284,7 @@ window.__ModuleLoader__.load({
         }
       }
       const onKeyDown = event => { if (event.key === 'Escape' && !overlay.hidden) close() }
+      document.addEventListener('visibilitychange', onVisibilityChange)
       // Follow DSH's live theme switch: body[data-ds-dark-theme] is the web
       // client's dark-mode signal, mirrored into the map iframe via synapse:theme.
       const themeObserver = typeof MutationObserver === 'undefined'
@@ -198,12 +300,20 @@ window.__ModuleLoader__.load({
       frame.addEventListener('load', onFrameLoad)
       window.addEventListener('message', onMessage)
       window.addEventListener('keydown', onKeyDown)
+      // M4: a fresh host page boots with the canvas closed; re-assert the
+      // silent state so a long-lived host process drops any stale active
+      // flag recorded before the reload.
+      postViewState(false)
       ctx.effect(() => () => {
         dialogButton.removeEventListener('click', close)
         mapButton.removeEventListener('click', open)
         frame.removeEventListener('load', onFrameLoad)
         window.removeEventListener('message', onMessage)
         window.removeEventListener('keydown', onKeyDown)
+        document.removeEventListener('visibilitychange', onVisibilityChange)
+        if (liveFlushTimer !== 0) window.clearTimeout(liveFlushTimer)
+        if (bridgeFlushTimer !== 0) window.clearTimeout(bridgeFlushTimer)
+        if (syncTrailingTimer !== 0) window.clearTimeout(syncTrailingTimer)
         themeObserver?.disconnect()
         unsubscribeSessions()
         unsubscribeWorkspaces()

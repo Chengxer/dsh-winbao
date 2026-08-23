@@ -248,6 +248,58 @@ window.__ModuleLoader__.load({
       return out;
     }
 
+    // ---------------------------------------------------------------------------
+    // 增量扫描缓存（M1，2026-08「开多了子代理后不稳定」）：
+    //
+    // 内核 client-runtime 的 Session.events 数组常驻且**只追加**（appendLive
+    // push；窗口重建时整体换新数组）。本插件对同一数组的重复全量重扫——
+    // 展开行运行态 1.2s 轮询 tick、以及父会话每条流式事件触发的重渲染——
+    // 是 O(N) 扫/次 = O(N²) 累计的 CPU + GC 放大器；多子代理并行流式时
+    // 渲染进程长期满负荷 GC，加剧内存压力与不稳定。按「数组身份 + 已扫
+    // 长度」增量续扫：新事件只扫新增段，旧条目对象引用复用（tool/result
+    // 的错误标记迟到时回写旧条目对象，引用稳定安全）。数组换新（窗口
+    // 重建）自然失效（WeakMap 按身份键控）。
+    // ---------------------------------------------------------------------------
+    const ACTIVITY_SCAN_CACHE = new WeakMap();
+    function activityFromEventsCached(events, opts) {
+      if (!Array.isArray(events)) return activityFromEvents(events, opts);
+      const chars = opts && typeof opts.commandChars === "number" ? opts.commandChars : undefined;
+      const prev = ACTIVITY_SCAN_CACHE.get(events);
+      let scan;
+      let start;
+      if (prev && prev.chars === chars && prev.len <= events.length) {
+        scan = prev;
+        start = prev.len;
+      } else {
+        scan = { chars, len: 0, commands: [], fileSeeds: [], errors: new Map() };
+        start = 0;
+      }
+      const extractOpts = { commandChars: chars };
+      for (let i = start; i < events.length; i++) {
+        const event = events[i];
+        if (!event || typeof event !== "object" || !event.data || typeof event.data !== "object") continue;
+        if (event.type === "tool/call") {
+          const entry = activityEntryOf(event.data.name, event.data.arguments, event.data.callId, event.seq, extractOpts);
+          if (entry.command) scan.commands.push(entry.command);
+          if (entry.file) scan.fileSeeds.push(entry.file);
+        } else if (event.type === "tool/result") {
+          const source = event.data.message && event.data.message.source;
+          const block = event.data.message && Array.isArray(event.data.message.content)
+            ? event.data.message.content[0] : undefined;
+          if (source && typeof source.callId === "string" && block && block.isError === true) {
+            scan.errors.set(source.callId, true);
+          }
+        }
+      }
+      // 错误标记回写（幂等，代价远低于重扫——无 JSON.parse / 字符串切片）：
+      // 覆盖「错误标记晚于命令条目到达」的迟到形态（对旧条目同样生效）。
+      for (const item of scan.commands) if (scan.errors.get(item.callId)) item.error = true;
+      for (const item of scan.fileSeeds) if (scan.errors.get(item.callId)) item.error = true;
+      scan.len = events.length;
+      ACTIVITY_SCAN_CACHE.set(events, scan);
+      return { commands: scan.commands, fileSeeds: scan.fileSeeds };
+    }
+
     /**
      * 从工具调用块（chat 快照的 tool-call root 或其 subCalls，两种生命周期形态）
      * 提取活动。running 块：{callId,name,argsRaw,subCalls}；完成块：
@@ -322,6 +374,39 @@ window.__ModuleLoader__.load({
         hiddenCommands: Math.max(0, commands.length - keepCommands.length),
         hiddenFiles: Math.max(0, files.length - keepFiles.length),
       };
+    }
+
+    // ---------------------------------------------------------------------------
+    // 聚合条摘要节流缓存（M1）：ActivityStrip 订阅**整个会话快照**
+    //（useSession((s) => s)），父会话流式期间每条事件都重渲染并全量重扫
+    // tool-call 根块（O(N)/事件 = O(N²) 累计）。按「节点表身份 + 尺寸」缓存
+    // 摘要：尺寸未变时 1s 内复用（运行中根块的 subCalls 原地增长不改变
+    // 节点表 size——时间兜底覆盖该形态）；尺寸变化（新根块入表）立即重算。
+    // ---------------------------------------------------------------------------
+    const STRIP_SUMMARY_CACHE = new WeakMap();
+    function stripSummaryCached(chat, opts) {
+      const o = opts || {};
+      let nodes = null;
+      try {
+        if (chat && typeof chat.values === "function") nodes = chat;
+        else if (chat && chat.nodes && typeof chat.nodes.values === "function") nodes = chat.nodes;
+        else if (chat && chat.chat && chat.chat.nodes && typeof chat.chat.nodes.values === "function") nodes = chat.chat.nodes;
+      } catch { nodes = null; }
+      if (!nodes || typeof nodes.size !== "number") {
+        return summarizeActivity(activityFromBlocks([], o), o);
+      }
+      const now = Date.now();
+      const prev = STRIP_SUMMARY_CACHE.get(nodes);
+      if (prev && prev.chars === o.commandChars && prev.maxItems === o.maxItems
+        && prev.size === nodes.size && now - prev.at < 1000) {
+        return prev.summary;
+      }
+      const summary = summarizeActivity(
+        activityFromBlocks(toolCallRootsFromChatSnapshot(chat), { commandChars: o.commandChars }),
+        { maxItems: o.maxItems }
+      );
+      STRIP_SUMMARY_CACHE.set(nodes, { size: nodes.size, at: now, summary, chars: o.commandChars, maxItems: o.maxItems });
+      return summary;
     }
 
     /**
@@ -595,7 +680,7 @@ window.__ModuleLoader__.load({
           const binding = sessionsFace && typeof sessionsFace.binding === "function" ? sessionsFace.binding(child.id) : undefined;
           const events = binding && binding.session && Array.isArray(binding.session.events) ? binding.session.events : null;
           if (events) {
-            childSummary = summarizeActivity(activityFromEvents(events, { commandChars }), { maxItems });
+            childSummary = summarizeActivity(activityFromEventsCached(events, { commandChars }), { maxItems });
           }
         }
       } catch { childSummary = null; }
@@ -736,8 +821,8 @@ window.__ModuleLoader__.load({
       const maxItems = typeof cfg.maxItems === "number" && cfg.maxItems >= 1 ? cfg.maxItems : DEFAULT_MAX_ITEMS;
       const commandChars = typeof cfg.commandChars === "number" && cfg.commandChars >= 10 ? cfg.commandChars : DEFAULT_COMMAND_CHARS;
 
-      const roots = toolCallRootsFromChatSnapshot(chat);
-      const summary = summarizeActivity(activityFromBlocks(roots, { commandChars }), { maxItems });
+      // 节点表抽取 + 汇总已移入 stripSummaryCached（M1 节流缓存；见其注释）。
+      const summary = stripSummaryCached(chat, { commandChars, maxItems });
 
       if (summary.commandCount === 0 && summary.fileCount === 0 && !isSubagent && !running) return null;
 
@@ -1014,6 +1099,8 @@ window.__ModuleLoader__.load({
     exports.splitToolNames = splitToolNames;
     exports.activityEntryOf = activityEntryOf;
     exports.activityFromEvents = activityFromEvents;
+    exports.activityFromEventsCached = activityFromEventsCached;
+    exports.stripSummaryCached = stripSummaryCached;
     exports.activityFromBlocks = activityFromBlocks;
     exports.mergeFiles = mergeFiles;
     exports.summarizeActivity = summarizeActivity;
