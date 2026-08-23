@@ -302,11 +302,26 @@ function treeHasLinks(dir) {
  * @param {Function} [opts.now]          时间源（注入）
  * @returns {Promise<{ok:true, version:string}|{ok:false, error:PluginError}>}
  */
+/**
+ * tar 二进制解析：Windows 优先 System32 自带 bsdtar——与归档预检的盘符路径
+ * 契约一致（bsdtar 对 C:\... 无「远程主机」歧义）。裸 'tar.exe' 依赖 PATH
+ * 顺序：Git Bash / 开发环境里 Git 的 GNU tar 会排在前面，把盘符冒号误判为
+ * rsh 主机名（exit 2，"Cannot connect to C:"）；把 Git usr/bin 排进系统
+ * PATH 的用户在正式应用里也会踩同一坑。非 Windows 或 System32 缺件时回落
+ * 裸名（unix tar 无此歧义）。正斜杠形式：existsSync 在部分环境下对反斜杠
+ * System32 路径误报不存在（实测），spawnSync 两种形式皆可执行。
+ */
+function resolveTarBin() {
+  if (process.platform !== 'win32') return 'tar';
+  return fs.existsSync('C:/Windows/System32/tar.exe')
+    ? 'C:/Windows/System32/tar.exe' : 'tar.exe';
+}
+
 async function updatePlugin(opts) {
   const {
     id, name, profileDir, source, log = () => {},
     request = defaultRequest, spawnSync = require('node:child_process').spawnSync,
-    tarBin = 'tar.exe', confirm = () => false, now = Date.now,
+    tarBin = resolveTarBin(), confirm = () => false, now = Date.now,
     installedVersion = '', gate = null,
   } = opts;
   const pkgDir = path.join(profileDir, 'node_modules', ...name.split('/'));

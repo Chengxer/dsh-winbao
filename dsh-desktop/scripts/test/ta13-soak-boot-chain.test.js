@@ -79,8 +79,12 @@ test('boot 链 soak：applyAll+preflight ×50 轮，缓存命中后耗时趋稳 
   assert.notEqual(refreshed, cold, '改写后缓存应失效');
   fs.writeFileSync(probe, cold); // 还原，保持后续幂等断言口径
 
-  // 2) 趋稳：末 5 轮均值不高于首 5 轮（允许 1.3× 抖动上限）
-  assert.ok(last5 <= first5 * 1.3 + 2, `boot 链耗时应趋稳不劣化：首5 ${first5.toFixed(1)}ms 末5 ${last5.toFixed(1)}ms`);
+  // 2) 趋稳：末 5 轮均值不显著高于首 5 轮。容差 2×+10ms：单跑与全套并行
+  //    （node --test 多文件并发，其他用例 spawn 子进程争 CPU）两种负载形态
+  //    都要稳定——真实累积劣化（缓存泄漏/补丁叠写）是复利式增长，50 轮放大
+  //    百倍以上远超此容差；瞬态调度噪声不应误报（1.3×+2ms 在满套并行下
+  //    实测会抖：首5 13.0ms 末5 20.6ms 误红，单跑则恒绿）。
+  assert.ok(last5 <= first5 * 2 + 10, `boot 链耗时应趋稳不劣化：首5 ${first5.toFixed(1)}ms 末5 ${last5.toFixed(1)}ms`);
   // 3) 无累积副作用：50 轮后目标文件与首轮后逐字节一致（补丁幂等/不叠写）
   targetFiles.forEach((f, i) => {
     assert.equal(fs.readFileSync(f, 'utf8'), snapshotAfterFirst[i], '重复 applyAll 不应累积改写目标: ' + f);

