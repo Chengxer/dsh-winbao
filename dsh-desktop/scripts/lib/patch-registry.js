@@ -68,6 +68,7 @@ const {
   KERNEL_WEB_INDEX_REL,
   PICKER_AUTO_PKG_REL,
   LLM_PKG_REL,
+  PERSISTENCE_PKG_REL,
 } = require('./patch-target-resolver');
 
 const {
@@ -107,6 +108,8 @@ const {
   // R7：adapter 缺 prepareCall 时回落基类语义 + 升级指引（v0.5.3 对话失败）。
   transformAdapterPrepareCallGuard,
   transformSessionEventBound,
+  transformSessionHeaderScanGuard,
+  transformSessionLoadGraceful,
   rootAppliers,
 } = require('./patch-adapters');
 
@@ -136,6 +139,8 @@ const {
   WSL_PICKER_BROWSE_MARKER,
   ADAPTER_PREPARE_CALL_GUARD_MARKER,
   SESSION_EVENT_BOUND_MARKER,
+  SESSION_HEADER_SCAN_MARKER,
+  SESSION_LOAD_GRACEFUL_MARKER,
   LOADER_TREE_ISOLATION_MARKER,
   LOADER_ACTIVATION_ISOLATION_MARKER,
   FAIL_LOUD_ISOLATION_MARKER,
@@ -1235,6 +1240,71 @@ const PATCH_SPECS = [
       alreadyLog: alreadySkip,
       doneLog: (file) => '已注入 prepareCall 缺失回落守卫到 ' + file,
       failLog: (file, err) => 'adapter prepareCall 守卫补丁失败(' + file + '): ' + err.message,
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // K5 根因修复（v0.5.4 求稳）：会话 header 扫描缓存 + 读取上限。
+  //
+  // 打开子代理 → persistence.list() → listArtifacts 全量扫描 291 个会话文件、
+  // 每个都 zstd 解压 header，commit 内存吃紧时把内核 node 顶爆 OOM。补丁对
+  // dsh-session-persistence-jsonl 注入：1) listArtifacts 读 header 前先 stat、
+  // 命中 (path,size,mtimeNs) 缓存直接复用（二次 list()/刷新列表零解码）；
+  // 2) readFirstZstdLine 累积缓冲封顶 256KB（损坏/写入中文件不再整读进内存）。
+  // failPolicy warn：上游锚点漂移时 anchor-missing 自动退役，不阻断 boot。
+  // cli:false（对齐 agent-preset-fallback 先例：桌面壳 boot 链全量应用，CLI
+  // 同步期不碰内核包源码之外的目标）。详见 patch-adapters 注释。
+  // -------------------------------------------------------------------------
+  {
+    id: 'session-header-scan-guard',
+    group: 'runtime',
+    order: 275,
+    kind: 'file',
+    layout: 'runtime-local',
+    wslLayout: 'wsl',
+    pkgRel: PERSISTENCE_PKG_REL,
+    transform: transformSessionHeaderScanGuard,
+    marker: SESSION_HEADER_SCAN_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: '会话 header 扫描缓存补丁',
+      alreadyLog: alreadySkip,
+      doneLog: (file) => '已注入 header 扫描缓存 + 读取上限到 ' + file,
+      failLog: (file, err) => '会话 header 扫描缓存补丁失败(' + file + '): ' + err.message,
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // K6 根因修复（v0.5.4 求稳）：会话加载撕裂尾部优雅降级。
+  //
+  // 自动压缩追加的多事件批次中断后，除「结构撕裂的最后一帧」外还可能留下
+  // 「结构完整但校验失败 / seq 断档」的损坏帧，readZstdPrefix 抛致命错击穿
+  // loadHistory（loadHistory 读路径无 corrupt-guard）。补丁让 readZstdPrefix
+  // 解码/校验失败时降级为「加载到最后一个完整帧」+ tornMarker（commitRepair
+  // 截断损坏尾部并补 closers），console.warn 保留告警；header 帧损坏仍致命。
+  // failPolicy warn：上游锚点漂移时 anchor-missing 自动退役，不阻断 boot。
+  // cli:false（对齐 session-header-scan-guard 先例）。
+  // -------------------------------------------------------------------------
+  {
+    id: 'session-load-graceful',
+    group: 'runtime',
+    order: 280,
+    kind: 'file',
+    layout: 'runtime-local',
+    wslLayout: 'wsl',
+    pkgRel: PERSISTENCE_PKG_REL,
+    transform: transformSessionLoadGraceful,
+    marker: SESSION_LOAD_GRACEFUL_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: '会话加载优雅降级补丁',
+      alreadyLog: alreadySkip,
+      doneLog: (file) => '已注入 loadHistory 撕裂尾部优雅降级到 ' + file,
+      failLog: (file, err) => '会话加载优雅降级补丁失败(' + file + '): ' + err.message,
     },
   },
 ];

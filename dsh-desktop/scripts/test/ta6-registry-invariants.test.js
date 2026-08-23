@@ -146,8 +146,9 @@ test('D. pkgRel/pkgRels 被 patch-target-resolver 常量覆盖（白名单外新
 });
 
 test('E. order 全局唯一、组内升序、补丁间依赖序成立', () => {
-  // 46 = 45（E2 后）+ adapter-prepare-call-guard（R7，order 270）。
-  assert.equal(PATCH_SPECS.length, 47, 'spec 总数应为 47（E2 + wsl-picker-browse + kernel-web-boot-watchdog + adapter-prepare-call-guard）');
+  // 49 = 45（E2 后）+ adapter-prepare-call-guard（R7，order 270）
+  //    + session-header-scan-guard（K5，order 275）+ session-load-graceful（K6，order 280）。
+  assert.equal(PATCH_SPECS.length, 49, 'spec 总数应为 49（E2 + wsl-picker-browse + kernel-web-boot-watchdog + adapter-prepare-call-guard + session-header-scan-guard + session-load-graceful）');
   const orders = PATCH_SPECS.map((s) => s.order);
   assert.equal(new Set(orders).size, orders.length, 'order 必须全局唯一');
   const byId = Object.fromEntries(PATCH_SPECS.map((s) => [s.id, s]));

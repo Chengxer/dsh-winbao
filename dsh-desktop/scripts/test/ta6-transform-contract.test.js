@@ -1,7 +1,7 @@
 'use strict';
 
 // ---------------------------------------------------------------------------
-// TA6 元测试 2：transform 契约三态语义统一（33 个 file transform 逐个实跑）。
+// TA6 元测试 2：transform 契约三态语义统一（34 个 file transform 逐个实跑）。
 //
 // 对每个 transform 用三种输入各跑一遍：
 //   1) pristine 源（.tmp-rc2-stage 未经补丁的内核包文本；有依赖的先应用依赖
@@ -173,6 +173,6 @@ test('vision 系依赖序：未应用 image-send 时 toggle/key 必须 anchor-mi
   }
 });
 
-test('契约面完整性：33 个 file transform 全部被本文件覆盖', () => {
-  assert.equal(fileSpecs.length, 33);
+test('契约面完整性：35 个 file transform 全部被本文件覆盖', () => {
+  assert.equal(fileSpecs.length, 35);
 });

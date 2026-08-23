@@ -5,9 +5,9 @@
 //
 // 手法：pristine 源取自仓库根 .tmp-rc2-stage/node_modules（rc2 装配产物，
 // 未被任何补丁碰过）；拷入两个临时目录充当 appDir 与 home（绝不碰真实
-// ~/.dsh 与在用实例），跑生产 applyAll（47 补丁注册表全量）+ 只读预检 +
+// ~/.dsh 与在用实例），跑生产 applyAll（48 补丁注册表全量）+ 只读预检 +
 // 关键服务修复探测，断言：
-//   1. 一遍：47 补丁全部执行、changed > 0、零 errors；
+//   1. 一遍：48 补丁全部执行、changed > 0、零 errors；
 //   2. composition 字段（sources/services/criticalMissing/parseIssues）与
 //      CLI 退出码契约（关键服务全在位 → 0）；
 //   3. fault-isolation preflight：打补丁后 unpatched 为空；
@@ -70,13 +70,13 @@ async function buildTempRoots(t) {
   return { root, appDir, home, ctx, logs };
 }
 
-test('boot 链一条龙：applyAll(47) → composition-integrity → preflight → 二遍幂等', { skip: !hasPristine() && '缺 .tmp-rc2-stage pristine 源' }, async (t) => {
+test('boot 链一条龙：applyAll(49) → composition-integrity → preflight → 二遍幂等', { skip: !hasPristine() && '缺 .tmp-rc2-stage pristine 源' }, async (t) => {
   const { appDir, home, ctx } = await buildTempRoots(t);
 
-  // ---- 1. 一遍 applyAll：47 补丁全执行、有落盘、零 errors ----
+  // ---- 1. 一遍 applyAll：49 补丁全执行、有落盘、零 errors ----
   const r1 = applyAll(ctx);
-  assert.equal(r1.total, 47, `注册表应有 46 个补丁（实际 ${r1.total}）`);
-  assert.equal(PATCH_SPECS.length, 47, 'PATCH_SPECS 与编排 total 一致');
+  assert.equal(r1.total, 49, `注册表应有 49 个补丁（实际 ${r1.total}）`);
+  assert.equal(PATCH_SPECS.length, 49, 'PATCH_SPECS 与编排 total 一致');
   assert.ok(r1.changed > 0, `pristine 源一遍必须有写入（实际 changed=${r1.changed}）`);
   assert.deepEqual(r1.errors, [], `一遍不得有 errors：${JSON.stringify(r1.errors)}`);
   // degrade/fatal 档补丁的 anchor-missing 分流进 degraded（设计语义：降级告警
@@ -123,7 +123,7 @@ test('boot 链一条龙：applyAll(47) → composition-integrity → preflight �
 
   // ---- 4. 二遍幂等：changed 归零 ----
   const r2 = applyAll(ctx);
-  assert.equal(r2.total, 47);
+  assert.equal(r2.total, 49);
   assert.deepEqual(r2.errors, [], `二遍不得有 errors：${JSON.stringify(r2.errors)}`);
   assert.equal(r2.changed, 0, `二遍应幂等（一遍 changed=${changedFirst}，二遍 changed=${r2.changed}）`);
 

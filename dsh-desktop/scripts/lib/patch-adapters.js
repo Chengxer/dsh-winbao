@@ -1224,6 +1224,188 @@ function transformSessionEventBound(src, file) {
   return { status: 'changed', src: out };
 }
 
+// ---------------------------------------------------------------------------
+// 会话 header 扫描缓存 + 读取上限（K5，v0.5.4 求稳）。
+//
+// 根因（用户实测，直接采信）：打开子代理 → dsh-subagent 调 persistence.list()
+// → listArtifacts 全量扫描 291 个会话文件、每个都 zstd 解压 header；机器 commit
+// 内存吃紧（WebView2 866MB + OpenCode/msedge/marktext），全量扫描把内核 node
+// 进程顶爆 OOM（堆仅 150-260MB 就「Committing semi space failed」）→ 崩溃环。
+//
+// 修法（保守二级收敛，不破坏 list()/listSnapshots()/materialize 既有语义）：
+//   1) header 扫描缓存：listArtifacts 读 header 前先 stat，命中 (path,size,
+//      mtimeNs) 缓存直接复用 header（二次 list()/刷新列表零解码），未命中才
+//      读首行并写缓存。缓存为模块级 Map + FIFO 上限（跨 list() 调用生效、不随
+//      实例生命周期泄漏）；size/mtimeNs 任一变化即失效重读，不掩盖真实变更。
+//   2) 读取上限：readFirstZstdLine 累积缓冲超 256KB 仍未找到完整首帧即抛错，
+//      被 listArtifacts 既有 corrupt-guard catch 后 warn 跳过（损坏/写入中的
+//      文件不再整读进内存反复扫描），不击穿启动扫描。
+//
+// 幂等 marker 双点注入（模块级常量注释 + 读上限注释），锚点失配自动退役。
+// 目标：dsh-session-persistence-jsonl/lib/index.js（PERSISTENCE_PKG_REL）。
+// ---------------------------------------------------------------------------
+const SESSION_HEADER_SCAN_MARKER = 'dsh-desktop fix: session header scan cache + bounded read';
+
+const SESSION_HEADER_SCAN_MODULE_ANCHOR = 'function isENOENT(error) {';
+const SESSION_HEADER_SCAN_MODULE_INJECTION = [
+  '// ' + SESSION_HEADER_SCAN_MARKER + ' (K5)：打开子代理全量扫描 291 个会话文件、每个都',
+  '// zstd 解压 header，在 commit 内存吃紧时把内核 node 顶爆 OOM。二级收敛：1) 按',
+  '// (path,size,mtimeNs) 缓存已解析 header（文件未变二次 list()/刷新列表零解码）；',
+  '// 2) readFirstZstdLine 累积缓冲封顶 256KB（损坏/写入中文件不再整读进内存反复扫描）。',
+  '// 缓存为模块级 Map + FIFO 上限，跨 list() 调用生效且不随实例生命周期泄漏；',
+  '// size/mtimeNs 任一变化即失效重读，不掩盖真实变更。',
+  'const ZSTD_HEADER_SCAN_MAX_BYTES = 256 * 1024;',
+  'const SESSION_HEADER_SCAN_CACHE_MAX = 4096;',
+  'const sessionHeaderScanCache = new Map();',
+  'function sessionHeaderScanCacheGet(path, size, mtimeNs) {',
+  '\tconst entry = sessionHeaderScanCache.get(path);',
+  '\tif (entry !== void 0 && entry.size === size && entry.mtimeNs === mtimeNs) return entry.first;',
+  '\tif (entry !== void 0) sessionHeaderScanCache.delete(path);',
+  '\treturn void 0;',
+  '}',
+  'function sessionHeaderScanCacheSet(path, size, mtimeNs, first) {',
+  '\tif (first === void 0) return;',
+  '\tif (sessionHeaderScanCache.has(path)) sessionHeaderScanCache.delete(path);',
+  '\tsessionHeaderScanCache.set(path, { size, mtimeNs, first });',
+  '\tif (sessionHeaderScanCache.size > SESSION_HEADER_SCAN_CACHE_MAX) {',
+  '\t\tconst oldestKey = sessionHeaderScanCache.keys().next().value;',
+  '\t\tif (oldestKey !== void 0) sessionHeaderScanCache.delete(oldestKey);',
+  '\t}',
+  '}',
+].join('\n');
+
+const SESSION_HEADER_SCAN_METHOD_ANCHOR = '\t/** Read and validate only the independently compressed header frame. */';
+const SESSION_HEADER_SCAN_METHOD_INJECTION = [
+  '\t/**',
+  '\t * ' + SESSION_HEADER_SCAN_MARKER + ' — stat 后命中缓存直接复用 header（size+mtimeNs',
+  '\t * 未变），未命中才读首行并写缓存；miss 路径走 readFirstZstdLine/readFirstLine',
+  '\t *（含其 256KB 读上限），解析/身份校验仍由 listArtifacts 原链路负责。',
+  '\t */',
+  '\tasync readHeaderLineCached(path, signal) {',
+  '\t\tsignal?.throwIfAborted();',
+  '\t\tconst identity = await stat(path, { bigint: true });',
+  '\t\tsignal?.throwIfAborted();',
+  '\t\tconst cached = sessionHeaderScanCacheGet(path, identity.size, identity.mtimeNs);',
+  '\t\tif (cached !== void 0) return cached;',
+  '\t\tconst first = this.compression === "zstd" ? await this.readFirstZstdLine(path, signal) : await this.readFirstLine(path, signal);',
+  '\t\tsessionHeaderScanCacheSet(path, identity.size, identity.mtimeNs, first);',
+  '\t\treturn first;',
+  '\t}',
+  '\t/** Read and validate only the independently compressed header frame. */',
+].join('\n');
+
+const SESSION_HEADER_SCAN_READ_EXPR = 'this.compression === "zstd" ? await this.readFirstZstdLine(path, signal) : await this.readFirstLine(path, signal)';
+
+const SESSION_HEADER_SCAN_CAP_ANCHOR = '\t\t\t\tcontent = Buffer.concat([content, chunk.subarray(0, bytesRead)]);';
+const SESSION_HEADER_SCAN_CAP_INJECTION = [
+  '\t\t\t\tcontent = Buffer.concat([content, chunk.subarray(0, bytesRead)]);',
+  '\t\t\t\t// ' + SESSION_HEADER_SCAN_MARKER + ' — 累积缓冲封顶：损坏/写入中的日志不再被整读进',
+  '\t\t\t\t// 内存反复扫描（listArtifacts 的 corrupt-guard catch 后 warn 跳过，不击穿启动扫描）。',
+  '\t\t\t\tif (content.length > ZSTD_HEADER_SCAN_MAX_BYTES) throw new Error(`corrupt Zstandard session log: no complete header frame within ${ZSTD_HEADER_SCAN_MAX_BYTES} bytes`);',
+].join('\n');
+
+function transformSessionHeaderScanGuard(src, file) {
+  if (src.includes(SESSION_HEADER_SCAN_MARKER)) return { status: 'already' };
+  const missing = [];
+  if (!src.includes(SESSION_HEADER_SCAN_MODULE_ANCHOR)) missing.push('module anchor (isENOENT)');
+  if (!src.includes(SESSION_HEADER_SCAN_METHOD_ANCHOR)) missing.push('readFirstZstdLine JSDoc');
+  if (!src.includes(SESSION_HEADER_SCAN_READ_EXPR)) missing.push('listArtifacts read expression');
+  if (!src.includes(SESSION_HEADER_SCAN_CAP_ANCHOR)) missing.push('readFirstZstdLine concat');
+  if (missing.length > 0) {
+    return { status: 'anchor-missing', detail: '未找到 session header scan 锚点（版本可能已变更）：' + missing.join(' / ') + '，跳过 ' + file };
+  }
+  let out = src;
+  // 函数替换器：注入文本含 ${...} 模板字面量，规避 String.replace 对 $ 序列的替换语义。
+  out = out.replace(SESSION_HEADER_SCAN_READ_EXPR, () => 'await this.readHeaderLineCached(path, signal)');
+  out = out.replace(SESSION_HEADER_SCAN_MODULE_ANCHOR, () => SESSION_HEADER_SCAN_MODULE_INJECTION + '\n\n' + SESSION_HEADER_SCAN_MODULE_ANCHOR);
+  out = out.replace(SESSION_HEADER_SCAN_METHOD_ANCHOR, () => SESSION_HEADER_SCAN_METHOD_INJECTION);
+  out = out.replace(SESSION_HEADER_SCAN_CAP_ANCHOR, () => SESSION_HEADER_SCAN_CAP_INJECTION);
+  return { status: 'changed', src: out };
+}
+
+// ---------------------------------------------------------------------------
+// 会话加载撕裂尾部优雅降级（K6，v0.5.4 求稳）。
+//
+// 根因（代码推演 + 用户反馈直接采信）：自动压缩（auto-compaction）把一个
+// 多事件批次（compaction/start、compaction/summary、user/message replace、
+// compaction/end）一次性追加落盘，帧体比单事件帧更大；中断/崩溃后既可能留下
+// 「结构撕裂的最后一帧」（已被第 1 行 torn-tail 恢复兜住），也可能留下「结构
+// 完整但校验失败 / seq 断档 / 中部非法 magic」的损坏帧——后者会让
+// readZstdPrefix 抛致命错。而 loadHistory 读路径不像 listArtifacts 有
+// corrupt-guard，于是「历史加载失败」直接击穿，随后渲染进程崩溃。
+//
+// 修法（保守，方向 c）：readZstdPrefix 的解码/校验失败时降级为「加载到最后一
+// 个完整帧」——返回已解码前缀 + tornMarker（指向首个损坏帧起始），由
+// commitRepair 截断损坏尾部并补 closers；console.warn 保留告警（不掩盖真实
+// 损坏）；header 帧损坏仍致命（scanner 未建立即重抛）。listArtifacts 的
+// corrupt-guard 语义与 K5 的 header 扫描缓存均不受影响。
+//
+// 幂等 marker 单点注入（catch 分支注释），锚点失配自动退役。
+// 目标：dsh-session-persistence-jsonl/lib/index.js（PERSISTENCE_PKG_REL）。
+// ---------------------------------------------------------------------------
+const SESSION_LOAD_GRACEFUL_MARKER = 'dsh-desktop compat: degrade session load to last complete frame';
+
+// 锚点全部取「上游 pristine 与 torn-tail 已应用形态共有的稳定行」，故本补丁
+// 既能在 pristine（.tmp-rc2-stage）命中，也能在 torn-tail/corrupt-guard/K5 已
+// 应用的运行时副本上命中（二阶补丁不依赖一阶补丁注入的 frameIndex，改用自持
+// loadFrameIndex 计数）。
+const SESSION_LOAD_GRACEFUL_DECODER_OLD = '\t\tconst decoder = createZstdFrameDecoder();\n\t\tlet yieldDeadline = performance.now() + ZSTD_DECODE_YIELD_INTERVAL_MS;\n\t\ttry {';
+const SESSION_LOAD_GRACEFUL_DECODER_NEW = '\t\tconst decoder = createZstdFrameDecoder();\n\t\tlet scanner;\n\t\tlet loadFrameIndex = 1;\n\t\tlet yieldDeadline = performance.now() + ZSTD_DECODE_YIELD_INTERVAL_MS;\n\t\ttry {';
+
+const SESSION_LOAD_GRACEFUL_SCANNER_OLD = '\t\t\tconst scanner = new SessionLogScanner(headerFrame.value);';
+const SESSION_LOAD_GRACEFUL_SCANNER_NEW = '\t\t\tscanner = new SessionLogScanner(headerFrame.value);';
+
+// remainingFrames -= 1 后推进自持计数：解码帧 K 抛错（生成器 .next()）时
+// loadFrameIndex === K；torn-JSONL/seq 断档在循环体中部抛错时 loadFrameIndex
+// 仍 === K（尚未推进）——两种抛错点都指向首个损坏帧，catch 据此把 truncateTo
+// 设为 frames[K].start。
+const SESSION_LOAD_GRACEFUL_WRITE_OLD = '\t\t\t\tremainingFrames -= 1;';
+const SESSION_LOAD_GRACEFUL_WRITE_NEW = '\t\t\t\tremainingFrames -= 1;\n\t\t\t\tloadFrameIndex += 1;';
+
+const SESSION_LOAD_GRACEFUL_CATCH_OLD = '\t\t} catch (error) {\n\t\t\t/* v8 ignore next -- decoder failure plus concurrent abort is timing-dependent */\n\t\t\tif (signal?.aborted) signal.throwIfAborted();\n\t\t\tthrow error;\n\t\t} finally {';
+const SESSION_LOAD_GRACEFUL_CATCH_NEW = [
+  '\t\t} catch (error) {',
+  '\t\t\t/* v8 ignore next -- decoder failure plus concurrent abort is timing-dependent */',
+  '\t\t\tif (signal?.aborted) signal.throwIfAborted();',
+  '\t\t\t// ' + SESSION_LOAD_GRACEFUL_MARKER + ': 解码/校验失败降级为「加载到最后一个完整帧」——',
+  '\t\t\t// 返回已解码前缀 + tornMarker（指向首个损坏帧起始），由 commitRepair 截断损坏尾部',
+  '\t\t\t// 并补 closers；console.warn 保留告警，不掩盖真实损坏（header 帧损坏仍重抛）。',
+  '\t\t\tif (scanner !== void 0 && frames !== void 0) {',
+  '\t\t\t\tconst corruptStart = loadFrameIndex !== void 0 && loadFrameIndex < frames.length ? frames[loadFrameIndex].start : void 0;',
+  '\t\t\t\tconst truncateTo = corruptStart ?? (frames.length > 0 ? frames[frames.length - 1].end : 0);',
+  '\t\t\t\tconsole.warn(`[dsh-session-persistence] degraded session load to last complete frame (byte ${truncateTo}): ${error instanceof Error ? error.message : String(error)}`);',
+  '\t\t\t\tconst prefix = scanner.finish();',
+  '\t\t\t\treturn {',
+  '\t\t\t\t\tmeta: prefix.meta,',
+  '\t\t\t\t\tevents: prefix.events,',
+  '\t\t\t\t\ttornMarker: {',
+  '\t\t\t\t\t\ttruncateTo,',
+  '\t\t\t\t\t\trecoveredEvents: []',
+  '\t\t\t\t\t}',
+  '\t\t\t\t};',
+  '\t\t\t}',
+  '\t\t\tthrow error;',
+  '\t\t} finally {',
+].join('\n');
+
+function transformSessionLoadGraceful(src, file) {
+  if (src.includes(SESSION_LOAD_GRACEFUL_MARKER)) return { status: 'already' };
+  const missing = [];
+  if (!src.includes(SESSION_LOAD_GRACEFUL_DECODER_OLD)) missing.push('decoder hoist anchor');
+  if (!src.includes(SESSION_LOAD_GRACEFUL_SCANNER_OLD)) missing.push('scanner decl anchor');
+  if (!src.includes(SESSION_LOAD_GRACEFUL_WRITE_OLD)) missing.push('remainingFrames anchor');
+  if (!src.includes(SESSION_LOAD_GRACEFUL_CATCH_OLD)) missing.push('catch rethrow anchor');
+  if (missing.length > 0) {
+    return { status: 'anchor-missing', detail: '未找到 session load 优雅降级锚点（版本可能已变更）：' + missing.join(' / ') + '，跳过 ' + file };
+  }
+  let out = src;
+  out = out.replace(SESSION_LOAD_GRACEFUL_DECODER_OLD, SESSION_LOAD_GRACEFUL_DECODER_NEW);
+  out = out.replace(SESSION_LOAD_GRACEFUL_SCANNER_OLD, SESSION_LOAD_GRACEFUL_SCANNER_NEW);
+  out = out.replace(SESSION_LOAD_GRACEFUL_WRITE_OLD, SESSION_LOAD_GRACEFUL_WRITE_NEW);
+  out = out.replace(SESSION_LOAD_GRACEFUL_CATCH_OLD, SESSION_LOAD_GRACEFUL_CATCH_NEW);
+  return { status: 'changed', src: out };
+}
+
 module.exports = {
   // runtime-patches 的 9 个 transform（re-export）。其中
   // transformPersistenceAll 不被 registry 直接引用，其消费方是
@@ -1271,6 +1453,8 @@ module.exports = {
   // R7：adapter 缺 prepareCall 时回落基类语义 + 升级指引（v0.5.3 对话失败）。
   transformAdapterPrepareCallGuard,
   transformSessionEventBound,
+  transformSessionHeaderScanGuard,
+  transformSessionLoadGraceful,
   // K1 注入体常量（单测 vm 行为验证用，与 transform 同源；非 marker）。
   CREDENTIALS_HELPERS_CODE,
   // 包级补丁 node_modules 根应用器（唯一实现）。
@@ -1321,6 +1505,8 @@ module.exports = {
     WSL_PICKER_BROWSE_MARKER,
     ADAPTER_PREPARE_CALL_GUARD_MARKER,
     SESSION_EVENT_BOUND_MARKER,
+    SESSION_HEADER_SCAN_MARKER,
+    SESSION_LOAD_GRACEFUL_MARKER,
     ...require('./loader-isolation').markers,
   },
 };
