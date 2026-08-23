@@ -633,6 +633,63 @@ function ensureDisabledPatchEntry(patch, idPattern, block) {
 }
 
 /**
+ * 判定 patch 标量值是否需要 YAML 引号包裹（#155 根因二 / #153 第 2 条同源）：
+ * `@deepseek-ai/...` 裸包名是 YAML 的 indicator 起始（`@`），js-yaml 对
+ * `- id: @deepseek-ai/x` 直接报「bad indentation of a mapping entry」，
+ * 内核装配该 overlay 时解析失败 → 启动即崩（0.5.3 崩溃环的第二根因）。
+ * 安全裸标量子集 = 字母/数字/下划线/点/连字符（loader id 字符集超集）：
+ * 健康文件（全为这类 id）零改写；含 `@`/`/`/特殊字符的值才补引号。
+ */
+function needsYamlScalarQuote(value) {
+  if (typeof value !== 'string' || value === '') return false;
+  if (/^['"]/.test(value)) return false; // 已引号
+  // YAML 块标量指示符（`|` / `>` 及其裁剪/缩进变体）不是标量值：
+  // 引号化会改变语义（块标量 → 字面串），绝不误伤。
+  if (/^[|>][-+0-9]*$/.test(value)) return false;
+  // YAML flow 集合指示符（`[` `{` 起始，及闭合 `]` `}` `,`）不是标量：
+  // `id: [` 是损坏的 flow 序列——引号化成 `id: '['` 会把它从「解析失败」
+  // 变成「合法但语义错的标量」，掩盖 healProfilePatch/healHomePatch 的
+  // 「解析失败 → 备份 .broken- → 重置」恢复路径（#155 修复的误伤回归）。
+  // 这类值必须保持原样，让 yaml.load 抛错走备份恢复，而非被引号「救活」。
+  if (/^[[\]{},]/.test(value)) return false;
+  return !/^[A-Za-z0-9_.-]+$/.test(value);
+}
+
+/**
+ * 按需 YAML 引号化：#155 根因二——`@deepseek-ai/...` 裸包名是 YAML indicator
+ * 起始（js-yaml「bad indentation」），内核装配即崩；安全 id（字母/数字/
+ * 下划线/点/连字符，loader id 字符集超集）保持裸标量（健康文件零改写）。
+ * 已带引号的值原样返回。single-quote 转义（yamlQuote 语义：单引号加倍）。
+ */
+function yamlQuoteIfNeeded(value) {
+  if (!needsYamlScalarQuote(value)) return String(value);
+  return yamlQuote(value);
+}
+
+/**
+ * 把 patch/overlay 文本中的 `id:` / `name:` 裸标量按 YAML 安全规则补引号
+ * （#155 根因二幂等修复）。纯文本变换：只改需要引号的行；已引号行跳过；
+ * 健康文件零改写（零写入幂等）；EOL 保持。
+ * @param {string} text cordis.patch.yml / *.overlay.yml 原文
+ * @returns {{ text: string, changed: boolean }}
+ */
+function quotePatchScalarValues(text) {
+  if (typeof text !== 'string' || text === '') return { text, changed: false };
+  const original = text;
+  const normalized = original.includes('\r\n') ? original.replace(/\r\n/g, '\n') : original;
+  const out = splitLines(normalized).map((line) => {
+    // 值 = 首个非空 token（\S+，可含 @ 与 /）+ 可选行尾注释（# 前须有空白）。
+    const m = /^([ \t]*(?:-?[ \t]*)?)(id|name)[ \t]*:[ \t]*(\S+)((\s+#.*)?)$/.exec(line);
+    if (!m) return line;
+    if (!needsYamlScalarQuote(m[3])) return line;
+    return m[1] + m[2] + ': ' + yamlQuote(m[3]) + (m[4] || '');
+  });
+  const joined = joinLines(out, '\n');
+  if (joined === normalized) return { text: original, changed: false };
+  return { text: preserveEol(original, joined), changed: true };
+}
+
+/**
  * 把非 bundle 配套插件注册进 profile patch 层（幂等，语义与历史 companion-profile
  * 逐字一致；idNameRe 支持三种引号形态——修复双引号/无引号 name 改名漏修）。
  * @returns {{ patch: string, changed: boolean, dropped: string[], updated: string[], added: string[] }}
@@ -735,5 +792,10 @@ module.exports = {
   removedPluginIdsFromPatch,
   removeLegacyMarketplacePatchLines,
   ensureDisabledPatchEntry,
+  needsYamlScalarQuote,
+  quotePatchScalarValues,
+  yamlQuoteIfNeeded,
+  // #155 根因二：sidecar safe-overlay 复用 YAML 单引号安全化（@ 开头包名）。
+  yamlQuote,
   registerCompanionPatchEntries,
 };

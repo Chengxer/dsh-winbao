@@ -38,7 +38,6 @@ const COMPANION_PLUGINS = [
   { id: 'dsh-super-injector', name: '@dsh-external/dsh-super-injector' },
   { id: 'prompt-custom', name: '@deepseek-ai/dsh-prompt-custom' },
   { id: 'workspace-anchor', name: '@deepseek-ai/dsh-workspace-anchor' },
-  { id: 'third-party-thinking', name: '@deepseek-ai/dsh-third-party-thinking' },
   { id: 'wsl-settings', name: '@deepseek-ai/dsh-wsl-settings' },
   { id: 'dsh-vision', name: '@dsh-external/dsh-vision' },
   { id: 'side-session', name: '@dsh-external/dsh-side-session' },
@@ -99,6 +98,12 @@ const COMPANION_PLUGINS = [
   // 来自客户端已加载的会话事件流（零后端请求）。宿主半边仅注册 settings
   // 命名空间，UI 全在客户端半边（toolview 按 key 注册）。
   { id: 'dsh-subagent-lens', name: '@dsh-external/dsh-subagent-lens' },
+  // 推理强度选择器（HanaAyane/dsh-reasoning-effort，MIT）：Codex 风格「模型 +
+  // 推理强度」滑块，档位来自模型目录 reasoning.efforts；宿主半边只读诊断
+  // 自定义 provider 缺 reasoningEfforts 声明并给 copy-ready 指引。与 F4 补丁
+  // patch-pi-ai-reasoning-defaults 互补（本插件 UI/诊断面，F4 后端默认字典面）。
+  // 取代已退役的 dsh-third-party-thinking（fake 档位注入 + fetch 拦截旁路）。
+  { id: 'reasoning-effort', name: 'dsh-reasoning-effort' },
 ];
 
 /** 包名 → assets/plugins 下的目录名（去 scope 前缀）。 */

@@ -1,6 +1,6 @@
 //! # bridge —— `window.dshDesktop` 桥
 //!
-//! contracts/bridge-api.md（48 方法硬契约）+ contracts/ipc-commands.md（41 通道映射）
+//! contracts/bridge-api.md（53 方法硬契约）+ contracts/ipc-commands.md（43 通道映射）
 //! + contracts/error-codes.md（统一错误码）的**代码载体**：
 //!
 //! - [`error`]    —— `BridgeError`（code/message/detail，serde 序列化给垫片）

@@ -118,7 +118,11 @@ pub fn resolve_node_with(probe: &dyn NodeProbe, vendor: Option<PathBuf>) -> Opti
     vendor.map(ResolvedNode::Vendor)
 }
 
-/// 生产入口：三级解析链（真实探测 + `<appDir>/vendor/node` 保底）。
+/// 公开入口（仅文档 / 无注桩场景）：三级解析链（真实探测 +
+/// `<appDir>/vendor/node` 保底）。**生产构造不走此入口**——supervisor
+/// 直接调 [`resolve_node_with`] 以注入 [`NodeProbe`]（N1 注桩缝，可测优先级
+/// 矩阵与缺失路径），本函数仅供无注桩的直用方 / 文档引用，避免两入口语义
+/// 漂移。若未来生产改走此入口，须先移除 N1 缝或同步其语义。
 pub fn resolve_node(app_dir: &Path) -> Option<ResolvedNode> {
     resolve_node_with(&RealNodeProbe, existing_vendor_node(app_dir))
 }

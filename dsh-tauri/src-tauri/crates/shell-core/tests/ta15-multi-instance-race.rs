@@ -13,6 +13,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+#[cfg(windows)]
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -38,6 +39,7 @@ fn ta15_holder_entry() {
     }
 }
 
+#[cfg(windows)]
 fn spawn_holder(lock: &std::path::Path) -> Child {
     Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "ta15_holder_entry", "--test-threads=1"])
@@ -50,6 +52,7 @@ fn spawn_holder(lock: &std::path::Path) -> Child {
 }
 
 /// 等待子进程退码 3（拿锁失败），带超时。
+#[cfg(windows)]
 fn wait_denied(mut k: Child) {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
@@ -63,6 +66,7 @@ fn wait_denied(mut k: Child) {
 }
 
 #[test]
+#[cfg(windows)]
 fn ta15_concurrent_holders_exactly_one_wins() {
     let lock = tmp_lock("race");
     let _ = fs::remove_file(&lock);
@@ -115,6 +119,7 @@ fn ta15_concurrent_holders_exactly_one_wins() {
 }
 
 #[test]
+#[cfg(windows)]
 fn ta15_live_pid_lock_not_reclaimed_until_killed() {
     let lock = tmp_lock("live");
     let _ = fs::remove_file(&lock);

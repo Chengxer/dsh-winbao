@@ -346,6 +346,59 @@ test('safe-overlay：无失败日志 → 不生成禁用条目', { skip: !HAVE_D
   assert.strictEqual(fs.existsSync(path.join(sb.dir, 'safe-boot.overlay.yml')), false, '不应生成文件');
 });
 
+test('safe-overlay：@deepseek-ai 包名必须 YAML 引号化（#155 根因二）', { skip: !HAVE_DEPS }, (t) => {
+  const sb = sandbox(t.name);
+  t.after(() => fs.rmSync(sb.dir, { recursive: true, force: true }));
+  const logs = path.join(sb.dir, 'ud', 'logs');
+  fs.mkdirSync(logs, { recursive: true });
+  // 失败日志带 scoped 包名（parseFailedLoaderIds 的 pkgRe 形态）。
+  fs.writeFileSync(path.join(logs, 'dsh-web.log'), [
+    'failed to apply loader entry abc123 (@deepseek-ai/dsh-host-directory-picker): boom',
+    'dsh web: http://127.0.0.1:1',
+  ].join('\n'));
+  const r = cli(['safe-overlay'], { env: sb.env });
+  assert.strictEqual(r.json.ok, true, JSON.stringify(r.json));
+  assert.ok(r.json.ids.includes('@deepseek-ai/dsh-host-directory-picker'), `ids: ${JSON.stringify(r.json.ids)}`);
+  const text = fs.readFileSync(r.json.path, 'utf8');
+  // #155 根因二：裸 `@` 标量是 YAML indicator 起始（js-yaml bad indentation），
+  // 必须带单引号；同时内容必须能被 js-yaml 解析（内核装配不再崩）。
+  assert.ok(text.includes("- id: '@deepseek-ai/dsh-host-directory-picker'"), 'scoped 包名必须带引号: ' + text);
+  assert.ok(!/- id: @deepseek-ai\//.test(text), '不得出现裸 @ 包名');
+  const yaml = require(path.join(APP_DIR, 'node_modules', 'js-yaml'));
+  const parsed = yaml.load(text);
+  assert.ok(parsed.some((e) => e && e.id === '@deepseek-ai/dsh-host-directory-picker'), 'overlay 必须可解析且含 scoped 条目');
+  const scoped = parsed.find((e) => e && e.id === '@deepseek-ai/dsh-host-directory-picker');
+  assert.strictEqual(scoped.disabled, true);
+});
+
+test('safe-overlay：既有脏文件（裸 @ 包名）幂等修复（#155 根因二）', { skip: !HAVE_DEPS }, (t) => {
+  const sb = sandbox(t.name);
+  t.after(() => fs.rmSync(sb.dir, { recursive: true, force: true }));
+  // 旧版写入的脏 overlay：裸 @deepseek-ai 包名（内核装配即崩的形态），
+  // 落点 = DSH_TAURI_USERDATA（sandbox 的 ud/）。
+  const dirty = [
+    '# DSH Desktop 安全启动 overlay（自动生成）',
+    '- id: @deepseek-ai/dsh-host-directory-picker',
+    '  disabled: true',
+    '',
+  ].join('\n');
+  const overlayFile = path.join(sb.dir, 'ud', 'safe-boot.overlay.yml');
+  fs.mkdirSync(path.dirname(overlayFile), { recursive: true });
+  fs.writeFileSync(overlayFile, dirty);
+  // 无新失败日志：文件仍必须被修复（不能「no-failures 早退」留下脏文件）。
+  const r = cli(['safe-overlay'], { env: sb.env });
+  assert.strictEqual(r.json.ok, true, JSON.stringify(r.json));
+  assert.ok(r.json.ids.includes('@deepseek-ai/dsh-host-directory-picker'), '既有脏条目应被识别: ' + JSON.stringify(r.json.ids));
+  const text = fs.readFileSync(r.json.path, 'utf8');
+  assert.ok(text.includes("- id: '@deepseek-ai/dsh-host-directory-picker'"), '脏条目必须被补引号: ' + text);
+  const yaml = require(path.join(APP_DIR, 'node_modules', 'js-yaml'));
+  const parsed = yaml.load(text);
+  assert.ok(parsed.some((e) => e && e.id === '@deepseek-ai/dsh-host-directory-picker'));
+  // 幂等：修复后再跑不变更。
+  const r2 = cli(['safe-overlay'], { env: sb.env });
+  assert.strictEqual(fs.readFileSync(r2.json.path, 'utf8'), text, '修复后重复执行零改写');
+});
+
 // ===========================================================================
 // WSL 托管模式（boot 链 WSL 半边）
 // ---------------------------------------------------------------------------

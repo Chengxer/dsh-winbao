@@ -102,6 +102,16 @@ test('补丁脚本：锚点缺失跳过且字节不损坏', () => {
   assert.ok(!('src' in result), '锚点缺失不得产出改写文本');
 });
 
+test('补丁脚本：锚点缺失返回 detail（含文件名与原因，V14 P2-2）', () => {
+  const src = 'function resolveModelReasoning(provider, entry, base) {\n\treturn {};\n}';
+  const file = 'C:\\nm\\@deepseek-ai\\dsh-llm-pi-ai\\lib\\index.js';
+  const result = transformReasoningDefaults(src, file);
+  assert.equal(result.status, 'anchor-missing');
+  assert.ok(typeof result.detail === 'string' && result.detail.length > 0, 'anchor-missing 应带 detail');
+  assert.ok(result.detail.includes(file), 'detail 应含文件名: ' + result.detail);
+  assert.ok(result.detail.includes('resolveModelReasoning') || result.detail.includes('未声明分支锚点'), 'detail 应含原因');
+});
+
 test('补丁脚本：root 应用器一次写入 / 二次幂等 / stats 计数 / dry-run / 目录缺失', (t) => {
   const tree = buildFakeTree(t, fixtureSource());
   const stats = { anchorMissing: 0, failed: 0 };

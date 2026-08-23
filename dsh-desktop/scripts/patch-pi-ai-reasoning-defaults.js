@@ -84,11 +84,17 @@ const REPLACEMENT = [
 /**
  * transform：手声明条目思考档位默认（幂等、锚点失配不改写）。
  * @param {string} src
- * @returns {{status:'already'}|{status:'anchor-missing'}|{status:'changed',src:string}}
+ * @param {string} [file] 诊断用文件名（anchor-missing 的 detail 含之）
+ * @returns {{status:'already'}|{status:'anchor-missing',detail:string}|{status:'changed',src:string}}
  */
-function transformReasoningDefaults(src) {
+function transformReasoningDefaults(src, file) {
   if (src.includes(MARKER)) return { status: 'already' };
-  if (!src.includes(ANCHOR)) return { status: 'anchor-missing' };
+  if (!src.includes(ANCHOR)) {
+    return {
+      status: 'anchor-missing',
+      detail: '未找到 resolveModelReasoning 未声明分支锚点（版本可能已变更），跳过 ' + (file || '<unknown>'),
+    };
+  }
   return { status: 'changed', src: src.replace(ANCHOR, REPLACEMENT) };
 }
 
@@ -112,7 +118,7 @@ function patchPiAiReasoningDefaults(nmRoot, log = () => {}, stats, options) {
     if (stats) stats.failed += 1;
     return 0;
   }
-  const result = transformReasoningDefaults(src);
+  const result = transformReasoningDefaults(src, file);
   if (result.status === 'already') {
     log('pi-ai 思考档位默认补丁: 已应用，跳过 ' + file);
     return 0;

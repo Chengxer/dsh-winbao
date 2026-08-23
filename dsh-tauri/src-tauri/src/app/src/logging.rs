@@ -27,6 +27,18 @@ use std::path::{Path, PathBuf};
 /// 封顶阈值：4MB（与任务口径一致；Electron MAX_LOG_BYTES 同量级）。
 pub const LOG_CAP_BYTES: u64 = 4 * 1024 * 1024;
 
+/// 写者锁（K3，2026-08）：`append_capped` 的「封顶检查 → 轮转 → 打开 → 写入」
+/// 全链串行化。此前并发双线程（supervisor `log_line` 与 route `route_log` 共用
+/// desktop.log；dsh-web.log 由 stdout/stderr 两线程直写）各自独立
+/// `open(append)`，`writeln!` 对同一句柄并发写非原子——正文与换行分属两次
+/// 系统写，交错拼接成一行或产生空行撕裂（K2 诊断见 desktop.log:67 交错：
+/// 两线程 append 拼成一行）。单写者后每行必完整。
+/// 全局单锁（非 per-file）：desktop.log / dsh-web.log 同属低频落盘，串行化
+/// 开销可忽略；防住的正是多写者共享文件句柄时的交叉竞态（含轮转与写入
+/// 之间错位的崩溃现场）。panic hook 内调用安全性：锁临界区只做全静默 IO
+///（运行路径零 unwrap/expect/panic），持有锁期间不会触发 panic 重入。
+static APPEND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 壳日志目录（`<app_data>/logs`）。
 pub fn logs_dir() -> PathBuf {
     shell_core::DshPaths::resolve().logs
@@ -56,6 +68,10 @@ fn timestamp() -> String {
 /// stdout/stderr 原文进 dsh-web.log，若报错行携带 API key/Bearer 头/
 /// Authorization 行将明文持久化。
 pub fn append_capped(path: &Path, line: &str, cap: u64) {
+    // 写者锁（K3）：整链持锁——封顶检查/轮转与打开写入之间不允许其他线程
+    // 插入（此前轮转与 append 竞态：两线程同过 metadata 检查后一写一滚，
+    // 新文件丢行或 .old 内容撕裂）。持锁跨 IO 串行化全部落盘写者。
+    let _guard = APPEND_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     // 目录不存在则建（early 场景 logs/ 可能从未被创建过——v0.5.2 根因）。
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);

@@ -431,3 +431,68 @@ test('vm 冒烟: 两份 bundle 均可注册 factory 并在 rc.8 种子表下物�
     assert.ok(Array.isArray(exportsLike.inject), `${rel}: 应导出 inject 清单`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// 6) F1 三连修回归契约（V17）：编辑器主机的三类自愈兜底都必须内联进两份 bundle
+// ---------------------------------------------------------------------------
+//
+//   F1-1 fsRead 网络类错误指数退避重试：内核重启窗口期 api.fsRead 抛
+//         network/http 类错误时，不留在死错误态，而是按 nextDelayMs 退避自动
+//         重拉，直到读到为止（与 chunk loader 共用同一退避曲线）。
+//   F1-2 error 态 tab 重新可见触发重拉：同一个文件标签在错误态被切走再切回
+//         时（visible false→true），必须重新发起读取，绝不卡死在过期红字上。
+//   F1-3 chunk 失败内联 <pre> 预览兜底：编辑器 chunk 加载失败时，用只读 <pre>
+//         呈现已取到的文本（fsRead 内容已在 props），保证文件始终可见。
+
+test('F1-1: fsRead 网络类错误（network/http）按指数退避自动重试', () => {
+  for (const file of BUNDLES) {
+    const src = fs.readFileSync(file, 'utf8');
+    const rel = path.basename(file);
+    // 仅 network/http 类错误视为可重试（其它错误不自动重试）
+    assert.ok(
+      src.includes('error instanceof SidebarApiError && (error.code === "network" || error.code === "http")'),
+      `${rel}: 网络类错误判定（network/http）`,
+    );
+    // 与 chunk loader 共用同一指数退避曲线（2s→30s 封顶，无限轮）
+    assert.ok(src.includes('nextDelayMs(failCountRef.current)'), `${rel}: 退避调用 nextDelayMs`);
+    // 退避定时器有对称清理（unmount / effect 重跑不泄漏）
+    assert.ok(src.includes('retryTimer = window.setTimeout'), `${rel}: 退避定时器`);
+    assert.ok(src.includes('window.clearTimeout(retryTimer)'), `${rel}: 退避定时器清理`);
+    // 等待文案携带第 N 次尝试计数
+    assert.ok(src.includes('autoAttempt: retryable'), `${rel}: 可重试错误记录 autoAttempt`);
+  }
+});
+
+test('F1-2: error 态 tab 重新可见（visible false→true）触发重拉', () => {
+  for (const file of BUNDLES) {
+    const src = fs.readFileSync(file, 'utf8');
+    const rel = path.basename(file);
+    // 重新可见且当前是 error 态时才 bump attempt → effect 重跑重新读取
+    assert.ok(
+      src.includes('!prevVisibleRef.current && visible && loadRef.current.status === "error"'),
+      `${rel}: error 态重新可见触发重拉的条件`,
+    );
+    // bump attempt 复用同一读取 effect（依赖数组含 attempt）
+    assert.ok(src.includes('setAttempt((a) => a + 1)'), `${rel}: 重拉通过 setAttempt 触发`);
+  }
+});
+
+test('F1-3: chunk 加载失败时内联 <pre> 只读预览兜底（文件始终可见）', () => {
+  for (const file of BUNDLES) {
+    const src = fs.readFileSync(file, 'utf8');
+    const rel = path.basename(file);
+    // 只读兜底组件存在
+    assert.ok(src.includes('function TextFallback'), `${rel}: 只读兜底组件 TextFallback`);
+    // 内联 <pre> 呈现已取到的文本（fsRead 内容在 props 里）
+    assert.ok(src.includes('jsx)("pre"'), `${rel}: 兜底内联 <pre>`);
+    assert.ok(src.includes('whiteSpace: "pre-wrap"'), `${rel}: <pre> 预格式化换行`);
+    // 降级提示 banner + 兜底渲染接线
+    assert.ok(src.includes('t("chunkFallbackNotice")'), `${rel}: 降级提示文案`);
+    assert.ok(src.includes('fallback(props)'), `${rel}: fallback 渲染接线`);
+    // 编辑器 chunk 明确挂上兜底
+    assert.ok(
+      src.includes('lazyChunkComponent("editor", (mod) => mod.TextEditor, TextFallback)'),
+      `${rel}: editor chunk 挂接 TextFallback`,
+    );
+  }
+});

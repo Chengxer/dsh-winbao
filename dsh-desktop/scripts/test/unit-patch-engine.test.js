@@ -216,6 +216,27 @@ test('runtime-patches: 白名单变换 声明缺失/收尾缺失/部分缺失/�
   assert.strictEqual(transformExposeFix(fs.readFileSync(real, 'utf8'), real).status, 'already', 'vendored 副本应判定为已应用');
 });
 
+test('runtime-patches: 白名单变换 空数组不产生前导逗号（P2-5）', () => {
+  const file = 'C:\\x\\index.js';
+  // 形态一：`const WEB_SETTINGS_NAMESPACES = [];`
+  const empty = 'const WEB_SETTINGS_NAMESPACES = [];\nrest();';
+  const out = transformExposeFix(empty, file);
+  assert.strictEqual(out.status, 'changed');
+  const arrOnly = out.src.slice(out.src.indexOf('['), out.src.indexOf('];') + 1);
+  assert.ok(!/^\[\s*,/.test(arrOnly), '空数组不得生成前导逗号（空槽非法 JS）: ' + arrOnly);
+  assert.ok(!/,\s*,/.test(arrOnly), '数组内不得有空槽');
+  assert.deepStrictEqual(new Function('return ' + arrOnly)(), SETTINGS_NAMESPACES, '空数组注入后解析为完整白名单');
+  assert.strictEqual(transformExposeFix(out.src, file).status, 'already', '二次应用幂等');
+
+  // 形态二：`const WEB_SETTINGS_NAMESPACES = [\n];`
+  const emptyNl = 'const WEB_SETTINGS_NAMESPACES = [\n];\nrest();';
+  const out2 = transformExposeFix(emptyNl, file);
+  assert.strictEqual(out2.status, 'changed');
+  const arrOnly2 = out2.src.slice(out2.src.indexOf('['), out2.src.indexOf('];') + 1);
+  assert.ok(!/^\[\s*,/.test(arrOnly2), '换行空数组同样不得前导逗号');
+  assert.deepStrictEqual(new Function('return ' + arrOnly2)(), SETTINGS_NAMESPACES);
+});
+
 test('runtime-patches: WSL/CLI 目标路径约定', () => {
   const home = 'C:\\home';
   const rel = path.join('dsh-client-runtime', 'lib', 'client.js');
@@ -420,8 +441,8 @@ test('companion-plugins: 既有前缀顺序与 workspace-anchor 位置唯一（�
       'balance', 'file-changes', 'client-file-changes', 'terminal',
       'better-sidebar', 'harness-pet', 'float-window', 'dsh-navbar', 'dsh-session-manager',
       'conversation-tweaks', 'quest-ui', 'dsh-super-injector', 'prompt-custom', 'workspace-anchor',
-      'third-party-thinking', 'wsl-settings', 'dsh-vision', 'side-session',
-      'compaction-acp',
+      'wsl-settings', 'dsh-vision', 'side-session', 'compaction-acp',
+      'plugin-manager',
     ],
     '既有前缀顺序不得漂移（新增/改名须同步更新本测试）'
   );

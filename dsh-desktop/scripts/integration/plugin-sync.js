@@ -19,11 +19,13 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 const { writeFileAtomic } = require('../lib/patch-io');
+const { readFileRetry } = require('../lib/patch-io');
 const { COMPANION_PLUGINS } = require('../lib/companion-plugins');
 const { syncHubRecognition } = require('../lib/hub-registry');
 const { CORE_BUNDLE_NAMES } = require('../../profile-manifest');
 const { isPatchListValid, verifyBundleDir } = require('../../profile-bundle-heal');
 const { dedupePatchEntries } = require('../../profile-patch-heal');
+const { quotePatchScalarValues } = require('../plugin-core/lib/patch-surgery');
 const { PluginStateStore } = require('../plugin-core/lib/state-store');
 const { reconcileProfileBundles, resolveBundleDirLike } = require('../lib/profile-reconcile');
 const {
@@ -31,6 +33,7 @@ const {
   PET_DISABLE_BLOCK,
   removeLegacyMarketplacePatchLines,
   removeRetiredDshMarketPatchRows,
+  removeRetiredThirdPartyThinkingPatchRows,
   removedPluginIdsFromPatch,
   ensureDisabledPatchEntry,
   registerCompanionPatchEntries,
@@ -124,13 +127,25 @@ function createPluginSync(ctx) {
           return;
         }
       }
-      let text = fs.readFileSync(file, 'utf8');
+      // #154 第二根因：杀软/索引器瞬时锁（EBUSY/EPERM）下 readFileSync 会抛——
+      // 历史行为是解析失败 → 备份 + 重置为 []（连带丢补丁）。用有限重试读取。
+      let text = readFileRetry(file, 'utf8');
       const bareArray = /^\s*\[\]\s*$/m.test(text);
       const hasEntries = /^\s*-\s+(?:id|insert)\s*:/m.test(text);
       if (bareArray && hasEntries) {
         text = text.replace(/^\s*\[\]\s*$\n?/m, '');
         writeFileAtomic(file, text);
         log('profile patch 自愈: 移除了与列表混存的顶层 []（cordis.patch.yml）');
+      }
+      // #155 根因二幂等修复：`@deepseek-ai/...` 裸包名（js-yaml 报 bad
+      // indentation，内核装配即崩）补 YAML 引号。必须发生在解析之前——
+      // 裸 @ 值会让下面的 yaml.load 直接失败，旧行为是「备份 + 重置为 []」
+      // （连带丢失用户补丁）；这里先把脏标量修好再解析，健康文件零改写。
+      const quoted = quotePatchScalarValues(text);
+      if (quoted.changed) {
+        writeFileAtomic(file, quoted.text);
+        log('profile patch 自愈: 为 @ 开头/特殊字符包名补 YAML 引号（#155 根因二）');
+        text = quoted.text;
       }
       const yaml = loadYaml();
       if (!yaml) return;
@@ -182,9 +197,18 @@ function createPluginSync(ctx) {
       }
       const yaml = loadYaml();
       if (!yaml) return; // 无 yaml 依赖：跳过解析（运行时防护兜底）
+      // #155 根因二幂等修复（同 healProfilePatch）：裸 @ 包名先补引号再解析。
+      // #154：瞬时锁下用有限重试读取。
+      let text = readFileRetry(file, 'utf8');
+      const quoted = quotePatchScalarValues(text);
+      if (quoted.changed) {
+        writeFileAtomic(file, quoted.text);
+        log('家级补丁层自愈: 为 @ 开头/特殊字符包名补 YAML 引号（#155 根因二）');
+        text = quoted.text;
+      }
       let parsed = null;
       let error = null;
-      try { parsed = yaml.load(fs.readFileSync(file, 'utf8')); } catch (err) { error = err; }
+      try { parsed = yaml.load(text); } catch (err) { error = err; }
       if (!error && isPatchListValid(parsed)) {
         homePatchHealMemo = { file, size: sig.size, mtimeMs: sig.mtimeMs, hash: sig.hash };
         return;
@@ -329,6 +353,18 @@ function createPluginSync(ctx) {
         if (retired.changed) {
           writeFileAtomic(patchFile, retired.patch);
           log('已从 cordis.patch.yml 移除退役插件市场 dshmarket 条目');
+        }
+      } catch {}
+
+      // 内置推理强度选择切换为 dsh-reasoning-effort：退役 dsh-third-party-thinking
+      // （loader id third-party-thinking）的 patch 行一次性清理（幂等；目录在
+      // syncCompanionFiles 内的 removeRetiredThirdPartyThinkingDir 已处理）。
+      try {
+        const retiredTpt = fs.readFileSync(patchFile, 'utf8');
+        const retired2 = removeRetiredThirdPartyThinkingPatchRows(retiredTpt);
+        if (retired2.changed) {
+          writeFileAtomic(patchFile, retired2.patch);
+          log('已从 cordis.patch.yml 移除退役插件 dsh-third-party-thinking 条目');
         }
       } catch {}
 

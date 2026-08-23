@@ -18,6 +18,7 @@ const {
   bundlePatchEntryIds, collectBundleEntryIds, removeBundledRowDuplicates,
   healPatchListSyntax, removedPluginIdsFromPatch, removeLegacyMarketplacePatchLines,
   ensureDisabledPatchEntry, registerCompanionPatchEntries,
+  needsYamlScalarQuote, quotePatchScalarValues, yamlQuoteIfNeeded,
 } = require('../plugin-core/lib/patch-surgery');
 
 // ── 1. togglePluginInPatch ─────────────────────────────────────────────────
@@ -482,4 +483,50 @@ test('topLevelBlocks / patchRowIds: 形状契约', () => {
   assert.equal(blocks[0].insert, true);
   assert.equal(blocks[1].insert, false);
   assert.deepEqual(patchRowIds('- id: a.b\n- insert:\n    - id: c\n'), ['a.b', 'c']);
+});
+
+// ── 10. YAML 标量引号化（#155 根因二：@deepseek-ai 裸包名解析失败）─────────
+
+test('needsYamlScalarQuote: @ 开头/含特殊字符须引号，安全 id 不引号', () => {
+  assert.equal(needsYamlScalarQuote('@deepseek-ai/dsh-foo'), true, '@ 开头包名必须引号');
+  assert.equal(needsYamlScalarQuote('@deepseek-ai/dsh-host-directory-picker-browse'), true);
+  assert.equal(needsYamlScalarQuote('plain-pkg'), false, '字母/连字符安全');
+  assert.equal(needsYamlScalarQuote('a.b_c-2'), false, '点/下划线/连字符/数字安全');
+  assert.equal(needsYamlScalarQuote('"@deepseek-ai/x"'), false, '已带引号不重复引号');
+  assert.equal(needsYamlScalarQuote("'@deepseek-ai/x'"), false, '已带单引号不重复引号');
+});
+
+test('quotePatchScalarValues: 裸 @ 包名补引号，健康文件零改写（幂等）', () => {
+  // ① 裸 @ id → 单引号。
+  const r1 = quotePatchScalarValues('- id: @deepseek-ai/dsh-host-directory-picker\n  disabled: true\n');
+  assert.equal(r1.changed, true);
+  assert.ok(r1.text.includes("- id: '@deepseek-ai/dsh-host-directory-picker'"));
+  // ② insert 内层裸 @ name → 单引号。
+  const r2 = quotePatchScalarValues('- insert:\n    - id: dsh-balance\n      name: @deepseek-ai/dsh-balance\n');
+  assert.equal(r2.changed, true);
+  assert.ok(r2.text.includes("name: '@deepseek-ai/dsh-balance'"));
+  // ③ 健康文件：全为安全 id → 零改写（零写入幂等）。
+  const healthy = '- id: dsh-balance\n  disabled: true\n- insert:\n    - id: dsh-pet\n      name: dsh-pet\n';
+  const r3 = quotePatchScalarValues(healthy);
+  assert.equal(r3.changed, false);
+  assert.equal(r3.text, healthy);
+  // ④ 已引号 → 零改写。
+  const r4 = quotePatchScalarValues("- id: '@deepseek-ai/x'\n");
+  assert.equal(r4.changed, false);
+  // ⑤ 幂等：补引号后再跑零改写。
+  const r5 = quotePatchScalarValues(r1.text);
+  assert.equal(r5.changed, false);
+  // ⑥ CRLF 保持。
+  const crlf = '- id: @deepseek-ai/x\r\n  disabled: true\r\n';
+  const r6 = quotePatchScalarValues(crlf);
+  assert.equal(r6.changed, true);
+  assert.ok(r6.text.includes('\r\n'), 'CRLF 输入必须保持 CRLF');
+  assert.ok(r6.text.includes("- id: '@deepseek-ai/x'"));
+});
+
+test('yamlQuoteIfNeeded: 安全 id 裸标量，@ 开头补单引号（sidecar safe-overlay 用）', () => {
+  assert.equal(yamlQuoteIfNeeded('bad-plugin-x'), 'bad-plugin-x');
+  assert.equal(yamlQuoteIfNeeded('ghost.bundle_1'), 'ghost.bundle_1');
+  assert.equal(yamlQuoteIfNeeded('@deepseek-ai/dsh-foo'), "'@deepseek-ai/dsh-foo'");
+  assert.equal(yamlQuoteIfNeeded("it's"), "'it''s'", '单引号转义（yamlQuote 语义）');
 });

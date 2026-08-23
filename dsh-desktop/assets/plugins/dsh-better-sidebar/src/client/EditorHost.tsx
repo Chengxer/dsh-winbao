@@ -10,6 +10,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { createElement } from 'react'
+import { IconChevronLeftOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { Context } from '../context-types.ts'
 import { api, mediaUrl, SidebarApiError, type SessionScope } from './api.ts'
 import { BinaryDownload } from './binary-download.tsx'
@@ -26,8 +27,15 @@ type EditorLoad =
   | { status: 'ready'; viewer: FileViewerDescriptor; content?: string; truncated?: boolean; mediaUrl?: string; customData?: unknown }
   | { status: 'binary' }
 
-export function EditorHost(props: { ctx: Context; store: SidebarStore; scope: SessionScope; path: string; title: string; visible?: boolean }) {
-  const { ctx, store, scope, path, title } = props
+export function EditorHost(props: { ctx: Context; store: SidebarStore; scope: SessionScope; path: string; title: string; tabId?: string; visible?: boolean }) {
+  const { ctx, store, scope, path, title, tabId } = props
+  /** 返回上级：切回资源管理器（若打开）并关闭当前文件预览标签。 */
+  const goBack = () => {
+    const service = ctx.betterSidebar
+    if (service === undefined || tabId === undefined) return
+    service.activateTab('explorer', scope)
+    service.closeTab(tabId, scope)
+  }
   const [load, setLoad] = useState<EditorLoad>({ status: 'loading' })
   const [attempt, setAttempt] = useState(0)
   const failCountRef = useRef(0)
@@ -135,6 +143,15 @@ export function EditorHost(props: { ctx: Context; store: SidebarStore; scope: Se
   return (
     <div className={css.editor}>
       <div className={css.editorHeader}>
+        <button
+          type="button"
+          className={css.editorBack}
+          title={t('editorBack')}
+          aria-label={t('editorBack')}
+          onClick={goBack}
+        >
+          <IconChevronLeftOutline14 />
+        </button>
         <span className={css.editorTitle} title={path}>{title}</span>
       </div>
       {load.status === 'loading' && <div className={css.editorPlaceholder}>{t('loading')}</div>}

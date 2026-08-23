@@ -65,8 +65,8 @@ pub const CHANNELS: &[ChannelMapping] = &[
     mp3("dsh:wsl-config", "wsl_config_get", false, false),
     mp3("dsh:wsl-config-save", "wsl_config_save", false, false),
     mp3("dsh:wsl-recheck", "wsl_recheck", false, false),
-    // ---- 裁撤（ipc-commands.md §2.4）----
-    c("guard:action", "guard_action"),
+    // ---- 插件保护中心交互面（guard:action 分发；写动作仍走守护瀑布自动面）----
+    mp3("guard:action", "guard_action", false, false),
 ];
 
 const fn m(e: &'static str, t: &'static str, f: bool, cut: bool) -> ChannelMapping {
@@ -77,9 +77,6 @@ const fn mp(e: &'static str, t: &'static str, f: bool, cut: bool) -> ChannelMapp
 }
 const fn mp3(e: &'static str, t: &'static str, f: bool, cut: bool) -> ChannelMapping {
     ChannelMapping { electron: e, tauri: t, phase: 3, fire_and_forget: f, cut }
-}
-const fn c(e: &'static str, t: &'static str) -> ChannelMapping {
-    ChannelMapping { electron: e, tauri: t, phase: 0, fire_and_forget: false, cut: true }
 }
 
 /// Electron 通道名 → Tauri command 名（含 7 个 fire-and-forget）。
@@ -97,11 +94,11 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// contracts/ipc-commands.md §2 声明的总量：36 invoke + 7 send = 43，其中裁撤 1。
+    /// contracts/ipc-commands.md §2 声明的总量：36 invoke + 7 send = 43，全部保留。
     #[test]
     fn channel_count_matches_contract() {
         assert_eq!(CHANNELS.len(), 43, "通道总数必须与契约文档一致");
-        assert_eq!(CHANNELS.iter().filter(|c| c.cut).count(), 1, "仅 guard:action 裁撤");
+        assert_eq!(CHANNELS.iter().filter(|c| c.cut).count(), 0, "无裁撤通道（guard:action 已迁移）");
         assert_eq!(
             CHANNELS.iter().filter(|c| c.fire_and_forget).count(),
             7,
@@ -123,6 +120,7 @@ mod tests {
     fn lookup_roundtrip() {
         assert_eq!(tauri_command_for("chrome:window"), Some("window_control"));
         assert_eq!(electron_channel_for("plugin_list"), Some("dsh:plugin-list"));
+        assert_eq!(tauri_command_for("guard:action"), Some("guard_action"));
         assert_eq!(tauri_command_for("check-agent-update"), None, "菜单动作不是通道");
     }
 

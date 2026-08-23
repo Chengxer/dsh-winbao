@@ -42,7 +42,7 @@ assets/plugins/<id>/
 
 1. 运行在内核 Web UI 页面（`http://127.0.0.1:<port>`）上，与内核前端同源同上下文。
 2. 可依赖的宿主 API 白名单：
-   - `window.dshDesktop.*`（本壳桥，49 方法）
+   - `window.dshDesktop.*`（本壳桥，53 方法）
    - `window.__DSH_FLOAT__` / `window.__DSH_PET__`（模式全局）
    - window CustomEvent：`dsh-balance-changed` / `dsh-pet-state`
    - 标准浏览器 API + 内核前端自身暴露的稳定挂点
@@ -62,6 +62,10 @@ assets/plugins/<id>/
 
 官方把服务分为 definition / provider / consumer 三角色。桌面壳的插件管理 inventory 分组
 沿用同一口径标注，不自造分类：
+
+> **状态：未实装 / 规划态**。sidecar 当前 inventory 不做 `provides`/`consumes`
+> 推导，也无卸载预检——本节的三角色推导与预检仅为对齐官方 capability-seams
+> 术语的规划口径，落地前不作为行为契约。
 
 - 壳 inventory 展示插件时，`provides`（该插件提供哪些 seam 能力）与 `consumes`
   （依赖哪些 seam）从其 package.json 的依赖声明推导。

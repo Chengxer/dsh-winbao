@@ -70,7 +70,7 @@ export function builtinTabs(ctx: Context): readonly TabDescriptor[] {
       hidden: true,
       dedupeKey: (tab) => tab.path,
       component: ({ ctx, store, scope, tab, visible }) => (
-        <EditorHost ctx={ctx} store={store} scope={scope} path={tab.path ?? ''} title={tab.title} visible={visible} />
+        <EditorHost ctx={ctx} store={store} scope={scope} path={tab.path ?? ''} title={tab.title} tabId={tab.id} visible={visible} />
       ),
     },
     {

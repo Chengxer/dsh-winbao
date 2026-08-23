@@ -251,6 +251,7 @@ pub fn run() {
             commands::wsl_config_get,
             commands::wsl_config_save,
             commands::wsl_recheck,
+            commands::guard_action,
             commands::pet_window,
             commands::pet_close,
             commands::pet_move_to,
@@ -869,7 +870,7 @@ mod contract_audit {
         let reg = registered();
         for c in CHANNELS.iter().filter(|c| !c.cut) {
             assert!(
-                reg.contains(&c.tauri) || c.tauri == "guard_action",
+                reg.contains(&c.tauri),
                 "契约命令未注册: {}（{}）",
                 c.tauri,
                 c.electron
@@ -888,7 +889,9 @@ mod contract_audit {
     #[test]
     fn cut_channel_not_registered() {
         let reg = registered();
-        assert!(!reg.contains(&"guard_action"), "裁撤命令不得注册");
+        for c in CHANNELS.iter().filter(|c| c.cut) {
+            assert!(!reg.contains(&c.tauri), "裁撤命令不得注册: {}（{}）", c.tauri, c.electron);
+        }
     }
 }
 
@@ -1080,6 +1083,11 @@ enum RendererRecoveryAction {
     /// 第 3 级：原生重导航到内核 URL（CoreWebView2.Navigate）——reload 仍
     /// 不奏效的终级重建（渲染进程反复崩溃 / 文档钉死在崩溃错误页等形态）。
     NativeNavigate,
+    /// 第 4 级（K3 终态兜底）：**supervisor 级内核重启**——连续 N 次第 3 级
+    /// 重导航仍救不活（浏览器进程级重载也救不活的死渲染进程，常见反复
+    /// OOM），实证「整窗重启」是唯一有效恢复。经 supervisor kill_kernel +
+    /// on_kernel_exit 自动重启链（新内核就绪行线程统一换页/布防心跳监测）。
+    KernelRestart,
 }
 
 /// 升级梯推进（纯函数，可单测）：停摆连续触发而心跳未恢复时逐级上升，
@@ -1092,20 +1100,74 @@ fn next_recovery_action(stage: u32) -> RendererRecoveryAction {
     }
 }
 
+/// K3 终态兜底阈值：连续第 3 级重导航失败（心跳未恢复）次数。
+/// 达到即升级 supervisor 级内核重启——实证整窗重启是唯一有效恢复
+/// （v0.5.3 白屏：渲染进程 OOM 后 CoreWebView2.Reload/Navigate 也救不活，
+/// 无限重试只留白屏挂死）。
+const RENDERER_ESCAPE_MAX_CONSECUTIVE_NAVIGATE: u32 = 3;
+
+/// K3 终态兜底决策（纯函数，可单测）：连续 `navigate_failures` 次「第 3 级
+/// 原生重导航」后心跳仍未恢复 → 必须升级到 supervisor 级内核重启
+/// （kill_kernel + on_kernel_exit 自动重启链）。心跳恢复即复位计数（幂等
+/// 循环——每次恢复都从零重来，不在崩溃环里重复升级）。
+fn should_escape_to_kernel_restart(navigate_failures: u32) -> bool {
+    navigate_failures >= RENDERER_ESCAPE_MAX_CONSECUTIVE_NAVIGATE
+}
+
+/// 恢复动作级别号（日志/排障用）：1=页内 eval / 2=原生 reload / 3=原生
+/// 重导航 / 4=supervisor 级内核重启。纯函数，可单测。
+fn action_level(action: RendererRecoveryAction) -> u32 {
+    match action {
+        RendererRecoveryAction::EvalReload => 1,
+        RendererRecoveryAction::NativeReload => 2,
+        RendererRecoveryAction::NativeNavigate => 3,
+        RendererRecoveryAction::KernelRestart => 4,
+    }
+}
+
+/// K3 终态兜底执行：supervisor 级内核重启（实证整窗重启是唯一有效恢复）。
+/// 经 supervisor 公共出口 `restart_kernel_after_renderer_escape`（内部 =
+/// kill_kernel + on_kernel_exit 自动重启链）——崩溃环判定天然限次（未成环
+/// 自动拉起，成环进恢复页），与崩溃环窗口限次/恢复页互斥协同，不双杀。
+/// 任何缺位（无 AppState / supervisor / 通道）都返回 Err，调用方降级为继续
+/// 第 3 级重试——绝不因兜底不可用而中断恢复链。
+fn kernel_restart_escape(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.try_state::<AppState>().ok_or("AppState 缺失（内核重启不可用）")?;
+    let sv = state
+        .supervisor
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+        .ok_or("supervisor 未装配（内核重启不可用）")?;
+    let tx = state
+        .supervisor_tx
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+        .ok_or("supervisor 事件通道缺失（内核重启不可用）")?;
+    sv.restart_kernel_after_renderer_escape(&tx);
+    Ok(())
+}
+
 /// 恢复导航目标（第 3 级用）：优先 supervisor 现值（WSL `--port 0` 端口漂移
 /// 后仍准确）；supervisor 缺席/未就绪时退主窗当前 URL——`WebviewWindow::url`
 /// 读的是浏览器进程持有的 Source，与渲染进程死活无关。
-fn kernel_url_for_recovery(app: &tauri::AppHandle, win: &tauri::WebviewWindow) -> tauri::Url {
+///
+/// 返回 `None` = 无可用目标（supervisor 无 URL 且主窗 URL 读取失败），调用方
+/// 降级为错误继续升级梯。V13 P2-8 收口：原 `tauri::Url::parse("http://
+/// 127.0.0.1").expect(…)` 生产路径 expect（字面量虽必达，仍是 panic 面）改为
+/// 纯 `Option` 降级——`win.url().ok()` 失败即 None，全程零 panic。
+fn kernel_url_for_recovery(app: &tauri::AppHandle, win: &tauri::WebviewWindow) -> Option<tauri::Url> {
     if let Some(state) = app.try_state::<AppState>() {
         if let Some(sv) = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone() {
             if let Some(u) = sv.kernel_url() {
                 if let Ok(parsed) = u.parse::<tauri::Url>() {
-                    return parsed;
+                    return Some(parsed);
                 }
             }
         }
     }
-    win.url().unwrap_or_else(|_| tauri::Url::parse("http://127.0.0.1").expect("静态回退 URL 必达"))
+    win.url().ok()
 }
 
 fn watch_renderer_heartbeat(app: tauri::AppHandle) {
@@ -1136,6 +1198,9 @@ fn watch_renderer_heartbeat(app: tauri::AppHandle) {
         // 恢复梯当前级（M1）：0=eval reload / 1=原生 reload / 2=原生重导航；
         // 心跳恢复即复位（下次停摆从最廉价动作重来）。
         let mut stage: u32 = 0;
+        // K3 终态兜底计数：连续第 3 级重导航失败（动作后回读心跳无增量）次数。
+        // 达阈值升级 supervisor 级内核重启（实证整窗重启是唯一有效恢复）。
+        let mut navigate_failures: u32 = 0;
         loop {
             std::thread::sleep(std::time::Duration::from_secs(10));
             // 代数交替：有更晚的监测线程接岗 → 本线程退出（防重启循环下线程只增不减）。
@@ -1165,6 +1230,7 @@ fn watch_renderer_heartbeat(app: tauri::AppHandle) {
                 stall = 0;
                 last = now;
                 stage = 0; // 心跳恢复 → 恢复梯复位（下次停摆从最廉价动作重来）。
+                navigate_failures = 0; // K3：心跳恢复同样复位终态兜底计数（幂等循环）。
             }
             if stall >= 4 {
                 // 落盘（v0.5.2 教训：GUI 安装态 eprintln 无人接收——自动重载
@@ -1173,27 +1239,82 @@ fn watch_renderer_heartbeat(app: tauri::AppHandle) {
                 // M1 恢复梯：eval reload 对已死渲染进程是 no-op（ExecuteScript
                 // 无处执行），连续停摆必须升级到浏览器进程级原生 reload /
                 // 重导航——否则多子代理 OOM 崩溃后的白屏永远无人救。
-                let action = next_recovery_action(stage);
+                // K3 终态兜底：连续 N 次第 3 级重导航仍救不活（浏览器进程级
+                // 重载也救不活的死渲染进程，反复 OOM 形态）→ 升级 supervisor
+                // 级内核重启——实证「整窗重启」是唯一有效恢复。
+                let mut action = next_recovery_action(stage);
+                if action == RendererRecoveryAction::NativeNavigate
+                    && should_escape_to_kernel_restart(navigate_failures)
+                {
+                    action = RendererRecoveryAction::KernelRestart;
+                }
                 let action_name = match action {
                     RendererRecoveryAction::EvalReload => "页内 eval reload",
                     RendererRecoveryAction::NativeReload => "原生 reload（CoreWebView2.Reload）",
                     RendererRecoveryAction::NativeNavigate => "原生重导航（CoreWebView2.Navigate → 内核 URL）",
+                    RendererRecoveryAction::KernelRestart => "supervisor 级内核重启（整窗重启）",
                 };
                 route_log(format!(
                     "[renderer-recovery] 可见主窗心跳停摆 {}0 秒（疑似渲染进程崩溃/挂死），执行第 {} 级恢复：{action_name}",
                     stall,
-                    stage + 1
+                    action_level(action)
                 ));
+                // K3 恢复结果可观测（K2 排障缺口：此前只记动作不记结果）：动作
+                // 前快照心跳计数，动作后回读（垫片 5s 一跳，等 4s 已能观察页面
+                // 是否复活），把「是否恢复」写进 [renderer-recovery] 日志行——
+                // 成功/失败可区分，排障有证。
+                let hb_before_action = state.hb_main.load(Ordering::Relaxed);
                 let outcome: Result<(), tauri::Error> = match action {
                     RendererRecoveryAction::EvalReload => win.eval("try{location.reload()}catch(e){}"),
                     RendererRecoveryAction::NativeReload => win.reload(),
                     RendererRecoveryAction::NativeNavigate => {
-                        let target = kernel_url_for_recovery(&app, &win);
-                        win.navigate(target)
+                        // V13 P2-8：导航目标改 Option 降级（无可用目标时按失败
+                        // 收链，升级梯继续，不再经 expect 的静态回退 URL）。
+                        match kernel_url_for_recovery(&app, &win) {
+                            Some(target) => win.navigate(target),
+                            None => Err(tauri::Error::AssetNotFound(
+                                "无可用恢复导航目标（supervisor URL 与主窗 URL 均不可用）".into(),
+                            )),
+                        }
+                    }
+                    RendererRecoveryAction::KernelRestart => {
+                        // supervisor 级内核重启：kill_kernel + on_kernel_exit
+                        // 自动重启链（崩溃环判定天然限次：未成环自动拉起，成环
+                        // 进恢复页——与崩溃环窗口限次互斥协同，不双杀）。新内核
+                        // 就绪行线程统一换页并布防新一代心跳监测（本线程随代际
+                        // 交替自行退出）。
+                        match kernel_restart_escape(&app) {
+                            Ok(()) => Ok(()),
+                            Err(msg) => Err(tauri::Error::AssetNotFound(msg)),
+                        }
                     }
                 };
                 if let Err(e) = outcome {
                     route_log(format!("[renderer-recovery] 恢复动作执行失败（升级梯将继续）：{e}"));
+                }
+                // 动作后回读心跳计数，判定恢复结果（K3 可观测性）。
+                std::thread::sleep(std::time::Duration::from_secs(4));
+                let hb_after = state.hb_main.load(Ordering::Relaxed);
+                let recovered = hb_after > hb_before_action;
+                if recovered {
+                    route_log(format!(
+                        "[renderer-recovery] 恢复结果：心跳已恢复（+{}，页面复活）",
+                        hb_after - hb_before_action
+                    ));
+                    navigate_failures = 0;
+                } else {
+                    // 未恢复 → 计数推进（仅第 3 级重导航计入终态兜底计数；
+                    // 内核重启后给新内核完整观察周期，计数复位不连续升级）。
+                    route_log(format!("[renderer-recovery] 恢复结果：心跳未恢复（4s 回读无增量）"));
+                    if action == RendererRecoveryAction::NativeNavigate {
+                        navigate_failures += 1;
+                        route_log(format!(
+                            "[renderer-recovery] 第 3 级重导航连续失败 {navigate_failures}/{RENDERER_ESCAPE_MAX_CONSECUTIVE_NAVIGATE} 次{}",
+                            if should_escape_to_kernel_restart(navigate_failures) { "，下次升级内核重启" } else { "" }
+                        ));
+                    } else if action == RendererRecoveryAction::KernelRestart {
+                        navigate_failures = 0;
+                    }
                 }
                 stage = (stage + 1).min(2);
                 stall = 0;
@@ -1457,6 +1578,132 @@ mod heartbeat_watcher_tests {
         assert!(
             cmd.contains("hb_main.fetch_add"),
             "renderer_heartbeat 必须递增主窗专属计数 hb_main（仅 label==main）"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // K3（2026-08 终态兜底）回归锚点。
+    //
+    // 背景：M1 恢复梯（eval reload → CoreWebView2.Reload → Navigate）是无限
+    // 重试，若渲染进程反复 OOM、浏览器进程级重载也救不活，白屏仍无限挂
+    // （v0.5.3 实证 2 小时 199 次 reload 循环；整窗重启是唯一有效恢复）。
+    // 修法：连续 N 次第 3 级重导航仍无心跳 → 升级 supervisor 级内核重启。
+    // -----------------------------------------------------------------------
+
+    /// K3 终态兜底决策表（纯函数）：0~2 次第 3 级失败 → 保持重试不升级；
+    /// ≥3 次 → 升级 supervisor 级内核重启；心跳恢复即复位（幂等循环）。
+    #[test]
+    fn k3_escape_decision_table() {
+        use super::{
+            action_level, next_recovery_action, should_escape_to_kernel_restart,
+            RendererRecoveryAction, RENDERER_ESCAPE_MAX_CONSECUTIVE_NAVIGATE,
+        };
+        assert_eq!(RENDERER_ESCAPE_MAX_CONSECUTIVE_NAVIGATE, 3, "阈值取 3~5 区间（K3 任务口径）");
+        // 未达阈值：不升级（保持第 3 级重试——白屏必须有人持续救）。
+        assert!(!should_escape_to_kernel_restart(0));
+        assert!(!should_escape_to_kernel_restart(1));
+        assert!(!should_escape_to_kernel_restart(2));
+        // 达阈值：升级。达阈值后持续成立（若计数漏复位，兜底不会停）。
+        assert!(should_escape_to_kernel_restart(3));
+        assert!(should_escape_to_kernel_restart(99));
+        // 第 4 级动作级别号。
+        assert_eq!(action_level(RendererRecoveryAction::KernelRestart), 4);
+        assert_eq!(action_level(RendererRecoveryAction::EvalReload), 1);
+        assert_eq!(action_level(RendererRecoveryAction::NativeReload), 2);
+        assert_eq!(action_level(RendererRecoveryAction::NativeNavigate), 3);
+        // 常规升级梯不受影响（M1 语义保持）。
+        assert_eq!(next_recovery_action(0), RendererRecoveryAction::EvalReload);
+        assert_eq!(next_recovery_action(1), RendererRecoveryAction::NativeReload);
+        assert_eq!(next_recovery_action(2), RendererRecoveryAction::NativeNavigate);
+        assert_eq!(next_recovery_action(9), RendererRecoveryAction::NativeNavigate);
+    }
+
+    /// K3 形态锚点（watch_renderer_heartbeat 段）：
+    /// ① 连续第 3 级失败计数 navigate_failures 必须在场，且心跳恢复复位
+    ///    （幂等循环）；② 达阈值走 supervisor 级内核重启（restart_kernel_
+    ///    after_renderer_escape = kill_kernel + on_kernel_exit 自动重启链）；
+    /// ③ 恢复结果必须回读心跳计数落 [renderer-recovery] 日志（成功/失败
+    ///    可区分——K2 排障缺口）；④ 内核重启后计数复位（给新内核完整观察
+    ///    周期，不双杀/不连续升级）。
+    #[test]
+    fn k3_renderer_recovery_escape_shape() {
+        let src = include_str!("lib.rs").replace("\r\n", "\n");
+        let seg = src
+            .split("fn watch_renderer_heartbeat")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n\n/// 诊断探针").next())
+            .expect("watch_renderer_heartbeat 函数体");
+        assert!(
+            seg.contains("navigate_failures"),
+            "连续第 3 级失败计数必须在场: {seg}"
+        );
+        assert!(
+            seg.contains("navigate_failures = 0;"),
+            "心跳恢复/豁免/内核重启后必须复位终态兜底计数（幂等循环）: {seg}"
+        );
+        assert!(
+            seg.contains("should_escape_to_kernel_restart(navigate_failures)"),
+            "升级判定必须走纯函数决策表: {seg}"
+        );
+        assert!(
+            seg.contains("kernel_restart_escape(&app)"),
+            "第 4 级必须经 kernel_restart_escape（supervisor 级内核重启）: {seg}"
+        );
+        // kernel_restart_escape 内部接线：supervisor 侧 restart_kernel_after_
+        // renderer_escape（kill_kernel + on_kernel_exit 自动重启链）。
+        let escape_holder = src
+            .split("fn kernel_restart_escape")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n\n/// 诊断探针").next())
+            .expect("kernel_restart_escape 函数体");
+        assert!(
+            escape_holder.contains("restart_kernel_after_renderer_escape(&tx)"),
+            "第 4 级必须经 supervisor 级内核重启（kill_kernel + on_kernel_exit 链）: {escape_holder}"
+        );
+        assert!(
+            escape_holder.contains("supervisor_tx"),
+            "内核重启必须复用 supervisor 事件通道（路由不断链）: {escape_holder}"
+        );
+        // 恢复结果可观测：动作后回读心跳，日志行区分成功/失败。
+        assert!(
+            seg.contains("hb_after > hb_before_action"),
+            "必须动作后回读心跳计数判定恢复: {seg}"
+        );
+        assert!(
+            seg.contains("心跳已恢复") && seg.contains("心跳未恢复"),
+            "恢复结果必须区分成功/失败（排障有证）: {seg}"
+        );
+        // 动作级别号含第 4 级文案。
+        assert!(
+            seg.contains("supervisor 级内核重启（整窗重启）"),
+            "第 4 级动作文案: {seg}"
+        );
+        // supervisor 侧出口：restart_kernel_after_renderer_escape = kill_kernel
+        // + on_kernel_exit（崩溃环判定限次，与恢复页互斥协同）。
+        let sup = include_str!("supervisor.rs").replace("\r\n", "\n");
+        let escape_seg = sup
+            .split("pub fn restart_kernel_after_renderer_escape")
+            .nth(1)
+            .and_then(|s| s.split("/// 杀内核整树").next())
+            .expect("restart_kernel_after_renderer_escape 函数体");
+        assert!(escape_seg.contains("self.kill_kernel()"), "第 4 级必须杀内核整树: {escape_seg}");
+        assert!(escape_seg.contains("self.on_kernel_exit(None, tx)"), "第 4 级必须走 on_kernel_exit 自动重启链: {escape_seg}");
+    }
+
+    /// K3 形态锚点（防回退）：终态兜底只在该升级时升级——常规升级梯
+    /// next_recovery_action 的封顶仍是 NativeNavigate（第 3 级），不得把
+    /// KernelRestart 塞进常规梯封顶（升级须经 navigate_failures 达阈值判定）。
+    #[test]
+    fn k3_escape_not_in_regular_ladder_cap() {
+        let src = include_str!("lib.rs").replace("\r\n", "\n");
+        let seg = src
+            .split("fn next_recovery_action")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n\n/// K3 终态兜底阈值").next())
+            .expect("next_recovery_action 函数体");
+        assert!(
+            !seg.contains("KernelRestart"),
+            "常规升级梯封顶必须保持 NativeNavigate（KernelRestart 只经阈值升级）: {seg}"
         );
     }
 }

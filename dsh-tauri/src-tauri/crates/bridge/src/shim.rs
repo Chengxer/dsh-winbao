@@ -1,6 +1,6 @@
 //! 垫片 JS 的嵌入与静态自检。
 //!
-//! `dist/bridge-shim.js` 是 contracts/bridge-api.md 的页面侧实现（49 方法），
+//! `dist/bridge-shim.js` 是 contracts/bridge-api.md 的页面侧实现（53 方法），
 //! 编进二进制后由 app 层作为 `initialization_script` 注入每个页面。
 
 /// 垫片 JS 全文。
@@ -48,6 +48,10 @@ const REQUIRED_SURFACES: &[&str] = &[
     "diagBackup.removeBundle",
     "diagBackup.analyzeOrder",
     "diagBackup.applyOrder",
+    "guard.status",
+    "guard.check",
+    "guard.incident",
+    "guard.resolveIncident",
     "petWindow.open",
     "petWindow.toggle",
     "petWindow.isOpen",
@@ -85,17 +89,17 @@ mod tests {
     }
 
     #[test]
-    fn all_48_surfaces_present() {
+    fn all_surfaces_present() {
         let missing: Vec<&str> = REQUIRED_SURFACES.iter().copied().filter(|s| !defines(s)).collect();
         assert!(missing.is_empty(), "垫片缺失契约方法: {missing:?}");
-        assert_eq!(REQUIRED_SURFACES.len(), 49, "契约方法计数（48+recovery.openLogs）");
+        assert_eq!(REQUIRED_SURFACES.len(), 53, "契约方法计数（49 + guard 4 面）");
     }
 
     /// check-agent-update 退役锚点（v0.5.3）：npm 内核更新链整体退役
     /// （内核随客户端分发，无 overlay 更新链）——菜单动作与垫片引用不得
     /// 残留；更新项统一走 check-client-update（updater_client 双源链）。
-    /// E_CUT_FEATURE 不应出现在垫片（无其他裁撤方法位需要垫片侧守卫；
-    /// guard:action 通道本就不在垫片面）。
+    /// E_CUT_FEATURE 不应出现在垫片（guard:action 已迁移为 guard 命名空间
+    /// 的读面/轻量解，写动作仍走守护瀑布自动面，无垫片侧裁撤守卫）。
     #[test]
     fn agent_update_menu_action_retired() {
         assert!(!BRIDGE_SHIM_JS.contains("check-agent-update"), "check-agent-update 菜单动作已退役，不得残留");
@@ -150,6 +154,27 @@ mod tests {
                 "垫片调用的 command {cmd} 不在映射表（或已被裁撤）"
             );
         }
+    }
+
+    /// H6 收口锚点：`image_paste_save` 命令的参数是具名 `payload`
+    /// （`#[tauri::command] fn image_paste_save(payload: serde_json::Value)`），
+    /// 垫片调用体必须携带 `{ payload: ... }` 键——旧形态
+    /// `call('image_paste_save', payload || {})` 把 payload 当位置参数裸传，
+    /// Tauri 2 只按具名参数匹配会丢参（command 收到空对象，粘贴图落盘失败）。
+    /// 本测试锁住「调用体键名 = 命令具名参数」的一致性。
+    #[test]
+    fn image_paste_save_call_uses_named_payload_key() {
+        let block = BRIDGE_SHIM_JS
+            .split("imagePaste:")
+            .nth(1)
+            .and_then(|s| s.split("sponsorQr:").next())
+            .expect("imagePaste 块边界缺失");
+        assert!(block.contains("image_paste_save"), "imagePaste 块必须含 image_paste_save 调用: {block}");
+        assert!(block.contains("{ payload:"), "save 调用体必须携带具名 payload 键: {block}");
+        assert!(
+            !block.contains("call('image_paste_save', payload"),
+            "不得裸传 payload（位置参数形态）: {block}"
+        );
     }
 }
 

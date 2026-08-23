@@ -15,6 +15,14 @@ DeepSeek Harness 桌面客户端的 Tauri 2 重构。**v0.5.0 起为仓库主线
 > **开发手册（统一入口）**：[`docs/development.md`](docs/development.md) ——
 > 架构地图 / 接口索引与防漂移机制 / 加命令五步 / 加插件 / 打包冒烟 / 调试开关。
 
+> **macOS 用户**：当前 macOS DMG 为 ad-hoc 签名、未做 Apple 公证，从浏览器/网盘
+> 下载后首次打开可能提示「已损坏，无法打开」或「无法验证开发者」。这是 Gatekeeper
+> 对未公证应用的拦截，**不是安装包真的损坏**。任选其一即可打开：
+> 1. 访达中**右键 app → 打开 → 再点「打开」**；
+> 2. 终端执行 `sudo xattr -cr "/Applications/DSH Desktop.app"`（移除隔离属性）；
+> 3. **系统设置 → 隐私与安全性 → 页面底部「仍要打开」**。
+> 每次重新下载覆盖安装后需重做一次；长期方案为 Apple Developer ID 签名 + 公证。
+
 ## 布局
 
 ```

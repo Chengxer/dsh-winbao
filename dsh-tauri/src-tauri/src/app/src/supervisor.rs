@@ -532,7 +532,20 @@ impl Supervisor {
 
     /// 端口复用（同端口重试保 origin 稳定）；占用则换新端口。
     fn reuse_or_new_port(&self, preferred: u16) -> u16 {
-        choose_stable_port(Some(preferred)).unwrap_or(preferred)
+        if let Some(p) = choose_stable_port(Some(preferred)) {
+            return p;
+        }
+        // #155 EADDRINUSE 崩溃环：期望端口仍被占用（残留进程/AV 锁）时，
+        // 绝不能把忙端口交给内核（绑定失败秒退 → 被误判崩溃）。换 OS 随机
+        // 安全端口；随机分配失败才退回期望端口（终防线，正常流程到不了）。
+        // K3：占用者可能是另一个 dsh web 实例/孤儿内核（端口 7388 复用形态）——
+        // 输出持有者诊断（pid/进程名/启动时间），便于用户报障。
+        log_port_holder_diag(preferred);
+        if let Some(p) = choose_stable_port(None) {
+            return p;
+        }
+        log_line(&format!("端口 {preferred} 占用且 OS 随机分配失败，仍尝试期望端口（终防线）"));
+        preferred
     }
 
     /// 拉起内核并同步等待就绪（瀑布核心原语）。
@@ -576,6 +589,32 @@ impl Supervisor {
     /// 事故报告落盘（guard/incidents/）。
     fn guard_incident(&self, kind: &str, detail: &str) {
         let _ = self.guard_cli_json(&["guard-incident", kind, detail]);
+    }
+
+    // ---- 插件保护中心交互面（guard:action 迁移，V16-G1 收口）----
+    // 只读/轻量查询面：读守护瀑布已落盘的状态与报告。写动作（snapshot /
+    // restore / repair）仍走守护瀑布自动面（boot_waterfall），此处不暴露，
+    // 避免手动回滚与自动瀑布竞态（快照/回滚发生在「无服务进程持锁」窗口期，
+    // 交互期调用会与运行中的内核文件锁撞车）。
+
+    /// guard:action status：快照列表 + 未解决事故列表 + 最后良好快照（只读）。
+    pub fn guard_status(&self) -> Option<serde_json::Value> {
+        self.guard_cli_json(&["guard-status"])
+    }
+
+    /// guard:action check：静态体检（healthCheck findings，不执行修复）。
+    pub fn guard_check(&self) -> Option<serde_json::Value> {
+        self.guard_cli_json(&["guard-health"])
+    }
+
+    /// guard:action incident：读单条事故详情（content 截断 30KB）。
+    pub fn guard_incident_read(&self, id: &str) -> Option<serde_json::Value> {
+        self.guard_cli_json(&["guard-read-incident", id])
+    }
+
+    /// guard:action resolve-incident：把事故重命名为 .resolved.md（软解决）。
+    pub fn guard_resolve_incident(&self, id: &str) -> Option<serde_json::Value> {
+        self.guard_cli_json(&["guard-resolve-incident", id])
     }
 
     fn inner_crash_reset(&self) { /* 兼容占位：crash_count 复位已直写 */ }
@@ -988,7 +1027,17 @@ impl Supervisor {
                 match g.kernel.as_mut() {
                     Some(c) => match c.try_wait() {
                         Ok(Some(st)) => (st.code(), true),
-                        Ok(None) => (None, true), // stdout 关了但进程在：罕见，按退出处理
+                        Ok(None) => {
+                            // stdout 关了但进程仍在：罕见（进程主动关闭 stdout /
+                            // 句柄提前释放）。**必须收割**——on_kernel_exit 把它当
+                            // 退出后自动重启的新内核会与它并存 = 双 web 实例
+                            //（端口 7388 复用/孤儿内核形态，synapse「另一个 dsh
+                            // web 实例」告警的壳侧来源）。K3 排查看板点。
+                            let _ = c.kill();
+                            let code = c.wait().ok().and_then(|st| st.code());
+                            log_line(&format!("stdout EOF 但进程仍在（pid={}），已收割防双 web 实例", c.id()));
+                            (code, true)
+                        }
                         Err(_) => (None, true),
                     },
                     None => (None, false),
@@ -1035,6 +1084,13 @@ impl Supervisor {
                 let _ = rtx.send(Err(format!("内核启动期退出 code={code:?}")));
             }
             g.kernel = None;
+            // P1-1（V13 审查）：内核死亡即吊销旧探活环令牌。若不递增，旧环在
+            // 「自动重启 spawn 新内核（kernel.is_some()==true）→ 新内核就绪行
+            // 递增 probe_gen」之间的窗口内令牌仍匹配，且端口可能尚未就绪 →
+            // 3 次失联误杀健康新内核（端口漂移/冷启动 >7s 形态）。probe_gen
+            // 只由就绪行线程递增（覆盖瀑布与自动重启两路径）；此处吊销的是
+            // 上一代内核的环，二者不冲突。
+            g.probe_gen += 1;
             g.crash_count += 1;
             let v = g.crash.record_crash(now);
             (v, g.crash_count)
@@ -1073,7 +1129,28 @@ impl Supervisor {
                     drop(g);
                     this.refresh_safe_overlay();
                     if let Some(p) = port {
-                        if Arc::clone(&this).spawn_kernel(p, &tx2).is_err() {
+                        // #155 稳定化等待：内核刚死（探活/退出判定）时监听端口
+                        // 未必即刻归还（Windows taskkill 子孙收割异步 / TIME_WAIT）。
+                        // 直接 spawn 同一端口会 EADDRINUSE 秒退，被当作又一次
+                        // 崩溃计入崩溃环（0.5.3「内核反复拉起」形态）。先等端口
+                        // 释放；等不到就换 OS 随机端口——绝不把忙端口交给内核。
+                        let target = if kernel_process::port::wait_port_free(p, Duration::from_secs(3)) {
+                            p
+                        } else {
+                            log_line(&format!("自动重启：端口 {p} 3s 内未释放，换新端口"));
+                            // K3 双 web 实例排查：内核已死但端口仍被占用 =
+                            // 旧内核未彻底收割（孤儿/杀不净）或另一实例持有——
+                            // 输出持有者诊断供用户报障。
+                            log_port_holder_diag(p);
+                            match kernel_process::port::choose_stable_port(None) {
+                                Some(np) => np,
+                                None => {
+                                    this.enter_recovery_tx(&tx2, "自动重启无可用端口");
+                                    return;
+                                }
+                            }
+                        };
+                        if Arc::clone(&this).spawn_kernel(target, &tx2).is_err() {
                             this.enter_recovery_tx(&tx2, "自动重启失败");
                         }
                     }
@@ -1203,6 +1280,12 @@ impl Supervisor {
         {
             let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             g.last_error = Some(reason.to_string());
+            // P2-3（V13 审查）：吊销在途瀑布。看门狗/崩溃环开火时若不递增
+            // 代际，慢 boot 步（AV 拖 300s）返回后 continue 的瀑布会继续
+            // spawn 内核（boot_waterfall 只在每步间查 cancelled(gen)），把
+            // 状态从 CrashLoop 拉回 Ready → 页面横跳。递增后该瀑布的
+            // cancelled(gen) 命中代际不符即中止，恢复页保持。
+            g.generation += 1;
             // 内核已死，URL 随之作废——不清则恢复页「重新加载」会按 stale URL
             // 换页到已死端口（真机复现：ERR_CONNECTION_REFUSED 错误页，无任何
             // 可操作按钮，比停在 loading 页更糟）。清空后 reload 走重启分支。
@@ -1235,6 +1318,20 @@ impl Supervisor {
         self.restart(tx, preferred_port);
     }
 
+    /// K3 终态兜底（2026-08）：渲染进程反复死亡、浏览器进程级重载
+    /// （CoreWebView2.Reload / Navigate）也救不活的形态（v0.5.3 白屏：
+    /// WebView2 渲染进程 OOM 崩溃后白屏无限挂，实证「整窗重启」是唯一有效
+    /// 恢复）——supervisor 级内核重启。语义 = 强制内核按退出处理：
+    /// `kill_kernel()` 收割当前内核树，`on_kernel_exit(None)` 走崩溃环判定
+    /// ——未成环走自动重启链拉起新内核（新内核就绪行线程统一换页 + 布防
+    /// 新一代心跳监测）；成环进恢复页（与崩溃环窗口限次/恢复页互斥协同，
+    /// 不双杀）。调用方为 renderer 心跳监测线程（lib.rs `kernel_restart_escape`）。
+    pub fn restart_kernel_after_renderer_escape(self: &Arc<Self>, tx: &Sender<SupervisorEvent>) {
+        log_line("[renderer-recovery] 升级到 supervisor 级内核重启（整窗重启是唯一有效恢复）");
+        self.kill_kernel();
+        self.on_kernel_exit(None, tx);
+    }
+
     /// 杀内核整树（restart / 恢复页 / 探活失败 / 应用退出共用）。
     ///
     /// local：Windows taskkill /T /F；Unix：killpg(-pgid, SIGKILL) 整组收割
@@ -1251,16 +1348,52 @@ impl Supervisor {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(mut c) = g.kernel.take() {
             let pid = c.id();
+            let port = g.port;
             match &backend {
                 Some(b) => {
-                    b.stop();
+                    // P2-2（V13 审查）：b.stop()（WSL 内 pid 文件收割）最长可
+                    // 阻塞 30s，全程持 inner 锁会堵死所有 supervisor 查询
+                    // （state()/kernel_url()/crash_count() 与探活环判活）。
+                    // child 已 take 到局部、锁先释放再 stop/kill/wait
+                    // （与 local 分支同手法）。
+                    let backend = Arc::clone(b);
+                    drop(g);
+                    backend.stop();
                     let _ = c.kill();
                     let _ = c.wait();
-                    drop(g);
                     std::thread::sleep(Duration::from_millis(300));
+                    if let Some(p) = port {
+                        if kernel_process::port::wait_port_free(p, Duration::from_secs(5)) {
+                            log_line(&format!("WSL 收割完成，端口 {p} 已确认释放"));
+                        } else {
+                            log_line(&format!("WSL 收割后端口 {p} 5s 内未释放，后续换新端口"));
+                        }
+                    }
                 }
-                None => kill_tree(&mut c, pid),
+                None => {
+                    kill_tree(&mut c, pid);
+                    drop(g);
+                    // #155 EADDRINUSE 4311 崩溃环第一根因：旧内核被杀到监听
+                    // socket 真正归还之间存在窗口期（taskkill /T /F 子孙收割
+                    // 异步 / TIME_WAIT 残留），新内核在窗口内 spawn 同一端口
+                    // 会绑定失败秒退 → 被误判为崩溃计入崩溃环。这里等端口
+                    // 确认空闲再返回（restart / 恢复页 / 探活失败共用本出口），
+                    // 等不到就交给 choose_stable_port 换新端口。
+                    if let Some(p) = port {
+                        if kernel_process::port::wait_port_free(p, Duration::from_secs(5)) {
+                            log_line(&format!("杀树完成，端口 {p} 已确认释放"));
+                        } else {
+                            log_line(&format!("杀树后端口 {p} 5s 内未释放（AV/残留进程占用），后续换新端口"));
+                            // K3 双 web 实例排查：杀树后端口仍未归还 = 旧内核子孙
+                            // 未死净（孤儿监听）或另一 dsh web 实例持有——输出
+                            // 持有者诊断供用户报障（desktop.log 可取证）。
+                            log_port_holder_diag(p);
+                        }
+                    }
+                }
             }
+        } else {
+            drop(g);
         }
     }
 
@@ -1325,6 +1458,118 @@ fn koffi_preflight_passed(stdout: &str) -> bool {
         .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .and_then(|v| v.get("ok").and_then(|x| x.as_bool()))
         .unwrap_or(false)
+}
+
+/// 从 netstat 文本提取监听指定端口的持有者 PID（纯解析，可单测）。
+/// Windows `netstat -ano -p TCP` 行形态：
+/// `  TCP    127.0.0.1:7388   0.0.0.0:0   LISTENING   12345`
+/// 字段序：Proto / LocalAddr / ForeignAddr / State / PID。任何字段数不足
+/// 或 State ≠ LISTENING 的行跳过（含首行表头，其 State 列为 "State"）。
+/// 非 Windows 构建下仅测试引用（诊断主体走 lsof），allow(dead_code) 豁免。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_listening_pids(netstat_out: &str, port: u16) -> Vec<u32> {
+    let needle = format!(":{port}");
+    netstat_out
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() >= 5 && fields[1].ends_with(&needle) && fields[3] == "LISTENING" {
+                fields[4].parse::<u32>().ok()
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// 双 web 实例诊断（K3）：端口被外部进程占用（另一个 dsh web 实例 / 未杀净
+/// 的孤儿内核，K2「端口 7388 复用」形态）时，输出持有者信息
+/// （pid / 进程名 / 启动时间）到 desktop.log——补充 synapse 侧「另一个 dsh
+/// web 实例」告警的壳侧证据，用户报障可直接贴日志。OS 查询失败静默
+///（诊断绝不影响主流程；枚举不到时仅记一句无法枚举）。
+fn log_port_holder_diag(port: u16) {
+    let diag = port_holder_diag_text(port);
+    if diag.is_empty() {
+        log_line(&format!("端口 {port} 被外部进程占用，但未能枚举持有者（权限受限/查询失败）"));
+    } else {
+        log_line(&format!("端口 {port} 被外部进程占用（疑似双 web 实例/孤儿内核），持有者诊断: {diag}"));
+    }
+}
+
+/// 端口持有者诊断文本（pid/进程名/启动时间）。
+/// - Windows：netstat 枚举监听 PID → tasklist 取进程名 → PowerShell 取启动
+///   时间（Get-Process.StartTime）。
+/// - 非 Windows：lsof -i TCP:<port> 取 pid → ps -o lstart 取启动时间。
+fn port_holder_diag_text(port: u16) -> String {
+    #[cfg(windows)]
+    {
+        let mut pids: Vec<u32> = Vec::new();
+        if let Ok(o) = std::process::Command::new("netstat")
+            .args(["-ano", "-p", "TCP"])
+            .creation_flags_win()
+            .output()
+        {
+            pids = parse_listening_pids(&String::from_utf8_lossy(&o.stdout), port);
+            pids.dedup();
+        }
+        let mut parts: Vec<String> = Vec::new();
+        for pid in pids {
+            let name = std::process::Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+                .creation_flags_win()
+                .output()
+                .ok()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .split(',')
+                        .next()
+                        .unwrap_or("")
+                        .trim_matches('"')
+                        .to_string()
+                })
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "未知".into());
+            let start = std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    &format!(
+                        "$p=Get-Process -Id {pid} -ErrorAction SilentlyContinue; if($p){{$p.StartTime.ToString('yyyy-MM-dd HH:mm:ss')}}"
+                    ),
+                ])
+                .creation_flags_win()
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "未知".into());
+            parts.push(format!("pid={pid} 进程={name} 启动={start}"));
+        }
+        parts.join("；")
+    }
+    #[cfg(not(windows))]
+    {
+        let mut parts: Vec<String> = Vec::new();
+        if let Ok(o) = std::process::Command::new("lsof").args(["-ti", &format!("TCP:{port}")]).output() {
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                if let Ok(pid) = line.trim().parse::<u32>() {
+                    if let Ok(p) = std::process::Command::new("ps")
+                        .args(["-p", &pid.to_string(), "-o", "pid=,comm=,lstart="])
+                        .output()
+                    {
+                        let row = String::from_utf8_lossy(&p.stdout).trim().to_string();
+                        if !row.is_empty() {
+                            parts.push(row);
+                        }
+                    }
+                }
+            }
+        }
+        parts.join("；")
+    }
 }
 
 fn log_line(msg: &str) {
@@ -1651,6 +1896,129 @@ Content-Length: 0
         let _ = Ordering::Relaxed;
     }
 
+    /// #155 EADDRINUSE 崩溃环回归锚点：reuse_or_new_port 不得把忙端口交给内核。
+    /// 行为测试（真监听占用）：期望端口被占用时返回 OS 随机安全端口（≠占用端口）；
+    /// 空闲时优先复用期望端口（origin 稳定）。
+    #[test]
+    fn reuse_or_new_port_never_returns_busy_port() {
+        let Some(root) = repo_root() else { eprintln!("[skip] 仓库检出不含 dsh-desktop"); return; };
+        let sv: Arc<Supervisor> = Arc::new(Supervisor::new(&root));
+        // ① 空闲端口：优先复用（origin 稳定，localStorage 偏好不丢）。
+        let free_port = kernel_process::port::probe_bind(0).expect("OS 分配空闲端口");
+        assert_eq!(sv.reuse_or_new_port(free_port), free_port, "空闲端口应被复用");
+        // ② 占用端口：必须换新端口（≠ 占用端口），绝不把忙端口交给内核。
+        let held = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let busy = held.local_addr().unwrap().port();
+        let chosen = sv.reuse_or_new_port(busy);
+        assert_ne!(chosen, busy, "忙端口绝不能被选择（EADDRINUSE 秒退 → 崩溃环入口）: busy={busy} chosen={chosen}");
+        assert!(kernel_process::port::is_safe_port(chosen), "换新端口必须安全");
+        // ③ 不安全端口：不选择。
+        let chosen2 = sv.reuse_or_new_port(6666);
+        assert_ne!(chosen2, 6666);
+        drop(held);
+    }
+
+    /// #155 稳定化等待锚点（形态）：kill_kernel 的 local 分支必须在杀树后等待
+    /// 端口释放（wait_port_free）；on_kernel_exit 自动重启的 spawn 前必须等待
+    /// 同一端口释放或换新端口。防回退（revert 到「杀完即 spawn」的竞态形态）。
+    #[test]
+    fn port_release_wait_anchors_present() {
+        let src = include_str!("supervisor.rs").replace("\r\n", "\n");
+        let kill_seg = src
+            .split("pub fn kill_kernel")
+            .nth(1)
+            .and_then(|s| s.split("pub fn shutdown").next())
+            .expect("kill_kernel 段");
+        assert!(kill_seg.contains("wait_port_free"), "kill_kernel local 分支必须等待端口释放");
+        assert!(kill_seg.contains("Duration::from_secs(5)"), "杀树后端口释放等待上限 5s");
+        let exit_seg = src
+            .split("fn on_kernel_exit")
+            .nth(1)
+            .and_then(|s| s.split("/// 探活循环").next())
+            .expect("on_kernel_exit 段");
+        let ok_seg = exit_seg
+            .split("Verdict::Ok =>")
+            .nth(1)
+            .and_then(|s| s.split("/// 探活循环").next())
+            .expect("自动重启（Verdict::Ok）段");
+        assert!(ok_seg.contains("wait_port_free"), "自动重启 spawn 前必须等端口释放");
+        assert!(ok_seg.contains("choose_stable_port(None)"), "等不到释放必须换新端口（绝不把忙端口交给内核）");
+        let reuse_seg = src
+            .split("fn reuse_or_new_port")
+            .nth(1)
+            .and_then(|s| s.split("/// 拉起内核并同步等待就绪").next())
+            .expect("reuse_or_new_port 段");
+        assert!(reuse_seg.contains("choose_stable_port(None)"), "复用失败必须回落 OS 随机端口");
+        assert!(!reuse_seg.contains("unwrap_or(preferred)"), "旧实现「忙端口兜底」必须移除");
+    }
+
+    /// #155 崩溃环防止的行为测试：内核秒退（EADDRINUSE 形态）时，kill_kernel
+    /// 的端口释放等待不持锁（wait_port_free 期间 inner 锁已释放）——用
+    /// 已死端口验证 kill_kernel 幂等安全 + 不阻塞（真机依赖 wait_port_free
+    /// 轮询，此处验证 kill_kernel 在无内核时零副作用）。
+    #[test]
+    fn kill_kernel_no_kernel_is_safe() {
+        let Some(root) = repo_root() else { eprintln!("[skip]"); return; };
+        let sv: Arc<Supervisor> = Arc::new(Supervisor::new(&root));
+        sv.set_state_for_test(RunState::Ready);
+        sv.kill_kernel(); // kernel=None：不应 panic / 不应无限阻塞
+        assert_eq!(sv.state(), RunState::Ready);
+    }
+
+    /// K3 双 web 实例排查（K2「端口 7388 复用/孤儿内核」）：netstat 监听 PID
+    /// 提取纯函数——Windows `netstat -ano -p TCP` 行形态
+    /// `TCP 127.0.0.1:7388 0.0.0.0:0 LISTENING 12345` 正确提取；IPv6 地址、
+    /// 非 LISTENING、表头、字段不足全部跳过。
+    #[test]
+    fn parse_listening_pids_from_netstat_lines() {
+        let out = "\n  TCP    127.0.0.1:7388    0.0.0.0:0              LISTENING       12345\n\
+                   \x20 TCP    [::1]:51731        [::]:0               LISTENING       3344\n\
+                   \x20 TCP    127.0.0.1:6666    0.0.0.0:0              TIME_WAIT       9876\n\
+                   \x20 TCP    127.0.0.1:9999    0.0.0.0:0              LISTENING       12ab\n\
+                   \x20 Proto  Local Address     Foreign Address       State           PID\n";
+        assert_eq!(parse_listening_pids(out, 7388), vec![12345], "监听 7388 的 PID 必须提取");
+        assert_eq!(parse_listening_pids(out, 51731), vec![3344], "IPv6 [::1]:51731 形态提取");
+        assert_eq!(parse_listening_pids(out, 6666), Vec::<u32>::new(), "TIME_WAIT 非 LISTENING 不提取");
+        assert_eq!(parse_listening_pids(out, 9999), Vec::<u32>::new(), "PID 非法（12ab）跳过");
+        assert_eq!(parse_listening_pids(out, 4444), Vec::<u32>::new(), "无监听行 → 空");
+    }
+
+    /// K3 双 web 实例漏杀点回归锚点（形态）：stdout-EOF 且进程仍存活时
+    /// spawn_kernel 的收尾必须收割该进程（kill + wait）——此前「Ok(None) →
+    /// 按退出处理」不杀进程，on_kernel_exit 自动重启的新内核与孤儿并存 =
+    /// 双 web 实例（端口 7388 复用形态）。防回退（revert 到不收割）。
+    #[test]
+    fn stdout_eof_orphan_kernel_is_reaped_shape() {
+        let src = include_str!("supervisor.rs").replace("\r\n", "\n");
+        let seg = src
+            .split("// stdout EOF = 进程退出。")
+            .nth(1)
+            .and_then(|s| s.split("// stderr 收尾线程").next())
+            .expect("stdout-EOF 收尾段");
+        assert!(
+            seg.contains("c.kill()") && seg.contains("c.wait()"),
+            "stdout EOF 但进程仍在必须 kill + wait 收割（防孤儿内核 = 双 web 实例）: {seg}"
+        );
+        assert!(
+            seg.contains("已收割防双 web 实例"),
+            "收割动作必须留日志（排障取证）: {seg}"
+        );
+    }
+
+    /// K3 终态兜底出口接线：restart_kernel_after_renderer_escape 必须 =
+    /// kill_kernel + on_kernel_exit（崩溃环判定天然限次，与恢复页互斥协同）。
+    #[test]
+    fn restart_kernel_after_renderer_escape_anchor() {
+        let src = include_str!("supervisor.rs").replace("\r\n", "\n");
+        let seg = src
+            .split("pub fn restart_kernel_after_renderer_escape")
+            .nth(1)
+            .and_then(|s| s.split("/// 杀内核整树").next())
+            .expect("restart_kernel_after_renderer_escape 函数体");
+        assert!(seg.contains("self.kill_kernel();"), "必须杀内核整树: {seg}");
+        assert!(seg.contains("self.on_kernel_exit(None, tx);"), "必须走 on_kernel_exit 自动重启链: {seg}");
+    }
+
     /// 看门狗判定表（纯函数全态枚举）：boot 进行态（Boot/Repair/Sync/Patch/
     /// Spawn）触发转恢复页；Ready（迟到的正常就绪）与 Recovery（瀑布已自愈）
     /// 不触发；stopping（退出路径）压制一切——防退出时误发恢复页事件。
@@ -1763,6 +2131,58 @@ Content-Length: 0
         assert!(already_pos < send_pos, "already 分支必须先于事件发送 return");
     }
 
+    /// P1-1（V13 审查）回归锚点：on_kernel_exit 置 kernel=None 时必须同步
+    /// 递增 probe_gen——旧探活环令牌立即失效，不再在「自动重启新内核就绪行
+    /// 布防前」误杀健康新内核（端口漂移/冷启动 >7s 形态）。
+    #[test]
+    fn kernel_exit_revokes_old_probe_gen() {
+        let src = include_str!("supervisor.rs").replace("\r\n", "\n");
+        let exit_seg = src
+            .split("fn on_kernel_exit")
+            .nth(1)
+            .and_then(|s| s.split("/// 探活循环").next())
+            .expect("on_kernel_exit 段");
+        assert!(exit_seg.contains("g.probe_gen += 1;"), "内核退出必须递增 probe_gen（吊销旧探活环）");
+        let kill_seg = src
+            .split("fn on_kernel_exit")
+            .nth(1)
+            .and_then(|s| s.split("/// 探活循环").next())
+            .expect("on_kernel_exit 段");
+        let none_pos = kill_seg.find("g.kernel = None;").expect("kernel 置空");
+        let probe_pos = kill_seg.find("g.probe_gen += 1;").expect("probe_gen 递增");
+        assert!(probe_pos > none_pos, "probe_gen 递增必须位于 kernel 置空之后（同锁块内）");
+    }
+
+    /// P2-2（V13 审查）回归锚点：kill_kernel 的 WSL 分支必须先把 child take
+    /// 到局部并释放 inner 锁再 b.stop()（最长 30s 阻塞不持锁）。
+    #[test]
+    fn wsl_kill_releases_lock_before_stop() {
+        let src = include_str!("supervisor.rs").replace("\r\n", "\n");
+        let kill_seg = src
+            .split("pub fn kill_kernel")
+            .nth(1)
+            .and_then(|s| s.split("pub fn shutdown").next())
+            .expect("kill_kernel 段");
+        // WSL 分支：drop(g) 必须先于 backend.stop()。
+        let drop_pos = kill_seg.find("drop(g);").expect("锁释放");
+        let stop_pos = kill_seg.find("backend.stop();").expect("WSL stop 调用");
+        assert!(drop_pos < stop_pos, "WSL 分支必须先释放锁再 b.stop()（30s 阻塞不持 inner 锁）");
+    }
+
+    /// P2-3（V13 审查）回归锚点：enter_recovery_tx 必须递增 generation——
+    /// 看门狗/崩溃环开火后，慢 boot 步（AV 拖 300s）返回时 cancelled(gen)
+    /// 命中代际不符即中止，不再把状态从 CrashLoop 拉回 Ready（页面横跳）。
+    #[test]
+    fn enter_recovery_bumps_generation_to_revoke_inflight_waterfall() {
+        let src = include_str!("supervisor.rs").replace("\r\n", "\n");
+        let seg = src
+            .split("fn enter_recovery_tx")
+            .nth(1)
+            .and_then(|s| s.split("/// 恢复页「重启」").next())
+            .expect("enter_recovery_tx 段");
+        assert!(seg.contains("g.generation += 1;"), "进入恢复页必须递增代际（吊销在途瀑布）");
+    }
+
     /// 看门狗端到端（短超时注入，生产 300s 参数化）：boot 永挂（卡 Boot 态）
     /// → 超时 → CrashLoop 事件 + last_error 带「看门狗」+ 状态落 CrashLoop
     /// （恢复页路径）；对照组：已 Ready 的 supervisor 超时后零事件。
@@ -1809,7 +2229,7 @@ Content-Length: 0
             .nth(1)
             .and_then(|s| s.split("pub fn shutdown").next())
             .expect("kill_kernel 段");
-        let stop_pos = seg.find("b.stop();").expect("WSL 分支必须先 stop（WSL 内 pid 文件收割）");
+        let stop_pos = seg.find("backend.stop();").expect("WSL 分支必须先 stop（WSL 内 pid 文件收割）");
         let kill_pos = seg.find("let _ = c.kill();").expect("再杀 wsl.exe 包装 child");
         assert!(stop_pos < kill_pos, "收割次序：WSL 内 stop 先于杀包装进程");
         // shutdown 的 WSL 分支：stop 必须 fire-and-forget（退出不等 30s 上限）。
@@ -2206,5 +2626,67 @@ mod stability_tests {
                 Err(_) => panic!("240s 内未就绪（配置破坏未被自愈）"),
             }
         }
+    }
+
+    /// V16-G1 迁移收口：插件保护中心交互面（guard:action）读面——
+    /// guard_status/guard_check/guard_incident_read/guard_resolve_incident 经
+    /// supervisor guard_cli_json（node sidecar guard-*）读守护瀑布已落盘的
+    /// 快照/事故/lastGood。写动作仍走守护瀑布自动面，本测试只验读面与轻量解。
+    #[test]
+    fn guard_action_read_surface_status_check_incident_resolve() {
+        let Some(root) = repo_root() else { eprintln!("[skip] 无依赖环境"); return; };
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = sandbox("guard-read");
+        std::env::set_var("DSH_HOME", &home);
+        std::env::set_var("DSH_TAURI_USERDATA", home.join("ud"));
+        let sv: Arc<Supervisor> = Arc::new(Supervisor::new(&root));
+        // 建档（sidecar boot 建立 web profile，快照才有文件可拍）。
+        let (tx, rx) = std::sync::mpsc::channel();
+        sv.run_sidecar_boot(&tx, 0).expect("基线 boot");
+        drop(rx);
+        // 快照 + mark-good（模拟守护瀑布已落定的 lastGood）。
+        let snap = sv.guard_cli_json(&["guard-snapshot", "baseline"])
+            .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(String::from))
+            .expect("快照 id");
+        let _ = sv.guard_cli_json(&["guard-mark-good", &snap]);
+        // 事故报告（读面输入；guard-incident 的返回体 file 为嵌套对象，改用 status 取 id）。
+        let _ = sv.guard_cli_json(&["guard-incident", "test", "hello"]);
+
+        // ① status：快照/事故/lastGood 三者齐备。
+        let status = sv.guard_status().expect("guard-status 应可读");
+        assert_eq!(status.get("ok").and_then(|v| v.as_bool()), Some(true), "status ok: {status}");
+        let snaps = status.get("snapshots").and_then(|v| v.as_array()).expect("snapshots 数组");
+        assert!(snaps.iter().any(|s| s.get("id").and_then(|i| i.as_str()) == Some(snap.as_str())), "快照应在列表: {snaps:?}");
+        let lg = status.get("lastGood").and_then(|v| v.get("id")).and_then(|i| i.as_str());
+        assert_eq!(lg, Some(snap.as_str()), "lastGood 应指向标记快照");
+        let incidents = status.get("incidents").and_then(|v| v.as_array()).expect("incidents 数组");
+        assert!(!incidents.is_empty(), "事故应已落盘: {incidents:?}");
+        let inc_id = incidents[0].get("id").and_then(|x| x.as_str()).expect("事故 id").to_string();
+
+        // ② check：体检 findings（只读，不执行修复）。
+        let check = sv.guard_check().expect("guard-health 应可读");
+        assert_eq!(check.get("ok").and_then(|v| v.as_bool()), Some(true), "check ok: {check}");
+        assert!(check.get("findings").and_then(|v| v.as_array()).is_some(), "check 应带 findings 数组: {check}");
+
+        // ③ incident：读详情。
+        let detail = sv.guard_incident_read(&inc_id).expect("guard-read-incident 应可读");
+        assert_eq!(detail.get("ok").and_then(|v| v.as_bool()), Some(true), "incident ok: {detail}");
+        assert!(detail.get("content").and_then(|v| v.as_str()).is_some_and(|c| !c.is_empty()), "事故详情非空");
+
+        // ④ resolve-incident：解决后 status 的 incidents 不再含该 id。
+        let resolved = sv.guard_resolve_incident(&inc_id).expect("guard-resolve-incident 应可读");
+        assert_eq!(resolved.get("ok").and_then(|v| v.as_bool()), Some(true), "resolve ok: {resolved}");
+        let status2 = sv.guard_status().expect("guard-status 二次应可读");
+        let incidents2 = status2.get("incidents").and_then(|v| v.as_array()).expect("incidents 数组");
+        assert!(!incidents2.iter().any(|i| i.get("id").and_then(|x| x.as_str()) == Some(inc_id.as_str())), "已解决事故不得再出现在列表: {incidents2:?}");
+
+        // ⑤ 非法 id 的读/解不得 panic（sidecar 返回 {ok:false}）。
+        let bad = sv.guard_incident_read("../../etc/passwd").expect("非法 id 也应返回 JSON");
+        assert_eq!(bad.get("ok").and_then(|v| v.as_bool()), Some(false), "非法 id 应 ok:false: {bad}");
+
+        sv.shutdown();
+        std::env::remove_var("DSH_HOME");
+        std::env::remove_var("DSH_TAURI_USERDATA");
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

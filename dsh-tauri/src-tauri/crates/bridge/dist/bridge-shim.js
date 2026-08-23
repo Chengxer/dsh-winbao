@@ -8,7 +8,7 @@
  * 每一个页面（含远程内核页 http://127.0.0.1:<port>）。
  *
  * 设计约束：
- *  1. 签名与 Electron 版 preload.js 逐字段一致（48 方法，硬契约）；
+ *  1. 签名与 Electron 版 preload.js 逐字段一致（53 方法，硬契约）；
  *  2. 无 Tauri 内部件时降级为「浏览器模式」：方法返回 rejected Promise、
  *     getPathForFile 返回 ''（与 Electron 版浏览器降级同语义）；
  *  3. 错误统一 Error('[CODE] message')（contracts/error-codes.md）；
@@ -153,7 +153,7 @@
     setInterval(tick, 3000);
   })();
 
-  // ---- 桥对象（48 方法，签名见 contracts/bridge-api.md）----
+  // ---- 桥对象（53 方法，签名见 contracts/bridge-api.md）----
   var dshDesktop = {
     appVersion: '', // app_init 回填
     windowControls: {
@@ -211,7 +211,7 @@
       try { return (file && typeof file.path === 'string') ? file.path : ''; } catch (e) { return ''; }
     },
     imagePaste: {
-      save: function (payload) { return call('image_paste_save', payload || {}); }
+      save: function (payload) { return call('image_paste_save', { payload: payload || {} }); }
     },
     sponsorQr: function () { return call('sponsor_qr'); },
     sponsorWindow: function () { return call('sponsor_window'); },
@@ -237,6 +237,14 @@
       removeBundle: function (names) { return call('diag_remove_bundle', { names: names || [] }); },
       analyzeOrder: function () { return call('diag_order'); },
       applyOrder: function (order) { return call('diag_order_apply', { order: order }); }
+    },
+    guard: {
+      // 插件保护中心交互面（guard:action 分发）。只读面 + 轻量解；写动作
+      // （snapshot/restore/repair）仍走守护瀑布自动面，不在垫片面暴露。
+      status: function () { return call('guard_action', { action: 'status' }); },
+      check: function () { return call('guard_action', { action: 'check' }); },
+      incident: function (id) { return call('guard_action', { action: 'incident', id: String(id || '') }); },
+      resolveIncident: function (id) { return call('guard_action', { action: 'resolve-incident', id: String(id || '') }); }
     },
     petWindow: {
       open: function () { return call('pet_window', { action: 'open' }); },

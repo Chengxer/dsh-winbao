@@ -73,6 +73,7 @@ const KNOWN_COMPANION_DIR_NAMES = new Set([
   'dshmarket',
   'dsh-terminal',
   'dsh-prompt',
+  'dsh-third-party-thinking',
 ]);
 
 /**
@@ -223,6 +224,62 @@ function removeRetiredDshMarketPatchRows(patch) {
 }
 
 // ---------------------------------------------------------------------------
+// dsh-third-party-thinking 退役（内置推理强度选择切换为 dsh-reasoning-effort）
+// ---------------------------------------------------------------------------
+
+/** 退役插件的包名与 loader id。 */
+const RETIRED_THIRD_PARTY_THINKING_PACKAGE = '@deepseek-ai/dsh-third-party-thinking';
+const RETIRED_THIRD_PARTY_THINKING_LOADER_ID = 'third-party-thinking';
+
+/**
+ * 移除已退役插件 dsh-third-party-thinking 的同步副本（幂等）。该插件是**非
+ * bundle** 插件（无 dsh.bundle.patch），登记只存在于 cordis.patch.yml 的 insert
+ * 条目，manifest 无 bundles/dependencies 登记，故无需 manifest 手术——与
+ * dshmarket（bundle 插件）退役路径的差异即在此。目录清理带内置装配特征门
+ * （private: true + 包名精确匹配），避免误删用户自装的同名第三方包。
+ * @param {string} profileDir web profile 目录
+ * @param {Object} hooks { log, fail, plan, dryRun }
+ */
+function removeRetiredThirdPartyThinkingDir(profileDir, hooks = {}) {
+  const { log, fail, plan, dryRun = false } = hooks;
+  const pkgDir = path.join(profileDir, 'node_modules', '@deepseek-ai', 'dsh-third-party-thinking');
+  if (fs.existsSync(pkgDir)) {
+    let isBuiltin = false;
+    try {
+      const p = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'));
+      isBuiltin = !!(p && p.name === RETIRED_THIRD_PARTY_THINKING_PACKAGE && p.private === true);
+    } catch { /* 目录残缺：也按可清理处理 */ isBuiltin = true; }
+    if (isBuiltin) {
+      if (dryRun) {
+        if (plan) plan('dry-run: 将移除已退役插件 ' + RETIRED_THIRD_PARTY_THINKING_PACKAGE);
+      } else {
+        try {
+          fs.rmSync(pkgDir, { recursive: true, force: true });
+          if (log) log('已移除已退役插件: ' + RETIRED_THIRD_PARTY_THINKING_PACKAGE);
+        } catch (err) {
+          if (fail) fail('移除已退役插件失败: ' + err.message);
+        }
+      }
+    }
+  }
+}
+
+/**
+ * 移除 patch 层已退役插件（loader id third-party-thinking）的全部登记行
+ * （insert 内层条目、纯 insert 块、name-only 顶层条目）。纯文本变换，由调用方
+ * 在自己的 patch 快照上调用后统一落盘（syncCompanionFiles 不改写 patch 文件）。
+ * @param {string} patch cordis.patch.yml 原文
+ * @returns {{ patch: string, changed: boolean }}
+ */
+function removeRetiredThirdPartyThinkingPatchRows(patch) {
+  const drop = dropBlocksByIds(String(patch || ''), [RETIRED_THIRD_PARTY_THINKING_LOADER_ID]);
+  if (drop.removed.length > 0) {
+    return { patch: drop.text, changed: true };
+  }
+  return { patch, changed: false };
+}
+
+// ---------------------------------------------------------------------------
 // 目录级同步（递归比对 size+mtime 精确值，一致时跳过）
 // ---------------------------------------------------------------------------
 
@@ -305,6 +362,9 @@ function syncCompanionFiles(opts) {
   // patch 行不在此时机清理（本函数不落盘 patch——调用方持快照统一写），
   // 由调用方对快照调用 removeRetiredDshMarketPatchRows。
   removeRetiredDshMarketDir(profileDir, { log, fail, plan, dryRun });
+  // dsh-third-party-thinking 退役：非 bundle 插件，仅目录清理（无 manifest 登记）；
+  // patch 行由调用方对快照调用 removeRetiredThirdPartyThinkingPatchRows 清理。
+  removeRetiredThirdPartyThinkingDir(profileDir, { log, fail, plan, dryRun });
 
   const bundleNames = new Set();
   for (const name of VENDOR_DEPS) {
@@ -444,6 +504,8 @@ module.exports = {
   removeLegacyMarketplaceDir,
   removeRetiredDshMarketDir,
   removeRetiredDshMarketPatchRows,
+  removeRetiredThirdPartyThinkingDir,
+  removeRetiredThirdPartyThinkingPatchRows,
   removeLegacyMarketplacePatchLines,
   removedPluginIdsFromPatch,
   ensureDisabledPatchEntry,

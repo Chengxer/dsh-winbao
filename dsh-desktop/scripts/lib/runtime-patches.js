@@ -155,7 +155,13 @@ function transformExposeFix(src, file) {
   const missing = SETTINGS_NAMESPACES.filter((ns) => !arrText.includes('"' + ns + '"'));
   if (missing.length === 0) return { status: 'already' };
   const hasTrailingComma = /,\s*$/.test(arrText);
-  const block = (hasTrailingComma ? '\n' : ',\n') + missing.map((ns) => '\t"' + ns + '"').join(',\n') + '\n';
+  // 空数组（`const WEB_SETTINGS_NAMESPACES = []` 或 `= [\n]`）没有既有元素，
+  // 若沿用非尾逗号分支无条件前置 `,\n` 会生成 `[,\n"x"]` 的非法 JS（前导逗号
+  // = 空槽）。空数组特殊处理：换行起始注入条目，去掉前导逗号。
+  const inner = arrText.slice(arrText.lastIndexOf('[') + 1).trim();
+  const isEmptyArray = inner === '';
+  const prefix = isEmptyArray ? '\n' : (hasTrailingComma ? '\n' : ',\n');
+  const block = prefix + missing.map((ns) => '\t"' + ns + '"').join(',\n') + '\n';
   return { status: 'changed', src: src.slice(0, closeIdx) + block + src.slice(closeIdx), note: missing };
 }
 

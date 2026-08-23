@@ -9,7 +9,7 @@
 //! 所有窗都注入 bridge 垫片（initialization_script 对每次导航生效）；
 //! 浮窗/宠物窗追加模式注入脚本（`__DSH_FLOAT__` / `__DSH_PET__`，契约 bridge-api.md §5）。
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use bridge::{BridgeError, BRIDGE_SHIM_JS};
 use tauri::{Emitter, Manager, WebviewUrl};
@@ -69,11 +69,33 @@ pub fn create_main_window(
     }
     let win = b.build()?;
     let handle = app.clone();
+    let was_minimized = std::sync::Arc::new(AtomicBool::new(false));
     win.on_window_event(move |e| {
         if matches!(e, tauri::WindowEvent::Resized(_)) {
             if let Some(w) = handle.get_webview_window("main") {
                 if let Ok(max) = w.is_maximized() {
                     let _ = handle.emit("window-maximized", max);
+                }
+                // G3：主窗「最小化自动弹宠物窗」。tauri 2 的 WindowEvent 无
+                // Minimized 变体（tao Windows 源码注释「if we decide to
+                // implement one」），故在 Resized 里轮询 is_minimized()
+                // （Win32 IsIconic 直问 OS）抓 WM_SIZE/SIZE_MINIMIZED 上升沿，
+                // 语义对齐 Electron mainWindow.on('minimize')。
+                if let Ok(min) = w.is_minimized() {
+                    let was = was_minimized.swap(min, Ordering::Relaxed);
+                    if min && !was {
+                        if let Some(state) = handle.try_state::<crate::AppState>() {
+                            let store = shell_core::SettingsStore::new(state.paths.settings.clone());
+                            let auto_open = pet_auto_open_from_store(&store);
+                            let pet_exists = handle.get_webview_window("pet").is_some();
+                            if should_open_pet_on_minimize(auto_open, pet_exists) {
+                                let sv = state.supervisor.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                                if let Some(url) = sv.as_ref().and_then(|s| s.kernel_url()) {
+                                    let _ = open_pet_window(&handle, &url);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -260,6 +282,20 @@ const FLOAT_WATCHDOG_SCRIPT: &str = r#"
 "#;
 
 static PET_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// G3：读 settings.json 的 pet.autoOpen（写侧 commands/window.rs
+/// `pet_set_auto_open`，扁平键）。缺省 false（Electron `let petAutoOpen = false`
+/// 同口径）；未设置/损坏/非布尔一律不弹。
+pub fn pet_auto_open_from_store(store: &shell_core::SettingsStore) -> bool {
+    store.get("pet.autoOpen").ok().flatten().and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+/// G3：主窗最小化时应否自动弹宠物窗（纯判定，供事件分支与单测共用）。
+/// `auto_open` 为 settings 的 pet.autoOpen；`pet_exists` 为宠物窗是否已存在
+/// （防 minimize 反复触发重复弹）。二者缺一不可。
+pub fn should_open_pet_on_minimize(auto_open: bool, pet_exists: bool) -> bool {
+    auto_open && !pet_exists
+}
 
 /// 宠物窗：透明置顶小窗。WebView2 透明窗为已知风险点（roadmap R2）——
 /// 创建失败时返回错误（调用方降级提示），不拖垮主流程。
@@ -479,6 +515,88 @@ mod tests {
         assert!(parse_url("http://127.0.0.1:51731/").is_ok());
         assert!(parse_url("not a url").is_err());
         // scheme 不设限（围栏在 on_navigation 层）；只测形态拒绝。
+    }
+
+    /// G3：主窗「最小化自动弹宠物窗」决策表（纯函数）——
+    /// 仅「设置开启 + 宠物窗未存在」才开；设置关闭 / 已开一律不弹。
+    #[test]
+    fn should_open_pet_on_minimize_decision_table() {
+        assert!(should_open_pet_on_minimize(true, false), "开启+未开 → 应开");
+        assert!(!should_open_pet_on_minimize(true, true), "开启+已开 → 不重复开");
+        assert!(!should_open_pet_on_minimize(false, false), "关闭+未开 → 不弹");
+        assert!(!should_open_pet_on_minimize(false, true), "关闭+已开 → 不弹");
+    }
+
+    /// G3：pet.autoOpen 读取口径——true 才弹；缺省/非布尔/损坏一律回落 false
+    /// （Electron `let petAutoOpen = false` 同口径，绝不因坏配置误弹）。
+    #[test]
+    fn pet_auto_open_reads_flat_key_defaults_false() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("dsh-pet-autoopen-{}-{}.json", std::process::id(), line!()));
+        let _ = std::fs::remove_file(&path);
+        let store = shell_core::SettingsStore::new(&path);
+        // 缺省：未写入 → false。
+        assert!(!pet_auto_open_from_store(&store));
+        // 显式 true/false 往返。
+        store.set("pet.autoOpen", serde_json::json!(true)).unwrap();
+        assert!(pet_auto_open_from_store(&store));
+        store.set("pet.autoOpen", serde_json::json!(false)).unwrap();
+        assert!(!pet_auto_open_from_store(&store));
+        // 非布尔（字符串）→ 回落缺省 false。
+        store.set("pet.autoOpen", serde_json::json!("yes")).unwrap();
+        assert!(!pet_auto_open_from_store(&store));
+        let _ = std::fs::remove_file(&path);
+
+        // 损坏文件 → load 自愈为空 → 回落 false。
+        let mut bad = std::env::temp_dir();
+        bad.push(format!("dsh-pet-autoopen-bad-{}-{}.json", std::process::id(), line!()));
+        let _ = std::fs::remove_file(&bad);
+        std::fs::write(&bad, "{not json").unwrap();
+        let broken = shell_core::SettingsStore::new(&bad);
+        assert!(!pet_auto_open_from_store(&broken));
+        let _ = std::fs::remove_file(&bad);
+        let _ = std::fs::remove_file(bad.with_extension("json.broken"));
+    }
+
+    /// G3 接线形态：主窗 Resized 轮询 is_minimized（tauri 2 无 Minimized 事件），
+    /// 上升沿经 should_open_pet_on_minimize → open_pet_window，防回退到 V16
+    /// 「只写不读」缺口（设置持久化了但从不生效）。
+    #[test]
+    fn minimize_auto_opens_pet_window_shape() {
+        let src = include_str!("windows.rs");
+        let seg = src
+            .split("pub fn create_main_window")
+            .nth(1)
+            .and_then(|s| s.split("pub fn hide_main_to_tray").next())
+            .expect("create_main_window 函数体");
+        assert!(seg.contains("is_minimized"), "必须轮询最小化态（tauri 2 无 Minimized 事件）: {seg}");
+        assert!(seg.contains("was_minimized"), "必须上升沿去重（防反复触发）: {seg}");
+        assert!(seg.contains("pet_auto_open_from_store"), "必须经 pet_auto_open_from_store 读键: {seg}");
+        assert!(seg.contains("should_open_pet_on_minimize"), "必须走纯判定门: {seg}");
+        assert!(seg.contains("open_pet_window"), "判定为真必须打开宠物窗: {seg}");
+    }
+
+    /// G3：非主窗 minimize 不触发自动弹宠物窗——自动弹窗只接在主窗
+    /// create_main_window 的 on_window_event 里；宠物/浮窗/赞助窗创建路径
+    /// 不得出现 is_minimized / pet_auto_open_from_store / should_open_pet_on_minimize
+    /// 触发逻辑（否则最小化宠物/浮窗也会反向弹新宠物窗，形成互相触发的坏循环）。
+    #[test]
+    fn non_main_windows_do_not_auto_open_pet_shape() {
+        let src = include_str!("windows.rs");
+        for (fn_name, end_marker) in [
+            ("pub fn open_float_window", "/// URL 解析 helper"),
+            ("pub fn open_pet_window", "/// 宠物窗模式注入"),
+            ("pub fn open_sponsor_window", "pub fn build_sponsor_window"),
+        ] {
+            let seg = src
+                .split(fn_name)
+                .nth(1)
+                .and_then(|s| s.split(end_marker).next())
+                .unwrap_or_else(|| panic!("{fn_name} 函数体边界缺失"));
+            assert!(!seg.contains("should_open_pet_on_minimize"), "{fn_name} 不得含自动弹宠物窗判定: {seg}");
+            assert!(!seg.contains("pet_auto_open_from_store"), "{fn_name} 不得读 pet.autoOpen 触发弹窗: {seg}");
+            assert!(!seg.contains("is_minimized"), "{fn_name} 不得轮询最小化态触发弹窗: {seg}");
+        }
     }
 
     /// FW1 白屏双保险——壳层看门狗形态锚点：

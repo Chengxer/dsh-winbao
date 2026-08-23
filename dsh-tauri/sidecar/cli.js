@@ -122,6 +122,9 @@ function loadModules(appDir) {
     desktopBackup: req('scripts/desktop-backup'),
     desktopOrdering: req('scripts/desktop-ordering'),
     desktopValidity: req('scripts/desktop-validity'),
+    // #155 根因二：patch 文本 YAML 安全化（裸 @ 包名补引号）唯一实现在
+    // scripts/plugin-core/lib/patch-surgery.js（sidecar 与同步器共用）。
+    patchSurgery: req('scripts/plugin-core/lib/patch-surgery'),
      sessionWatcher: req('session-watcher'),
     pluginGuard: req('plugin-guard'),
   };
@@ -959,7 +962,11 @@ async function main() {
         const c = ctx();
         // Electron 版安全启动链（ensureSafeBootOverlay + parseFailedLoaderIds）：
         // 解析 dsh-web.log 尾部失败 loader id → 生成/合并禁用 overlay（幂等）。
+        // #155 根因二：id 可以是 `@deepseek-ai/...` 包名，裸标量是 YAML
+        // indicator 起始（`@`），js-yaml 解析失败 → 内核装配 overlay 即崩。
+        // 一律经 quotePatchScalarValues 安全化（新写 id 与既有脏文件都过）。
         const ud = resolveUserData();
+        fs.mkdirSync(ud, { recursive: true });
         const logFile = path.join(ud, 'logs', 'dsh-web.log');
         let tail = '';
         try {
@@ -975,21 +982,42 @@ async function main() {
         try { ids = c.mods.profilePatchHeal.parseFailedLoaderIds(tail) || []; } catch {}
         const file = path.join(ud, 'safe-boot.overlay.yml');
         const existing = new Set();
-        try {
-          const text = fs.readFileSync(file, 'utf8');
-          const re = /(?:^|\n)\s*-\s*id:\s*([A-Za-z0-9_-]+)/g;
-          let m; while ((m = re.exec(text)) !== null) existing.add(m[1]);
-        } catch {}
+        let existingText = '';
+        try { existingText = fs.readFileSync(file, 'utf8'); } catch {}
+        // 既有脏文件的幂等修复：旧版可能写入了裸 `@deepseek-ai/...` id。
+        // 必须无失败新条目时也修（否则「no-failures 早退」会留下脏文件，
+        // 下次内核启动仍解析失败进崩溃环）。
+        const healedExisting = c.mods.patchSurgery.quotePatchScalarValues(existingText);
+        let writeNeeded = healedExisting.changed;
         const merged = [...new Set([...existing, ...ids])];
-        if (merged.length === 0) return emit({ ok: true, path: file, ids: [], note: 'no-failures' });
+        // 现有条目提取：先按引号形态再按裸形态（脏文件两者都可能）。
+        const re = /(?:^|\n)\s*-\s*id:\s*['"]?([^'"\n]+)['"]?\s*(?:\n|$)/g;
+        let m; while ((m = re.exec(healedExisting.text)) !== null) {
+          if (m[1] && m[1].trim()) existing.add(m[1].trim());
+        }
+        const mergedFinal = [...new Set([...existing, ...ids])];
+        if (mergedFinal.length === 0) {
+          // V17：no-failures 早退但既有脏文件需修复时也必须原子写（开发原则 6
+          // 设置类文件走原子写；防 HMR/内核装配撕裂读半写文件）。
+          if (writeNeeded) {
+            try { c.mods.patchIo.writeFileAtomic(file, healedExisting.text); } catch {}
+          }
+          return emit({ ok: true, path: file, ids: [], note: 'no-failures' });
+        }
         const NL = String.fromCharCode(10);
         const content = [
           '# DSH Desktop 安全启动 overlay（自动生成）：以下插件启动失败，已被自动禁用。',
           '# 修复插件后可删除本文件恢复。',
-          ...merged.map((id) => '- id: ' + id + NL + '  disabled: true'),
+          // #155 根因二：@ 开头/特殊字符包名补单引号（裸标量 YAML 解析失败），
+          // 安全 id（字母/数字/下划线/点/连字符）保持裸标量（健康文件零改写）。
+          ...mergedFinal.map((id) => '- id: ' + c.mods.patchSurgery.yamlQuoteIfNeeded(id) + NL + '  disabled: true'),
           '',
         ].join(NL);
-        try { fs.writeFileSync(file, content); return emit({ ok: true, path: file, ids: merged }); }
+        if (!writeNeeded && content === healedExisting.text) {
+          return emit({ ok: true, path: file, ids: mergedFinal });
+        }
+        // V17：原子写（tmp+rename），防内核装配读半写文件。
+        try { c.mods.patchIo.writeFileAtomic(file, content); return emit({ ok: true, path: file, ids: mergedFinal }); }
         catch (err) { return emit({ ok: false, error: String(err && err.message || err) }); }
       }
       case 'guard-snapshot': {
@@ -1050,6 +1078,32 @@ async function main() {
           return emit({ ok: true, file: file || null });
         }
         return emit({ ok: false, error: 'guard 无 reportIncident' });
+      }
+      case 'guard-status': {
+        // 插件保护中心交互面（guard:action status）：快照列表 + 未解决事故列表 +
+        // 最后良好快照。只读，读守护瀑布已落盘的状态（rollbacks/guard/）。
+        const c = ctx();
+        const g = makeGuard(c);
+        const snapshots = (typeof g.listSnapshots === 'function' && g.listSnapshots()) || [];
+        const incidents = (typeof g.listIncidents === 'function' && g.listIncidents()) || [];
+        const lastGood = (typeof g.lastGoodSnapshot === 'function' && g.lastGoodSnapshot()) || null;
+        return emit({ ok: true, snapshots, incidents, lastGood });
+      }
+      case 'guard-read-incident': {
+        // 读单条事故详情（content 截断 30KB；guard:action incident）。
+        const c = ctx();
+        const id = rest.find((a) => !a.startsWith('--'));
+        if (!id) { process.stderr.write('用法: guard-read-incident <id>'); process.exit(2); }
+        const g = makeGuard(c);
+        return emit(typeof g.readIncident === 'function' ? g.readIncident(String(id)) : { ok: false, error: 'guard 无 readIncident' });
+      }
+      case 'guard-resolve-incident': {
+        // 解决事故：重命名 .resolved.md（软解决，不删盘；guard:action resolve-incident）。
+        const c = ctx();
+        const id = rest.find((a) => !a.startsWith('--'));
+        if (!id) { process.stderr.write('用法: guard-resolve-incident <id>'); process.exit(2); }
+        const g = makeGuard(c);
+        return emit(typeof g.resolveIncident === 'function' ? g.resolveIncident(String(id)) : { ok: false, error: 'guard 无 resolveIncident' });
       }
       case 'balance-fetch': {
         // 余额单轮取数（Electron main.js ensureBalanceScheduler 的取数半边，

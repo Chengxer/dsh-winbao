@@ -12,7 +12,7 @@
 | `E_INTERNAL` | 壳内部未分类错误 | 任何 crate |
 | `E_INVALID_ARG` | 参数校验失败（含超长/类型错） | bridge 参数校验 |
 | `E_NOT_FOUND` | 目标不存在（窗口/插件/会话/文件） | 各 command |
-| `E_CUT_FEATURE` | 该能力在 Tauri 版已裁撤（GPU 守卫 `guard:action` 预留位、自研客户端更新链） | 命令位保留（v0.5.2 起无活跃返回方——`check-agent-update` 已改最简版本比对） |
+| `E_CUT_FEATURE` | 该能力在 Tauri 版已裁撤（自研客户端更新链） | 命令位保留（v0.5.3 起无活跃返回方——`check-agent-update` 菜单动作已整体移除） |
 | `E_TIMEOUT` | 下游超时（内核 HTTP / sidecar 探活） | kernel-process / sidecar |
 | `E_NOT_IMPLEMENTED` | 能力已规划未实装（占位拒绝，非裁撤——区别于 `E_CUT_FEATURE`） | image_paste_save（Phase 3 剪贴板位图） |
 | `E_UNAUTHORIZED` | 调用窗越权：主窗白名单（Electron `pluginManagerIpcAllowed` 同守卫面）外的窗口调插件管理/诊断/备份族或 `restart_service` | app commands（v0.5.2 实装，ipc-commands.md §3.3） |
@@ -28,6 +28,13 @@
 | `E_KERNEL_PORT` | 端口占用/安全端口选择失败 |
 | `E_KERNEL_CRASH_LOOP` | 崩溃环触发（连续崩溃超阈值，进入恢复页） |
 | `E_KERNEL_NOT_READY` | 就绪行未在期限内出现 |
+
+> **注记（清偿口径）**：`E_KERNEL_SPAWN` / `E_KERNEL_PORT` / `E_KERNEL_CRASH_LOOP`
+> 三码**声明保留但无活跃生产方**（不参与 command 返回；仅作历史错误串识别锚点）。
+> 崩溃环 → 恢复页的实际链路是 `SupervisorEvent::CrashLoop` 事件路由（route_events →
+> `navigate_main` 换恢复页）+ `recovery_state` 状态值（`{state:"no-kernel", reason}` 等，
+> 见 data-flow.md §3.2），**并非错误码**。`E_KERNEL_NOT_READY` 除外——有活跃
+> `kernel_not_ready` 构造方。
 
 ## 3. Sidecar / 插件域（沿用 #121 码表；Rust 编排在 app commands/sidecar + supervisor，执行在 Node sidecar cli.js）
 
@@ -63,14 +70,14 @@
 1. **新增码只追加不复用**；删除码保留占位（返回 `E_CUT_FEATURE` 或 `E_INTERNAL`）。
 2. `detail` 字段自由结构（诊断用），插件不得依赖其稳定性。
 3. fire-and-forget command 的错误只进日志，不达页面。
-4. 崩溃环 / 恢复页场景：`E_KERNEL_CRASH_LOOP` 是唯一把主窗切到恢复页的码。
+4. 崩溃环 / 恢复页场景：主窗切恢复页走 `SupervisorEvent::CrashLoop` 事件路由 + `recovery_state` 状态值（非错误码；`E_KERNEL_SPAWN`/`E_KERNEL_PORT`/`E_KERNEL_CRASH_LOOP` 三码声明保留但无活跃生产方，见 §2 注记）。
 5. **入表口径（2026-08 清偿时钉板）**：错误码只覆盖 command 返回的跨进程
    错误面。以下两类形态**刻意不入表**：
    - 恢复页**状态值**（`recovery_state` 的 `{state:"no-kernel", reason}` 等，
      见 data-flow.md §3.2）——那是状态查询的正常返回，不是错误；
    - 内部监督**事件**（探活失败 `ProbeFailed`、假死可疑 `ZombieSuspect`——
      TCP 通而 HTTP 连续无响应的 #122/#129 形态）——只进 desktop.log，终态
-     仍归 `E_KERNEL_CRASH_LOOP`（假死受控重启走崩溃环窗口限次，天然防死循环）。
+     仍归 `SupervisorEvent::CrashLoop` 事件路由（假死受控重启走崩溃环窗口限次，天然防死循环）。
 
 ## 7. WSL 托管域（wsl-backend crate，v0.5.3 随 supervisor WSL 分支实装）
 

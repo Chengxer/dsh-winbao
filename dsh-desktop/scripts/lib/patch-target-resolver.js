@@ -37,6 +37,9 @@ const PERSISTENT_SHELL_PKG_RELS = [PWSH_PERSIST_REL, BASH_PERSIST_REL];
 const TERMINAL_BASH_REL = path.join('dsh-terminal-bash', 'lib', 'index.js');
 const CODE_PRESET_REL = path.join('dsh', 'config', 'agent-presets', 'code', 'agent.cordis.yml');
 const ATTACH_LOCAL_REL = path.join('dsh-attachment-local', 'lib', 'index.js');
+// R7：adapter prepareCall 守卫补丁目标（dsh-llm）：LlmRuntime.prepareCall /
+// adapterStream 所在入口（0.1.1-rc.2 起新增 adapter.prepareCall 契约调用点）。
+const LLM_PKG_REL = path.join('dsh-llm', 'lib', 'index.js');
 // loader 自动隔离补丁目标（cordis-plugin-loader 是 @deepseek-ai scope 下的包）。
 const LOADER_PKG_REL = path.join('cordis-plugin-loader', 'lib', 'index.js');
 const APP_BOOT_PKG_REL = path.join('dsh-app-boot', 'lib', 'index.js');
@@ -58,6 +61,10 @@ const PROMPT_CONTEXT_LITERAL_PKG_RELS = [
 // 经 exports "." 实际加载的唯一入口（/api 前缀路由 + fallback fetch 所在），
 // apply() 的 apiProxy 缺席分支即锚点。
 const API_GATEWAY_ABSENT_PKG_REL = path.join('dsh-client-connection', 'lib', 'index.js');
+// #154 第三根因：内核 web UI boot 看门狗补丁目标——dsh-web-frontend 的
+// index.html（dist 是内核 Web 服务器实际托管的面；client-compat.js 也注入
+// 同一 dist，说明这是可补丁的落点）。
+const KERNEL_WEB_INDEX_REL = path.join('dsh-web-frontend', 'dist', 'index.html');
 // W1 问题四（WSL 目录选择器误判 native）补丁目标：adaptive 选择器的
 // resolver 所在入口（resolveDirectoryPickerBackend 锚点 :65）。
 const PICKER_AUTO_PKG_REL = path.join('dsh-host-directory-picker-auto', 'lib', 'index.js');
@@ -84,6 +91,13 @@ const LAYOUTS = {
     mkAi(ctx.appDir, spec.pkgRel),
     mkAi(path.join(ctx.userDataDir, 'agent'), spec.pkgRel),
     mkAi(path.join(ctx.userDataDir, 'agent', 'node_modules', '@deepseek-ai', 'dsh'), spec.pkgRel),
+    mkAi(path.join(ctx.home, 'profiles'), spec.pkgRel),
+  ],
+  // 内核 Web UI dist 补丁（#154 前端兜底）：dist 目录只存在于 app 内置副本
+  // 与 agent overlay（Web 组合由内核 dsh-web-app 的 frontend-static 托管）。
+  'web-frontend-dist': (ctx, spec) => [
+    mkAi(ctx.appDir, spec.pkgRel),
+    mkAi(path.join(ctx.userDataDir, 'agent'), spec.pkgRel),
     mkAi(path.join(ctx.home, 'profiles'), spec.pkgRel),
   ],
   // WSL：profile fallback + agent（UNC 写穿）。
@@ -219,11 +233,13 @@ module.exports = {
   TERMINAL_BASH_REL,
   CODE_PRESET_REL,
   ATTACH_LOCAL_REL,
+  LLM_PKG_REL,
   LOADER_PKG_REL,
   APP_BOOT_PKG_REL,
   AGENT_PRESET_FALLBACK_PKG_RELS,
   PROMPT_CONTEXT_LITERAL_PKG_RELS,
   API_GATEWAY_ABSENT_PKG_REL,
+  KERNEL_WEB_INDEX_REL,
   PICKER_AUTO_PKG_REL,
   resolvePatchTargets,
   resolveNmRoots,

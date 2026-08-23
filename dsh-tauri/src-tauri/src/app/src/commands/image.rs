@@ -1,19 +1,16 @@
-//! 剪贴板粘贴图落盘（`image_paste_save`，ipc-commands.md §2.3 / bridge-api.md §2.5）。
+//! 剪贴板粘贴图落盘（`image_paste_save`，ipc-commands.md §2.1 / bridge-api.md §2.5）。
 //!
 //! Electron imagePasteSave（main.js:2930）对齐：插件 client 已把粘贴图捕获为
 //! dataUrl 字符串（真实场景测试 U2 确认），壳侧只需落盘——无需 clipboard 插件。
 
+use bridge::error::codes::IMAGE_PASTE;
 use bridge::BridgeError;
 
 use super::common::b64_decode;
 
-/// 错误码：图片粘贴域自用码，已登记 contracts/error-codes.md §1
-/// （2026-08-22 原则审查清偿登记；码值自始未变，无跨进程行为变更）。
-const E_IMAGE_PASTE: &str = "E_IMAGE_PASTE";
-
 #[tauri::command]
 pub fn image_paste_save(payload: serde_json::Value) -> Result<serde_json::Value, BridgeError> {
-    image_paste_save_impl(&payload).map_err(|e| BridgeError::new(E_IMAGE_PASTE, &e))
+    image_paste_save_impl(&payload).map_err(|e| BridgeError::new(IMAGE_PASTE, &e))
 }
 
 fn image_paste_save_impl(payload: &serde_json::Value) -> Result<serde_json::Value, String> {

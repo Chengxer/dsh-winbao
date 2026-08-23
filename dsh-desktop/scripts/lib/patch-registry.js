@@ -65,7 +65,9 @@ const {
   AGENT_PRESET_FALLBACK_PKG_RELS,
   PROMPT_CONTEXT_LITERAL_PKG_RELS,
   API_GATEWAY_ABSENT_PKG_REL,
+  KERNEL_WEB_INDEX_REL,
   PICKER_AUTO_PKG_REL,
+  LLM_PKG_REL,
 } = require('./patch-target-resolver');
 
 const {
@@ -98,8 +100,12 @@ const {
   transformDeviceAuthGuidance,
   // E1（apiProxy 缺席 → /api 全裸 404）缺席分支改错误信封 + 修复指引。
   transformApiGatewayAbsent,
+  // #154 第三根因：内核 web UI boot 看门狗（client module system 不可达不无限转圈）。
+  transformKernelBootWatchdog,
   // W1 问题四：WSL 内目录选择器强制 browse（zenity 窗口在 WSLg 里不可见）。
   transformDirectoryPickerWslBrowse,
+  // R7：adapter 缺 prepareCall 时回落基类语义 + 升级指引（v0.5.3 对话失败）。
+  transformAdapterPrepareCallGuard,
   rootAppliers,
 } = require('./patch-adapters');
 
@@ -125,7 +131,9 @@ const {
   CREDENTIALS_ABSENT_GUIDANCE_MARKER,
   DEVICE_AUTH_GUIDANCE_MARKER,
   API_GATEWAY_ABSENT_MARKER,
+  KERNEL_BOOT_WATCHDOG_MARKER,
   WSL_PICKER_BROWSE_MARKER,
+  ADAPTER_PREPARE_CALL_GUARD_MARKER,
   LOADER_TREE_ISOLATION_MARKER,
   LOADER_ACTIVATION_ISOLATION_MARKER,
   FAIL_LOUD_ISOLATION_MARKER,
@@ -731,6 +739,32 @@ const PATCH_SPECS = [
     },
   },
   {
+    // #154 第三根因：内核 web UI boot 看门狗——client module system / boot
+    // 数据长时间不可达时前端 boot 页无限转圈（内核进程活着、探活恒过，
+    // 壳侧恢复页不出现）。在 dsh-web-frontend/dist/index.html 注入有界
+    // 等待看门狗（45s 超时 → 明确错误 + 重新加载出口 + 完全退出重启指引）。
+    // 独立文件补丁（dist 只有 app 内置与 agent overlay 两份，不套 guard 的
+    // 嵌套 dsh 副本）。cli:false：只在桌面壳 boot 链应用（CLI 同步期不碰
+    // 内核包源码之外的目标）。锚点失配（版本差异）warn 跳过，不阻断启动。
+    id: 'kernel-web-boot-watchdog',
+    group: 'guard',
+    order: 156,
+    kind: 'file',
+    layout: 'web-frontend-dist',
+    wslLayout: 'web-frontend-dist',
+    pkgRel: KERNEL_WEB_INDEX_REL,
+    transform: transformKernelBootWatchdog,
+    marker: KERNEL_BOOT_WATCHDOG_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: '内核 boot 看门狗',
+      doneLog: (file) => '已注入 boot 看门狗（#154 不再无限转圈） ' + file,
+      failLog: (file, err) => '内核 boot 看门狗注入失败(' + file + '): ' + err.message,
+    },
+  },
+  {
     id: 'plugin-inventory-tab-merge',
     group: 'guard',
     order: 160,
@@ -1144,6 +1178,37 @@ const PATCH_SPECS = [
       alreadyLog: alreadySkip,
       doneLog: (file) => '已让 WSL 内目录选择强制 browse（zenity 窗口在 WSLg 不可见） ' + file,
       failLog: (file, err) => 'WSL 目录选择器补丁失败(' + file + '): ' + err.message,
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // R7 根因修复（v0.5.3 用户反馈「registration.adapter.prepareCall is not a
+  // function」）：v0.5.3 内核 0.1.1-rc.2 起 LlmRuntime.prepareCall 调用
+  // adapter.prepareCall（新增契约）；内置唯一不自带 prepareCall 的自定义
+  // provider 适配器 dsh-openclaw-bridge 的 OpenAiCompatAdapter 只 extends
+  // LlmAdapter、依赖基类——它经 profile fallback junction 解析到旧内核
+  // （0.1.0-rc.7/8，基类无 prepareCall）时该调用点即 undefined → 对话整轮炸。
+  // 补丁在 dsh-llm 注入 prepareAdapterCall 守卫：缺失回落基类语义 + 升级指引。
+  // failPolicy warn：上游锚点漂移时 anchor-missing 自动退役，不阻断 boot。
+  // -------------------------------------------------------------------------
+  {
+    id: 'adapter-prepare-call-guard',
+    group: 'runtime',
+    order: 270,
+    kind: 'file',
+    layout: 'runtime-local',
+    wslLayout: 'wsl',
+    pkgRel: LLM_PKG_REL,
+    transform: transformAdapterPrepareCallGuard,
+    marker: ADAPTER_PREPARE_CALL_GUARD_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: false,
+    logs: {
+      prefix: 'adapter prepareCall 守卫补丁',
+      alreadyLog: alreadySkip,
+      doneLog: (file) => '已注入 prepareCall 缺失回落守卫到 ' + file,
+      failLog: (file, err) => 'adapter prepareCall 守卫补丁失败(' + file + '): ' + err.message,
     },
   },
 ];

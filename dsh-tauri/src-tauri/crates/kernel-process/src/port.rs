@@ -10,6 +10,7 @@
 //! `choose_stable_port()` OS 绑定里组合使用。
 
 use std::net::TcpListener;
+use std::time::{Duration, Instant};
 
 /// Chromium 不安全端口表的常用子集（完整表见 Chromium net/base/port_util.cc；
 /// Electron 版取的同一子集：历史上会被浏览器/中间盒劫持的端口）。
@@ -63,6 +64,35 @@ pub fn choose_stable_port(preferred: Option<u16>) -> Option<u16> {
     None
 }
 
+/// 等待端口释放（#155 EADDRINUSE 4311 崩溃环第一根因）：旧内核进程退出与新
+/// 内核 bind 之间存在窗口期——kill_tree 返回后监听 socket 未必即刻归还
+/// （Windows taskkill /T /F 的子孙收割异步、TIME_WAIT 残留）。新内核在
+/// 该窗口内 spawn 会绑定失败（EADDRINUSE）秒退，supervisor 误判为崩溃进入
+/// 崩溃环。本函数轮询 `probe_bind`（bind 成功即视为空闲，随即释放），直到
+/// 端口空闲或超时。
+///
+/// `port == 0`（OS 分配语义）恒视为已空闲（调用方不应在此处等待随机端口）。
+/// 返回 true = 超时内确认空闲（可安全交给内核 bind）；false = 超时仍未空闲
+/// （调用方应换新端口，绝不把忙端口交给内核）。
+pub fn wait_port_free(port: u16, timeout: Duration) -> bool {
+    if port == 0 {
+        return true;
+    }
+    if !is_safe_port(port) {
+        return true; // 不安全端口不会作为内核端口下发，无等待意义
+    }
+    let deadline = Instant::now() + timeout;
+    loop {
+        if probe_bind(port).map(|actual| actual == port).unwrap_or(false) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(120));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +122,23 @@ mod tests {
         assert!(choose_stable_port(None).is_some());
         // 不安全端口永远不会被选择。
         assert_eq!(choose_stable_port(Some(6666)).map(|p| p != 6666), Some(true));
+    }
+
+    /// #155 EADDRINUSE 崩溃环：kill 后到端口归还的窗口期是崩溃环入口。
+    /// wait_port_free 必须等到端口真的空闲（占用期间返回 false，释放后
+    /// 恢复 true），且 0 端口（OS 分配）恒空闲。
+    #[test]
+    fn wait_port_free_waits_for_release() {
+        // ① 占用中的端口：短超时 → false（不得把忙端口交给内核）。
+        let held = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let p = held.local_addr().unwrap().port();
+        assert!(!wait_port_free(p, Duration::from_millis(300)), "占用端口必须返回 false（spawn 前不可用）");
+        // ② 释放后：轮询恢复 true。
+        drop(held);
+        assert!(wait_port_free(p, Duration::from_secs(3)), "释放后必须恢复 true（轮询确认端口归还）");
+        // ③ 0 端口（OS 分配语义）：恒空闲。
+        assert!(wait_port_free(0, Duration::from_millis(1)));
+        // ④ 不安全端口：不等待（不会下发为内核端口）。
+        assert!(wait_port_free(6666, Duration::from_millis(1)));
     }
 }

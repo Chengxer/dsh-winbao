@@ -108,14 +108,23 @@ window.__ModuleLoader__.load({
           minute: "2-digit",
         }).formatToParts(now).map((p) => [p.type, p.value]));
       } catch {
-        return { minutes: now.getHours() * 60 + now.getMinutes(), date: "unknown" };
+        return { minutes: now.getHours() * 60 + now.getMinutes(), date: "unknown", weekday: 0 };
       }
+      const year = Number(parts.year);
+      const month = Number(parts.month);
+      const day = Number(parts.day);
+      // 由北京日历日推算星期（周一=1 … 周日=7），避免跟着机器本地时区跑偏（issue #158）。
+      const jsWeekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+      const weekday = jsWeekday === 0 ? 7 : jsWeekday;
       return {
         minutes: (Number(parts.hour) % 24) * 60 + Number(parts.minute),
         date: parts.year + "-" + parts.month + "-" + parts.day,
+        weekday,
       };
     }
-    function isPeak(minutes, windows) {
+    function isPeak(minutes, windows, weekday) {
+      // 周末（周六/周日）整天空闲（issue #158）。
+      if (weekday === 6 || weekday === 7) return false;
       return Array.isArray(windows) && windows.some((w) => minutes >= Number(w.start) && minutes < Number(w.end));
     }
 
@@ -163,7 +172,7 @@ window.__ModuleLoader__.load({
       if (intercepting) return null;
       if (modalEl !== null) return null; // 已有弹窗时不重复拦截
       const bj = beijingParts(new Date());
-      if (!isPeak(bj.minutes, s.peakWindows)) return null;
+      if (!isPeak(bj.minutes, s.peakWindows, bj.weekday)) return null;
       return s;
     }
     //#endregion

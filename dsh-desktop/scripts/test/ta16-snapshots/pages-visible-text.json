@@ -11,7 +11,9 @@
     "staticVisibleLines": [
       "DSH Desktop — 启动中",
       "DSH Desktop",
-      "正在启动 DSH 内核…"
+      "正在启动 DSH 内核…",
+      "重试启动内核",
+      "完全重新加载"
     ],
     "attrVisibleTexts": [
       "最小化",

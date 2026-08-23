@@ -54,9 +54,10 @@ fn ta1_append_capped_concurrent_10k_lines_no_tear() {
     let total = cur.len() + old.len();
     assert!(total > 0, "至少落盘一代日志");
     assert!(total <= 2 * PER_THREAD, "落盘行数 {total} 超写入总量 {}", 2 * PER_THREAD);
-    // 【TA1 发现的产品缺陷（已记录）】：writeln! 在并发双写下非原子——观察
-    // 到空行撕裂形态（正文与 \n 分属两次 write，交错产生 "\n\n"）。非空行仍
-    // 必须完整（无 A/B 正文交错合并）；空行按已知缺陷容忍。
+    // 【K3 修复后强断言】：APPEND_LOCK 写者锁把「检查→轮转→打开→写入」全链
+    // 串行化，writeln! 单写者执行 → 正文与换行不再分属两次并发系统写。
+    // 行撕裂/交错/空行（TA1 曾记录「正文与 \n 分属两次 write，交错产生
+    // "\n\n"」）从此必须为零——这是原子化修复的回归锚点。
     let mut torn_empty = 0usize;
     for line in cur.iter().chain(old.iter()) {
         if line.is_empty() {
@@ -66,7 +67,7 @@ fn ta1_append_capped_concurrent_10k_lines_no_tear() {
         let ok = line_is_intact(line, "A") || line_is_intact(line, "B");
         assert!(ok, "行撕裂/交错: {line:?}");
     }
-    eprintln!("[ta1] 并发写空行撕裂形态 {torn_empty} 例（append_capped 行非原子，缺陷已记录）");
+    assert_eq!(torn_empty, 0, "写者锁后并发写不得再产生空行撕裂（K3 原子化锚点）: {torn_empty} 例");
     // 轮转上限近似：单文件（不含换行前 scrub 差异）不超过 cap + 单行余量。
     let cur_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     assert!(cur_len <= cap + 512, "轮转后当前文件 {cur_len}B 超上限 {cap}B+余量");

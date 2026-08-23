@@ -56,6 +56,11 @@ pub const LOADING_HTML: &str = r#"<!doctype html>
   .fail::before{content:"✗ ";color:#ff6b6b}
   .run::before{content:"… ";color:#f5c451}
   .err{max-width:520px;color:var(--err);font-size:13px;white-space:pre-wrap}
+  .err-exit{display:flex;gap:12px;margin-top:6px}
+  .err-exit[hidden]{display:none}
+  .err-exit button{padding:9px 20px;border-radius:8px;border:1px solid var(--line);
+    background:var(--bg);color:var(--fg);font-size:13.5px;cursor:pointer}
+  .err-exit button:hover{background:var(--hover)}
 </style></head>
 <body>
 <div id="bar" data-tauri-drag-region>
@@ -69,6 +74,10 @@ pub const LOADING_HTML: &str = r#"<!doctype html>
   <h1 id="title">正在启动 DSH 内核…</h1>
   <div id="steps"></div>
   <div class="err" id="err"></div>
+  <div class="err-exit" id="err-exit" hidden>
+    <button onclick="doRestartKernel()">重试启动内核</button>
+    <button onclick="doFullReload()">完全重新加载</button>
+  </div>
 </main>
 <script>
 (function(){
@@ -78,10 +87,14 @@ pub const LOADING_HTML: &str = r#"<!doctype html>
   var el = document.getElementById('steps');
   var titleEl = document.getElementById('title');
   var errEl = document.getElementById('err');
+  var exitEl = document.getElementById('err-exit');
   var DEFAULT_TITLE = '正在启动 DSH 内核…';
   var attempts = 1;      // boot 链轮次：链头 repair 重现（瀑布二/三层重跑 boot 链）即 +1
   var roundOpen = false; // 本轮是否已收到过 boot-step
   var failTimer = 0;     // 失败终态防抖句柄（0 = 无未决；页面即销毁，无需 beforeunload）
+  // #154 前端兜底出口：任何 boot-step（新尝试）都会复位隐藏恢复出口——新尝试
+  // 仍在推进时不给「重试」按钮（避免用户在自动重试期间手动再触发一次）。
+  function hideExit(){ if (exitEl) exitEl.setAttribute('hidden',''); }
   function addLine(cls, text){
     var d = document.createElement('div');
     d.className = cls; d.textContent = text;
@@ -99,6 +112,7 @@ pub const LOADING_HTML: &str = r#"<!doctype html>
     if (titleEl.getAttribute('data-fail') || newRound) {
       titleEl.removeAttribute('data-fail');
       errEl.textContent = '';
+      hideExit();
       titleEl.textContent = roundTitle();
     }
   }
@@ -138,15 +152,26 @@ pub const LOADING_HTML: &str = r#"<!doctype html>
     // 时发出，且路由随即换页恢复页——正常路径本页在窗口内被换走，失败字样
     // 永不闪现；仅当换页迟迟未发生（导航异常等）才翻终态，让用户不至面对
     // 无解释的转圈。窗口内任何 boot-step（新尝试）都会取消此定时器并复位。
+    // #154 前端兜底出口：防抖到点后除了翻错误标题，还显示「重试启动内核」/
+    // 「完全重新加载」两个恢复按钮——换页迟迟不发生时用户有明确出口。
     if (failTimer) clearTimeout(failTimer);
     failTimer = setTimeout(function(){
       failTimer = 0;
       titleEl.setAttribute('data-fail', '1');
       titleEl.textContent = '启动失败（正在转入恢复…）';
       errEl.textContent = String(p.reason || '');
+      if (exitEl) exitEl.removeAttribute('hidden');
     }, 1800);
   });
   listen('pet-state', function(){});
+  // #154 前端兜底出口（手动触发）：恢复页导航迟迟不发生时的用户出口。
+  window.doRestartKernel = function(){
+    try { B && B.recovery.restart(); } catch (e) {}
+  };
+  window.doFullReload = function(){
+    try { B && B.recovery.reload(); } catch (e) {}
+    setTimeout(function(){ location.reload(); }, 250);
+  };
 })();
 </script>
 </body></html>
@@ -337,6 +362,28 @@ mod tests {
         for name in ["'boot-step'", "'kernel-fail'", "'pet-state'"] {
             assert!(LOADING_HTML.contains(name), "缺事件订阅 {name}");
         }
+    }
+
+    /// #154 前端兜底出口：kernel-fail 防抖到点后必须展示「重试启动内核」/
+    /// 「完全重新加载」两个恢复按钮（换页迟迟不发生时用户有明确出口，不再
+    /// 停在无限转圈）；任何 boot-step（新尝试）复位隐藏出口。
+    #[test]
+    fn loading_fail_has_recovery_exit_buttons() {
+        assert!(LOADING_HTML.contains("err-exit"), "缺恢复出口容器");
+        assert!(LOADING_HTML.contains("doRestartKernel"), "缺「重试启动内核」按钮");
+        assert!(LOADING_HTML.contains("doFullReload"), "缺「完全重新加载」按钮");
+        assert!(LOADING_HTML.contains("exitEl.removeAttribute('hidden')"), "防抖到点后必须显示恢复出口");
+        assert!(LOADING_HTML.contains("hideExit"), "新尝试须隐藏恢复出口（避免手动重试与自动重试叠加）");
+        let fail_at = LOADING_HTML.find("exitEl.removeAttribute('hidden')").unwrap();
+        let timer_at = LOADING_HTML.find("failTimer = setTimeout").unwrap();
+        assert!(fail_at > timer_at, "恢复出口展示必须在防抖回调内（真终态才显示）");
+        // 出口动作经 B.recovery 契约（与恢复页同源）。
+        assert!(LOADING_HTML.contains("B && B.recovery.restart()"), "重试走 recovery.restart 契约");
+        assert!(LOADING_HTML.contains("B && B.recovery.reload()"), "完全重新加载走 recovery.reload 契约");
+        // 旧「无出口」形态不得回归（标题/err 仍在，但必须有按钮区）。
+        let exit_pos = LOADING_HTML.find("id=\"err-exit\"").unwrap();
+        let err_pos = LOADING_HTML.find("id=\"err\"").unwrap();
+        assert!(exit_pos > err_pos, "恢复出口位于错误行之后");
     }
 
     /// 事件信封解包（#144 根因回归锚点）：Tauri 2 回调收 {event, payload} 信封

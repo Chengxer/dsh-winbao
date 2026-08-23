@@ -14,7 +14,7 @@
 - 所有请求-响应方法返回 `Promise`；错误拒绝时携带 `{ message }` 形态的 `Error`。
 - 订阅方法（`onMaximizeChange` / `onNotificationJump`）返回**取消订阅函数**。
 
-## 2. 方法总表（49 项）
+## 2. 方法总表（53 项）
 
 ### 2.1 顶层字段与方法
 
@@ -29,7 +29,7 @@
 | 7 | `openExternal(url: string): Promise<any>` | 系统浏览器打开 URL（端口预览） | `dsh:open-external` → `open_external` |
 | 8 | `copyText(text: string): Promise<any>` | 复制到剪贴板 | `dsh:copy-text` → `copy_text` |
 | 9 | `getPathForFile(file: File): string` | **同步**。浏览器 File → 磁盘路径；非桌面环境/失败返回 `''`（插件自行降级） | 本地实现（Electron webUtils / Tauri 无直接等价，见 §6-R1） |
-| 10 | `sponsorQr(): Promise<{alipay?, wechat?}>` | 赞助二维码（data URI） | `dsh:sponsor-qr` → `sponsor_qr` |
+| 10 | `sponsorQr(): Promise<{ok: boolean, alipay?: string, wechat?: string}>` | 赞助二维码（data URI）。`ok:false` = supervisor 未初始化（无图）；`ok:true` 时 `alipay`/`wechat` 为 data URI（对应图片缺失时回空串） | `dsh:sponsor-qr` → `sponsor_qr` |
 | 11 | `sponsorWindow(): Promise<any>` | 打开独立赞助小窗（主进程单例） | `chrome:sponsor-window` → `sponsor_window` |
 | 12 | `onNotificationJump(cb: (e: {sessionId: string}) => void): () => void` | 订阅通知点击跳转；**补发语义**：订阅前收到的最后一次 jump 在订阅时补发 | 事件 `dsh:notification-jump` → event `notification-jump` |
 
@@ -130,6 +130,19 @@
 | 48 | `restart(): Promise<any>` | 重启应用 | `chrome:recovery-restart` → `recovery_restart` |
 | 49 | `openLogs(): Promise<any>` | 打开日志目录 | `chrome:recovery-open-logs` → `recovery_open_logs` |
 
+### 2.11 `guard`（插件保护中心交互面，4 项；只读面 + 轻量解）
+
+> `guard:action {action}` 单通道的分发迁移。写动作（snapshot/restore/repair）仍走
+> 守护瀑布自动面（supervisor boot_waterfall），**不在垫片面暴露**——手动回滚会与
+> 运行中内核的文件锁/自动瀑布竞态。
+
+| # | 签名 | 语义 | 通道 |
+|---|------|------|------|
+| 50 | `status(): Promise<GuardStatus>` | 快照列表 + 未解决事故列表 + 最后良好快照（只读） | `guard:action{action:'status'}` → `guard_action` |
+| 51 | `check(): Promise<{ok, findings}>` | 静态体检（healthCheck findings，不执行修复） | `guard:action{action:'check'}` → `guard_action` |
+| 52 | `incident(id: string): Promise<{ok, content}>` | 读单条事故详情（content 截断 30KB） | `guard:action{action:'incident'}` → `guard_action` |
+| 53 | `resolveIncident(id: string): Promise<{ok}>` | 把事故重命名为 `.resolved.md`（软解决，不删盘） | `guard:action{action:'resolve-incident'}` → `guard_action` |
+
 ## 3. 主进程 → 页面事件（3 项）
 
 | 页面侧表现 | 载荷 | 语义 | Tauri 事件名 |
@@ -161,3 +174,8 @@
 - **远程页注入**：内核 Web UI 是 `http://127.0.0.1:<port>` 远程页。Tauri 2 经 capability `remote.urls` 放行该 origin 的 IPC；垫片作为 `initialization_script` 每次导航注入。命令侧再做 origin 白名单（沿用 Electron `pluginManagerIpcAllowed` 语义：插件管理通道仅主窗 origin 可调）。PoC-A 验证此链路。
 - **菜单裁撤**：内核自动更新链（overlay 布局 / runUpdateFlow / 定时触发）已删除；`check-agent-update`（npm registry 内核版本比对）已整体退役——Tauri 版内核随客户端分发、无 overlay 更新链，客户端更新检查（`check-client-update`，GitHub+Gitee 双源 releases）完全取代其在 ⋯ 菜单的位置。
 - **赞助窗实现注记（v0.5.0 终修）**：`sponsor_window` 为单例（已开则 show+focus 并返回 `{ok, reused:true}`）；HTML（内联 data URI 二维码图片）写 `%TEMP%\dsh-sponsor\sponsor.html` 后 `file://` 直载（绕开 WebView2 大 data URL 整页导航限制与 file:// 相对路径图片拦截）；原生标题栏（decorations+closable），不加自定义 CloseRequested 处理器（默认关闭即 destroy——回调内 destroy 曾致 UI 线程死锁）。
+- **`restart_service` 的 `intent` 载荷**：垫片 `restartService()` invoke 时携带
+  `{intent:'restart-service'}`（Electron 母本遗留的意图字段），但 Tauri
+  `restart_service(app, window)` 命令签名**不含 `intent` 参数**——该载荷不被
+  命令消费（仅垫片侧历史兼容保留）。命令侧按主窗白名单守卫后复用 supervisor
+  装配通道重启；文档以命令签名为准：`restartService()` 对外无参。

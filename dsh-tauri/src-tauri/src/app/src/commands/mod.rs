@@ -5,7 +5,8 @@
 //! 拆分不改变任何 IPC 命令签名。分三类：
 //! 1. 壳内实现（窗口/恢复/剪贴板/外部打开/文件围栏/宠物窗/浮窗/赞助）；
 //! 2. sidecar 转发（插件管理六通道 + 诊断备份族——`run_sidecar`）；
-//! 3. 已裁撤（内核更新链 guard:action——不注册，垫片报错）。
+//! 3. 已裁撤（内核更新链——不注册，垫片报错）；
+//! 4. guard 交互面（插件保护中心 `guard:action` 分发——读面/轻量解，经 supervisor）。
 //!
 //! 子模块清单：
 //! - [`lifecycle`] —— Phase 1 核心：app_init / 剪贴板 / 外部打开 / 心跳 / 会话 / 重启服务
@@ -25,6 +26,7 @@
 pub(crate) mod balance;
 mod common;
 mod file;
+mod guard;
 mod image;
 mod lifecycle;
 mod menu;
@@ -40,6 +42,7 @@ pub mod updater_client;
 pub use balance::*;
 pub use common::*;
 pub use file::*;
+pub use guard::*;
 pub use image::*;
 pub use lifecycle::*;
 pub use menu::*;

@@ -36,12 +36,13 @@ const { writeFileAtomic } = require('./lib/patch-io');
 const { applyAll } = require('./integration/patch-runner');
 const { getSpecsByCli } = require('./lib/patch-registry');
 const { reconcileProfileBundles, createEntryListYamlParser } = require('./lib/profile-reconcile');
+const { quotePatchScalarValues } = require('./plugin-core/lib/patch-surgery');
 const { PluginStateStore } = require('./plugin-core/lib/state-store');
 const { syncHubRecognition } = require('./lib/hub-registry');
 const {
   ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK,
   ensureDisabledPatchEntry, removeLegacyMarketplacePatchLines,
-  removeRetiredDshMarketPatchRows,
+  removeRetiredDshMarketPatchRows, removeRetiredThirdPartyThinkingPatchRows,
   registerCompanionPatchEntries, syncCompanionFiles, removedPluginIdsFromPatch,
 } = require('./lib/companion-profile');
 
@@ -172,6 +173,14 @@ function syncPlugins(home, dryRun, dshPkgDir) {
   const patchFile = path.join(profileDir, 'cordis.patch.yml');
   let patch = '';
   try { patch = fs.readFileSync(patchFile, 'utf8'); } catch { patch = ''; }
+  // #155 根因二幂等修复：`@deepseek-ai/...` 裸包名（js-yaml「bad indentation」）
+  // 会让内核装配 patch 层即崩。先补引号再往下走（健康文件零改写）。
+  const quoted = quotePatchScalarValues(patch);
+  if (quoted.changed) {
+    if (dryRun) log(`dry-run: 将为 ${patchFile} 的 @ 开头/特殊字符包名补 YAML 引号（#155 根因二）`);
+    else writeFileAtomic(patchFile, quoted.text);
+    patch = quoted.text;
+  }
   // 插件管理「卸载」标记（removed: true 的顶层条目）：与 main.js 同一语义，
   // 本次同步跳过文件复制与注册，避免 CLI 把用户在桌面端卸载的插件装回。
   const removedIds = removedPluginIdsFromPatch(patch);
@@ -264,6 +273,16 @@ function syncPlugins(home, dryRun, dshPkgDir) {
   if (retiredMarket.changed) {
     changed = true;
     log('已从 cordis.patch.yml 移除退役插件市场 dshmarket 条目');
+  }
+
+  // 已退役插件 dsh-third-party-thinking（loader id third-party-thinking）：
+  // insert 内层条目 / 顶层块 / name-only 条目一次性清理（幂等；目录清理在
+  // syncCompanionFiles 内的 removeRetiredThirdPartyThinkingDir 已处理）。
+  const retiredTpt = removeRetiredThirdPartyThinkingPatchRows(patch);
+  patch = retiredTpt.patch;
+  if (retiredTpt.changed) {
+    changed = true;
+    log('已从 cordis.patch.yml 移除退役插件 dsh-third-party-thinking 条目');
   }
 
   // billion-context-dsh（compaction-acp）是模型驱动的 ACP 压缩后端：同一

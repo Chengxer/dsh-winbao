@@ -748,6 +748,26 @@
   border-bottom: 1px solid var(--dsw-alias-border-l1);
 }
 
+.editorBack {
+  width: 22px;
+  height: 22px;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  flex: none;
+  justify-content: center;
+  align-items: center;
+  display: inline-flex;
+  padding: 0;
+}
+
+.editorBack:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
 .editorTitle {
   flex: 1;
   min-width: 0;

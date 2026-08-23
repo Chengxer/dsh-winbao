@@ -236,11 +236,16 @@ function transformSettingsModelsResilience(src, file) {
  * 对某个 node_modules 根目录应用孤儿锁自愈补丁（幂等）。
  * @param {string} nmRoot node_modules 根目录
  * @param {(msg: string) => void} [log]
+ * @param {{anchorMissing?: number, failed?: number}} [stats]
+ * @param {{dryRun?: boolean, donePrefix?: boolean, anchorLog?: Function}} [options]
  * @returns {number} 实际发生修改的文件数
  */
-function patchAtomicWriteOrphanLock(nmRoot, log = () => {}) {
+function patchAtomicWriteOrphanLock(nmRoot, log = () => {}, stats, options = {}) {
   const file = path.join(nmRoot, '@deepseek-ai', ATOMIC_WRITE_REL);
   if (!fs.existsSync(file)) return 0;
+  // CLI 场景经 applyRoot 透传 options：donePrefix=false 输出无前缀单行、
+  // anchorLog=warn 把失配走告警通道、dryRun 只判定不落盘；stats 回流
+  // anchorMissing/failed 计数。缺省保持原默认（log / true）。
   return applyPatchToFiles({
     prefix: '孤儿锁自愈补丁',
     files: [file],
@@ -248,8 +253,12 @@ function patchAtomicWriteOrphanLock(nmRoot, log = () => {}) {
     transform: transformOrphanLock,
     alreadyLog: (f) => '已应用，跳过 ' + f,
     doneLog: (f) => '已让设置写入在持有者进程死亡后自愈孤儿锁 ' + f,
-    anchorLog: log,
+    anchorLog: (options && options.anchorLog) || log,
     failLog: (f, err) => '孤儿锁自愈补丁失败(' + f + '): ' + err.message,
+    donePrefix: options && options.donePrefix,
+    dryRun: options && options.dryRun,
+    dryRunChangedLog: (f) => 'dry-run: 将应用孤儿锁自愈 ' + f,
+    stats,
   });
 }
 
@@ -257,11 +266,16 @@ function patchAtomicWriteOrphanLock(nmRoot, log = () => {}) {
  * 对某个 node_modules 根目录应用设置页韧性补丁（幂等）。
  * @param {string} nmRoot node_modules 根目录
  * @param {(msg: string) => void} [log]
+ * @param {{anchorMissing?: number, failed?: number}} [stats]
+ * @param {{dryRun?: boolean, donePrefix?: boolean, anchorLog?: Function}} [options]
  * @returns {number} 实际发生修改的文件数
  */
-function patchSettingsModelsResilience(nmRoot, log = () => {}) {
+function patchSettingsModelsResilience(nmRoot, log = () => {}, stats, options = {}) {
   const file = path.join(nmRoot, '@deepseek-ai', SETTINGS_MODELS_REL);
   if (!fs.existsSync(file)) return 0;
+  // CLI 场景经 applyRoot 透传 options：donePrefix=false 输出无前缀单行、
+  // anchorLog=warn 把失配走告警通道、dryRun 只判定不落盘；stats 回流
+  // anchorMissing/failed 计数。缺省保持原默认（log / true）。
   return applyPatchToFiles({
     prefix: '设置页韧性补丁',
     files: [file],
@@ -269,8 +283,12 @@ function patchSettingsModelsResilience(nmRoot, log = () => {}) {
     transform: transformSettingsModelsResilience,
     alreadyLog: (f) => '已应用，跳过 ' + f,
     doneLog: (f) => '已注入命名空间自愈 + 冲突重试 ' + f,
-    anchorLog: log,
+    anchorLog: (options && options.anchorLog) || log,
     failLog: (f, err) => '设置页韧性补丁失败(' + f + '): ' + err.message,
+    donePrefix: options && options.donePrefix,
+    dryRun: options && options.dryRun,
+    dryRunChangedLog: (f) => 'dry-run: 将注入命名空间自愈 + 冲突重试 ' + f,
+    stats,
   });
 }
 

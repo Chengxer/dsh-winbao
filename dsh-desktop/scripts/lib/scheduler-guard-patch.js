@@ -125,10 +125,16 @@ function transformSchedulerMirror(src, file) {
 }
 
 // ---------------------------------------------------------------------------
-// 应用入口（返回变更文件数）
+// 应用入口（patch-session-persistence.js 同款契约：返回变更文件数）
 // ---------------------------------------------------------------------------
-function patchSchedulerGuard(nmRoot, log = () => {}) {
+function patchSchedulerGuard(nmRoot, log = () => {}, stats, options = {}) {
   let changed = 0;
+  // CLI 场景经 applyRoot 透传 options：donePrefix=false 输出无前缀单行、
+  // anchorLog=warn 把失配走告警通道、dryRun 只判定不落盘；stats 回流
+  // anchorMissing/failed 计数。缺省保持原默认（log / true）。
+  const donePrefix = options && options.donePrefix;
+  const anchorLog = (options && options.anchorLog) || log;
+  const dryRun = options && options.dryRun;
   const loopFile = path.join(nmRoot, '@deepseek-ai', AGENT_LOOP_REL);
   if (fs.existsSync(loopFile)) {
     changed += applyPatchToFiles({
@@ -138,8 +144,12 @@ function patchSchedulerGuard(nmRoot, log = () => {}) {
       transform: transformSchedulerGuard,
       alreadyLog: (f) => '已应用，跳过 ' + f,
       doneLog: (f) => '已应用调度器跨副本解析守卫 ' + f,
-      anchorLog: log,
+      anchorLog,
       failLog: (f, err) => '调度器防崩补丁失败(' + f + '): ' + err.message,
+      donePrefix,
+      dryRun,
+      dryRunChangedLog: (f) => 'dry-run: 将应用调度器跨副本解析守卫 ' + f,
+      stats,
     });
   }
   const toolsFile = path.join(nmRoot, '@deepseek-ai', TOOLS_REL);
@@ -151,8 +161,12 @@ function patchSchedulerGuard(nmRoot, log = () => {}) {
       transform: transformSchedulerMirror,
       alreadyLog: (f) => '已应用，跳过 ' + f,
       doneLog: (f) => '已应用调度器全局符号镜像 ' + f,
-      anchorLog: log,
+      anchorLog,
       failLog: (f, err) => '调度器镜像补丁失败(' + f + '): ' + err.message,
+      donePrefix,
+      dryRun,
+      dryRunChangedLog: (f) => 'dry-run: 将应用调度器全局符号镜像 ' + f,
+      stats,
     });
   }
   return changed;

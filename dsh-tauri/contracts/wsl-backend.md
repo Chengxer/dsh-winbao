@@ -155,7 +155,7 @@ force-refresh 结果）。预检失败不改变已保存配置，错误进 `stat
    展示 `error`，`code` 供程序识别）。
 2. **启动期探测失败不是 command 错误**：走 §5 回落路径，原因进
    `fallbackReason`（状态值，不入错误码表——同「恢复页状态值不入表」口径）。
-3. 恢复页触达仍只有 `E_KERNEL_CRASH_LOOP` 一个码（规则 4 不破）。
+3. 恢复页触达走 `SupervisorEvent::CrashLoop` 事件路由 + `recovery_state` 状态值（非错误码；§6 规则 4 同口径——WSL 模式崩溃环/假死/看门狗与 local 共用同一链）。
 4. `E_WSL_INSTALL` 仅 M2（版本对齐安装）起用；M1 的 ensure_installed 失败
    同码（首装即安装）。
 

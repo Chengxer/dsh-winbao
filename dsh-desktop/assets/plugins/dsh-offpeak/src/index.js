@@ -43,11 +43,22 @@ const DEFAULT_PEAK_WINDOWS = [
   { start: 14 * 60, end: 18 * 60 },
 ];
 
-/** 允许定时的小时（避开 9:00–12:00、14:00–18:00 高峰，也避开 12–14 边界）。 */
-const ALLOWED_HOURS = [
+/** 工作日允许定时的小时（避开 9:00–12:00、14:00–18:00 高峰，也避开 12–14 边界）。 */
+const WEEKDAY_ALLOWED_HOURS = [
   0, 1, 2, 3, 4, 5, 6, 7, 8,
   18, 19, 20, 21, 22, 23,
 ];
+
+/** 周末整天空闲，全天 24 小时皆可排（issue #158）。 */
+const WEEKEND_ALLOWED_HOURS = Array.from({ length: 24 }, (_, i) => i);
+
+/** 周末闲时规则生效日（北京时间）：2026-08-23 00:00 起周末整天空闲，不溯及既往。 */
+const WEEKEND_OFFPEAK_EFFECTIVE_FROM = "2026-08-23";
+
+/** 给定北京时间星期（1=周一 … 7=周日），返回允许定时的小时。 */
+function allowedHoursFor(weekday) {
+  return weekday === 6 || weekday === 7 ? WEEKEND_ALLOWED_HOURS : WEEKDAY_ALLOWED_HOURS;
+}
 
 /** 定时任务的有效窗口：最远可排到两天后，避免误填。 */
 const MAX_SCHEDULE_AHEAD_MS = 2 * 24 * 60 * 60 * 1000;
@@ -83,26 +94,42 @@ function beijingNow(nowMs = Date.now()) {
   );
   const hour = Number(parts.hour) % 24;
   const minute = Number(parts.minute);
+  const year = Number(parts.year);
+  const month = Number(parts.month);
+  const day = Number(parts.day);
+  // 由北京日历日推算星期（周一=1 … 周日=7）。用 Date.UTC 把「北京那一天」当作纯
+  // 日历日取 getUTCDay（0=周日），避免跟着机器本地时区跑偏（issue #158）。
+  const jsWeekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  const weekday = jsWeekday === 0 ? 7 : jsWeekday;
   return {
     date: `${parts.year}-${parts.month}-${parts.day}`,
-    year: Number(parts.year),
-    month: Number(parts.month),
-    day: Number(parts.day),
+    year,
+    month,
+    day,
     hour,
     minute,
     minutes: hour * 60 + minute,
+    weekday,
+    isWeekend: weekday === 6 || weekday === 7,
     iso: new Date(nowMs).toISOString(),
     epochMs: nowMs,
   };
 }
 
-/** 是否为高峰时段。 */
-function isPeak(minutes, windows) {
+/** 是否为高峰时段。weekday=北京时间星期（1=周一…7=周日），date=北京时间日历日（YYYY-MM-DD）。 */
+function isPeak(minutes, windows, weekday, date) {
+  // 周末（周六/周日）整天空闲，但仅自 2026-08-23（北京时间）起生效，不溯及既往（issue #158）。
+  if ((weekday === 6 || weekday === 7) && date >= WEEKEND_OFFPEAK_EFFECTIVE_FROM) {
+    return false;
+  }
   return windows.some((w) => minutes >= w.start && minutes < w.end);
 }
 
-/** 当前所处高峰窗口的起点分钟数（非高峰返回 null）。 */
-function peakStartOf(minutes, windows) {
+/** 当前所处高峰窗口的起点分钟数（非高峰返回 null）。weekday/date 语义同 isPeak。 */
+function peakStartOf(minutes, windows, weekday, date) {
+  if ((weekday === 6 || weekday === 7) && date >= WEEKEND_OFFPEAK_EFFECTIVE_FROM) {
+    return null;
+  }
   const w = windows.find((win) => minutes >= win.start && minutes < win.end);
   return w === undefined ? null : w.start;
 }
@@ -231,7 +258,7 @@ export function apply(ctx, config = {}) {
     const sessionId = typeof session?.id === "string" ? session.id : "";
     state.lastCommandStartAt = bj.epochMs;
 
-    if (!isPeak(bj.minutes, windows)) {
+    if (!isPeak(bj.minutes, windows, bj.weekday, bj.date)) {
       state.reminder = null;
       return;
     }
@@ -387,8 +414,11 @@ export function apply(ctx, config = {}) {
       const bj = beijingNow();
       const nowMinutes = bj.minutes;
       const nowHour = bj.hour;
-      const todayAllowed = ALLOWED_HOURS.filter((h) => h > nowHour);
-      const todayCurrent = ALLOWED_HOURS.includes(nowHour);
+      const tomorrowWeekday = bj.weekday === 7 ? 1 : bj.weekday + 1;
+      const todayAllowedHours = allowedHoursFor(bj.weekday);
+      const tomorrowAllowedHours = allowedHoursFor(tomorrowWeekday);
+      const todayAllowed = todayAllowedHours.filter((h) => h > nowHour);
+      const todayCurrent = todayAllowedHours.includes(nowHour);
       const options = []; // { label, hour, dayOffset, atMs(分钟0档), minute:0, minutes:[] }
       const pushHour = (hour, dayOffset, minutes) => {
         // 以北京时间的年月日为准构造目标时刻（epoch ms = 北京时间 → UTC）。
@@ -411,10 +441,10 @@ export function apply(ctx, config = {}) {
         for (let m = nowMinutes + 1; m < nowHour * 60 + 60; m += 1) remaining.push(m - nowHour * 60);
         if (remaining.length > 0) pushHour(nowHour, 0, remaining);
       }
-      // 次日 0–8 点：完整 00–59 分钟档。
-      for (const h of [0, 1, 2, 3, 4, 5, 6, 7, 8]) pushHour(h, 1, [...ALL_MINUTES]);
+      // 次日：按次日的星期决定可排小时（工作日 0–8/18–23，周末全天）。
+      for (const h of tomorrowAllowedHours) pushHour(h, 1, [...ALL_MINUTES]);
       if (options.length === 0) {
-        // 理论上不会发生（明天 0–8 恒可用）；兜底。
+        // 理论上不会发生（明天 0 点恒可用）；兜底。
         pushHour(0, 1, [0]);
       }
       return options;
@@ -434,7 +464,7 @@ export function apply(ctx, config = {}) {
           end: w.end,
           label: `${String(Math.floor(w.start / 60)).padStart(2, "0")}:00–${String(Math.floor(w.end / 60)).padStart(2, "0")}:00`,
         })),
-        inPeak: isPeak(bj.minutes, windows),
+        inPeak: isPeak(bj.minutes, windows, bj.weekday, bj.date),
         model,
         modelKind,
         prices: PRICES,
@@ -652,3 +682,6 @@ export function apply(ctx, config = {}) {
     });
   });
 }
+
+/** 供回归单测引用的纯判定函数（无副作用；不改插件注册面）。 */
+export { isPeak, peakStartOf, beijingNow, allowedHoursFor };

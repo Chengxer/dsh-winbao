@@ -960,6 +960,163 @@ function transformApiGatewayAbsent(src, file) {
   return { status: 'changed', src: crlf ? out.replace(/\n/g, '\r\n') : out };
 }
 
+// ---------------------------------------------------------------------------
+// 内核 web UI boot 看门狗（#154 第三根因）：client module system 不可达时
+// 前端无限转圈。
+//   · 形态：内核进程活着、HTTP 正常，但启动数据（__DSH_BOOT__ / client
+//     module system / 插件 boot）一直不落定——前端 boot 页 spinner 无限转，
+//     壳侧恢复页不会出现（内核进程没死，探活恒过）。
+//   · 触发面：boot manifest 取回挂起、module bundle 加载失败、插件 fiber 永
+//     不 settle（loader await 永不返回）。既有 fail-loud 只覆盖「内核自己
+//     抓到错误」的分支；此处兜「什么都没发生」的静默挂起。
+//   · 修法：在 dsh-web-frontend/dist/index.html 注入独立看门狗脚本（幂等），
+//     45s 有界等待后若 boot 页仍停在 spinner（或模块 bundle 根本没加载），
+//     用覆盖层给出明确错误 + 「重新加载」出口 + 完全退出重启指引——不再
+//     无限转圈。boot 成功（卡片被真 UI 替换）或 fail-loud 已展示时不打扰。
+//     纯 DOM 实现（零 React 依赖），页面/内核版本差异只影响锚点失配跳过。
+// ---------------------------------------------------------------------------
+const KERNEL_BOOT_WATCHDOG_MARKER = 'dsh-desktop compat: kernel web boot watchdog';
+// 锚点 = index.html 的 mount 点（payload 与 pristine 均含；client-compat.js
+// 注入差异不影响锚点）。注入在 mount 点之后、</body> 之前。
+const KERNEL_BOOT_WATCHDOG_ANCHOR = '    <div id="root"></div>';
+// 看门狗脚本（ES5；运行期文本中的换行经 \n 转义，构造为行数组保持可读）。
+const KERNEL_BOOT_WATCHDOG_SCRIPT = [
+  '  <script>',
+  '  /* ' + KERNEL_BOOT_WATCHDOG_MARKER + '（#154）：boot 页有界等待，超时给出错误与恢复出口 */',
+  '  (function () {',
+  "    'use strict';",
+  '    var START = Date.now();',
+  '    var LIMIT_MS = 45000;',
+  '    var POLL_MS = 2000;',
+  '    function isStuck() {',
+  "      var root = document.getElementById('root');",
+  '      if (!root) return false;',
+  "      var card = root.querySelector('[data-dsh-boot]');",
+  '      if (card) {',
+  '        // boot 页仍在：spinner = 卡死；fail-loud（_failed_ 节点）已展示 → 不打扰',
+  "        return card.querySelector('[class*=\"_failed_\"]') === null;",
+  '      }',
+  '      // 卡片已被真 UI 替换或模块系统已就绪 → 完成；两者皆无 = 模块 bundle 根本没加载',
+  '      return root.children.length === 0 && !window.__DSH_MODULES__;',
+  '    }',
+  '    function showRecovery() {',
+  "      if (document.getElementById('dsh-boot-watchdog')) return;",
+  "      var root = document.getElementById('root');",
+  '      if (!root) return;',
+  '      var panel = document.createElement("div");',
+  "      panel.id = 'dsh-boot-watchdog';",
+  "      panel.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:#0b1220;color:#d7dde4;font:14px/1.7 \"Segoe UI\",\"Microsoft YaHei\",sans-serif;text-align:center;padding:24px;';",
+  '      var box = document.createElement("div");',
+  '      var title = document.createElement("div");',
+  "      title.style.cssText = 'font-size:18px;font-weight:600;margin-bottom:12px;';",
+  "      title.textContent = '内核服务异常';",
+  '      var msg = document.createElement("div");',
+  "      msg.style.cssText = 'max-width:520px;margin:0 auto 16px;color:#9fb0c0;white-space:pre-wrap;';",
+  "      msg.textContent = '启动数据（client module system）长时间不可达，页面已停止等待。\\n可点击下方「重新加载」重试；若反复出现，请完全退出并重启 DSH Desktop（启动链会自动修复）。';",
+  '      var btns = document.createElement("div");',
+  "      btns.style.cssText = 'display:flex;gap:12px;justify-content:center;';",
+  '      var reload = document.createElement("button");',
+  "      reload.textContent = '重新加载';",
+  "      reload.style.cssText = 'padding:9px 22px;border-radius:8px;border:1px solid #32405280;background:#1a222c;color:#d7dde4;cursor:pointer;font-size:14px;';",
+  "      reload.addEventListener('click', function () { location.reload(); });",
+  '      btns.appendChild(reload);',
+  '      box.appendChild(title); box.appendChild(msg); box.appendChild(btns);',
+  '      panel.appendChild(box);',
+  '      root.appendChild(panel);',
+  '    }',
+  '    function tick() {',
+  '      if (!isStuck()) return;',
+  '      if (Date.now() - START >= LIMIT_MS) { showRecovery(); return; }',
+  '      setTimeout(tick, POLL_MS);',
+  '    }',
+  "    if (document.readyState === 'complete' || document.readyState === 'interactive') {",
+  '      setTimeout(tick, 1000);',
+  '    } else {',
+  "      window.addEventListener('DOMContentLoaded', function () { setTimeout(tick, 1000); });",
+  '    }',
+  '  })();',
+  '  </script>',
+].join('\n');
+
+/**
+ * 内核 web UI boot 看门狗（#154 第三根因）：index.html 注入有界等待看门狗。
+ * 幂等（marker + 注入体双重判定）；锚点失配（版本差异）跳过不阻断。
+ */
+function transformKernelBootWatchdog(src, file) {
+  const crlf = src.includes('\r\n');
+  const text = crlf ? src.replace(/\r\n/g, '\n') : src;
+  if (text.includes(KERNEL_BOOT_WATCHDOG_MARKER) && text.includes("dsh-boot-watchdog")) {
+    return { status: 'already' };
+  }
+  if (!text.includes(KERNEL_BOOT_WATCHDOG_ANCHOR)) {
+    return { status: 'anchor-missing', detail: '未找到内核 web UI index.html mount 点锚点（版本可能已变更），跳过 ' + file };
+  }
+  const out = text.replace(
+    KERNEL_BOOT_WATCHDOG_ANCHOR,
+    KERNEL_BOOT_WATCHDOG_ANCHOR + '\n' + KERNEL_BOOT_WATCHDOG_SCRIPT,
+  );
+  return { status: 'changed', src: crlf ? out.replace(/\n/g, '\r\n') : out };
+}
+
+// ---------------------------------------------------------------------------
+// adapter prepareCall 守卫（R7，2026-08 v0.5.3 用户反馈）：
+// 「registration.adapter.prepareCall is not a function」——v0.5.3 内核升级到
+// 0.1.1-rc.2 后 LlmRuntime.prepareCall（dsh-llm/lib/index.js:1498）开始调用
+// adapter.prepareCall（新增契约：基类 LlmAdapter 补上默认 prepareCall，内置
+// DeepSeekAdapter / PiAiAdapter 自带实现，不受影响）；而内置唯一「不自带
+// prepareCall」的自定义 provider 适配器 dsh-openclaw-bridge 的
+// OpenAiCompatAdapter 只 `extends LlmAdapter`、依赖基类 prepareCall——一旦它
+// 经 profile fallback junction 解析到旧内核（0.1.0-rc.7/8，基类无 prepareCall），
+// registration.adapter.prepareCall 即为 undefined → 对话整轮炸。同一文件两处
+// 调用点（prepareCall 主路径 + adapterStream 直连路径）同源同险。
+//
+// 修法：在 LlmRuntime 注入 prepareAdapterCall 守卫——adapter.prepareCall 缺失
+// 时回落基类语义（resolveModel + stream）并 console.warn 升级指引，不裸抛
+// 「is not a function」。幂等 marker + 方法注入点 + 双调用点三锚点校验。
+// 上游修复意向：上游为内置/自定义适配器统一稳定 prepareCall 契约后，本补丁
+// 经 already / anchor-missing 自然退役。
+// ---------------------------------------------------------------------------
+const ADAPTER_PREPARE_CALL_GUARD_MARKER = 'dsh-desktop fix: adapter prepareCall guard';
+const ADAPTER_PREPARE_CALL_ANCHOR_PREPARED = '\t\tconst adapterCall = await registration.adapter.prepareCall(config.provider, config.model, signal);';
+const ADAPTER_PREPARE_CALL_ANCHOR_DIRECT = '\t\t\t\tconst adapterCall = await adapter.prepareCall(options.provider, options.model, options.signal);';
+// 注入点 = registration(provider) 方法签名（prepareCall 结束之后，避免把
+// prepareCall 的 JSDoc 注释错挂到注入方法上）。
+const ADAPTER_PREPARE_CALL_METHOD_ANCHOR = '\tregistration(provider) {';
+const ADAPTER_PREPARE_CALL_METHOD_INJECTION = [
+  '\t/**',
+  '\t* ' + ADAPTER_PREPARE_CALL_GUARD_MARKER + ' — a custom-provider adapter built',
+  '\t* against a pre-rc.2 kernel (the base LlmAdapter had no prepareCall) can be',
+  '\t* missing prepareCall entirely. Fall back to the base semantics so the call',
+  '\t* still works, and warn the user that the kernel needs an upgrade/reinstall.',
+  '\t*/',
+  '\tasync prepareAdapterCall(adapter, provider, model, signal) {',
+  '\t\tif (typeof adapter.prepareCall === "function") {',
+  '\t\t\treturn adapter.prepareCall(provider, model, signal);',
+  '\t\t}',
+  "\t\tconsole.warn('[dsh] LLM adapter for provider ' + provider + ' is missing prepareCall (built against an older kernel); falling back to base LlmAdapter.prepareCall semantics. Upgrade or reinstall the kernel to clear this warning.');",
+  '\t\treturn {',
+  '\t\t\tmodel: await adapter.resolveModel(provider, model, signal),',
+  '\t\t\tstream: (options) => adapter.stream(options)',
+  '\t\t};',
+  '\t}',
+  ADAPTER_PREPARE_CALL_METHOD_ANCHOR,
+].join('\n');
+
+function transformAdapterPrepareCallGuard(src, file) {
+  if (src.includes(ADAPTER_PREPARE_CALL_GUARD_MARKER)) return { status: 'already' };
+  // 方法注入点 + 双调用点三者缺一即版本漂移，按失配跳过（不冒险半补）。
+  if (!src.includes(ADAPTER_PREPARE_CALL_METHOD_ANCHOR)
+    || !src.includes(ADAPTER_PREPARE_CALL_ANCHOR_PREPARED)
+    || !src.includes(ADAPTER_PREPARE_CALL_ANCHOR_DIRECT)) {
+    return { status: 'anchor-missing', detail: '未找到 dsh-llm prepareCall 调用点/方法注入锚点（版本可能已变更），跳过 ' + file };
+  }
+  let out = src;
+  out = out.replace(ADAPTER_PREPARE_CALL_METHOD_ANCHOR, ADAPTER_PREPARE_CALL_METHOD_INJECTION);
+  out = out.replace(ADAPTER_PREPARE_CALL_ANCHOR_PREPARED, '\t\tconst adapterCall = await this.prepareAdapterCall(registration.adapter, config.provider, config.model, signal);');
+  out = out.replace(ADAPTER_PREPARE_CALL_ANCHOR_DIRECT, '\t\t\t\tconst adapterCall = await this.prepareAdapterCall(adapter, options.provider, options.model, options.signal);');
+  return { status: 'changed', src: out };
+}
+
 module.exports = {
   // runtime-patches 的 9 个 transform（re-export）。其中
   // transformPersistenceAll 不被 registry 直接引用，其消费方是
@@ -1000,8 +1157,12 @@ module.exports = {
   transformDeviceAuthGuidance,
   // E1（apiProxy 缺席 → /api 全裸 404 → 桌面端整体不可用）缺席分支改错误信封 + 指引。
   transformApiGatewayAbsent,
+  // #154 第三根因：内核 web UI boot 看门狗（client module system 不可达不无限转圈）。
+  transformKernelBootWatchdog,
   // W1 问题四：WSL 内目录选择器强制 browse（zenity 窗口在 WSLg 里不可见）。
   transformDirectoryPickerWslBrowse,
+  // R7：adapter 缺 prepareCall 时回落基类语义 + 升级指引（v0.5.3 对话失败）。
+  transformAdapterPrepareCallGuard,
   // K1 注入体常量（单测 vm 行为验证用，与 transform 同源；非 marker）。
   CREDENTIALS_HELPERS_CODE,
   // 包级补丁 node_modules 根应用器（唯一实现）。
@@ -1048,7 +1209,9 @@ module.exports = {
     CREDENTIALS_ABSENT_GUIDANCE_MARKER,
     DEVICE_AUTH_GUIDANCE_MARKER,
     API_GATEWAY_ABSENT_MARKER,
+    KERNEL_BOOT_WATCHDOG_MARKER,
     WSL_PICKER_BROWSE_MARKER,
+    ADAPTER_PREPARE_CALL_GUARD_MARKER,
     ...require('./loader-isolation').markers,
   },
 };

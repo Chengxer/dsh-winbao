@@ -173,8 +173,14 @@ function transformServeReadRetry(src, file) {
 // ---------------------------------------------------------------------------
 // 应用入口（patch-session-persistence.js 同款契约：返回变更文件数）
 // ---------------------------------------------------------------------------
-function patchBundleArrivalRetry(nmRoot, log = () => {}) {
+function patchBundleArrivalRetry(nmRoot, log = () => {}, stats, options = {}) {
   let changed = 0;
+  // CLI 场景经 applyRoot 透传 options：donePrefix=false 输出无前缀单行、
+  // anchorLog=warn 把失配走告警通道、dryRun 只判定不落盘；stats 回流
+  // anchorMissing/failed 计数。缺省保持原默认（log / true）。
+  const donePrefix = options && options.donePrefix;
+  const anchorLog = (options && options.anchorLog) || log;
+  const dryRun = options && options.dryRun;
   const clientFile = path.join(nmRoot, '@deepseek-ai', CLIENT_MODULES_CLIENT_REL);
   if (fs.existsSync(clientFile)) {
     changed += applyPatchToFiles({
@@ -184,8 +190,12 @@ function patchBundleArrivalRetry(nmRoot, log = () => {}) {
       transform: transformLoaderRetry,
       alreadyLog: (f) => '已应用，跳过 ' + f,
       doneLog: (f) => '已应用 bundle script 取回重试 ' + f,
-      anchorLog: log,
+      anchorLog,
       failLog: (f, err) => 'bundle script 取回重试失败(' + f + '): ' + err.message,
+      donePrefix,
+      dryRun,
+      dryRunChangedLog: (f) => 'dry-run: 将应用 bundle script 取回重试 ' + f,
+      stats,
     });
   }
   const indexFile = path.join(nmRoot, '@deepseek-ai', CLIENT_MODULES_INDEX_REL);
@@ -197,8 +207,12 @@ function patchBundleArrivalRetry(nmRoot, log = () => {}) {
       transform: transformServeReadRetry,
       alreadyLog: (f) => '已应用，跳过 ' + f,
       doneLog: (f) => '已应用 serveBundle 瞬态读盘重试 ' + f,
-      anchorLog: log,
+      anchorLog,
       failLog: (f, err) => 'serveBundle 读重试失败(' + f + '): ' + err.message,
+      donePrefix,
+      dryRun,
+      dryRunChangedLog: (f) => 'dry-run: 将应用 serveBundle 瞬态读盘重试 ' + f,
+      stats,
     });
   }
   return changed;

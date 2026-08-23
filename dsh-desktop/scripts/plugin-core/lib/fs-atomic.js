@@ -19,10 +19,12 @@ const { PluginError, PLUGIN_ERROR_CODES } = require('./errors');
 // 同 key 重入识别（见 WriteGate.run）。
 const runAls = new AsyncLocalStorage();
 
-/** tmp+rename 原子写：EPERM（杀软短暂锁定）重试 3 次，失败抛错（调用方兜底）。
+/** tmp+rename 原子写：EPERM/EBUSY（杀软短暂锁定）重试 3 次（递增退避），失败抛错（调用方兜底）。
  *  目标目录必须已存在（与历史契约一致：不隐式创建目录，缺失即抛错）。
  *  绝不先删目标再写——「失败时原文件完好」是原子写契约的一部分
- *  （只读目标等场景 rename 失败即失败，不降级为破坏性覆盖）。 */
+ *  （只读目标等场景 rename 失败即失败，不降级为破坏性覆盖）。
+ *  #154 第二根因：重试间加 120ms 递增退避（杀软锁窗口通常是几十 ms 级），
+ *  并给出可读错误（含文件与重试次数），替代裸 EBUSY。 */
 function writeFileAtomic(file, content) {
   sweepStaleTmp(file);
   const tmp = file + '.tmp-' + process.pid + '-' + Math.random().toString(36).slice(2, 8);
@@ -35,9 +37,32 @@ function writeFileAtomic(file, content) {
     } catch (err) {
       lastErr = err;
       try { fs.rmSync(tmp, { force: true }); } catch { /* 忽略清理失败 */ }
+      if (isTransientFsError(err) && attempt < 2) {
+        sleepSync(120 * (attempt + 1));
+      }
     }
   }
-  throw lastErr || new Error('writeFileAtomic failed: ' + file);
+  const readable = lastErr && isTransientFsError(lastErr)
+    ? `${file}: 写入失败（${lastErr.message}），文件可能被杀毒软件/索引服务暂时锁定，已重试 3 次仍失败`
+    : `writeFileAtomic failed: ${file}（${(lastErr && lastErr.message) || lastErr}）`;
+  const out = new Error(readable);
+  if (lastErr) {
+    out.cause = lastErr;
+    // 保留原始错误码（EPERM/EACCES/EBUSY/ENOENT…）：调用方（manifest-store/
+    // lifecycle 只读目标传播、测试断言 err.code）依赖 code 而非包装文本。
+    if (lastErr.code) out.code = lastErr.code;
+  }
+  throw out;
+}
+
+/** 是否为可重试的 Windows 瞬时锁错误码（EBUSY/EPERM/EACCES）。 */
+function isTransientFsError(err) {
+  return !!err && (err.code === 'EBUSY' || err.code === 'EPERM' || err.code === 'EACCES');
+}
+
+function sleepSync(ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { /* 同步退避 */ }
 }
 
 /** 清理同一目标文件 1 小时前的孤儿 .tmp-*（崩溃残留；尽力而为，绝不动其它文件）。 */
@@ -270,4 +295,5 @@ module.exports = {
   pidAlive,
   WriteGate,
   sharedWriteGate,
+  isTransientFsError,
 };
