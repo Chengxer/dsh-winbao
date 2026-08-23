@@ -1,15 +1,17 @@
 'use strict';
 
 // 单测：scripts/lib/hub-registry.js —— DSH Hotplug Hub（ARFCON/dsh-hotplug-hub）
-// 识别适配层。三层验证：
-//   1. 适配层自身语义（dependencies 登记 / hotpack 指针 / 幂等 / 卸载联动 /
-//      元数据校验）；
+// 识别适配层。四层验证：
+//   1. 适配层自身语义（issue #156 止血：v0.5.3 dependencies 脏数据幂等清理 /
+//      不误删用户自装 / hotpack 指针 / 幂等 / 卸载联动 / 元数据校验）；
 //   2. 断言级「hub 识别复现」：按 hub 源码（lib/core/state.js listPackIds/
 //      readPackManifest、lib/core/status.js statusSync、lib/core/ensure.js
 //      ensurePath、packages/shared-core/format/hotpack.js parseHotpack、
 //      release/src/Main.cs GetPluginsJson）的扫描与校验逻辑复刻，喂我方布局，
 //      断言内置件全部被识别；
-//   3. 仓库级元数据收口断言：真实 assets/plugins 的 34 个配套件全部通过
+//   3. 识别面取舍断言：内置件不再进 profile dependencies（issue #156 毒化
+//      pnpm 的写入面已废除）——桌面端 GetPluginsJson 列表仅剩用户自装件；
+//   4. 仓库级元数据收口断言：真实 assets/plugins 的 34 个配套件全部通过
 //      校验环节（防 dsh-vision 式 version 漂移回归）。
 // 运行：node --test scripts/test/unit-hub-registry.test.js
 
@@ -26,7 +28,7 @@ const {
   inspectCompanionMeta,
   validateCompanionMetadata,
   collectRegistrablePlugins,
-  syncProfileDependencies,
+  cleanLegacyProfileDependencies,
   buildHotpackPointer,
   syncHotplugPackPointer,
   syncHubRecognition,
@@ -183,28 +185,46 @@ function installFixturePlugins(assetsRoot, profileDir, plugins, removedIds = new
   });
 }
 
+/** 向 profile manifest 写入 dependencies（模拟 v0.5.3 落盘 / 用户自装形态）。 */
+function seedDependencies(profileDir, deps) {
+  const manifestFile = path.join(profileDir, 'package.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+  manifest.dependencies = { ...(manifest.dependencies || {}), ...deps };
+  fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\n');
+}
+
+function readManifest(profileDir) {
+  return JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
+}
+
 // ---------------------------------------------------------------------------
-// 适配层语义
+// 适配层语义：syncHubRecognition（编排面）
 // ---------------------------------------------------------------------------
 
-test('syncHubRecognition: dependencies + hotpack 指针一次补齐，二次运行零写入', () => {
+test('syncHubRecognition: 只写 hotpack 指针包；清掉 v0.5.3 脏数据；二次运行零写入', () => {
   const { home, assetsRoot, profileDir, plugins } = buildFixtureHome();
   installFixturePlugins(assetsRoot, profileDir, plugins);
+  // 模拟 v0.5.3（6070d5ab）在用户机器上写下的脏 dependencies（精确版本）。
+  seedDependencies(profileDir, {
+    '@deepseek-ai/dsh-fixture-beta': '1.2.3',
+    'dsh-fixture-bundle': '0.4.5',
+  });
   const logs = [];
   const r1 = syncHubRecognition({
     home, profileDir, assetsRoot, plugins,
     desktopVersion: '0.5.2',
     log: (m) => logs.push(m),
   });
-  assert.strictEqual(r1.registrable, 2, '两个配套件都应可登记');
-  assert.deepStrictEqual(r1.deps.added.sort(), ['@deepseek-ai/dsh-fixture-beta', 'dsh-fixture-bundle']);
+  assert.strictEqual(r1.registrable, 2, '两个配套件都应可登记（hotpack 指针面）');
+  assert.deepStrictEqual(r1.deps.removed.sort(), ['@deepseek-ai/dsh-fixture-beta', 'dsh-fixture-bundle'],
+    'v0.5.3 写入的 dependencies 脏数据必须被清除');
+  assert.strictEqual(r1.deps.skipped, false);
   assert.strictEqual(r1.pack.written, true);
 
-  // dependencies：精确版本 + 用户自装条目保留
-  const manifest = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
-  assert.strictEqual(manifest.dependencies['@deepseek-ai/dsh-fixture-beta'], '1.2.3');
-  assert.strictEqual(manifest.dependencies['dsh-fixture-bundle'], '0.4.5');
-  assert.strictEqual(manifest.dependencies['some-user-plugin'], '^2.0.0', '用户自装 dependencies 不得被动');
+  // dependencies：脏数据已清、用户自装条目保留、绝不新增任何内置件登记
+  const manifest = readManifest(profileDir);
+  assert.deepStrictEqual(manifest.dependencies, { 'some-user-plugin': '^2.0.0' },
+    '清理后 dependencies 只剩用户自装条目');
   // bundles 登记不受影响
   assert.ok(manifest.dsh.profile.bundles.includes('dsh-fixture-bundle'));
 
@@ -215,18 +235,18 @@ test('syncHubRecognition: dependencies + hotpack 指针一次补齐，二次运�
   assert.strictEqual(pack.id, HUB_PACK_ID);
   assert.strictEqual(pack.plugins.length, 2);
 
-  // 幂等：内容一致零写入（mtime 不变）
+  // 幂等：内容一致零写入（mtime 不变），脏数据清后不再有任何 dependencies 动作
   const statBefore = fs.statSync(packFile);
+  const manifestBefore = fs.statSync(path.join(profileDir, 'package.json'));
   const r2 = syncHubRecognition({ home, profileDir, assetsRoot, plugins, desktopVersion: '0.5.2', log: () => {} });
-  assert.deepStrictEqual(r2.deps.added, []);
-  assert.deepStrictEqual(r2.deps.updated, []);
   assert.deepStrictEqual(r2.deps.removed, []);
   assert.strictEqual(r2.pack.written, false);
-  const statAfter = fs.statSync(packFile);
-  assert.strictEqual(statAfter.mtimeMs, statBefore.mtimeMs, '指针包不得重写（健康零写入）');
+  assert.strictEqual(fs.statSync(packFile).mtimeMs, statBefore.mtimeMs, '指针包不得重写（健康零写入）');
+  assert.strictEqual(fs.statSync(path.join(profileDir, 'package.json')).mtimeMs, manifestBefore.mtimeMs,
+    'manifest 无变化不得重写（健康零写入）');
 });
 
-test('syncHubRecognition: 卸载标记联动——dependencies 撤登记 + 指针包剔除', () => {
+test('syncHubRecognition: 卸载标记联动——指针包剔除（dependencies 面已废除）', () => {
   const { home, assetsRoot, profileDir, plugins } = buildFixtureHome();
   installFixturePlugins(assetsRoot, profileDir, plugins);
   syncHubRecognition({ home, profileDir, assetsRoot, plugins, desktopVersion: '0.5.2', log: () => {} });
@@ -235,28 +255,154 @@ test('syncHubRecognition: 卸载标记联动——dependencies 撤登记 + 指�
   installFixturePlugins(assetsRoot, profileDir, plugins, removedIds); // 卸载后不同步文件
   const r = syncHubRecognition({ home, profileDir, assetsRoot, plugins, removedIds, desktopVersion: '0.5.2', log: () => {} });
   assert.strictEqual(r.registrable, 1, '卸载件不得再登记');
-  assert.deepStrictEqual(r.deps.removed, ['dsh-fixture-bundle']);
+  assert.deepStrictEqual(r.deps.removed, [], 'dependencies 面已废除：本就无登记可撤');
 
-  const manifest = JSON.parse(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'));
-  assert.strictEqual(manifest.dependencies['dsh-fixture-bundle'], undefined);
-  assert.strictEqual(manifest.dependencies['@deepseek-ai/dsh-fixture-beta'], '1.2.3');
+  const manifest = readManifest(profileDir);
+  assert.deepStrictEqual(manifest.dependencies, { 'some-user-plugin': '^2.0.0' });
 
   const pack = JSON.parse(fs.readFileSync(path.join(home, 'hotplug-hub', 'packs', HUB_PACK_ID, 'hotpack.json'), 'utf8'));
   assert.strictEqual(pack.plugins.length, 1);
   assert.strictEqual(pack.plugins[0].name, '@deepseek-ai/dsh-fixture-beta');
 });
 
-test('syncProfileDependencies: manifest 未初始化时跳过且不创建文件', () => {
+// ---------------------------------------------------------------------------
+// 适配层语义：cleanLegacyProfileDependencies（issue #156 止血核心）
+// ---------------------------------------------------------------------------
+
+test('cleanLegacyProfileDependencies: v0.5.3 脏数据（安装包版本）清除且幂等', () => {
+  const { assetsRoot, profileDir, plugins } = buildFixtureHome();
+  installFixturePlugins(assetsRoot, profileDir, plugins);
+  seedDependencies(profileDir, {
+    '@deepseek-ai/dsh-fixture-beta': '1.2.3', // = assets 版本 = node_modules 版本（正常脏数据位形）
+    'dsh-fixture-bundle': '0.4.5',
+    'some-user-plugin': '^2.0.0',
+  });
+  const r1 = cleanLegacyProfileDependencies({ profileDir, plugins, assetsRoot, log: () => {} });
+  assert.deepStrictEqual(r1.removed.sort(), ['@deepseek-ai/dsh-fixture-beta', 'dsh-fixture-bundle']);
+  assert.deepStrictEqual(readManifest(profileDir).dependencies, { 'some-user-plugin': '^2.0.0' });
+
+  // 幂等：清干净后二次运行零写入（mtime 不变）
+  const statBefore = fs.statSync(path.join(profileDir, 'package.json'));
+  const r2 = cleanLegacyProfileDependencies({ profileDir, plugins, assetsRoot, log: () => {} });
+  assert.deepStrictEqual(r2.removed, []);
+  assert.strictEqual(fs.statSync(path.join(profileDir, 'package.json')).mtimeMs, statBefore.mtimeMs);
+});
+
+test('cleanLegacyProfileDependencies: 版本漂移脏数据（条目=旧版本）也清除', () => {
+  const { assetsRoot, profileDir, plugins } = buildFixtureHome();
+  installFixturePlugins(assetsRoot, profileDir, plugins);
+  // 升级漂移位形：v0.5.3 写下旧版本，修复版已把 assets/node_modules 升到 9.9.9。
+  // 条目值 ≠ 安装包版本 ≠ 已装版本 —— 不清则非 npm 包名照旧 404 锁死。
+  seedDependencies(profileDir, { 'dsh-fixture-bundle': '0.1.0' });
+  const r = cleanLegacyProfileDependencies({ profileDir, plugins, assetsRoot, log: () => {} });
+  assert.deepStrictEqual(r.removed, ['dsh-fixture-bundle']);
+  assert.strictEqual(readManifest(profileDir).dependencies['dsh-fixture-bundle'], undefined);
+});
+
+test('cleanLegacyProfileDependencies: 插件中心 npm 更新的配套件条目保留（不误删用户安装）', () => {
+  const { assetsRoot, profileDir, plugins } = buildFixtureHome();
+  installFixturePlugins(assetsRoot, profileDir, plugins);
+  // keep-newer 位形：用户经插件中心把 billion-context-dsh 风格的配套件更到 2.0.0
+  //（companion-profile 保留更新版本），dependencies 条目是用户自己的安装记录。
+  const installed = path.join(profileDir, 'node_modules', 'dsh-fixture-bundle', 'package.json');
+  const pkg = JSON.parse(fs.readFileSync(installed, 'utf8'));
+  pkg.version = '2.0.0';
+  fs.writeFileSync(installed, JSON.stringify(pkg, null, 2));
+  seedDependencies(profileDir, {
+    'dsh-fixture-bundle': '2.0.0', // = 已装版本 ≠ assets 版本（0.4.5）→ 用户更新位形
+    '@deepseek-ai/dsh-fixture-beta': '1.2.3', // 正常脏数据 → 清
+  });
+  const r = cleanLegacyProfileDependencies({ profileDir, plugins, assetsRoot, log: () => {} });
+  assert.deepStrictEqual(r.removed, ['@deepseek-ai/dsh-fixture-beta'], '更新位形条目绝不能删');
+  const deps = readManifest(profileDir).dependencies;
+  assert.strictEqual(deps['dsh-fixture-bundle'], '2.0.0');
+});
+
+test('cleanLegacyProfileDependencies: 用户自装条目一律不动（非配套名 / 范围 / file: 形状）', () => {
+  const { assetsRoot, profileDir, plugins } = buildFixtureHome();
+  installFixturePlugins(assetsRoot, profileDir, plugins);
+  seedDependencies(profileDir, {
+    'some-user-plugin': '^2.0.0',                       // 非配套名
+    'lodash.get': '4.4.2',                               // 非配套名（精确版本也不动）
+    '@deepseek-ai/dsh-fixture-beta': '^1.2.3',           // 配套名 + 范围 spec（非旧写入器形状）
+    'dsh-fixture-bundle': 'file:../somewhere',           // 配套名 + file: spec
+    '@deepseek-ai/dsh-web-app': 'workspace:*',           // 核心包名（不在配套清单）
+  });
+  const r = cleanLegacyProfileDependencies({ profileDir, plugins, assetsRoot, log: () => {} });
+  assert.deepStrictEqual(r.removed, [], '用户自装/异形条目绝不能删');
+  const deps = readManifest(profileDir).dependencies;
+  assert.strictEqual(deps['some-user-plugin'], '^2.0.0');
+  assert.strictEqual(deps['lodash.get'], '4.4.2');
+  assert.strictEqual(deps['@deepseek-ai/dsh-fixture-beta'], '^1.2.3');
+  assert.strictEqual(deps['dsh-fixture-bundle'], 'file:../somewhere');
+  assert.strictEqual(deps['@deepseek-ai/dsh-web-app'], 'workspace:*');
+});
+
+test('cleanLegacyProfileDependencies: 落位文件缺失的脏条目清除（与旧写入器撤下语义一致）', () => {
+  const { assetsRoot, profileDir, plugins } = buildFixtureHome();
+  installFixturePlugins(assetsRoot, profileDir, plugins);
+  fs.rmSync(path.join(profileDir, 'node_modules', 'dsh-fixture-bundle'), { recursive: true, force: true });
+  seedDependencies(profileDir, { 'dsh-fixture-bundle': '0.4.5' });
+  const r = cleanLegacyProfileDependencies({ profileDir, plugins, assetsRoot, log: () => {} });
+  assert.deepStrictEqual(r.removed, ['dsh-fixture-bundle']);
+});
+
+test('cleanLegacyProfileDependencies: assets 缺源时退化为保守判定（条目=已装版本即保留）', () => {
+  const { profileDir, plugins } = buildFixtureHome();
+  const assetsRoot = path.join(profileDir, 'no-such-assets');
+  // 无 assets 指纹可对照：条目与已装版本一致 → 无法证明是脏数据 → 保留。
+  const r = cleanLegacyProfileDependencies({ profileDir, plugins, assetsRoot, log: () => {} });
+  assert.deepStrictEqual(r.removed, []);
+});
+
+test('cleanLegacyProfileDependencies: dry-run 只计算不落盘', () => {
+  const { assetsRoot, profileDir, plugins } = buildFixtureHome();
+  installFixturePlugins(assetsRoot, profileDir, plugins);
+  seedDependencies(profileDir, { 'dsh-fixture-bundle': '0.4.5' });
+  const before = fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8');
+  const logs = [];
+  const r = cleanLegacyProfileDependencies({ profileDir, plugins, assetsRoot, dryRun: true, log: (m) => logs.push(m) });
+  assert.deepStrictEqual(r.removed, ['dsh-fixture-bundle'], 'dry-run 也要报告将清理的条目');
+  assert.ok(logs.some((m) => m.includes('dry-run')), 'dry-run 计划须进日志');
+  assert.strictEqual(fs.readFileSync(path.join(profileDir, 'package.json'), 'utf8'), before, 'dry-run 绝不落盘');
+});
+
+test('cleanLegacyProfileDependencies: 清空后 dependencies 键整体移除（不留空对象）', () => {
+  const { assetsRoot, profileDir, plugins } = buildFixtureHome();
+  installFixturePlugins(assetsRoot, profileDir, plugins);
+  const manifestFile = path.join(profileDir, 'package.json');
+  const manifest = readManifest(profileDir);
+  manifest.dependencies = { 'dsh-fixture-bundle': '0.4.5' }; // 只有脏数据，无用户条目
+  fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2) + '\n');
+  const r = cleanLegacyProfileDependencies({ profileDir, plugins, assetsRoot, log: () => {} });
+  assert.deepStrictEqual(r.removed, ['dsh-fixture-bundle']);
+  assert.strictEqual(readManifest(profileDir).dependencies, undefined, '空 dependencies 对象应删除（同 removeRetiredDshMarketDir 先例）');
+});
+
+test('cleanLegacyProfileDependencies: manifest 未初始化时跳过且不创建文件', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-hub-reg-noinit-'));
-  const out = syncProfileDependencies({
+  const out = cleanLegacyProfileDependencies({
     profileDir: dir,
     plugins: [{ id: 'a', name: 'a' }],
-    registrable: [{ name: 'a', version: '1.0.0' }],
     log: () => {},
   });
   assert.strictEqual(out.skipped, true);
   assert.strictEqual(fs.existsSync(path.join(dir, 'package.json')), false, '绝不凭空创建 manifest');
 });
+
+test('cleanLegacyProfileDependencies: 无 dependencies / 无可清条目零写入', () => {
+  const { assetsRoot, profileDir, plugins } = buildFixtureHome();
+  installFixturePlugins(assetsRoot, profileDir, plugins);
+  const manifestFile = path.join(profileDir, 'package.json');
+  const statBefore = fs.statSync(manifestFile);
+  const r = cleanLegacyProfileDependencies({ profileDir, plugins, assetsRoot, log: () => {} });
+  assert.deepStrictEqual(r.removed, []);
+  assert.strictEqual(fs.statSync(manifestFile).mtimeMs, statBefore.mtimeMs, '无可清条目不得重写 manifest');
+});
+
+// ---------------------------------------------------------------------------
+// 适配层语义：登记集合与指针包（识别面②）
+// ---------------------------------------------------------------------------
 
 test('collectRegistrablePlugins: 包名漂移/版本缺失的落位目录被拒', () => {
   const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-hub-reg-badmeta-'));
@@ -340,20 +486,22 @@ test('hub 识别复现：lib statusSync 把指针包插件全部判 cached，ens
   }
 });
 
-test('hub 识别复现：桌面端 GetPluginsJson 枚举 dependencies 键，内置件全部在列且版本可读', () => {
+test('hub 识别复现：桌面端 GetPluginsJson 只列用户自装件——内置件不进 dependencies（issue #156 取舍）', () => {
   const { home, assetsRoot, profileDir, plugins } = buildFixtureHome();
   installFixturePlugins(assetsRoot, profileDir, plugins);
+  // 预埋 v0.5.3 脏数据 + 用户自装，同步后：脏数据清除、用户条目在列。
+  seedDependencies(profileDir, { 'dsh-fixture-bundle': '0.4.5' });
   syncHubRecognition({ home, profileDir, assetsRoot, plugins, desktopVersion: '0.5.2', log: () => {} });
 
   const rows = hubDesktopPluginList(profileDir);
   const byName = new Map(rows.map((r) => [r.name, r]));
   for (const p of plugins) {
-    const row = byName.get(p.name);
-    assert.ok(row, '内置件必须出现在 hub 桌面端插件列表: ' + p.name);
-    assert.ok(HUB_EXACT_VERSION_RE.test(row.spec), 'spec 须为精确版本（hub 更新检查按 semver 判定）: ' + row.spec);
-    assert.ok(row.version !== null && row.spec === row.version, 'node_modules 版本须与 dependencies 登记一致: ' + p.name);
+    assert.strictEqual(byName.has(p.name), false,
+      '内置件不得再出现在 dependencies（识别面①的取舍，见模块头注释）: ' + p.name);
   }
   assert.ok(byName.has('some-user-plugin'), '用户自装插件仍在列');
+  const user = byName.get('some-user-plugin');
+  assert.strictEqual(user.spec, '^2.0.0');
 });
 
 // ---------------------------------------------------------------------------

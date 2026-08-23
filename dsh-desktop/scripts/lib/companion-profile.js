@@ -35,7 +35,17 @@ const PLUGIN_FILES = [
 ];
 
 // 配套插件引用的私有依赖（dsh 核心闭包之外）。
-const VENDOR_DEPS = ['schemastery', 'cosmokit', '@standard-schema/spec'];
+// dsh-community-market 的运行时依赖（ajv 契约校验 / semver 版本 / yaml 解析，
+// 加上游市场宿主面的 @deepseek-ai/schemastery、@deepseek-ai/dsh-settings）
+// 随源同步进 profile node_modules。sharp（原生模块，市场媒体图标规整用）
+// 不在此列：由 loader 经安装根 node_modules 解析（同 dsh-hub 的
+// @deepseek-ai/dsh-typert-protocol 运行时导入先例），避免 @img 平台二进制
+// 的多平台同步问题。
+const VENDOR_DEPS = [
+  'schemastery', 'cosmokit', '@standard-schema/spec',
+  'ajv', 'ajv-formats', 'semver', 'yaml',
+  '@deepseek-ai/schemastery', '@deepseek-ai/dsh-settings',
+];
 
 // 目录级同步的运行资产子目录（正常复制路径全量走这份清单）。
 const SYNC_SUBDIRS = ['lib', 'client', 'data', 'assets', 'src', 'dist', 'public', 'gui', 'node_modules'];
@@ -60,6 +70,7 @@ const KNOWN_COMPANION_DIR_NAMES = new Set([
   // 历史退役/改名目录：
   'zat-dsh-engine',
   'dsh-plugin-marketplace',
+  'dshmarket',
   'dsh-terminal',
   'dsh-prompt',
 ]);
@@ -119,6 +130,96 @@ function removeLegacyMarketplaceDir(profileWebModules, hooks = {}) {
   } catch (err) {
     if (fail) fail('移除旧插件市场包失败: ' + err.message);
   }
+}
+
+// ---------------------------------------------------------------------------
+// dshmarket 退役（内置市场切换为 dsh-community-market）
+// ---------------------------------------------------------------------------
+
+/** 退役市场的包名与 loader id。 */
+const RETIRED_MARKET_PACKAGE = 'dshmarket';
+const RETIRED_MARKET_LOADER_ID = 'dsh-market';
+
+/**
+ * 移除已退役市场 dshmarket 的同步副本与 manifest 登记（幂等，dir + bundles +
+ * dependencies）。目录清理带内置装配特征门（dsh.bundle.patch 声明），避免误删
+ * 用户自装的同名第三方包；manifest 手术直接 JSON 原子写（一次性退役，与
+ * retireZatEngine 同款先例——不走 ManifestStore 写锁，窗口极小且幂等可重放）。
+ * @param {string} profileDir web profile 目录
+ * @param {Object} hooks { log, fail, plan, dryRun }
+ */
+function removeRetiredDshMarketDir(profileDir, hooks = {}) {
+  const { log, fail, plan, dryRun = false } = hooks;
+  const pkgDir = path.join(profileDir, 'node_modules', RETIRED_MARKET_PACKAGE);
+  if (fs.existsSync(pkgDir)) {
+    let isBuiltin = false;
+    try {
+      const p = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'));
+      isBuiltin = !!(p && p.dsh && p.dsh.bundle && p.dsh.bundle.patch);
+    } catch { /* 目录残缺：也按可清理处理 */ isBuiltin = true; }
+    if (isBuiltin) {
+      if (dryRun) {
+        if (plan) plan('dry-run: 将移除已退役市场包 ' + RETIRED_MARKET_PACKAGE);
+      } else {
+        try {
+          fs.rmSync(pkgDir, { recursive: true, force: true });
+          if (log) log('已移除已退役市场包: ' + RETIRED_MARKET_PACKAGE);
+        } catch (err) {
+          if (fail) fail('移除已退役市场包失败: ' + err.message);
+        }
+      }
+    }
+  }
+  const manifestFile = path.join(profileDir, 'package.json');
+  try {
+    const m = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+    if (!m || typeof m !== 'object') return;
+    let changed = false;
+    if (m.dsh && m.dsh.profile && Array.isArray(m.dsh.profile.bundles)
+      && m.dsh.profile.bundles.includes(RETIRED_MARKET_PACKAGE)) {
+      m.dsh.profile.bundles = m.dsh.profile.bundles.filter((n) => n !== RETIRED_MARKET_PACKAGE);
+      changed = true;
+    }
+    if (m.dependencies && typeof m.dependencies === 'object'
+      && Object.prototype.hasOwnProperty.call(m.dependencies, RETIRED_MARKET_PACKAGE)) {
+      delete m.dependencies[RETIRED_MARKET_PACKAGE];
+      if (Object.keys(m.dependencies).length === 0) delete m.dependencies;
+      changed = true;
+    }
+    if (changed) {
+      if (dryRun) {
+        if (plan) plan('dry-run: 将从 profile manifest 移除 ' + RETIRED_MARKET_PACKAGE + ' 登记（bundles/dependencies）');
+      } else {
+        writeFileAtomic(manifestFile, JSON.stringify(m, null, 2) + '\n');
+        if (log) log('已从 profile manifest 移除已退役市场登记: ' + RETIRED_MARKET_PACKAGE);
+      }
+    }
+  } catch (err) {
+    if (fail) fail('清理 ' + RETIRED_MARKET_PACKAGE + ' manifest 登记失败: ' + err.message);
+  }
+}
+
+/**
+ * 移除 patch 层已退役市场（dsh-market / dshmarket）的全部登记行（insert 内层
+ * 条目、纯 insert 块、顶层 id 块与遗留 marker 注释）。纯文本变换，由调用方在
+ * 自己的 patch 快照上调用后统一落盘（syncCompanionFiles 不改写 patch 文件）。
+ * @param {string} patch cordis.patch.yml 原文
+ * @returns {{ patch: string, changed: boolean }}
+ */
+function removeRetiredDshMarketPatchRows(patch) {
+  const drop = dropBlocksByIds(String(patch || ''), [RETIRED_MARKET_LOADER_ID]);
+  let text = drop.text;
+  const before = text;
+  // 兜底：顶层残留的非 name-only 块（带 disabled/removed 标记的退役行）与 marker 注释。
+  text = text.replace(
+    /(?:^|\n)-(?:[ \t]*)id:[ \t]*dsh-market\b[^\n]*(?:\n[ \t]+[^\n]*)*/g,
+    (m) => (m[0] === '\n' ? '\n' : ''),
+  );
+  text = text.replace(/\n?[^\n]*插件管理[^\n]*关闭[ \t]+dsh-market[^\n]*\n?/g, '\n');
+  if (text !== before || drop.removed.length > 0) {
+    return { patch: text, changed: true };
+  }
+  return { patch, changed: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +301,10 @@ function syncCompanionFiles(opts) {
   // 永不清理」）。
   removeStaleCompanionPlugins(path.join(profileDir, 'node_modules'), { log, fail, plan, dryRun, expectedDirs: currentDirs });
   removeLegacyMarketplaceDir(path.join(profileDir, 'node_modules'), { log, fail, plan, dryRun });
+  // dshmarket 退役：目录 + manifest 登记（bundles/dependencies）一次性清理。
+  // patch 行不在此时机清理（本函数不落盘 patch——调用方持快照统一写），
+  // 由调用方对快照调用 removeRetiredDshMarketPatchRows。
+  removeRetiredDshMarketDir(profileDir, { log, fail, plan, dryRun });
 
   const bundleNames = new Set();
   for (const name of VENDOR_DEPS) {
@@ -337,6 +442,8 @@ module.exports = {
   KNOWN_COMPANION_DIR_NAMES,
   removeStaleCompanionPlugins,
   removeLegacyMarketplaceDir,
+  removeRetiredDshMarketDir,
+  removeRetiredDshMarketPatchRows,
   removeLegacyMarketplacePatchLines,
   removedPluginIdsFromPatch,
   ensureDisabledPatchEntry,

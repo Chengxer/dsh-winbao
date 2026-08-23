@@ -10,21 +10,38 @@
 //      = profile package.json 的 **dependencies 键**；逐键读
 //      node_modules/<name>/package.json 取版本；启停走 cordis.patch.yml 的
 //      loader id 禁用条目（完整移植我方 plugin-manager-patch.js 语义，双向
-//      兼容）。内置配套件此前只写 dsh.profile.bundles + patch insert，从不
-//      落 dependencies → 桌面端列表恒为空 —— 这就是「识别不到」的根因。
+//      兼容）。【issue #156 后我方主动放弃此识别面：向 dependencies 写内置件
+//      会毒化 pnpm（见下），内置件改由 DSH Desktop 自己的插件管理面呈现；
+//      此面仅保留用户自装插件的既有行为。】
 //   2. lib/CLI（dsh-hotplug-hub/lib）：包清单 = <DSH_HOME>/hotplug-hub/packs/
 //      <packId>/hotpack.json（hotpack 1.0）；statusSync 按包内 plugins 逐条
 //      以「目标目录存在 package.json」判 cached。配套件没有 hotpack 登记 →
 //      status/check 一概不显示。
 //
-// 本模块在同步链末段补齐两处登记（幂等、健康零写入）：
-//   · profile package.json dependencies：每个健康配套件写精确版本登记
-//     （与 `dsh plugin add` 落盘形状一致）；卸载/缺源/元数据不合格的配套件
-//     移除登记。只动配套件名，用户自装插件条目原样保留。
+// 本模块在同步链末段维护 hub 识别面（幂等、健康零写入）：
+//   · 【issue #156 止血】profile package.json dependencies **不再写入任何
+//     内置配套件登记**，并幂等清除 v0.5.3（提交 6070d5ab）写入的存量脏数据。
+//     旧口径把 34 个内置件按 npm 形状（精确版本）写进 dependencies，而这些
+//     包只随客户端分发、多数不在 npm 上 → 用户在 profiles/web 跑 pnpm 时
+//     ERR_PNPM_FETCH_404，整个 profile 锁死。清理识别口径：配套件名 + 精确
+//     版本值（旧写入器形状），且排除「插件中心更新位形」（见
+//     cleanLegacyProfileDependencies）；用户自装条目（非配套名 / 范围版本 /
+//     file: link: 等异形 spec）一律不动。识别面①（桌面端插件管理页枚举
+//     dependencies）就此失去内置件——取舍见下。
 //   · hotplug-hub/packs/dsh-desktop/hotpack.json：指向已落位 node_modules
 //     目录的 path 源指针包，让 hub 的 status/preview 把内置件列为
-//     cached/reused。**只读指针**：内置件的挂载归同步链所有，hub 侧请勿
-//     activate（会追加重复 insert 块，双登记即 issue #104 启动崩溃）。
+//     cached/reused（识别面②，保留）。**只读指针**：内置件的挂载归同步链
+//     所有，hub 侧请勿 activate（会追加重复 insert 块，双登记即 issue #104
+//     启动崩溃）。
+//
+// 识别面①取舍（为何不救 dependencies 面）：评估过 `file:` 协议依赖（pnpm 对
+// file: 本地路径不查 registry）。实测 pnpm 11：file: 指向存在路径可装，但
+// 指向缺失路径直接 ERR_PNPM_LINKED_PKG_DIR_NOT_FOUND 退出 1——与 404 同类
+// 的整 profile 锁死。file: 只能指向 app 的 assets 目录（绝对路径，便携版/
+// 重装/升级换目录即失效）或 profile 自身 node_modules（自指循环，且 pnpm
+// 会重写同步链所管的目录）。结论：file: 会以另一种形态复刻 issue #156，
+// 弃用。内置件本来就有 DSH Desktop 自己的插件管理面（cordis.patch.yml
+// loader id 枚举 + 启停），失去官方桌面端列表显示可接受。
 //
 // 元数据校验（收口）：配套件 package.json 必须 name 与清单一致、version 为
 // hub 认可的精确 semver（EXACT_VERSION_RE 同源规则）；带 dsh.plugin.json 的
@@ -33,7 +50,7 @@
 //
 // WSL 边界：profile 位于 UNC 路径（\\wsl$\...）时跳过 hotpack 指针（hub 的
 // validateSourcePath 拒绝 UNC；且 Windows 侧写下的路径对 WSL 内的 hub 也无
-// 意义），仅保留 dependencies 登记（纯 JSON，无路径）。
+// 意义），dependencies 清理照常（纯 JSON，无路径）。
 // ---------------------------------------------------------------------------
 
 const fs = require('node:fs');
@@ -160,11 +177,12 @@ function validateCompanionMetadata(opts) {
 }
 
 // ---------------------------------------------------------------------------
-// 识别面 1：profile package.json dependencies 登记（hub 桌面端插件清单）
+// 识别面 1（原登记面，现为 issue #156 止血清理面）
 // ---------------------------------------------------------------------------
 
 /**
- * 读取 profile node_modules 里已落位配套件的元数据，产出可登记集合。
+ * 读取 profile node_modules 里已落位配套件的元数据，产出可登记集合
+ * （hotpack 指针包的数据源；不再写 dependencies）。
  * @param {Object} opts
  * @param {string} opts.profileDir
  * @param {Array<{id: string, name: string}>} opts.plugins
@@ -181,7 +199,7 @@ function collectRegistrablePlugins(opts) {
     const check = inspectCompanionMeta(dir, p);
     if (!check.ok) {
       // 落位目录元数据不合格（未安装/版本缺失/包名漂移）→ 不登记并告警。
-      log('配套件未就绪，跳过 hub dependencies 登记: ' + p.name + ' —— ' + check.reasons.join('；'));
+      log('配套件未就绪，跳过 hub 指针包登记: ' + p.name + ' —— ' + check.reasons.join('；'));
       continue;
     }
     out.push({ id: p.id, name: p.name, version: check.version, description: check.description });
@@ -189,60 +207,96 @@ function collectRegistrablePlugins(opts) {
   return out;
 }
 
+/** 读 profile node_modules 里配套件的已装版本（缺失/不可解析 → null）。 */
+function readInstalledVersion(profileDir, name) {
+  const pkg = readJson(path.join(profileDir, 'node_modules', ...name.split('/'), 'package.json'));
+  return pkg && typeof pkg.version === 'string' ? pkg.version : null;
+}
+
+/** 读 assets 源目录里配套件的分发版本（缺 assetsRoot/缺失/不可解析 → null）。 */
+function readAssetsVersion(assetsRoot, plugin) {
+  if (!assetsRoot) return null;
+  const pkg = readJson(path.join(assetsRoot, companionDirName(plugin), 'package.json'));
+  return pkg && typeof pkg.version === 'string' ? pkg.version : null;
+}
+
 /**
- * 把健康配套件以精确版本写进 profile package.json dependencies（hub 桌面端
- * GetPluginsJson 的清单来源），并移除已卸载/缺源配套件的陈旧登记。
- * 只触碰配套件名集合内的键，用户自装插件条目一律原样保留；无变化零写入。
+ * 【issue #156 止血】清除 v0.5.3（提交 6070d5ab）写进 profile package.json
+ * dependencies 的内置配套件脏数据，并保证此后不再写入任何登记（本函数只删
+ * 不加）。识别口径 = 旧写入器的落盘指纹：
+ *
+ *   条目是脏数据 ⟺ 键 ∈ 配套件名集合
+ *              ∧ 值是精确 semver（旧写入器只写精确版本；范围/^、file:、
+ *                link:、workspace: 等异形 spec 绝不是我们写的，一律保留）
+ *              ∧ ¬插件中心更新位形
+ *
+ * 「插件中心更新位形」（保留）：用户经插件中心把某配套件从 npm 更新到了
+ * 比安装包新的版本（companion-profile 的 keep-newer 分支保护该安装）——
+ * node_modules 已装版本 === 条目值 !== assets 分发版本。该位形的条目是
+ * 用户自己的安装记录（npm 可解析，不锁 pnpm），绝不误删。
+ *
+ * 由此覆盖全部旧口径写入场景：
+ *   · 常规脏数据（值 = 安装包版本，node_modules 同版本）→ 清除；
+ *   · 版本漂移脏数据（升级后 assets/node_modules 已是新版，条目仍是旧
+ *     写入器写下的旧版本）→ 清除（否则非 npm 包名照旧 404 锁死）；
+ *   · 落位文件缺失（installedV 不可读）→ 清除（与旧写入器「不可登记即
+ *     撤下」的既有语义一致）；
+ *   · assets 缺源无法指纹时取保守方向：条目与已装版本一致即保留。
+ *
+ * 已知残余边界（可接受，见模块头注释）：用户若从 npm 恰好自装了与安装包
+ * 完全同版本的同名包，其条目会被按脏数据清除——功能无影响（该名字的文件
+ * 本就归同步链管理，node_modules/bundles/patch 三面俱在），仅官方桌面端
+ * 插件列表少显示一行。
+ *
+ * 幂等：清干净后二次运行零写入；无 dependencies / 无可清条目不触碰文件。
  * @param {Object} opts
  * @param {string} opts.profileDir
- * @param {Array<{id: string, name: string}>} opts.plugins 全量配套清单（含未就绪项）
- * @param {Array<{name: string, version: string}>} opts.registrable 可登记集合
+ * @param {Array<{id: string, name: string}>} opts.plugins 全量配套清单
+ * @param {string} [opts.assetsRoot] assets/plugins 源目录（缺省则退化为
+ *        「条目=已装版本即保留」的保守判定）
  * @param {boolean} [opts.dryRun]
  * @param {(msg: string) => void} [opts.log]
- * @returns {{ skipped: boolean, added: string[], updated: string[], removed: string[] }}
+ * @returns {{ skipped: boolean, removed: string[] }}
  */
-function syncProfileDependencies(opts) {
-  const { profileDir, plugins = [], registrable = [], dryRun = false, log = () => {} } = opts;
-  const result = { skipped: false, added: [], updated: [], removed: [] };
+function cleanLegacyProfileDependencies(opts) {
+  const { profileDir, plugins = [], assetsRoot, dryRun = false, log = () => {} } = opts;
+  const result = { skipped: false, removed: [] };
   const manifestFile = path.join(profileDir, 'package.json');
   const manifest = readJson(manifestFile);
   if (!manifest || typeof manifest !== 'object') {
     // 与 reconcileProfileBundles 的 CLI 契约同口径：manifest 尚未初始化时
-    // 绝不凭空创建，交由 dsh 首次启动初始化后下次同步再登记。
+    // 绝不凭空创建，无脏数据可清。
     result.skipped = true;
-    log('profile manifest 尚未初始化，hub dependencies 登记留待下次同步');
+    log('profile manifest 尚未初始化，hub dependencies 清理留待下次同步');
     return result;
   }
-  const companionNames = new Set(plugins.map((p) => p.name));
-  const target = new Map(registrable.map((p) => [p.name, p.version]));
-  const deps = (manifest.dependencies && typeof manifest.dependencies === 'object')
-    ? manifest.dependencies
-    : {};
+  if (!manifest.dependencies || typeof manifest.dependencies !== 'object') return result;
+  const byName = new Map(plugins.map((p) => [p.name, p]));
+  const deps = manifest.dependencies;
   let changed = false;
-  for (const [name, version] of target) {
-    if (deps[name] !== version) {
-      if (deps[name] === undefined) result.added.push(name);
-      else result.updated.push(name);
-      deps[name] = version;
-      changed = true;
-    }
-  }
   for (const name of Object.keys(deps)) {
-    // 只清理配套件名：已卸载/缺源/元数据不合格 → 从清单撤下；其余键绝不动。
-    if (companionNames.has(name) && !target.has(name)) {
-      delete deps[name];
-      result.removed.push(name);
-      changed = true;
-    }
+    const plugin = byName.get(name);
+    if (!plugin) continue; // 非配套件名：用户自装，绝不动
+    const spec = deps[name];
+    // 形状门：旧写入器只写精确 semver；范围/异形 spec 是用户自己的。
+    if (typeof spec !== 'string' || !HUB_EXACT_VERSION_RE.test(spec)) continue;
+    const installedV = readInstalledVersion(profileDir, name);
+    const assetsV = readAssetsVersion(assetsRoot, plugin);
+    const isPluginCenterUpdate = installedV !== null && installedV === spec && installedV !== assetsV;
+    if (isPluginCenterUpdate) continue; // 用户的 npm 更新记录：保留
+    delete deps[name];
+    result.removed.push(name);
+    changed = true;
+    log('清除 v0.5.3 写入的 dependencies 脏数据（issue #156）: ' + name + '@' + spec);
   }
   if (!changed) return result;
-  manifest.dependencies = deps;
+  if (Object.keys(deps).length === 0) delete manifest.dependencies;
   if (dryRun) {
-    log('dry-run: 将写 profile dependencies（+' + result.added.length + ' ~' + result.updated.length + ' -' + result.removed.length + '）供 hotplug-hub 识别');
+    log('dry-run: 将清除 profile dependencies 脏数据 ' + result.removed.length + ' 条（issue #156）');
     return result;
   }
   writeFileAtomic(manifestFile, JSON.stringify(manifest, null, 2) + '\n');
-  log('已登记配套件进 profile dependencies（hotplug-hub 插件清单识别）: +' + result.added.length + ' ~' + result.updated.length + ' -' + result.removed.length);
+  log('已清除 profile dependencies 脏数据 ' + result.removed.length + ' 条（issue #156，pnpm 解锁）');
   return result;
 }
 
@@ -334,17 +388,19 @@ function syncHotplugPackPointer(opts) {
 // ---------------------------------------------------------------------------
 
 /**
- * 同步 hotplug-hub 识别登记：dependencies + 指针包 + 源元数据校验。
+ * 同步 hotplug-hub 识别：v0.5.3 dependencies 脏数据清理（issue #156）+
+ * packs 指针包 + 源元数据校验。**不再向 dependencies 写任何登记。**
  * @param {Object} opts
  * @param {string} opts.home DSH_HOME（如 ~/.dsh）
  * @param {string} opts.profileDir 通常 <home>/profiles/web
- * @param {string} [opts.assetsRoot] assets/plugins 源目录（校验环节；缺省跳过）
+ * @param {string} [opts.assetsRoot] assets/plugins 源目录（校验环节 + 脏数据
+ *        清理的安装包版本指纹；缺省时校验跳过、清理退化为保守判定）
  * @param {Array<{id: string, name: string}>} [opts.plugins] 配套清单（默认 COMPANION_PLUGINS）
  * @param {Set<string>} [opts.removedIds] 用户已卸载 id 集
  * @param {string} [opts.desktopVersion] 指针包版本（缺省自动探测）
  * @param {boolean} [opts.dryRun]
  * @param {(msg: string) => void} [opts.log]
- * @returns {{ metaBad: Array<{name: string, reasons: string[]}>, deps: object, pack: object, registrable: number }}
+ * @returns {{ metaBad: Array<{name: string, reasons: string[]}>, deps: { skipped: boolean, removed: string[] }, pack: object, registrable: number }}
  */
 function syncHubRecognition(opts) {
   const {
@@ -364,7 +420,7 @@ function syncHubRecognition(opts) {
     : { checked: 0, bad: [] };
   const registrable = collectRegistrablePlugins({ profileDir, plugins: list, removedIds, log });
   const version = desktopVersion || resolveDesktopVersion();
-  const deps = syncProfileDependencies({ profileDir, plugins: list, registrable, dryRun, log });
+  const deps = cleanLegacyProfileDependencies({ profileDir, plugins: list, assetsRoot, dryRun, log });
   const pack = syncHotplugPackPointer({ home, profileDir, desktopVersion: version, registrable, dryRun, log });
   return { metaBad: meta.bad, deps, pack, registrable: registrable.length };
 }
@@ -380,7 +436,7 @@ module.exports = {
   inspectCompanionMeta,
   validateCompanionMetadata,
   collectRegistrablePlugins,
-  syncProfileDependencies,
+  cleanLegacyProfileDependencies,
   buildHotpackPointer,
   syncHotplugPackPointer,
   syncHubRecognition,

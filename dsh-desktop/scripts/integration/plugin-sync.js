@@ -30,6 +30,7 @@ const {
   ACP_DISABLE_BLOCK,
   PET_DISABLE_BLOCK,
   removeLegacyMarketplacePatchLines,
+  removeRetiredDshMarketPatchRows,
   removedPluginIdsFromPatch,
   ensureDisabledPatchEntry,
   registerCompanionPatchEntries,
@@ -319,6 +320,18 @@ function createPluginSync(ctx) {
         }
       } catch {}
 
+      // 内置市场切换为 dsh-community-market：退役 dshmarket（loader id
+      // dsh-market）的 patch 行一次性清理（幂等；目录与 manifest 登记在
+      // syncCompanionFiles 内的 removeRetiredDshMarketDir 已处理）。
+      try {
+        const retiredBefore = fs.readFileSync(patchFile, 'utf8');
+        const retired = removeRetiredDshMarketPatchRows(retiredBefore);
+        if (retired.changed) {
+          writeFileAtomic(patchFile, retired.patch);
+          log('已从 cordis.patch.yml 移除退役插件市场 dshmarket 条目');
+        }
+      } catch {}
+
       // v0.3.11 起内置插件市场 zat-dsh-engine 默认移除（用户要求）。
       retireZatEngine(profileDir);
 
@@ -399,9 +412,11 @@ function createPluginSync(ctx) {
         log('已同步配套插件到 web profile: ' + COMPANION_PLUGINS.map((p) => p.id).join(', '));
       }
 
-      // 第八步：hotplug-hub 识别登记（profile dependencies + packs 指针包；
-      // 幂等、健康零写入）。hub 桌面端插件清单只认 dependencies 键，lib/CLI
-      // 的 status 只认 packs 目录 —— 不补这两处，内置件对 hub 全隐形。
+      // 第八步：hotplug-hub 识别（issue #156 止血后口径）。hub lib/CLI 的
+      // status/preview 只认 packs 目录 → 写 dsh-desktop 指针包；v0.5.3 曾把
+      // 内置件按 npm 形状写进 profile dependencies（多数不在 npm 上 → pnpm
+      // 404 锁死 profile），此处幂等清除存量脏数据且不再写入（用户在下次
+      // 启动即自愈，pnpm 恢复可用）。
       syncHubRecognition({
         home,
         profileDir,

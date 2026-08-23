@@ -48,10 +48,19 @@ const COMPANION_PLUGINS = [
   // 社区检测 + 向量去重；作者为 DSH 提供原生适配器（graph-memory/dsh 入口），
   // 内置后随壳分发，dsh-hub 中枢页直接显示装配状态与图谱统计。
   { id: 'graph-memory', name: 'graph-memory' },
-  // 可视化插件市场（dsh-market/dsh-market，MIT）：浏览/搜索/一键安装社区插件。
-  // v0.3.11 起内置市场整体切换为 dshmarket（原 zat-dsh-engine 已默认移除，
-  // 存量装配由 main.js 的 retireZatEngine 一次性清理）。
-  { id: 'dsh-market', name: 'dshmarket' },
+  // 可视化插件市场（anywhere-labs/deepseek-harness-desktop 的 dsh-community-market，
+  // MIT）：开放目录源（DSH 1024Store / dshfind / 标准 HTTP 源，用户自行添加
+  // 与启用）、搜索、npm registry 校验安装、启停与回执管理。内置市场整体切换为
+  // dsh-community-market（原 dshmarket 已退役：存量装配由 companion-profile 的
+  // removeRetiredDshMarketDir / removeRetiredDshMarketPatchRows 一次性清理，
+  // patch 层锚定 dropBlocksByIds('dsh-market')）。
+  { id: 'community-market', name: 'dsh-community-market' },
+  // 市场桌面服务桥（本仓库内置）：为 dsh-community-market 提供
+  // desktopProfiles / desktopPnpm / desktopPlugins / desktopActions 四个
+  // host 服务（上游市场在 DSH Plugin Desktop 壳层环境下的依赖契约）——
+  // 包操作转 dsh CLI 重入、启停读写 cordis.patch.yml（与壳层插件管理页
+  // 双向兼容）、重启走壳层监管通道。与市场本体同装卸载，无客户端半边。
+  { id: 'market-desktop-bridge', name: 'dsh-market-desktop-bridge' },
   // 插件中枢（ARFCON/dsh-hub-DSH，MIT）：插件更新引擎（版本对比/一键更新/
   // 启停/卸载/启动自检修复）+ 全局记忆 + graph-memory / dsh-market 挂载 +
   // 自身更新检查；原生适配 Gitee 版客户端版本双源对比。

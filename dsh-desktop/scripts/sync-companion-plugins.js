@@ -41,6 +41,7 @@ const { syncHubRecognition } = require('./lib/hub-registry');
 const {
   ACP_DISABLE_BLOCK, PET_DISABLE_BLOCK,
   ensureDisabledPatchEntry, removeLegacyMarketplacePatchLines,
+  removeRetiredDshMarketPatchRows,
   registerCompanionPatchEntries, syncCompanionFiles, removedPluginIdsFromPatch,
 } = require('./lib/companion-profile');
 
@@ -255,6 +256,16 @@ function syncPlugins(home, dryRun, dshPkgDir) {
     log('已从 cordis.patch.yml 移除旧插件市场条目');
   }
 
+  // 已退役市场 dshmarket（loader id dsh-market）：insert 内层条目 / 顶层块 /
+  // marker 注释一次性清理（幂等；目录与 manifest 登记在 syncCompanionFiles 内
+  // 的 removeRetiredDshMarketDir 已处理）。
+  const retiredMarket = removeRetiredDshMarketPatchRows(patch);
+  patch = retiredMarket.patch;
+  if (retiredMarket.changed) {
+    changed = true;
+    log('已从 cordis.patch.yml 移除退役插件市场 dshmarket 条目');
+  }
+
   // billion-context-dsh（compaction-acp）是模型驱动的 ACP 压缩后端：同一
   // realm 内与 dsh 默认的 compaction-basic 不能并存（插件 README 的官方
   // 安装说明）。幂等写入禁用条目：patch 中已存在 compaction-basic 条目
@@ -297,9 +308,10 @@ function syncPlugins(home, dryRun, dshPkgDir) {
     log('补丁层无变化（全部条目已存在）');
   }
 
-  // hotplug-hub 识别登记（与 main.js 运行时同步共用 scripts/lib/hub-registry.js
-  // 唯一实现）：profile dependencies（hub 桌面端插件清单来源）+ packs 指针包
-  // （hub lib/CLI status 来源）。幂等、健康零写入；dry-run 只计算不落盘。
+  // hotplug-hub 识别（与 main.js 运行时同步共用 scripts/lib/hub-registry.js
+  // 唯一实现；issue #156 止血后口径）：写 packs 指针包（hub lib/CLI status
+  // 来源）+ 幂等清除 v0.5.3 写进 profile dependencies 的内置件脏数据（不再
+  // 写入任何登记）。幂等、健康零写入；dry-run 只计算不落盘。
   syncHubRecognition({
     home,
     profileDir,
