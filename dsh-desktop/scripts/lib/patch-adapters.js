@@ -1117,6 +1117,113 @@ function transformAdapterPrepareCallGuard(src, file) {
   return { status: 'changed', src: out };
 }
 
+// 会话事件有界保留（K4：v0.5.4 多子代理渲染进程 OOM 根治）。内核
+// Session.events / ConversationNodeAssembler.inputs 无上限累积，多 Session 的
+// 流式事件线性堆积吃光 WebView2 渲染进程内存。保守两步根治（不砍结构性事件，
+// rewind/compaction/replay 语义不回归）：
+//   1) appendLive 追加后 trimSessionWindow()：events 超 SESSION_EVENT_BOUND 时按
+//      turn/start 对齐裁掉最旧切片并 flip hasMore，loadOlder 仍可按需回翻（host
+//      会话日志是持久真相，客户端窗口只是镜像）；
+//   2) dispose() 实装 + drop() 调用：会话被 prune/drop 时清空 events/views/
+//      conversation 派生态，解决「切会话/删会话后仍常驻」。
+const SESSION_EVENT_BOUND_MARKER = 'dsh-desktop compat: bounded session event retention';
+
+const SESSION_EVENT_BOUND_CONSTANTS_OLD = '\t\tvar Session = class {';
+const SESSION_EVENT_BOUND_CONSTANTS_NEW = [
+  '\t\t/** ' + SESSION_EVENT_BOUND_MARKER + ' — hard cap on the in-memory raw window;',
+  '\t\t * trimSessionWindow drops the oldest slice once the bound is exceeded',
+  '\t\t * (turn/start-aligned), retaining SESSION_EVENT_KEEP. */',
+  '\t\tconst SESSION_EVENT_BOUND = 2000;',
+  '\t\tconst SESSION_EVENT_KEEP = 1200;',
+  '\t\tvar Session = class {',
+].join('\n');
+
+const SESSION_EVENT_BOUND_DISPOSE_OLD = '\t\t\tdispose() {}';
+const SESSION_EVENT_BOUND_DISPOSE_NEW = [
+  '\t\t\tdispose() {',
+  '\t\t\t\tif (this.disposed === true) return;',
+  '\t\t\t\tthis.disposed = true;',
+  '\t\t\t\t// ' + SESSION_EVENT_BOUND_MARKER + ': release retained event/derived state so a dropped',
+  '\t\t\t\t// resident session stops holding its renderer memory (host log is durable',
+  '\t\t\t\t// truth; a later get() lazily rebuilds and open() backfills).',
+  '\t\t\t\tthis.events = [];',
+  '\t\t\t\tthis.views = [];',
+  '\t\t\t\tthis.baseSeq = 0;',
+  '\t\t\t\tthis.hasMore = false;',
+  '\t\t\t\tthis.liveBuffer = [];',
+  '\t\t\t\tthis.subscribedLastSeq = null;',
+  '\t\t\t\tthis.openGeneration++;',
+  '\t\t\t\tthis.pending.clear();',
+  '\t\t\t\tthis.pendingRev++;',
+  '\t\t\t\tthis.pendingCache = null;',
+  '\t\t\t\tthis.queueMirror.reset();',
+  '\t\t\t\tthis.conversation.replaceWindow([], false);',
+  '\t\t\t\tthis.notifier.markDirty();',
+  '\t\t\t}',
+].join('\n');
+
+const SESSION_EVENT_BOUND_DROP_OLD = ['\t\t\tdrop(sessionId) {', '\t\t\t\tthis.sessions.delete(sessionId);', '\t\t\t}'].join('\n');
+const SESSION_EVENT_BOUND_DROP_NEW = [
+  '\t\t\tdrop(sessionId) {',
+  '\t\t\t\tconst session = this.sessions.get(sessionId);',
+  '\t\t\t\tif (session !== void 0) session.dispose();',
+  '\t\t\t\tthis.sessions.delete(sessionId);',
+  '\t\t\t}',
+].join('\n');
+
+const SESSION_EVENT_BOUND_APPENDLIVE_OLD = '\t\t\t\treturn queueChanged ? "immediate" : publication;\n\t\t\t}';
+const SESSION_EVENT_BOUND_APPENDLIVE_NEW = [
+  '\t\t\t\t// ' + SESSION_EVENT_BOUND_MARKER + '.',
+  '\t\t\t\tthis.trimSessionWindow();',
+  '\t\t\t\treturn queueChanged ? "immediate" : publication;',
+  '\t\t\t}',
+  '',
+  '\t\t\t/**',
+  '\t\t\t* ' + SESSION_EVENT_BOUND_MARKER + ' — keep the in-memory raw window (and the derived',
+  '\t\t\t* Conversation state) bounded so long-lived multi-subagent streams cannot',
+  '\t\t\t* grow the renderer without limit. The host session log stays the durable',
+  '\t\t\t* truth: trimming only drops the oldest retained slice and flips hasMore so',
+  '\t\t\t* loadOlder() can page it back on demand. The cut aligns to the nearest',
+  '\t\t\t* turn/start boundary to avoid a half-trimmed turn at the window head.',
+  '\t\t\t*/',
+  '\t\t\ttrimSessionWindow() {',
+  '\t\t\t\tif (this.events.length <= SESSION_EVENT_BOUND) return;',
+  '\t\t\t\tlet cut = this.events.length - SESSION_EVENT_KEEP;',
+  '\t\t\t\tfor (let index = cut; index < this.events.length; index++) {',
+  '\t\t\t\t\tconst candidate = this.events[index];',
+  '\t\t\t\t\tif (candidate !== void 0 && candidate.type === "turn/start") {',
+  '\t\t\t\t\t\tcut = index;',
+  '\t\t\t\t\t\tbreak;',
+  '\t\t\t\t\t}',
+  '\t\t\t\t}',
+  '\t\t\t\tif (cut <= 0) return;',
+  '\t\t\t\tthis.events = this.events.slice(cut);',
+  '\t\t\t\tthis.views = this.views.slice(cut);',
+  '\t\t\t\tthis.baseSeq = this.events[0]?.seq ?? 0;',
+  '\t\t\t\tthis.hasMore = true;',
+  '\t\t\t\tthis.conversation.replaceWindow(this.events.map((event, index) => ({',
+  '\t\t\t\t\tevent,',
+  '\t\t\t\t\tview: this.views[index]',
+  '\t\t\t\t})), true);',
+  '\t\t\t\tthis.notifier.markDirty();',
+  '\t\t\t}',
+].join('\n');
+
+function transformSessionEventBound(src, file) {
+  if (src.includes(SESSION_EVENT_BOUND_MARKER)) return { status: 'already' };
+  const anchors = [SESSION_EVENT_BOUND_CONSTANTS_OLD, SESSION_EVENT_BOUND_DISPOSE_OLD, SESSION_EVENT_BOUND_DROP_OLD, SESSION_EVENT_BOUND_APPENDLIVE_OLD];
+  const missing = anchors.filter((anchor) => !src.includes(anchor));
+  if (missing.length > 0) {
+    return { status: 'anchor-missing', detail: '未找到 Session events 有界保留锚点（版本可能已变更），跳过 ' + file };
+  }
+  let out = src;
+  out = out.replace(SESSION_EVENT_BOUND_CONSTANTS_OLD, SESSION_EVENT_BOUND_CONSTANTS_NEW);
+  out = out.replace(SESSION_EVENT_BOUND_DISPOSE_OLD, SESSION_EVENT_BOUND_DISPOSE_NEW);
+  out = out.replace(SESSION_EVENT_BOUND_DROP_OLD, SESSION_EVENT_BOUND_DROP_NEW);
+  out = out.replace(SESSION_EVENT_BOUND_APPENDLIVE_OLD, SESSION_EVENT_BOUND_APPENDLIVE_NEW);
+  return { status: 'changed', src: out };
+}
+
 module.exports = {
   // runtime-patches 的 9 个 transform（re-export）。其中
   // transformPersistenceAll 不被 registry 直接引用，其消费方是
@@ -1163,6 +1270,7 @@ module.exports = {
   transformDirectoryPickerWslBrowse,
   // R7：adapter 缺 prepareCall 时回落基类语义 + 升级指引（v0.5.3 对话失败）。
   transformAdapterPrepareCallGuard,
+  transformSessionEventBound,
   // K1 注入体常量（单测 vm 行为验证用，与 transform 同源；非 marker）。
   CREDENTIALS_HELPERS_CODE,
   // 包级补丁 node_modules 根应用器（唯一实现）。
@@ -1212,6 +1320,7 @@ module.exports = {
     KERNEL_BOOT_WATCHDOG_MARKER,
     WSL_PICKER_BROWSE_MARKER,
     ADAPTER_PREPARE_CALL_GUARD_MARKER,
+    SESSION_EVENT_BOUND_MARKER,
     ...require('./loader-isolation').markers,
   },
 };

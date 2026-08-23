@@ -147,7 +147,7 @@ test('D. pkgRel/pkgRels 被 patch-target-resolver 常量覆盖（白名单外新
 
 test('E. order 全局唯一、组内升序、补丁间依赖序成立', () => {
   // 46 = 45（E2 后）+ adapter-prepare-call-guard（R7，order 270）。
-  assert.equal(PATCH_SPECS.length, 46, 'spec 总数应为 46（E2 + wsl-picker-browse + kernel-web-boot-watchdog + adapter-prepare-call-guard）');
+  assert.equal(PATCH_SPECS.length, 47, 'spec 总数应为 47（E2 + wsl-picker-browse + kernel-web-boot-watchdog + adapter-prepare-call-guard）');
   const orders = PATCH_SPECS.map((s) => s.order);
   assert.equal(new Set(orders).size, orders.length, 'order 必须全局唯一');
   const byId = Object.fromEntries(PATCH_SPECS.map((s) => [s.id, s]));
@@ -206,7 +206,7 @@ test('E3. device-auth 154 与 credentials-absent 153 相邻无干扰', () => {
 
 test('F. cli:true 恰为 17 项；failPolicy ∈ {warn,degrade}', () => {
   const cliSpecs = registry.getSpecsByCli();
-  assert.equal(cliSpecs.length, 17, 'cli:true 数量应与既有断言一致（17，E2 +2 内核韧性补丁）');
+  assert.equal(cliSpecs.length, 18, 'cli:true 数量应与既有断言一致（18，E2 +2 内核韧性补丁）');
   for (const s of cliSpecs) assert.equal(s.cli, true);
   for (const spec of PATCH_SPECS) {
     assert.ok(

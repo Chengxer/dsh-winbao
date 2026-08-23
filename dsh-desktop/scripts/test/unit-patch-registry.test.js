@@ -84,7 +84,7 @@ test('防护类补丁与包级补丁均已登记（无遗漏 apply*）', () => {
   const ids = new Set(PATCH_SPECS.map((s) => s.id));
   const expected = [
     'slot-legacy-key', 'slot-unkeyed-compat', 'slot-error-isolation',
-    'runtime-flash-fix', 'prompt-expose-fix', 'shell-description-compat',
+    'runtime-flash-fix', 'session-event-bound', 'prompt-expose-fix', 'shell-description-compat',
     'code-mode-compat', 'image-send-fix', 'attachment-mime-trust', 'vision-key-fix',
     'persistent-shell-abort-race', 'terminal-interrupt-escalation',
     'profile-patch-guard', 'profile-bundle-guard-appboot', 'profile-bundle-guard-profileboot',
@@ -98,12 +98,12 @@ test('防护类补丁与包级补丁均已登记（无遗漏 apply*）', () => {
   for (const id of expected) assert.ok(ids.has(id), `遗漏补丁 ${id}`);
 });
 
-test('getSpecsByCli：返回 17 个 cli:true 补丁（8 runtime + 5 数据完整性 + 2 设置写入韧性 + 2 内核韧性）', () => {
+test('getSpecsByCli：返回 18 个 cli:true 补丁（8 runtime + 5 数据完整性 + 2 设置写入韧性 + 2 内核韧性）', () => {
   const specs = getSpecsByCli();
-  assert.equal(specs.length, 17, 'cli 清单应恰为 17 项');
+  assert.equal(specs.length, 18, 'cli 清单应恰为 18 项');
   const expected = new Set([
     'slot-legacy-key', 'slot-unkeyed-compat', 'slot-error-isolation',
-    'runtime-flash-fix', 'prompt-expose-fix', 'shell-description-compat',
+    'runtime-flash-fix', 'session-event-bound', 'prompt-expose-fix', 'shell-description-compat',
     'code-mode-compat', 'attachment-mime-trust', 'session-persistence',
     'tool-source-compat', 'pi-ai-opencode-go-models', 'pi-ai-credits',
     'pi-ai-reasoning-defaults',
@@ -135,6 +135,7 @@ test('getSpecsByCli：每个 spec 的 transform/apply 与 patch-adapters 导出�
     'slot-unkeyed-compat': adapters.transformSlotUnkeyedCompat,
     'slot-error-isolation': adapters.transformSlotErrorIsolation,
     'runtime-flash-fix': adapters.transformFlashFix,
+    'session-event-bound': adapters.transformSessionEventBound,
     'prompt-expose-fix': adapters.transformExposeFix,
     'shell-description-compat': adapters.transformShellDescriptionOptional,
     'code-mode-compat': adapters.transformCodeModeCompat,

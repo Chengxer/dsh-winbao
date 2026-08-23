@@ -106,6 +106,7 @@ const {
   transformDirectoryPickerWslBrowse,
   // R7：adapter 缺 prepareCall 时回落基类语义 + 升级指引（v0.5.3 对话失败）。
   transformAdapterPrepareCallGuard,
+  transformSessionEventBound,
   rootAppliers,
 } = require('./patch-adapters');
 
@@ -134,6 +135,7 @@ const {
   KERNEL_BOOT_WATCHDOG_MARKER,
   WSL_PICKER_BROWSE_MARKER,
   ADAPTER_PREPARE_CALL_GUARD_MARKER,
+  SESSION_EVENT_BOUND_MARKER,
   LOADER_TREE_ISOLATION_MARKER,
   LOADER_ACTIVATION_ISOLATION_MARKER,
   FAIL_LOUD_ISOLATION_MARKER,
@@ -235,6 +237,30 @@ const PATCH_SPECS = [
       alreadyLog: alreadySkip,
       doneLog: (file) => '已修复会话列表刷新闪跳 ' + file,
       failLog: (file, err) => 'runtime 补丁失败(' + file + '): ' + err.message,
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // Session.events 有界保留（K4：v0.5.4 多子代理渲染进程 OOM 根治）。
+  // -------------------------------------------------------------------------
+  {
+    id: 'session-event-bound',
+    group: 'runtime',
+    order: 45,
+    kind: 'file',
+    layout: 'runtime-local',
+    wslLayout: 'wsl',
+    pkgRel: FLASH_PKG_REL,
+    transform: transformSessionEventBound,
+    marker: SESSION_EVENT_BOUND_MARKER,
+    requires: [],
+    failPolicy: 'warn',
+    cli: true,
+    logs: {
+      prefix: 'Session events 有界保留补丁',
+      alreadyLog: alreadySkip,
+      doneLog: (file) => '已绑定 Session events 有界保留 ' + file,
+      failLog: (file, err) => 'Session events 有界保留补丁失败(' + file + '): ' + err.message,
     },
   },
 
