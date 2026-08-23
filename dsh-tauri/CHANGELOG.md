@@ -4,6 +4,8 @@
 
 ### 修复（用户实测反馈驱动）
 - **多 agent 客户端卡顿/白屏根治（本次硬门禁）**：根因链=内核 UI `Session.events`/`conversation.inputs` 无上限累积 → WebView2 渲染进程 OOM → 白屏。三层收口：①**治本** `session-event-bound` 补丁——events 有界保留（2000 封顶、turn 对齐裁旧、复用 replaceWindow 同时封顶 inputs/contexts）+ `Session.dispose()` 实装（切/删会话释放内存）；②崩溃自愈三级梯（eval reload → CoreWebView2.Reload → 浏览器进程级 Navigate，重生死渲染进程）；③ reload 无限循环熔断（连续 navigate 救不活 → 升级到内核重启逃生梯）。压测：8 Session×4000 事件下内存斜率趋平（此前线性堆积）
+- **会话崩溃双修（子代理 OOM + 历史加载失败）**：①打开子代理 → `listArtifacts` 全量扫描 291 会话文件逐个 zstd 解压 header 顶爆内核 node OOM → `session-header-scan-guard` 补丁（header 按 (size,mtimeNs) 缓存零解码 + `readFirstZstdLine` 累积缓冲 256KB 封顶）；②对话中「本轮运行失败」→「历史加载失败」→ 崩溃，根因源码定论=自动压缩是**纯追加不重写**、真因是**加载路径缺损坏降级**（列表能跳过、加载必炸）→ `session-load-graceful` 补丁（`readZstdPrefix` 解码/校验失败降级「加载到最后一个完整帧」，header 损坏仍致命、告警保留）
+- **快速双击偶发双实例（ta15 并发实测）**：单实例锁 `create_new` 空文件 + `writeln` 写 PID 之间微秒窗口被并发者误判陈锁回收 → 双持有者 → 陈锁回收前加 5×10ms 空文件收敛窗口
 - **v0.5.3 后对话报「registration.adapter.prepareCall is not a function」**：真因=内核 rc.7→rc.2 引入 `adapter.prepareCall` 契约，openclaw-bridge 的 `OpenAiCompatAdapter` 依赖基类方法，profile fallback junction 陈旧指向旧内核时原型链缺方法 → 裸抛。`adapter-prepare-call-guard` 补丁：缺失时回落基类语义 + 升级/重装指引告警，不再崩整轮
 - **#154/#155 崩溃环四根因**：EADDRINUSE 4311 端口竞态（wait_port_free + 换随机端口）· safe-boot overlay 裸 `@` 包名引号化（幂等修既有脏文件）· 杀软 EBUSY 有限重试 + 可读错误 · 前端 45s 看门狗兜底出口（不再无限转圈）
 - **WSL 后端五问题根治（用户反馈）**：内核 spawn 缺 `--expose-internals`（双处补齐：本地 node_args + WSL server_cmd）· npm install OOM（`NODE_OPTIONS=--max-old-space-size=8192` export 形态 + env -u 不再误清）· file_open 无 WSL 分支（Linux 路径 → `\\wsl.localhost\<distro>` UNC + xdg-open 回落）· 目录选择器误判 zenity（WSL 环境强制 browse）· 配套插件裸包名解析（随 expose-internals 自动恢复）。**实机验证通过**（内核 wsl.exe spawn + 零安装秒进）
@@ -25,7 +27,10 @@
 ### 工程
 - 20+ 子代理 review 大军：18 路核对 + 补丁面/壳生命周期/跨平台/契约/迁移/模块化 6 路深度审查，缺陷全收口（dry-run 落盘、fs-atomic 丢错误码、quotePatchScalarValues 误伤 flow 定界符、probe_loop 误杀新内核、ta15 跨平台门控等）
 - 契约对齐：bridge-api 49→53 方法、ipc-commands 43 通道、error-codes 内核三码语义澄清、seam 三角色标注规划态
-- 门禁：cargo 649 全绿 + node 1624 全绿；补丁计数 47/33/18 对账
+- 门禁：cargo 649 全绿 + node 全套 1645 全绿；补丁计数 49/35/18 对账
+
+### 已知限制（内核上游，本期不改）
+- **自定义多模态模型读不到图片**：内核 `dsh-llm-pi-ai` 对未显式声明 `input` 的自定义模型回落 `DEFAULT_INPUT=["text"]`，视觉模型被误判纯文本、图片被 `MODEL_DOES_NOT_SUPPORT_IMAGES` 拒绝（上游能力缺口，设置页无 input-modalities 字段）。用户侧绕法：`settings.yaml` 的 `llm-pi-ai` 给该模型手动加 `input: [text, image]`。已反馈上游。
 
 ## [0.5.3] — 2026-08-22
 
