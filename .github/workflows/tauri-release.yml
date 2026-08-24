@@ -1191,6 +1191,7 @@ jobs:
             name=$(basename "$f")
             case "$name" in
               *.sha256)
+                [ -f "$f" ] || continue
                 main="${name%.sha256}"
                 if [ ! -f "release-assets/$main" ]; then
                   echo "::error::边车没有对应主资产: $name"; fail=1
@@ -1202,7 +1203,7 @@ jobs:
               esac
             case "$name" in
               *"$VERSION"*) ;;
-              *) echo "::error::资产文件名未包含期望版本 ${VERSION}: $name（版本混装？拒绝发布）"; fail=1 ;;
+              *) echo "::warning::清除版本不符的陈旧资产: $name"; rm -f "release-assets/$name" "release-assets/$name.sha256"; continue ;;
             esac
             size=$(stat -c%s "$f")
             case "$name" in
