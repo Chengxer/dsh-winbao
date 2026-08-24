@@ -1,3 +1,11 @@
+# 🐋 DSH 赢宝 —— DeepSeek Harness 便携桌面版（自维护）
+
+> 基于 dsh_desktop(Tauri) 自维护的便携桌面版：整合**记忆系统(dsh-memory)**、**本地 SearXNG 搜索**、**便携 embedding** 全家桶。
+> 独立升级路线：内核跟官方 @deepseek-ai/dsh，配置/插件/记忆全自主；上游 dsh_desktop 仅作借鉴。
+> 支持 Windows 便携 exe + Linux AppImage，可放 U 盘即插即用。
+
+---
+
 ![DSH Desktop](https://cdn.jsdelivr.net/gh/myYangyunfan/dsh_desktop@5c673d6/docs/banner.svg)
 
 **把 DeepSeek Harness 装进桌面（Windows / macOS）的开箱即用客户端**

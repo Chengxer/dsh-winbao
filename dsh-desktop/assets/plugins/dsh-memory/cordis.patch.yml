@@ -1,0 +1,4 @@
+# DSH 赢宝记忆库工具（memory_read/write/search + 自动读 core + 自动写 history）
+- insert:
+    - id: dsh-memory
+      name: '@dsh-external/dsh-memory'

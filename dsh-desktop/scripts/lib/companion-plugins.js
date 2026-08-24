@@ -19,6 +19,8 @@ const COMPANION_PLUGINS = [
   { id: 'client-file-changes', name: '@deepseek-ai/dsh-client-file-changes' },
   { id: 'terminal', name: '@deepseek-ai/dsh-terminal-tab' },
   { id: 'better-sidebar', name: 'dsh-better-sidebar' },
+  { id: 'dsh-memory', name: '@dsh-external/dsh-memory' },
+  { id: 'searxng-web-search', name: '@dsh-external/dsh-searxng-web-search' },
   { id: 'harness-pet', name: 'harness-pet' },
   { id: 'float-window', name: '@deepseek-ai/dsh-float-window' },
   // 对话节点导航条（vlln/dsh-navbar，MIT）：对话区右缘节点串快速跳转

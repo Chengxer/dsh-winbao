@@ -1,0 +1,4 @@
+# 本地 SearXNG 搜索提供方（免 API key，经 DSH_WEB_SEARCH_PROVIDER=searxng 选中）
+- insert:
+    - id: searxng-web-search
+      name: '@dsh-external/dsh-searxng-web-search'

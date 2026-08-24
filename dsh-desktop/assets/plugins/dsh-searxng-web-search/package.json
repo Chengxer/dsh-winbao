@@ -1,0 +1,18 @@
+{
+  "name": "@dsh-external/dsh-searxng-web-search",
+  "version": "0.1.0",
+  "description": "本地 SearXNG web 搜索提供方（免 API key，供 dsh web seam 使用）",
+  "type": "module",
+  "main": "./lib/index.js",
+  "files": [
+    "lib"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "searxng",
+    "web-search",
+    "plugin"
+  ]
+}
