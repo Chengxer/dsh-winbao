@@ -23,7 +23,7 @@
 //! 监听而错过该事件——垫片可经菜单 `check-client-update` 通道主动再查兜底。
 //!
 //! # 双源策略
-//! - 元数据端点：GitHub `api.github.com/repos/myYangyunfan/dsh_desktop/releases/latest`
+//! - 元数据端点：GitHub `api.github.com/repos/Chengxer/dsh-winbao/releases/latest`
 //!   （免 token，60/h）与 Gitee `gitee.com/api/v5/repos/my-yang-yunfan/dsh_desktop/releases/latest`；
 //! - 两源并发探测（每源 8s 超时），都不通 → [`UpdaterError::Offline`]；
 //! - 都通：取平台资产齐全者优先；均齐全 prefer Gitee（国内快）——但 tag 分歧时
@@ -171,7 +171,7 @@ impl From<UpdaterError> for bridge::BridgeError {
 // ---------------------------------------------------------------------------
 
 /// GitHub API（免 token，60 请求/h；v0.5.2 实测形状：tag_name + assets[].{name,browser_download_url,size,digest}）。
-const GITHUB_LATEST: &str = "https://api.github.com/repos/myYangyunfan/dsh_desktop/releases/latest";
+const GITHUB_LATEST: &str = "https://api.github.com/repos/Chengxer/dsh-winbao/releases/latest";
 /// Gitee API v5（资产仅 {name,browser_download_url}，无 size；100MB/文件限）。
 const GITEE_LATEST: &str = "https://gitee.com/api/v5/repos/my-yang-yunfan/dsh_desktop/releases/latest";
 /// 单源元数据超时（探测与边车查询共用；spec：8s/源）。
@@ -267,7 +267,7 @@ fn cached_alt_url(name: &str) -> Option<String> {
 /// GitHub 自家源无锚时维持 size/50MB 下限（同源信任 = GitHub HTTPS）。
 static CROSS_ANCHOR_URL_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
-const GITHUB_REPO_PATH: &str = "myYangyunfan/dsh_desktop";
+const GITHUB_REPO_PATH: &str = "Chengxer/dsh-winbao";
 
 fn github_sidecar_url(tag: &str, name: &str) -> String {
     format!("https://github.com/{GITHUB_REPO_PATH}/releases/download/{tag}/{name}.sha256")
@@ -872,8 +872,8 @@ mod tests {
     /// GitHub `/releases/latest` 真实响应脱敏样本（2026-08-21 v0.5.2 实抓：
     /// 去 author/uploader 等个人信息，保留 tag/assets 形状与真实 size/digest）。
     const GH_FIXTURE: &str = r##"{
-  "url": "https://api.github.com/repos/myYangyunfan/dsh_desktop/releases/853366",
-  "html_url": "https://github.com/myYangyunfan/dsh_desktop/releases/tag/v0.5.2",
+  "url": "https://api.github.com/repos/Chengxer/dsh-winbao/releases/853366",
+  "html_url": "https://github.com/Chengxer/dsh-winbao/releases/tag/v0.5.2",
   "id": 853366,
   "tag_name": "v0.5.2",
   "target_commitish": "main",
@@ -886,7 +886,7 @@ mod tests {
   "body": "# DSH Desktop v0.5.2\n\n修复：频繁重启/白屏根治；余额功能收口。",
   "assets": [
     {
-      "url": "https://api.github.com/repos/myYangyunfan/dsh_desktop/releases/assets/1",
+      "url": "https://api.github.com/repos/Chengxer/dsh-winbao/releases/assets/1",
       "id": 1,
       "name": "DSH-Desktop-0.5.2-linux-x64.AppImage",
       "content_type": "application/vnd.appimage",
@@ -894,10 +894,10 @@ mod tests {
       "size": 190437880,
       "digest": "sha256:67ebea6c38aec3e2992edb4a30e9f3eb84bff0148dfdc539b2826082dbbb99d0",
       "download_count": 1,
-      "browser_download_url": "https://github.com/myYangyunfan/dsh_desktop/releases/download/v0.5.2/DSH-Desktop-0.5.2-linux-x64.AppImage"
+      "browser_download_url": "https://github.com/Chengxer/dsh-winbao/releases/download/v0.5.2/DSH-Desktop-0.5.2-linux-x64.AppImage"
     },
     {
-      "url": "https://api.github.com/repos/myYangyunfan/dsh_desktop/releases/assets/2",
+      "url": "https://api.github.com/repos/Chengxer/dsh-winbao/releases/assets/2",
       "id": 2,
       "name": "DSH-Desktop-0.5.2-macos-arm64.dmg",
       "content_type": "application/x-apple-diskimage",
@@ -905,10 +905,10 @@ mod tests {
       "size": 119223466,
       "digest": "sha256:ed71832e4c27b7e7cf65691510179faf4727c15c87a5e6c5752c2a3fb1606455",
       "download_count": 2,
-      "browser_download_url": "https://github.com/myYangyunfan/dsh_desktop/releases/download/v0.5.2/DSH-Desktop-0.5.2-macos-arm64.dmg"
+      "browser_download_url": "https://github.com/Chengxer/dsh-winbao/releases/download/v0.5.2/DSH-Desktop-0.5.2-macos-arm64.dmg"
     },
     {
-      "url": "https://api.github.com/repos/myYangyunfan/dsh_desktop/releases/assets/3",
+      "url": "https://api.github.com/repos/Chengxer/dsh-winbao/releases/assets/3",
       "id": 3,
       "name": "DSH-Desktop-Portable-0.5.2-win-x64.zip",
       "content_type": "application/zip",
@@ -916,10 +916,10 @@ mod tests {
       "size": 102477786,
       "digest": "sha256:d43024918a61d02755035d7a9945a3dd266453976393de4b5f111c031bf4f94f",
       "download_count": 3,
-      "browser_download_url": "https://github.com/myYangyunfan/dsh_desktop/releases/download/v0.5.2/DSH-Desktop-Portable-0.5.2-win-x64.zip"
+      "browser_download_url": "https://github.com/Chengxer/dsh-winbao/releases/download/v0.5.2/DSH-Desktop-Portable-0.5.2-win-x64.zip"
     },
     {
-      "url": "https://api.github.com/repos/myYangyunfan/dsh_desktop/releases/assets/4",
+      "url": "https://api.github.com/repos/Chengxer/dsh-winbao/releases/assets/4",
       "id": 4,
       "name": "DSH-Desktop-Setup-0.5.2-win-arm64.exe",
       "content_type": "application/x-msdownload",
@@ -927,10 +927,10 @@ mod tests {
       "size": 68534272,
       "digest": "sha256:ee2a964de870d07c043f9e29380d15b3a10b90af2170272b2a74545f049e36e6",
       "download_count": 4,
-      "browser_download_url": "https://github.com/myYangyunfan/dsh_desktop/releases/download/v0.5.2/DSH-Desktop-Setup-0.5.2-win-arm64.exe"
+      "browser_download_url": "https://github.com/Chengxer/dsh-winbao/releases/download/v0.5.2/DSH-Desktop-Setup-0.5.2-win-arm64.exe"
     },
     {
-      "url": "https://api.github.com/repos/myYangyunfan/dsh_desktop/releases/assets/5",
+      "url": "https://api.github.com/repos/Chengxer/dsh-winbao/releases/assets/5",
       "id": 5,
       "name": "DSH-Desktop-Setup-0.5.2-win-x64.exe",
       "content_type": "application/x-msdownload",
@@ -938,10 +938,10 @@ mod tests {
       "size": 72272680,
       "digest": "sha256:8e062808478cf7bcc311b10414095f634ce5566d7686bf8498803898995e9646",
       "download_count": 5,
-      "browser_download_url": "https://github.com/myYangyunfan/dsh_desktop/releases/download/v0.5.2/DSH-Desktop-Setup-0.5.2-win-x64.exe"
+      "browser_download_url": "https://github.com/Chengxer/dsh-winbao/releases/download/v0.5.2/DSH-Desktop-Setup-0.5.2-win-x64.exe"
     },
     {
-      "url": "https://api.github.com/repos/myYangyunfan/dsh_desktop/releases/assets/6",
+      "url": "https://api.github.com/repos/Chengxer/dsh-winbao/releases/assets/6",
       "id": 6,
       "name": "dsh-desktop_0.5.2_amd64.deb",
       "content_type": "application/vnd.debian.binary-package",
@@ -949,11 +949,11 @@ mod tests {
       "size": 122865758,
       "digest": "sha256:07830f02473945f7904fdbe83fafebd0bcef05ed1fbcfaa4c3c4faa7f2da7859",
       "download_count": 6,
-      "browser_download_url": "https://github.com/myYangyunfan/dsh_desktop/releases/download/v0.5.2/dsh-desktop_0.5.2_amd64.deb"
+      "browser_download_url": "https://github.com/Chengxer/dsh-winbao/releases/download/v0.5.2/dsh-desktop_0.5.2_amd64.deb"
     }
   ],
-  "tarball_url": "https://api.github.com/repos/myYangyunfan/dsh_desktop/tarball/v0.5.2",
-  "zipball_url": "https://api.github.com/repos/myYangyunfan/dsh_desktop/zipball/v0.5.2"
+  "tarball_url": "https://api.github.com/repos/Chengxer/dsh-winbao/tarball/v0.5.2",
+  "zipball_url": "https://api.github.com/repos/Chengxer/dsh-winbao/zipball/v0.5.2"
 }"##;
 
     /// Gitee `/releases/latest` 真实响应脱敏样本（同日实抓）：资产只有

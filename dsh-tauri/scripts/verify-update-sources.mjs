@@ -43,7 +43,7 @@ import https from 'node:https';
 import { URL } from 'node:url';
 
 // ── 默认参数（与壳侧更新器 REPO_URLS 同源）─────────────────────────────────
-const DEFAULT_GITHUB_REPO = 'myYangyunfan/dsh_desktop';
+const DEFAULT_GITHUB_REPO = 'Chengxer/dsh-winbao';
 const DEFAULT_GITEE_REPO = 'my-yang-yunfan/dsh_desktop';
 const GITEE_FILE_LIMIT = 104857600; // Gitee 单附件 100MB 上限（字节）
 const HEAD_TIMEOUT_MS = 20_000;
