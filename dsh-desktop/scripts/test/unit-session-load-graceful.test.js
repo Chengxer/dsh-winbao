@@ -51,11 +51,22 @@ const TORN_MARKER = 'dsh-desktop compat: recover complete zstd frame torn JSONL 
 const CORRUPT_MARKER = 'dsh-desktop-corrupt-guard-v1';
 const K5_MARKER = 'dsh-desktop fix: session header scan cache + bounded read';
 
-const REPO_ROOT = path.resolve(__dirname, '..', '..');
-const NM_TARGET = path.join(REPO_ROOT, 'node_modules', '@deepseek-ai', 'dsh-session-persistence-jsonl', 'lib', 'index.js');
+const DESKTOP_ROOT = path.resolve(__dirname, '..', '..');
+const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
+// 内核源优先取仓库根 .tmp-rc2-stage 的 pristine 装配产物（绝不会被运行时补丁
+// 碰过），作为「内核源应命中锚点」的稳定基准；缺省回退 dev node_modules（可能
+// 已被 patch-deps / 运行时 boot 打过，不再是 pristine）。对齐
+// unit-session-header-scan-guard 的手法，根治「dev 树被全量 applyAll/运行时
+// boot 污染后，本单测把可变 dev 树当 pristine 基准导致的假失败」。
+const PRISTINE_FILE = path.join(REPO_ROOT, '.tmp-rc2-stage', 'node_modules', '@deepseek-ai', 'dsh-session-persistence-jsonl', 'lib', 'index.js');
+const NM_TARGET = path.join(DESKTOP_ROOT, 'node_modules', '@deepseek-ai', 'dsh-session-persistence-jsonl', 'lib', 'index.js');
+
+function kernelSourcePath() {
+  return fs.existsSync(PRISTINE_FILE) ? PRISTINE_FILE : NM_TARGET;
+}
 
 function kernelSource() {
-  return fs.readFileSync(NM_TARGET, 'utf8');
+  return fs.readFileSync(kernelSourcePath(), 'utf8');
 }
 
 function frame(value) {
@@ -70,9 +81,17 @@ function tmpdir(t, prefix) {
 
 /** 把内核源 transform 后写到包内 lib 目录（保证裸 specifier 可解析），动态 import 回来。 */
 async function loadTransformedKernel(t) {
-  const r = transformSessionLoadGraceful(kernelSource(), NM_TARGET);
+  const srcFile = kernelSourcePath();
+  // pristine 源上先应用 torn-tail + corrupt-guard（与 dev 树 postinstall/patch-deps
+  // 后的形态一致），再叠加本补丁，保证「结构撕裂最后一帧回归」等行为测试在
+  // pristine 源上也能复现 torn-tail 恢复语义（load-graceful 锚点特意取
+  // 「pristine 与 torn-tail 已应用形态共有的稳定行」，可叠加）。
+  let src = kernelSource();
+  const base = transformPersistenceAll(src, srcFile);
+  if (base.status === 'changed') src = base.src;
+  const r = transformSessionLoadGraceful(src, srcFile);
   assert.equal(r.status, 'changed', '内核源应命中本补丁锚点');
-  const file = path.join(path.dirname(NM_TARGET), 'index.k6test-' + process.pid + '-' + Date.now() + '-' + Math.random().toString(36).slice(2) + '.mjs');
+  const file = path.join(path.dirname(srcFile), 'index.k6test-' + process.pid + '-' + Date.now() + '-' + Math.random().toString(36).slice(2) + '.mjs');
   fs.writeFileSync(file, r.src);
   t.after(() => fs.rmSync(file, { force: true }));
   return import(pathToFileURL(file).href);
@@ -87,7 +106,14 @@ function headerLine() {
 // ---------------------------------------------------------------------------
 
 test('锚点命中内核源 → changed，含 marker（内容契约）', () => {
-  const r = transformSessionLoadGraceful(kernelSource(), NM_TARGET);
+  // 先应用 torn-tail + corrupt-guard（与 dev 树 postinstall/patch-deps 后形态
+  // 一致），再应用本补丁，使「frameIndex 应改为赋值」等 torn-tail 组合断言在
+  // pristine 源上同样成立（不依赖 dev 树已被打过补丁）。
+  const srcFile = kernelSourcePath();
+  let base = kernelSource();
+  const prep = transformPersistenceAll(base, srcFile);
+  if (prep.status === 'changed') base = prep.src;
+  const r = transformSessionLoadGraceful(base, srcFile);
   assert.equal(r.status, 'changed', '内核源应命中三个锚点');
   assert.ok(r.src.includes(MARKER), '产物应含 marker');
   assert.ok(r.src.includes('let scanner;'), '应提升 scanner 声明');
