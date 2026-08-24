@@ -641,6 +641,10 @@ fn exe_walk_candidates(exe: &std::path::Path) -> Vec<std::path::PathBuf> {
     while let Some(d) = cur {
         candidates.push(d.join("resources"));
         candidates.push(d.clone());
+        // Tauri AppImage 布局：linuxdeploy 把 bundle resources 放到
+        // <AppImage挂载>/usr/lib/<product>/（product=DSH-Desktop），内核落在
+        // <挂载>/usr/lib/DSH-Desktop/dsh-desktop——v0.5.2 起 Linux 必命中。
+        candidates.push(d.join("usr/lib/DSH-Desktop"));
         cur = d.parent().map(|p| p.to_path_buf());
     }
     candidates
