@@ -113,7 +113,7 @@ function buildChecks() {
   });
 
   C('GH-REPO', 'GH_REPO 注入存在（create/upload/verify/mirror ≥3 处）', ({ yaml }) => {
-    const n = (yaml.match(/GH_REPO: myYangyunfan\/dsh_desktop/g) || []).length;
+    const n = (yaml.match(/GH_REPO: Chengxer\/dsh-winbao/g) || []).length;
     assert(n >= 3, `GH_REPO 注入须 ≥3 处，实得 ${n}`);
   });
 
