@@ -45,18 +45,24 @@ interface ModuleSystemLike { import?: unknown }
 /** Anything global-shaped with the DSH module globals on it. */
 export interface GlobalLike {
   __DSH_MODULES__?: ModuleSystemLike | undefined
+  /** Plugin-owned page global carrying the injected module system on rc.8+ hosts (see chunk-loader.ts setChunkModuleSystem). */
+  __dshSidebarModuleSystem__?: ModuleSystemLike | undefined
   __dshChunks__?: Record<string, unknown> | undefined
 }
 
 /**
- * Whether the client module system (`globalThis.__DSH_MODULES__`, set by
- * the shell before plugins activate) is present with a callable import —
+ * Whether the client module system is present with a callable import —
  * the cheap probe every retry round runs first; while it is down the
- * chunk script is not even fetched.
+ * chunk script is not even fetched. On DSH 0.1.0-rc.8 the shell no longer
+ * exposes `window.__DSH_MODULES__`; it injects the system through
+ * `ctx.modules`, which the client half mirrors onto the plugin-owned
+ * `__dshSidebarModuleSystem__` page global. The legacy `__DSH_MODULES__`
+ * global stays a fallback for rc.7-era hosts and the test harness.
  */
 export function isModuleSystemAvailable(globalLike: unknown = globalThis): boolean {
   if (globalLike === null || typeof globalLike !== 'object') return false
-  const modules = (globalLike as GlobalLike).__DSH_MODULES__
+  const g = globalLike as GlobalLike
+  const modules = g.__DSH_MODULES__ ?? g.__dshSidebarModuleSystem__
   return typeof modules === 'object' && modules !== null
     && typeof (modules as ModuleSystemLike).import === 'function'
 }

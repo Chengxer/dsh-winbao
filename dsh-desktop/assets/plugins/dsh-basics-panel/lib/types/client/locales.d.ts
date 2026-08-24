@@ -1,0 +1,115 @@
+/**
+ * zh/en copy for the panel. The copy follows the DSH i18n system: the client
+ * apply attaches the locale service (`ctx.locale`) through {@link attachLocale},
+ * and `t()` resolves the active locale from it (Host-backed preference wins,
+ * switching live). Without an attached service the browser language is used.
+ */
+export declare const zh: {
+    nav: string;
+    intro: string;
+    tabMcp: string;
+    tabSkills: string;
+    tabRules: string;
+    refresh: string;
+    loading: string;
+    error: string;
+    retry: string;
+    empty: string;
+    mcpIntro: string;
+    mcpNoProject: string;
+    mcpScopeProfile: string;
+    mcpScopePreset: string;
+    mcpReadOnly: string;
+    mcpConnected: string;
+    mcpEnabled: string;
+    mcpDisabled: string;
+    mcpNotMounted: string;
+    mcpTools: string;
+    mcpToggle: string;
+    mcpTakesEffectNewSession: string;
+    mcpTakesEffectLive: string;
+    mcpFieldCommand: string;
+    mcpFieldArgs: string;
+    mcpFieldEnv: string;
+    mcpFieldUrl: string;
+    mcpFieldHeaders: string;
+    mcpFieldCwd: string;
+    mcpFieldTransport: string;
+    mcpFieldTimeout: string;
+    mcpSeconds: string;
+    mcpMasked: string;
+    mcpLoadFailed: string;
+    mcpToggleFailed: string;
+    mcpCreate: string;
+    mcpEmpty: string;
+    skillsIntro: string;
+    skillsSearch: string;
+    skillsFilterAll: string;
+    skillsScopeProject: string;
+    skillsScopeCustom: string;
+    skillsScopeUser: string;
+    skillsScopeBundled: string;
+    skillsScopeRuntime: string;
+    skillsScopeOther: string;
+    skillsEditable: string;
+    skillsReadonly: string;
+    skillsModelInvocable: string;
+    skillsUserInvocable: string;
+    skillsDisableModel: string;
+    skillsNoSkills: string;
+    skillsIncomplete: string;
+    skillsBack: string;
+    skillsName: string;
+    skillsDescription: string;
+    skillsWhenToUse: string;
+    skillsMetadata: string;
+    skillsBody: string;
+    skillsSave: string;
+    skillsCancel: string;
+    skillsSaved: string;
+    skillsSaveFailed: string;
+    skillsConflict: string;
+    skillsLocation: string;
+    skillsOpen: string;
+    close: string;
+    rulesIntro: string;
+    rulesGlobal: string;
+    rulesProject: string;
+    rulesSessionCwd: string;
+    rulesProjectRoot: string;
+    rulesCreate: string;
+    rulesCreateFailed: string;
+    rulesCreateName: string;
+    rulesCreateScope: string;
+    rulesScopeGlobal: string;
+    rulesScopeProject: string;
+    rulesScopeCwd: string;
+    rulesScopeHintGlobal: string;
+    rulesScopeHintProject: string;
+    rulesScopeHintCwd: string;
+    rulesExists: string;
+    rulesNoRules: string;
+    rulesPath: string;
+    rulesBytes: string;
+    rulesEdit: string;
+    rulesBack: string;
+    rulesContent: string;
+    rulesSave: string;
+    rulesCancel: string;
+    rulesSaved: string;
+    rulesSaveFailed: string;
+    rulesConflict: string;
+    rulesLoadFailed: string;
+};
+export declare const en: Record<keyof typeof zh, string>;
+/** The dictionary namespace this plugin owns in the DSH locale registry. */
+export declare const LOCALE_NS = "basicsPanel";
+/** Attach (or detach, with undefined) the DSH locale service. */
+export declare function attachLocale(service: {
+    getSnapshot(): {
+        active: string;
+    };
+} | undefined): void;
+export type CopyKey = keyof typeof zh;
+/** Translate a copy key; `{name}` placeholders interpolate from `params`. */
+export declare function t(key: CopyKey, params?: Record<string, string | number>): string;

@@ -74,6 +74,9 @@ const { patchBundleArrivalRetry } = require('./bundle-arrival-retry-patch');
 // 工具调度器缺席防崩（E2/问题B：reading 'prepare'——agent-loop 跨副本解析守卫 +
 // dsh-tools Symbol.for 全局镜像）。
 const { patchSchedulerGuard } = require('./scheduler-guard-patch');
+// 工具调用 name 为空指引（unknown tool ""——ToolNotFoundError 对空 name 特判
+// 三向指引：协议错位 / 中转网关剥离 / 模型输出崩坏，非空 name 原语义不变）。
+const { patchEmptyToolName } = require('./empty-tool-name-patch');
 
 // ---------------------------------------------------------------------------
 // 文本模型自动识图补丁（原 main.js applyImageSendFix 内联 transform）。
@@ -1135,6 +1138,10 @@ const SESSION_EVENT_BOUND_CONSTANTS_NEW = [
   '\t\t * (turn/start-aligned), retaining SESSION_EVENT_KEEP. */',
   '\t\tconst SESSION_EVENT_BOUND = 2000;',
   '\t\tconst SESSION_EVENT_KEEP = 1200;',
+  '\t\t// ' + SESSION_EVENT_BOUND_MARKER + ' (v4): after a loadOlder page, keep the expanded',
+  '\t\t// window stable up to trimSuppressedFloor + this margin before re-trimming, so',
+  '\t\t// streaming appends do not immediately drop the freshly paged history.',
+  '\t\tconst SESSION_EVENT_SUPPRESS_MARGIN = 20000;',
   '\t\tvar Session = class {',
 ].join('\n');
 
@@ -1150,6 +1157,8 @@ const SESSION_EVENT_BOUND_DISPOSE_NEW = [
   '\t\t\t\tthis.views = [];',
   '\t\t\t\tthis.baseSeq = 0;',
   '\t\t\t\tthis.hasMore = false;',
+  '\t\t\t\tthis.trimSuppressed = false;',
+  '\t\t\t\tthis.trimSuppressedFloor = 0;',
   '\t\t\t\tthis.liveBuffer = [];',
   '\t\t\t\tthis.subscribedLastSeq = null;',
   '\t\t\t\tthis.openGeneration++;',
@@ -1187,6 +1196,18 @@ const SESSION_EVENT_BOUND_APPENDLIVE_NEW = [
   '\t\t\t* turn/start boundary to avoid a half-trimmed turn at the window head.',
   '\t\t\t*/',
   '\t\t\ttrimSessionWindow() {',
+  '\t\t\t\t// ' + SESSION_EVENT_BOUND_MARKER + ' (v4): never trim while a loadOlder page is in',
+  '\t\t\t\t// flight — the request is keyed to the current baseSeq, and moving it would make',
+  '\t\t\t\t// the returned page discontinuous (whole page discarded).',
+  '\t\t\t\tif (this.loadingOlder) return;',
+  '\t\t\t\t// ' + SESSION_EVENT_BOUND_MARKER + ' (v4): after a successful loadOlder, keep the',
+  '\t\t\t\t// expanded window stable up to trimSuppressedFloor + SESSION_EVENT_SUPPRESS_MARGIN',
+  '\t\t\t\t// so streaming appends don\'t immediately drop the freshly paged history.',
+  '\t\t\t\tif (this.trimSuppressed === true) {',
+  '\t\t\t\t\tif (this.events.length <= (this.trimSuppressedFloor ?? 0) + SESSION_EVENT_SUPPRESS_MARGIN) return;',
+  '\t\t\t\t\tthis.trimSuppressed = false;',
+  '\t\t\t\t\tthis.trimSuppressedFloor = 0;',
+  '\t\t\t\t}',
   '\t\t\t\tif (this.events.length <= SESSION_EVENT_BOUND) return;',
   '\t\t\t\tlet cut = this.events.length - SESSION_EVENT_KEEP;',
   '\t\t\t\tfor (let index = cut; index < this.events.length; index++) {',
@@ -1209,9 +1230,39 @@ const SESSION_EVENT_BOUND_APPENDLIVE_NEW = [
   '\t\t\t}',
 ].join('\n');
 
+// v4 接缝：loadOlder 成功页写入点（去重 + 抑制后续 trim）。锚点是
+// loadOlder 里「拼接 older 到 events/views + 更新 baseSeq/hasMore + prepend」
+// 的整块（5 tab 缩进），随上游缩进/变量名漂移即 anchor-missing 退役。
+const SESSION_EVENT_BOUND_LOADOLDER_OLD = [
+  '\t\t\t\t\tthis.events = [...older.map((e) => e.event), ...this.events];',
+  '\t\t\t\t\tthis.views = [...older.map((e) => e.view), ...this.views];',
+  '\t\t\t\t\t/* v8 ignore next -- the ?? arm needs older[0] undefined, but the empty-page branch above already returned. */',
+  '\t\t\t\t\tthis.baseSeq = older[0]?.event.seq ?? this.baseSeq;',
+  '\t\t\t\t\tthis.hasMore = result.value.hasMore;',
+  '\t\t\t\t\tthis.conversation.prepend(older.map(conversationInput), this.hasMore);',
+].join('\n');
+const SESSION_EVENT_BOUND_LOADOLDER_NEW = [
+  '\t\t\t\t\t// ' + SESSION_EVENT_BOUND_MARKER + ' (v4): dedup the paged batch against the window',
+  '\t\t\t\t\t// so a trim/loadOlder seam can never double-count a boundary event (e.g. a',
+  '\t\t\t\t\t// tool/call start → "more than one start Match").',
+  '\t\t\t\t\tconst retainedSeqs = new Set(this.events.map((event) => event.seq));',
+  '\t\t\t\t\tconst freshOlder = older.filter((entry) => !retainedSeqs.has(entry.event.seq));',
+  '\t\t\t\t\tthis.events = [...freshOlder.map((e) => e.event), ...this.events];',
+  '\t\t\t\t\tthis.views = [...freshOlder.map((e) => e.view), ...this.views];',
+  '\t\t\t\t\t/* v8 ignore next -- the ?? arm needs older[0] undefined, but the empty-page branch above already returned. */',
+  '\t\t\t\t\tthis.baseSeq = freshOlder[0]?.event.seq ?? this.baseSeq;',
+  '\t\t\t\t\tthis.hasMore = result.value.hasMore;',
+  '\t\t\t\t\tthis.conversation.prepend(freshOlder.map(conversationInput), this.hasMore);',
+  '\t\t\t\t\t// ' + SESSION_EVENT_BOUND_MARKER + ' (v4): suppress re-trim after a successful',
+  '\t\t\t\t\t// loadOlder so the freshly paged history stays visible while streaming',
+  '\t\t\t\t\t// continues; trimSessionWindow only re-trims past floor + margin.',
+  '\t\t\t\t\tthis.trimSuppressed = true;',
+  '\t\t\t\t\tthis.trimSuppressedFloor = this.events.length;',
+].join('\n');
+
 function transformSessionEventBound(src, file) {
   if (src.includes(SESSION_EVENT_BOUND_MARKER)) return { status: 'already' };
-  const anchors = [SESSION_EVENT_BOUND_CONSTANTS_OLD, SESSION_EVENT_BOUND_DISPOSE_OLD, SESSION_EVENT_BOUND_DROP_OLD, SESSION_EVENT_BOUND_APPENDLIVE_OLD];
+  const anchors = [SESSION_EVENT_BOUND_CONSTANTS_OLD, SESSION_EVENT_BOUND_DISPOSE_OLD, SESSION_EVENT_BOUND_DROP_OLD, SESSION_EVENT_BOUND_APPENDLIVE_OLD, SESSION_EVENT_BOUND_LOADOLDER_OLD];
   const missing = anchors.filter((anchor) => !src.includes(anchor));
   if (missing.length > 0) {
     return { status: 'anchor-missing', detail: '未找到 Session events 有界保留锚点（版本可能已变更），跳过 ' + file };
@@ -1221,6 +1272,7 @@ function transformSessionEventBound(src, file) {
   out = out.replace(SESSION_EVENT_BOUND_DISPOSE_OLD, SESSION_EVENT_BOUND_DISPOSE_NEW);
   out = out.replace(SESSION_EVENT_BOUND_DROP_OLD, SESSION_EVENT_BOUND_DROP_NEW);
   out = out.replace(SESSION_EVENT_BOUND_APPENDLIVE_OLD, SESSION_EVENT_BOUND_APPENDLIVE_NEW);
+  out = out.replace(SESSION_EVENT_BOUND_LOADOLDER_OLD, SESSION_EVENT_BOUND_LOADOLDER_NEW);
   return { status: 'changed', src: out };
 }
 
@@ -1473,6 +1525,7 @@ module.exports = {
     patchSettingsModelsResilience,
     patchBundleArrivalRetry,
     patchSchedulerGuard,
+    patchEmptyToolName,
   },
   // 幂等 marker（单一数据源）：registry 与 transform 的 already 判定引用同一常量，
   // 杜绝「marker 跨模块复制漂移」。slot 系 marker 来自 runtime-patches（与 slot

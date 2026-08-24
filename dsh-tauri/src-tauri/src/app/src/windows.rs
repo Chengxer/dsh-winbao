@@ -474,6 +474,261 @@ pub fn sponsor_inject_script(alipay_uri: &str, wechat_uri: &str) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// 客户端更新进度弹窗（下载时置顶小窗：进度条 + 百分比 + 关闭按钮）
+// ---------------------------------------------------------------------------
+
+/// 进度弹窗尺寸（小窗放主屏右上角，不遮挡主窗关键区）。
+pub const UPDATE_PROGRESS_W: f64 = 360.0;
+pub const UPDATE_PROGRESS_H: f64 = 120.0;
+
+/// 进度弹窗事件名（Rust `emit` → 弹窗初始化脚本 `plugin:event|listen`）。
+/// 与主窗消费的 `client-update-progress` 分开：弹窗是独立窗口，主窗垫片不
+/// 订阅本事件，两条链路互不干扰。
+pub const UPDATE_PROGRESS_EVENT: &str = "client-update-progress-window";
+
+/// 更新进度弹窗的阶段（纯数据 + 纯判定，单测决策表）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdatePopupPhase {
+    /// 不弹 / 关闭（未下载、mac·linux manual|replaced 降级、用户手动关闭后）。
+    Closed,
+    /// 下载中（pct 0..100）。
+    Downloading(u8),
+    /// 下载完成，正在安装（Windows 进程即将退出，弹窗随之消亡）。
+    Installing,
+    /// 下载失败（payload 带原因，弹窗显示失败文案 + 关闭按钮）。
+    Failed,
+}
+
+/// 下载进度（received,total）→ 百分比（0..=100；total=0 未知按 0，超界钳到 100）。
+pub fn update_popup_pct(received: u64, total: u64) -> u8 {
+    if total == 0 {
+        return 0;
+    }
+    ((received as u128 * 100 / total as u128) as u8).min(100)
+}
+
+/// 百分比 → 弹窗阶段（100% 归一 Installing，其余 Downloading）。
+pub fn update_popup_phase_from_pct(pct: u8) -> UpdatePopupPhase {
+    if pct >= 100 {
+        UpdatePopupPhase::Installing
+    } else {
+        UpdatePopupPhase::Downloading(pct)
+    }
+}
+
+/// 安装结果形态 → 弹窗阶段：仅 `installing`（Windows）走 Installing；
+/// `manual`/`replaced`（mac·linux 降级，下载完成但安装交用户/就地替换）与
+/// 其它形态 → Closed（不弹「正在安装」）。
+pub fn update_popup_phase_from_install(result: &serde_json::Value) -> UpdatePopupPhase {
+    if result.get("installing").is_some() {
+        UpdatePopupPhase::Installing
+    } else {
+        UpdatePopupPhase::Closed
+    }
+}
+
+/// 阶段 → 弹窗事件载荷（`{phase, pct?, message?}`）。
+pub fn update_popup_event_payload(phase: UpdatePopupPhase, message: Option<&str>) -> serde_json::Value {
+    match phase {
+        UpdatePopupPhase::Closed => serde_json::json!({ "phase": "closed" }),
+        UpdatePopupPhase::Downloading(pct) => serde_json::json!({ "phase": "downloading", "pct": pct }),
+        UpdatePopupPhase::Installing => serde_json::json!({ "phase": "installing", "pct": 100 }),
+        UpdatePopupPhase::Failed => {
+            serde_json::json!({ "phase": "error", "message": message.unwrap_or("未知错误") })
+        }
+    }
+}
+
+/// 向进度弹窗发一次阶段更新（无窗口/未就绪时静默 no-op，绝不影响下载）。
+pub fn emit_update_progress<R: tauri::Runtime>(app: &tauri::AppHandle<R>, phase: UpdatePopupPhase, message: Option<&str>) {
+    let _ = app.emit(UPDATE_PROGRESS_EVENT, update_popup_event_payload(phase, message));
+}
+
+/// 弹窗默认位置：主屏右上角（留 24px 边距）。无显示器信息（mock/异常）→ None，
+/// 交由系统默认居中。
+fn update_progress_position<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<(f64, f64)> {
+    let mon = app.primary_monitor().ok().flatten()?;
+    let scale = mon.scale_factor();
+    let x = (mon.size().width as f64 / scale - UPDATE_PROGRESS_W - 24.0).max(0.0);
+    Some((x, 24.0))
+}
+
+/// 打开/复用客户端更新进度弹窗。复用赞助窗「内嵌资产 + initialization_script
+/// 注入」的最小窗口模式：零 file://、零本地端口、零磁盘写入；窗口创建移出
+/// IPC 线程（绝不反卡应用）。创建失败仅日志——进度弹窗是增强，下载主链不受影响。
+pub fn open_update_progress_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>, version: &str) -> Result<serde_json::Value, BridgeError> {
+    if let Some(existing) = app.get_webview_window("update-progress") {
+        let _ = existing.show();
+        return Ok(serde_json::json!({ "ok": true, "reused": true }));
+    }
+    let script = update_progress_inject_script(version);
+    let handle = app.clone();
+    std::thread::Builder::new()
+        .name("update-progress-window".into())
+        .spawn(move || {
+            // 双击竞态复检：两个线程同时过了外层检查时，后来者只聚焦。
+            if let Some(existing) = handle.get_webview_window("update-progress") {
+                let _ = existing.show();
+                return;
+            }
+            // 位置在窗口线程内算（primary_monitor 属窗口系统调用，与赞助窗
+            // 同「IPC 线程零窗口 API」原则；mock runtime 无 primary_monitor，
+            // 复用路径早退不会走到这里）。
+            let position = update_progress_position(&handle);
+            match build_update_progress_window(&handle, &script, position) {
+                Ok(win) => {
+                    let _ = win.show();
+                }
+                Err(e) => eprintln!("[update-progress] 进度弹窗创建失败（不影响下载）: {e}"),
+            }
+        })
+        .map_err(|e| BridgeError::internal(format!("进度弹窗线程启动: {e}")))?;
+    Ok(serde_json::json!({ "ok": true, "async": true }))
+}
+
+/// 进度弹窗构造（独立函数供集成测试复用——mock runtime 下走与生产完全
+/// 同款的 builder 路径，验证窗口属性与销毁）。
+pub fn build_update_progress_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    inject_script: &str,
+    position: Option<(f64, f64)>,
+) -> Result<tauri::WebviewWindow<R>, tauri::Error> {
+    let mut b = tauri::webview::WebviewWindowBuilder::new(
+        app,
+        "update-progress",
+        WebviewUrl::App("index.html".into()), // 内嵌资产占位页（与赞助窗同款 ui/index.html）
+    )
+    .title("正在下载更新")
+    .inner_size(UPDATE_PROGRESS_W, UPDATE_PROGRESS_H)
+    .decorations(false) // 无原生标题栏，自绘拖拽区 + 关闭按钮
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(true)
+    .always_on_top(true) // 置顶小窗，放角落不遮挡主窗
+    .skip_taskbar(true)
+    .shadow(false)
+    .focused(false) // 创建不抢焦点（下载进度不打断用户当前操作）
+    .initialization_script(inject_script);
+    if let Some((x, y)) = position {
+        b = b.position(x, y);
+    }
+    b.build()
+}
+
+/// 进度弹窗注入脚本：initialization_script 通道执行（每次导航必执行）。
+/// DOM 就绪后整体替换 body 为进度 UI，订阅 UPDATE_PROGRESS_EVENT 更新
+/// 进度条/百分比/阶段文案；关闭按钮走 window_control close（非主窗真关闭）。
+/// 幂等：`__dshUpdWinInit` 防 initialization_script 在同一文档重复执行。
+pub fn update_progress_inject_script(version: &str) -> String {
+    let version_json = serde_json::to_string(version).unwrap_or_else(|_| "\"\"".into());
+    let event_json = serde_json::to_string(UPDATE_PROGRESS_EVENT).unwrap_or_else(|_| "\"\"".into());
+    // CSS 走 <style> 注入（内嵌资产页 CSP 不放行内联 style 属性，观感对齐赞助窗）。
+    let css = r#"*{box-sizing:border-box;margin:0}body{background:#0b1220;color:#e6ecff;font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;overflow:hidden;user-select:none}#__dsh_upd_win__{width:100%;height:100%;display:flex;flex-direction:column;padding:10px 14px;gap:10px}.upd-head{display:flex;align-items:center;gap:8px}.upd-title{flex:1;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.upd-close{flex:none;width:20px;height:20px;border:0;border-radius:5px;background:transparent;color:#8b9ac4;cursor:pointer;font-size:13px;line-height:18px}.upd-close:hover{background:#c0392b;color:#fff}.upd-track{height:8px;border-radius:999px;background:rgba(255,255,255,.1);overflow:hidden}.upd-fill{height:100%;width:0;border-radius:999px;background:linear-gradient(90deg,#4f7cff,#7aa2ff);transition:width .2s ease}.upd-fill-err{background:#ff5f57}.upd-pct{font-size:11px;color:#8b9ac4}.upd-fail{flex:none;align-self:flex-end;appearance:none;border:1px solid rgba(255,255,255,.16);border-radius:6px;background:transparent;color:#e6ecff;cursor:pointer;font-size:12px;padding:4px 12px}.upd-fail:hover{background:rgba(255,255,255,.09)}"#;
+    format!(
+        r#"(function(){{
+  if (window.__dshUpdWinInit) return;
+  window.__dshUpdWinInit = true;
+  var EVENT = {event};
+  var VERSION = {version};
+  var CSS = {css};
+
+  var root, titleEl, fillEl, pctEl, failBtn;
+  function mk(tag, cls, text) {{
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }}
+  function closeWin() {{
+    try {{ window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke('window_control', {{ action: 'close' }}); }}
+    catch (e) {{}}
+    try {{ window.close(); }} catch (e2) {{}}
+  }}
+  function build() {{
+    if (document.getElementById('__dsh_upd_win__')) return;
+    try {{ document.body.innerHTML = ''; }} catch (e) {{}}
+    root = mk('div'); root.id = '__dsh_upd_win__';
+    var head = mk('div', 'upd-head');
+    head.setAttribute('data-tauri-drag-region', ''); // 拖拽区（不遮挡主窗时用户可挪开）
+    titleEl = mk('span', 'upd-title');
+    titleEl.setAttribute('data-tauri-drag-region', ''); // 标题文字也参与拖拽（FLOAT_BAR 同款直接命中语义）
+    head.appendChild(titleEl);
+    var close = mk('button', 'upd-close', '\u2715');
+    close.onclick = function () {{ closeWin(); }};
+    head.appendChild(close);
+    root.appendChild(head);
+    var track = mk('div', 'upd-track');
+    fillEl = mk('div', 'upd-fill');
+    track.appendChild(fillEl);
+    root.appendChild(track);
+    pctEl = mk('div', 'upd-pct');
+    root.appendChild(pctEl);
+    failBtn = mk('button', 'upd-fail', '关闭');
+    failBtn.style.display = 'none';
+    failBtn.onclick = function () {{ closeWin(); }};
+    root.appendChild(failBtn);
+    document.body.appendChild(root);
+    setPhase('downloading', 0, '');
+  }}
+  function setPhase(phase, pct, message) {{
+    if (!fillEl) return;
+    if (phase === 'error') {{
+      titleEl.textContent = '下载失败';
+      fillEl.className = 'upd-fill upd-fill-err';
+      fillEl.style.width = '100%';
+      pctEl.textContent = message ? ('下载失败：' + message) : '下载失败';
+      failBtn.style.display = '';
+    }} else if (phase === 'installing') {{
+      titleEl.textContent = '下载完成';
+      fillEl.className = 'upd-fill';
+      fillEl.style.width = '100%';
+      pctEl.textContent = '下载完成，正在安装…';
+      failBtn.style.display = 'none';
+    }} else if (phase === 'closed') {{
+      closeWin();
+    }} else {{
+      titleEl.textContent = '正在下载 DSH Desktop v' + VERSION + '…';
+      fillEl.className = 'upd-fill';
+      var p = pct | 0; if (p < 0) p = 0; else if (p > 100) p = 100;
+      fillEl.style.width = p + '%';
+      pctEl.textContent = p + '%';
+      failBtn.style.display = 'none';
+    }}
+  }}
+  function apply(p) {{
+    if (!p || typeof p !== 'object') return;
+    if (!root) build();
+    setPhase(p.phase || 'downloading', p.pct || 0, p.message || '');
+  }}
+  function ready(cb) {{
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', cb);
+    else cb();
+  }}
+  ready(function () {{
+    build();
+    try {{
+      var itn = window.__TAURI_INTERNALS__;
+      if (itn && itn.invoke && itn.transformCallback) {{
+        itn.invoke('plugin:event|listen', {{
+          event: EVENT,
+          target: {{ kind: 'Any' }},
+          handler: itn.transformCallback(function (ev) {{
+            var p = ev && ev.payload !== undefined ? ev.payload : ev;
+            apply(p);
+          }})
+        }}).catch(function () {{}});
+      }}
+    }} catch (e) {{}}
+  }});
+}})();"#,
+        event = event_json,
+        version = version_json,
+        css = serde_json::to_string(css).unwrap_or_else(|_| "\"\"".into()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -727,5 +982,131 @@ mod tests {
         assert!(s.contains("data:image/png;base64,iVBORw0KGgo="), "存在的码仍内嵌: {s}");
         let both = sponsor_inject_script("", "");
         assert!(both.contains("支付宝") && both.contains("微信"), "标题文字仍在: {both}");
+    }
+
+    // ---- 客户端更新进度弹窗 ----
+
+    /// 下载进度百分比：total=0 未知按 0；正常折算；超界钳到 100。
+    #[test]
+    fn update_popup_pct_clamps() {
+        assert_eq!(update_popup_pct(50, 200), 25);
+        assert_eq!(update_popup_pct(200, 200), 100);
+        assert_eq!(update_popup_pct(0, 200), 0);
+        assert_eq!(update_popup_pct(10, 0), 0, "total=0（未知大小）按 0");
+        assert_eq!(update_popup_pct(500, 100), 100, "超界钳到 100");
+    }
+
+    /// 决策表：百分比 → 阶段（100% 归一 Installing，其余 Downloading）。
+    #[test]
+    fn update_popup_phase_from_pct_decision_table() {
+        assert_eq!(update_popup_phase_from_pct(0), UpdatePopupPhase::Downloading(0));
+        assert_eq!(update_popup_phase_from_pct(37), UpdatePopupPhase::Downloading(37));
+        assert_eq!(update_popup_phase_from_pct(99), UpdatePopupPhase::Downloading(99));
+        assert_eq!(update_popup_phase_from_pct(100), UpdatePopupPhase::Installing);
+    }
+
+    /// 决策表：安装结果形态 → 阶段（installing 弹「正在安装」；manual/replaced
+    /// 降级不弹）。
+    #[test]
+    fn update_popup_phase_from_install_decision_table() {
+        assert_eq!(
+            update_popup_phase_from_install(&serde_json::json!({ "installing": "0.5.3" })),
+            UpdatePopupPhase::Installing
+        );
+        assert_eq!(
+            update_popup_phase_from_install(&serde_json::json!({ "manual": true, "version": "0.5.3" })),
+            UpdatePopupPhase::Closed,
+            "mac 降级不弹"
+        );
+        assert_eq!(
+            update_popup_phase_from_install(&serde_json::json!({ "replaced": true, "version": "0.5.3" })),
+            UpdatePopupPhase::Closed,
+            "linux 降级不弹"
+        );
+        assert_eq!(update_popup_phase_from_install(&serde_json::json!({ "ok": true })), UpdatePopupPhase::Closed);
+        assert_eq!(update_popup_phase_from_install(&serde_json::Value::Null), UpdatePopupPhase::Closed);
+    }
+
+    /// 阶段 → 事件载荷（弹窗脚本消费的 phase/pct/message 字段）。
+    #[test]
+    fn update_popup_event_payload_shape() {
+        assert_eq!(
+            update_popup_event_payload(UpdatePopupPhase::Downloading(42), None),
+            serde_json::json!({ "phase": "downloading", "pct": 42 })
+        );
+        assert_eq!(
+            update_popup_event_payload(UpdatePopupPhase::Installing, None),
+            serde_json::json!({ "phase": "installing", "pct": 100 })
+        );
+        assert_eq!(
+            update_popup_event_payload(UpdatePopupPhase::Failed, Some("boom")),
+            serde_json::json!({ "phase": "error", "message": "boom" })
+        );
+        assert_eq!(
+            update_popup_event_payload(UpdatePopupPhase::Closed, None),
+            serde_json::json!({ "phase": "closed" })
+        );
+    }
+
+    /// 注入脚本产物直验：进度条/百分比/阶段文案/关闭按钮/事件订阅/拖拽区
+    /// 全部在场；版本与事件名以 JSON 字符串字面量安全内嵌。
+    #[test]
+    fn update_progress_inject_script_renders_progress_elements() {
+        let s = update_progress_inject_script("0.5.3");
+        // 版本与事件名内嵌。
+        assert!(s.contains("\"0.5.3\""), "版本应内嵌: {s}");
+        assert!(s.contains(UPDATE_PROGRESS_EVENT), "事件名必须内嵌: {s}");
+        // 进度条 + 百分比元素。
+        assert!(s.contains("upd-track"), "进度条轨道缺失: {s}");
+        assert!(s.contains("upd-fill"), "进度条填充缺失: {s}");
+        assert!(s.contains("upd-pct"), "百分比元素缺失: {s}");
+        // 阶段文案。
+        assert!(s.contains("正在下载 DSH Desktop v"), "下载中文案缺失: {s}");
+        assert!(s.contains("下载完成，正在安装…"), "安装中文案缺失: {s}");
+        assert!(s.contains("下载失败"), "失败文案缺失: {s}");
+        // 事件订阅 + 信封解包。
+        assert!(s.contains("plugin:event|listen"), "事件订阅缺失: {s}");
+        assert!(s.contains("ev.payload !== undefined ? ev.payload : ev"), "信封解包缺失: {s}");
+        // 关闭按钮（走 window_control close，非主窗真关闭）。
+        assert!(s.contains("window_control"), "关闭走 window_control: {s}");
+        assert!(s.contains("action: 'close'"), "关闭动作缺失: {s}");
+        // 拖拽区。
+        assert!(s.contains("data-tauri-drag-region"), "拖拽区缺失: {s}");
+        // 零 file:// / 零本地端口 / 零 fetch。
+        assert!(!s.contains("file://"), "不得引用 file://: {s}");
+        assert!(!s.contains("127.0.0.1"), "不得依赖本地端口: {s}");
+        assert!(!s.to_ascii_lowercase().contains("fetch("), "不得发网络请求: {s}");
+    }
+
+    /// 进度弹窗形态锚点（对齐赞助窗第五轮终修的「三零依赖 + 独立线程」）：
+    /// - 必须加载 Tauri 内嵌资产（WebviewUrl::App），源码不得再出现 file:///；
+    /// - 窗口创建在独立线程（IPC 线程零窗口 API）；
+    /// - 置顶 + 跳过任务栏 + 创建不抢焦点（focused(false)）+ 自绘关闭；
+    /// - 不得注册 on_window_event / CloseRequested（回调内 destroy 死锁面）。
+    #[test]
+    fn update_progress_window_shape_anchor() {
+        let src = include_str!("windows.rs");
+        let open_seg = src
+            .split("pub fn open_update_progress_window")
+            .nth(1)
+            .and_then(|s| s.split("pub fn build_update_progress_window").next())
+            .expect("open_update_progress_window 函数体");
+        assert!(open_seg.contains("std::thread::Builder"), "窗口创建必须移出 IPC 线程: {open_seg}");
+        assert!(!open_seg.contains("file:///"), "不得依赖 file://（安装版断裂面）: {open_seg}");
+        assert!(!open_seg.contains("on_window_event"), "不得挂窗口事件回调（死锁面）: {open_seg}");
+        assert!(!open_seg.contains("CloseRequested"), "不走 CloseRequested 拦截: {open_seg}");
+        let build_seg = src
+            .split("pub fn build_update_progress_window")
+            .nth(1)
+            .and_then(|s| s.split("pub fn update_progress_inject_script").next())
+            .expect("build_update_progress_window 函数体");
+        assert!(build_seg.contains("WebviewUrl::App"), "必须加载内嵌资产（tauri://localhost）: {build_seg}");
+        assert!(build_seg.contains("decorations(false)"), "无原生标题栏（自绘关闭）: {build_seg}");
+        assert!(build_seg.contains("always_on_top(true)"), "置顶小窗: {build_seg}");
+        assert!(build_seg.contains("skip_taskbar(true)"), "跳过任务栏: {build_seg}");
+        assert!(build_seg.contains("focused(false)"), "创建不抢焦点: {build_seg}");
+        assert!(build_seg.contains("closable(true)"), "窗口必须可关闭: {build_seg}");
+        assert!(build_seg.contains("initialization_script"), "内容必须经 initialization_script 注入: {build_seg}");
+        assert!(!build_seg.contains("WebviewUrl::External"), "不得用 External URL: {build_seg}");
     }
 }

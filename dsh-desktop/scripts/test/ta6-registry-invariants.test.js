@@ -146,9 +146,8 @@ test('D. pkgRel/pkgRels 被 patch-target-resolver 常量覆盖（白名单外新
 });
 
 test('E. order 全局唯一、组内升序、补丁间依赖序成立', () => {
-  // 49 = 45（E2 后）+ adapter-prepare-call-guard（R7，order 270）
-  //    + session-header-scan-guard（K5，order 275）+ session-load-graceful（K6，order 280）。
-  assert.equal(PATCH_SPECS.length, 49, 'spec 总数应为 49（E2 + wsl-picker-browse + kernel-web-boot-watchdog + adapter-prepare-call-guard + session-header-scan-guard + session-load-graceful）');
+  // 50 = 49（上一基线）+ empty-tool-name-guidance（root，order 247）。
+  assert.equal(PATCH_SPECS.length, 50, 'spec 总数应为 50');
   const orders = PATCH_SPECS.map((s) => s.order);
   assert.equal(new Set(orders).size, orders.length, 'order 必须全局唯一');
   const byId = Object.fromEntries(PATCH_SPECS.map((s) => [s.id, s]));
@@ -205,9 +204,9 @@ test('E3. device-auth 154 与 credentials-absent 153 相邻无干扰', () => {
   );
 });
 
-test('F. cli:true 恰为 17 项；failPolicy ∈ {warn,degrade}', () => {
+test('F. cli:true 恰为 19 项；failPolicy ∈ {warn,degrade}', () => {
   const cliSpecs = registry.getSpecsByCli();
-  assert.equal(cliSpecs.length, 18, 'cli:true 数量应与既有断言一致（18，E2 +2 内核韧性补丁）');
+  assert.equal(cliSpecs.length, 19, 'cli:true 数量应与既有断言一致（19，含 empty-tool-name-guidance）');
   for (const s of cliSpecs) assert.equal(s.cli, true);
   for (const spec of PATCH_SPECS) {
     assert.ok(

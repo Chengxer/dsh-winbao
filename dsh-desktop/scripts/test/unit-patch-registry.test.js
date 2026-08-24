@@ -94,13 +94,14 @@ test('防护类补丁与包级补丁均已登记（无遗漏 apply*）', () => {
     'pi-ai-credits', 'pi-ai-reasoning-defaults',
     'atomic-write-orphan-lock', 'settings-models-resilience',
     'bundle-arrival-retry', 'agent-loop-scheduler-guard',
+    'empty-tool-name-guidance',
   ];
   for (const id of expected) assert.ok(ids.has(id), `遗漏补丁 ${id}`);
 });
 
-test('getSpecsByCli：返回 18 个 cli:true 补丁（8 runtime + 5 数据完整性 + 2 设置写入韧性 + 2 内核韧性）', () => {
+test('getSpecsByCli：返回 19 个 cli:true 补丁（8 runtime + 5 数据完整性 + 2 设置写入韧性 + 3 内核韧性）', () => {
   const specs = getSpecsByCli();
-  assert.equal(specs.length, 18, 'cli 清单应恰为 18 项');
+  assert.equal(specs.length, 19, 'cli 清单应恰为 19 项');
   const expected = new Set([
     'slot-legacy-key', 'slot-unkeyed-compat', 'slot-error-isolation',
     'runtime-flash-fix', 'session-event-bound', 'prompt-expose-fix', 'shell-description-compat',
@@ -109,6 +110,7 @@ test('getSpecsByCli：返回 18 个 cli:true 补丁（8 runtime + 5 数据完整
     'pi-ai-reasoning-defaults',
     'atomic-write-orphan-lock', 'settings-models-resilience',
     'bundle-arrival-retry', 'agent-loop-scheduler-guard',
+    'empty-tool-name-guidance',
   ]);
   assert.deepEqual(new Set(specs.map((s) => s.id)), expected, 'cli 清单 id 集合不符');
   for (const s of specs) assert.equal(s.cli, true, `${s.id} 应标记 cli:true`);
@@ -151,6 +153,7 @@ test('getSpecsByCli：每个 spec 的 transform/apply 与 patch-adapters 导出�
     'settings-models-resilience': adapters.rootAppliers.patchSettingsModelsResilience,
     'bundle-arrival-retry': adapters.rootAppliers.patchBundleArrivalRetry,
     'agent-loop-scheduler-guard': adapters.rootAppliers.patchSchedulerGuard,
+    'empty-tool-name-guidance': adapters.rootAppliers.patchEmptyToolName,
   };
   for (const spec of getSpecsByCli()) {
     if (spec.kind === 'root') {

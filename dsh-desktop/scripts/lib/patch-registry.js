@@ -1112,6 +1112,35 @@ const PATCH_SPECS = [
   },
 
   // -------------------------------------------------------------------------
+  // 工具调用 name 为空指引补丁（K11，用户实机反馈 `unknown tool ""` 死循环
+  // 重试 + repeat-tool-reminder 反复注入）：模型 Think 想调 str_replace_editor
+  // 但 tool-call 的 name 字段为空 ""。空 name 由上游 pi-ai 三协议适配器逐字
+  // 透传（openai-completions function.name / openai-responses output[].name /
+  // anthropic-messages content_block.name 均无空名防御），dsh-tools 的
+  // ToolNotFoundError 构造器再把空串嵌成 `unknown tool ""`，用户得不到任何
+  // 定位线索。补丁只对「空/缺失 name」这一个明确异常形态特判，把裸报错替换
+  // 为三向指引（协议错位 / 中转网关剥离 tool_call / 模型输出 JSON 崩坏），
+  // 非空 name 的 unknown-tool / reachableFrom 两分支逐字不变。与
+  // tool-source-patch.js（持久化层空 id/name 合成）互补。锚点失配自动退役。
+  // 见 scripts/lib/empty-tool-name-patch.js。
+  // -------------------------------------------------------------------------
+  {
+    id: 'empty-tool-name-guidance',
+    group: 'package',
+    order: 247,
+    kind: 'root',
+    layout: 'nm-roots',
+    wslLayout: 'nm-roots',
+    apply: rootAppliers.patchEmptyToolName,
+    marker: null,
+    requires: [],
+    failPolicy: 'warn',
+    cli: true,
+    successLog: (root) => '空工具名指引补丁: 已应用到 ' + root,
+    failLog: (root, err) => '空工具名指引补丁失败(' + root + '): ' + err.message,
+  },
+
+  // -------------------------------------------------------------------------
   // agent-preset 未知 id 回落补丁（0.5.0 存量用户 resume 变砖修复，追加条目）。
   //
   // 用户会话/profile 引用 Electron 老版本安装的 minimal-win 预设，0.5.0 Tauri

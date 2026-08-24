@@ -134,6 +134,9 @@ pub async fn menu_action(action: String, payload: Option<serde_json::Value>, app
                 CheckOutcome::UpToDate => return Err(BridgeError::not_found("已是最新版本")),
             };
             let next = upd.next.clone();
+            // 进度弹窗（下载时置顶小窗显示进度条 + 百分比）：创建失败/被用户
+            // 关闭均不影响下载主链——弹窗是增强，不是功能面。
+            let _ = crate::windows::open_update_progress_window(&app, &next);
             // 下载进度经 `client-update-progress` {received,total} 事件发给
             // 页面（垫片在菜单行尾就地显示百分比；emit 只借 &self，跨 await 安全）。
             // RV9 P1 节流：流式下载每 chunk 都回调（100Mbps ≈ 800 次/s），
@@ -142,7 +145,7 @@ pub async fn menu_action(action: String, payload: Option<serde_json::Value>, app
             let emit_app = app.clone();
             let mut last_emit: Option<(u64, std::time::Instant)> = None;
             let asset = upd.asset;
-            let path = updater_client::download_to_temp(&asset, move |received: u64, total: u64| {
+            let download_result = updater_client::download_to_temp(&asset, move |received: u64, total: u64| {
                 let now = std::time::Instant::now();
                 let fire = match last_emit {
                     None => true,
@@ -161,10 +164,31 @@ pub async fn menu_action(action: String, payload: Option<serde_json::Value>, app
                         "client-update-progress",
                         serde_json::json!({ "received": received, "total": total }),
                     );
+                    // 进度弹窗同步更新（与菜单行尾百分比并存，互不干扰）。
+                    let pct = crate::windows::update_popup_pct(received, total);
+                    crate::windows::emit_update_progress(
+                        &emit_app,
+                        crate::windows::update_popup_phase_from_pct(pct),
+                        None,
+                    );
                 }
             }, None)
-            .await
-            .map_err(updater_err_to_bridge)?;
+            .await;
+
+            // 下载结果分路：成功不立即弹「正在安装」（Windows 分支才弹；mac/linux
+            // 降级分支发 Closed 收掉弹窗——见平台分支）；失败转失败文案 + 关闭按钮。
+            let path = match download_result {
+                Ok(path) => path,
+                Err(e) => {
+                    let bridge_err = updater_err_to_bridge(e);
+                    crate::windows::emit_update_progress(
+                        &app,
+                        crate::windows::UpdatePopupPhase::Failed,
+                        Some(&bridge_err.message),
+                    );
+                    return Err(bridge_err);
+                }
+            };
 
             // ---- 平台分支 -----------------------------------------------------
             // Windows（唯一发版目标，tauri.conf.json bundle.targets=["nsis"]）：
@@ -195,6 +219,8 @@ pub async fn menu_action(action: String, payload: Option<serde_json::Value>, app
             //   OS 级收割，单实例锁有陈锁回收兜底，均无泄漏。
             #[cfg(windows)]
             {
+                // 弹窗转「正在安装」（进程即将退出，弹窗随之消亡）。
+                crate::windows::emit_update_progress(&app, crate::windows::UpdatePopupPhase::Installing, None);
                 let mut installer = std::process::Command::new(&path);
                 installer.args(["/S", "/R", "/UPDATE"]);
                 installer.spawn().map_err(|e| BridgeError::internal(format!("启动安装器失败: {e}")))?;
@@ -216,6 +242,8 @@ pub async fn menu_action(action: String, payload: Option<serde_json::Value>, app
                     .arg(&path)
                     .spawn()
                     .map_err(|e| BridgeError::internal(format!("打开 DMG 失败: {e}")))?;
+                // 降级形态：下载已完成、安装交用户 → 弹窗关闭（不弹「正在安装」）。
+                crate::windows::emit_update_progress(&app, crate::windows::UpdatePopupPhase::Closed, None);
                 Ok(serde_json::json!({ "ok": true, "manual": true, "version": next }))
             }
             // Linux：AppImage 自替换。运行中的 AppImage 挂的是旧 inode，
@@ -234,6 +262,8 @@ pub async fn menu_action(action: String, payload: Option<serde_json::Value>, app
                         let _ = open_in_explorer(dir);
                     }
                 }
+                // 降级形态：AppImage 就地替换 / 手动 → 弹窗关闭（不弹「正在安装」）。
+                crate::windows::emit_update_progress(&app, crate::windows::UpdatePopupPhase::Closed, None);
                 Ok(serde_json::json!({ "ok": true, "replaced": replaced, "manual": !replaced, "version": next }))
             }
         }
@@ -459,5 +489,29 @@ mod tests {
         // → From 映射 E_UPDATER_SIGNATURE 保证（updater_client.rs 自测覆盖），
         // menu 侧不吞错误：错误链必须走 updater_err_to_bridge。
         assert!(install.contains("updater_err_to_bridge"), "下载错误不得吞/改写（保 HashMismatch→SIGNATURE 映射）");
+    }
+
+    /// 客户端更新进度弹窗接线形态锚点：install-client-update 下载链必须
+    /// · 下载前打开弹窗（open_update_progress_window）；
+    /// · 进度回调在发 client-update-progress 的同时经 emit_update_progress
+    ///   更新弹窗（update_popup_phase_from_pct）；
+    /// · 下载失败转 UpdatePopupPhase::Failed；Windows 成功转 Installing；
+    ///   mac/linux 降级（manual/replaced）转 Closed（不弹「正在安装」）；
+    /// · 主窗菜单行尾百分比事件（client-update-progress）不得回退丢失。
+    #[test]
+    fn client_update_install_wires_progress_popup() {
+        let src = include_str!("menu.rs");
+        let install = src
+            .split("\"install-client-update\" =>")
+            .nth(1)
+            .and_then(|s| s.split("other =>").next())
+            .expect("install-client-update 分支");
+        assert!(install.contains("open_update_progress_window"), "下载前必须打开进度弹窗: {install}");
+        assert!(install.contains("emit_update_progress"), "必须经 emit_update_progress 发弹窗事件: {install}");
+        assert!(install.contains("update_popup_phase_from_pct"), "进度必须按 pct 折算弹窗阶段: {install}");
+        assert!(install.contains("UpdatePopupPhase::Failed"), "下载失败必须转失败阶段: {install}");
+        assert!(install.contains("UpdatePopupPhase::Installing"), "Windows 成功必须转安装中阶段: {install}");
+        assert!(install.contains("UpdatePopupPhase::Closed"), "mac/linux 降级必须关闭弹窗: {install}");
+        assert!(install.contains("\"client-update-progress\""), "主窗菜单进度事件不得回退丢失: {install}");
     }
 }

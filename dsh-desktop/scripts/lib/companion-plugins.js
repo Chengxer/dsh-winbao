@@ -104,6 +104,11 @@ const COMPANION_PLUGINS = [
   // patch-pi-ai-reasoning-defaults 互补（本插件 UI/诊断面，F4 后端默认字典面）。
   // 取代已退役的 dsh-third-party-thinking（fake 档位注入 + fetch 拦截旁路）。
   { id: 'reasoning-effort', name: 'dsh-reasoning-effort' },
+  // 基础能力面板（yxsj245/dsh-Basics-Panel，MIT）：设置页可视化并管理 MCP
+  // 服务器 / 技能 / 规则，模块化 feature 注册表；MCP 空态带「新建」入口
+  // （零 MCP 已添加时也显示「新建」按钮）。id 与 bundle 层 cordis.patch.yml
+  // 声明的 loader id（basics-panel）一致。
+  { id: 'basics-panel', name: 'dsh-basics-panel' },
 ];
 
 /** 包名 → assets/plugins 下的目录名（去 scope 前缀）。 */

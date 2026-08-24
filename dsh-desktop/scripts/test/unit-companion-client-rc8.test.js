@@ -79,6 +79,14 @@ function declaredExternals(pkgFile) {
 /** 深层惰性 stub：任意属性访问/调用都返回可继续链式使用的代理。 */
 function deepStub() {
   const fn = function () { return deepStub(); };
+  // React/ReactDOM named exports rolldown's __toESM(react, 1) + __copyProps must
+  // copy onto the ESM wrapper so `class extends react.Component` and hook calls
+  // resolve to a constructable/callable stub instead of undefined.
+  const stubKeys = [
+    'Component', 'PureComponent', 'Fragment', 'createElement', 'memo',
+    'useState', 'useEffect', 'useMemo', 'useRef', 'useCallback',
+    'useSyncExternalStore', 'createRoot', 'default',
+  ];
   return new Proxy(fn, {
     get: (target, key) => {
       if (key === Symbol.toPrimitive) return () => '';
@@ -86,6 +94,11 @@ function deepStub() {
       return deepStub();
     },
     apply: () => deepStub(),
+    ownKeys: (target) => [...new Set([...Reflect.ownKeys(target), ...stubKeys])],
+    getOwnPropertyDescriptor: (target, key) => {
+      if (stubKeys.includes(key)) return { configurable: true, enumerable: true, value: deepStub() };
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
   });
 }
 

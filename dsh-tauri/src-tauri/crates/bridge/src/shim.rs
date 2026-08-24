@@ -479,3 +479,27 @@ mod event_envelope_tests {
         );
     }
 }
+
+/// 外链点击委托（K15 余额充值 / #149 / #162 外链不跳转）回归锚点：
+/// <a target="_blank"> http(s) 外链被 WebView2 导航围栏拦掉（on_navigation 只放行
+/// 127.0.0.1 / tauri://），垫片必须全局捕获点击、preventDefault 原生导航并改走
+/// openExternal（系统默认浏览器）；且不得劫持内核同源 127.0.0.1 内链。
+#[cfg(test)]
+mod external_link_delegation_tests {
+    use super::BRIDGE_SHIM_JS;
+
+    #[test]
+    fn delegation_block_present() {
+        for marker in [
+            "installExternalLinkDelegation",      // 委托安装函数
+            "target.toLowerCase() !== '_blank'", // 只拦 _blank
+            "openExternal(href)",                 // 走 open_external 桥
+            "e.preventDefault()",                 // 阻止原生导航
+            "indexOf('http://127.0.0.1')",      // 内核同源放行
+            "slice(0, 7) !== 'http://'",        // 只拦 http(s)
+            "installExternalLinkDelegation();",   // 自初始化调用
+        ] {
+            assert!(BRIDGE_SHIM_JS.contains(marker), "外链点击委托缺 {marker}");
+        }
+    }
+}

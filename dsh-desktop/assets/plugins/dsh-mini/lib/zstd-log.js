@@ -267,13 +267,41 @@ export function foldLogEvents(file) {
   return state;
 }
 
-// 完整日志事件流（GUI history 用，不裁剪）
+// 完整日志事件流（GUI history 用，不裁剪）。
+// 增量读：session.history 每次 loadOlder 都调 readAllLogEvents(file)，若每次
+// 都 readFileSync + 全量 zstd 解压 + 逐行 JSON.parse（前端只请求 maxMessages:50，
+// 后端代价 O(整份日志)）。此处复用 foldLogEvents 同款 (mtimeMs,size,frameEnd)
+// 增量缓存：首次全量解压后，后续 loadOlder 仅解压新增尾部帧，不再整份解压；
+// 文件缩小/变更即失效重读，不掩盖真实变更。非 zstd（纯文本 JSONL）路径保持
+// 原样（无帧边界，未变文件命中缓存、变更则全量重读）。
+const allEventsCache = new Map();
 export function readAllLogEvents(file) {
   try {
+    let st;
+    try {
+      st = statSync(file);
+    } catch {
+      return [];
+    }
+    const cached = allEventsCache.get(file);
+    if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) return cached.events;
     const buf = readFileSync(file);
     const firstMagic = buf.length >= 4 ? buf.readUInt32LE(0) : 0;
-    const raw = firstMagic === ZSTD_MAGIC ? decompressZstd(buf) : buf.toString("utf8");
-    return parseLines(raw);
+    const isZstd = firstMagic === ZSTD_MAGIC;
+    let events;
+    let frameEnd;
+    if (isZstd && cached && cached.isZstd && cached.frameEnd > 0 && cached.frameEnd <= buf.length && cached.size <= st.size) {
+      const inc = decompressFrames(buf, cached.frameEnd);
+      events = cached.events;
+      if (inc.text) events = events.concat(parseLines(inc.text));
+      frameEnd = inc.end;
+    } else {
+      events = isZstd ? parseLines(decompressZstd(buf)) : parseLines(buf.toString("utf8"));
+      frameEnd = isZstd ? decompressFrames(buf, 0).end : buf.length;
+    }
+    allEventsCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, isZstd, frameEnd, events });
+    capMap(allEventsCache, 200);
+    return events;
   } catch {
     return [];
   }

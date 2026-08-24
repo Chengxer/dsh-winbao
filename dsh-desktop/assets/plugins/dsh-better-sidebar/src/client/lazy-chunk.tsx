@@ -132,6 +132,8 @@ function LazyChunkView<P>({ chunk, pick, props, fallback }: LazyChunkViewProps<P
  * effect on every render.
  * @param chunk - the chunk name (see chunk-loader.ts).
  * @param pick - select the component from the chunk's exports.
+ * @param fallback - optional read-only preview rendered while the chunk is
+ *   unavailable (the fsRead viewers pass one so the file stays viewable).
  */
 export function lazyChunkComponent<P extends object>(
   chunk: ChunkName,

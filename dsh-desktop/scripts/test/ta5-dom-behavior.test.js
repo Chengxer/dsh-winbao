@@ -875,6 +875,53 @@ async function main() {
     check('状态读取失败 → 「状态读取失败：」', s2why.textContent.includes('状态读取失败：'));
   }
 
+  // ---- 3.12 外链点击委托：<a target="_blank"> http(s) → open_external ----
+  console.log('\n[12] 外链点击委托：<a target="_blank"> http(s) → open_external');
+  {
+    const s = bootShim({ appInfo: APP_INFO });
+    await flush();
+    const mkAnchor = (attrs) => {
+      const a = s.doc.createElement('a');
+      for (const [k, v] of Object.entries(attrs)) a.setAttribute(k, v);
+      s.doc.body.appendChild(a);
+      return a;
+    };
+    // 正向：余额充值外链（target=_blank + https）→ open_external + preventDefault
+    const topup = mkAnchor({ href: 'https://platform.deepseek.com/top_up', target: '_blank', rel: 'noopener noreferrer' });
+    let prevented = 0;
+    s.doc.dispatchEvent({ type: 'click', target: topup, preventDefault() { prevented++; } });
+    await flush();
+    const call = s.last('open_external');
+    check('https 外链 → open_external(top_up)', !!call && call.args.url === 'https://platform.deepseek.com/top_up', call && JSON.stringify(call.args));
+    check('外链点击已 preventDefault（阻止原生导航）', prevented === 1);
+
+    // 正向：命中 <span> 子元素也经祖先 <a> 拦截（closest-a 向上遍历）
+    const child = s.doc.createElement('span');
+    topup.appendChild(child);
+    let prevented2 = 0;
+    s.doc.dispatchEvent({ type: 'click', target: child, preventDefault() { prevented2++; } });
+    await flush();
+    check('点击 <span> 子元素 → 仍拦截到祖先 <a>', s.count('open_external') === 2 && prevented2 === 1);
+
+    // 负向：无 target 的 <a>（同站导航）→ 不拦
+    const noTarget = mkAnchor({ href: 'https://example.com/x' });
+    s.doc.dispatchEvent({ type: 'click', target: noTarget, preventDefault() {} });
+    await flush();
+    check('无 target 的 <a> 不拦截', s.count('open_external') === 2);
+
+    // 负向：内核同源 127.0.0.1（target=_blank）→ 不拦（内部导航放行）
+    const internal = mkAnchor({ href: 'http://127.0.0.1:4000/chat', target: '_blank' });
+    s.doc.dispatchEvent({ type: 'click', target: internal, preventDefault() {} });
+    await flush();
+    check('127.0.0.1 内核内链不拦截', s.count('open_external') === 2);
+
+    // 负向：非 http(s) 协议（mailto:）target=_blank → 不拦
+    const mailto = mkAnchor({ href: 'mailto:a@b.c', target: '_blank' });
+    s.doc.dispatchEvent({ type: 'click', target: mailto, preventDefault() {} });
+    await flush();
+    check('mailto: 外链不拦截', s.count('open_external') === 2);
+  }
+
   // ---- 汇总 ----
   console.log(`\n===== TA5 DOM 行为测试：${pass} ok, ${fail} FAIL =====`);
   if (fail > 0) process.exitCode = 1;

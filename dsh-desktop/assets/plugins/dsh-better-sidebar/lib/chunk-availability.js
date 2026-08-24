@@ -6,7 +6,7 @@
  * dsh-desktop/scripts/test/unit-better-sidebar-chunk-retry.test.js.
  *
  * Background (0.5.0 user report): while the kernel process dies/restarts,
- * `window.__DSH_MODULES__` is briefly missing, so a lazy chunk load threw
+ * the client module system is briefly missing, so a lazy chunk load threw
  * `chunk "editor": client module system unavailable` and the view stayed on
  * its manual-retry error state forever — to a user the sidebar looked
  * bricked. The loop keeps probing with exponential backoff (2s/4s/8s/…
@@ -33,14 +33,17 @@ function nextDelayMs(failedAttempts, base = CHUNK_RETRY_BASE_DELAY_MS, max = CHU
 }
 
 /**
- * Whether the client module system (`globalThis.__DSH_MODULES__`, set by
- * the shell before plugins activate) is present with a callable import —
+ * Whether the client module system is present with a callable import —
  * the cheap probe every retry round runs first; while it is down the
- * chunk script is not even fetched.
+ * chunk script is not even fetched. On DSH 0.1.0-rc.8 the shell no longer
+ * exposes `window.__DSH_MODULES__`; it injects the system through
+ * `ctx.modules`, which the client half mirrors onto the plugin-owned
+ * `__dshSidebarModuleSystem__` page global. The legacy `__DSH_MODULES__`
+ * global stays a fallback for rc.7-era hosts and the test harness.
  */
 function isModuleSystemAvailable(globalLike = globalThis) {
 	if (globalLike === null || typeof globalLike !== "object") return false
-	const modules = globalLike.__DSH_MODULES__
+	const modules = globalLike.__DSH_MODULES__ ?? globalLike.__dshSidebarModuleSystem__
 	return typeof modules === "object" && modules !== null && typeof modules.import === "function"
 }
 

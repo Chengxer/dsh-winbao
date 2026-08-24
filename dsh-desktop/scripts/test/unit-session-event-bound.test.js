@@ -105,8 +105,13 @@ test('补丁 transform 注入有界保留 + dispose + drop（内容契约）', (
   assert.ok(src.includes('dsh-desktop compat: bounded session event retention'), '应含 marker');
   assert.ok(src.includes('const SESSION_EVENT_BOUND = 2000;'), '应含 SESSION_EVENT_BOUND');
   assert.ok(src.includes('const SESSION_EVENT_KEEP = 1200;'), '应含 SESSION_EVENT_KEEP');
+  assert.ok(src.includes('const SESSION_EVENT_SUPPRESS_MARGIN = 20000;'), '应含 v4 SESSION_EVENT_SUPPRESS_MARGIN');
   assert.ok(src.includes('trimSessionWindow() {'), '应注入 trimSessionWindow 方法');
   assert.ok(src.includes('this.trimSessionWindow();'), 'appendLive 应调用 trimSessionWindow');
+  assert.ok(src.includes('if (this.loadingOlder) return;'), 'v4：loadOlder 期间 trim 应直接 return');
+  assert.ok(src.includes('if (this.trimSuppressed === true) {'), 'v4：应含 trimSuppressed 抑制分支');
+  assert.ok(src.includes('const freshOlder = older.filter'), 'v4：loadOlder 应含去重');
+  assert.ok(src.includes('this.trimSuppressedFloor = this.events.length;'), 'v4：loadOlder 成功应记录 floor');
   assert.ok(src.includes('this.conversation.replaceWindow([], false);'), 'dispose 应重建空窗口');
   assert.ok(src.includes('if (session !== void 0) session.dispose();'), 'drop 应调用 dispose');
   assert.ok(src.includes('if (this.disposed === true) return;'), 'dispose 应幂等');
@@ -233,4 +238,111 @@ test('多 Session 高频压测：每个 Session events 有上界（内存斜率�
   const tail = sessions[0].events;
   assert.ok(tail.some((e) => e.type === 'turn/start'), '尾部窗口应保留 turn/start 边界');
   assert.ok(tail.some((e) => e.type === 'compaction/summary'), '尾部窗口应保留 compaction/summary 摘要');
+});
+
+// ---------------------------------------------------------------------------
+// v4 回归：loadOlder / trim 接缝 + 运行中不裁（历史加载回归修复）。
+// ---------------------------------------------------------------------------
+
+test('v4：loadOlder 请求期间 trimSessionWindow 直接 return（baseSeq 不动）', { skip: !hasSource }, () => {
+  const pristine = fs.readFileSync(CLIENT_PATH, 'utf8');
+  const patched = transformSessionEventBound(pristine, 'client.js').src;
+  const mod = loadClientModule(patched);
+  const s = makeSession(mod);
+
+  s.loadingOlder = true;
+  for (let i = 1; i <= 3000; i += 1) s.appendLive(eventAt(i, 50), undefined);
+  assert.equal(s.events.length, 3000, 'loadOlder 期间 appendLive 不应触发 trim');
+  assert.equal(s.baseSeq, 0, 'loadOlder 期间 baseSeq 应保持不动（trim 未触发）');
+
+  // 解除 loadingOlder 后再追加 → 恢复 trim。
+  s.loadingOlder = false;
+  s.appendLive(eventAt(3001, 50), undefined);
+  assert.ok(s.events.length <= BOUND, '解除 loadingOlder 后应恢复 trim 有界');
+});
+
+test('v4：loadOlder 成功后 trimSuppressed 抑制重裁，超动态上限才重新裁', { skip: !hasSource }, () => {
+  const pristine = fs.readFileSync(CLIENT_PATH, 'utf8');
+  const patched = transformSessionEventBound(pristine, 'client.js').src;
+  const mod = loadClientModule(patched);
+  const s = makeSession(mod);
+
+  for (let i = 1; i <= 100; i += 1) s.appendLive(eventAt(i, 50), undefined);
+  s.trimSuppressed = true;
+  s.trimSuppressedFloor = s.events.length; // 100
+
+  const MARGIN = 20000;
+  for (let i = 0; i < MARGIN; i += 1) s.appendLive(eventAt(101 + i, 50), undefined);
+  assert.equal(s.events.length, 100 + MARGIN, 'floor+margin 内不应裁');
+  assert.equal(s.trimSuppressed, true, '抑制状态应保持');
+
+  // 再追加 1 条 → 超动态上限 → 重裁并清除抑制。
+  s.appendLive(eventAt(101 + MARGIN, 50), undefined);
+  assert.ok(s.events.length <= BOUND, '超动态上限后应重裁到有界窗口');
+  assert.equal(s.trimSuppressed, false, '重裁后应清除抑制状态');
+});
+
+test('v4：loadOlder 回翻连续、不回退、不重复，并记录抑制 floor', { skip: !hasSource }, async () => {
+  const pristine = fs.readFileSync(CLIENT_PATH, 'utf8');
+  const patched = transformSessionEventBound(pristine, 'client.js').src;
+  const mod = loadClientModule(patched);
+
+  let calls = 0;
+  const s = new mod.__Session('s1', {
+    sessions: {
+      history: async () => {
+        calls += 1;
+        if (calls === 1) {
+          return { result: { ok: true, value: { events: [
+            { event: { seq: 9, type: 'turn/start', data: { turn: 0 } }, view: undefined },
+          ], hasMore: false } } };
+        }
+        return { result: { ok: true, value: { events: [], hasMore: false } } };
+      },
+    },
+  }, {}, {});
+
+  s.openState = 'open';
+  s.installWindow([
+    { event: { seq: 10, type: 'turn/start', data: { turn: 1 } }, view: undefined },
+    { event: { seq: 11, type: 'assistant/message', data: { turn: 1 } }, view: undefined },
+  ], false, undefined);
+  s.hasMore = true;
+  assert.equal(s.baseSeq, 10, '初始 baseSeq 应为 10');
+
+  await s.loadOlder();
+  assert.deepEqual([...s.events.map((e) => e.seq)], [9, 10, 11], 'loadOlder 后窗口连续无重复、不回退');
+  assert.equal(s.baseSeq, 9, 'baseSeq 应前移到 9');
+  assert.equal(s.trimSuppressed, true, 'loadOlder 成功后应抑制重裁');
+  assert.equal(s.trimSuppressedFloor, 3, 'trimSuppressedFloor 应记录当前窗口长度');
+});
+
+test('v4：baseSeq 偏移时 loadOlder 去重，防止重复事件进入窗口（duplicate start 根治）', { skip: !hasSource }, async () => {
+  const pristine = fs.readFileSync(CLIENT_PATH, 'utf8');
+  const patched = transformSessionEventBound(pristine, 'client.js').src;
+  const mod = loadClientModule(patched);
+
+  const s = new mod.__Session('s1', {
+    sessions: {
+      history: async () => ({ result: { ok: true, value: { events: [
+        { event: { seq: 9, type: 'turn/start', data: { turn: 0 } }, view: undefined },
+        { event: { seq: 10, type: 'assistant/message', data: { turn: 1 } }, view: undefined },
+        { event: { seq: 11, type: 'assistant/message', data: { turn: 1 } }, view: undefined },
+      ], hasMore: false } } }),
+    },
+  }, {}, {});
+
+  s.openState = 'open';
+  s.installWindow([
+    { event: { seq: 10, type: 'assistant/message', data: { turn: 1 } }, view: undefined },
+    { event: { seq: 11, type: 'assistant/message', data: { turn: 1 } }, view: undefined },
+  ], false, undefined);
+  s.hasMore = true;
+  // 人为制造 baseSeq 漂移（模拟 trim 后 baseSeq 与窗口首事件不一致的边界）。
+  s.baseSeq = 12;
+
+  await s.loadOlder();
+  // 历史回页 [9,10,11] 与现有窗口 [10,11] 重叠：10/11 被去重，仅前插 9。
+  assert.deepEqual([...s.events.map((e) => e.seq)], [9, 10, 11], '重叠事件应去重，窗口不出现重复 seq');
+  assert.equal(new Set(s.events.map((e) => e.seq)).size, s.events.length, 'events 内 seq 应唯一（后续 trim/replaceWindow 不再 duplicate start）');
 });

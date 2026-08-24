@@ -171,3 +171,16 @@ try {
 } catch (err) {
   console.log('[patch-deps] 调度器防崩补丁跳过: ' + (err && err.message ? err.message : err));
 }
+
+// 工具调用 name 为空指引补丁（K11：`unknown tool ""` 死循环重试）——dsh-tools
+// ToolNotFoundError 对空 name 特判三向指引（协议错位 / 中转网关剥离 / 模型输出
+// 崩坏），非空 name 原语义不变。开发模式（npm start / postinstall）直接打 dev
+// node_modules；运行副本由 patch-registry（桌面壳启动 + CLI 同步）覆盖（幂等，
+// 锚点失配只告警不中断）。见 scripts/lib/empty-tool-name-patch.js。
+try {
+  const { patchEmptyToolName } = require('./lib/empty-tool-name-patch');
+  const n = patchEmptyToolName(path.join(root, 'node_modules'), (m) => console.log('[patch-deps] ' + m));
+  if (n > 0) console.log('[patch-deps] 空工具名指引补丁已应用（dev node_modules）');
+} catch (err) {
+  console.log('[patch-deps] 空工具名指引补丁跳过: ' + (err && err.message ? err.message : err));
+}

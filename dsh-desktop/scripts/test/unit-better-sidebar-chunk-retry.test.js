@@ -363,8 +363,12 @@ test('产物契约: client.js 与 client-registry.js 内联重试环并接线视
     assert.ok(src.includes('function isModuleSystemAvailable('), `${rel}: 内联探测`);
     assert.ok(src.includes('function ensureChunkAutoRetry('), `${rel}: 注册表入口`);
     assert.ok(src.includes('const retryLoops'), `${rel}: 每 chunk 单例循环注册表（HMR 去重）`);
-    assert.ok(/function resetChunks\(\) \{[\s\S]{0,400}?loop\.dispose\(\)/.test(src),
-      `${rel}: resetChunks 必须 dispose 全部循环（HMR 清理路径）`);
+    // v0.15.2 HMR path is revalidateChunksOnReactivate (resetChunks is a full
+    // reset kept for tests/consumers and is tree-shaken out of the client
+    // bundle); BOTH must dispose every retry loop so no timer outlives its
+    // views across a re-activation.
+    assert.ok(/function revalidateChunksOnReactivate\(\) \{[\s\S]{0,1200}?loop\.dispose\(\)/.test(src),
+      `${rel}: HMR 重激活必须 dispose 全部循环（清理路径）`);
     assert.ok(src.includes('document.removeEventListener("visibilitychange"'),
       `${rel}: visibility 监听有对称移除`);
     assert.ok(src.includes('stopAutoRetry = ensureChunkAutoRetry('),
@@ -401,6 +405,14 @@ const RC8_SEED = [
 
 function deepStub() {
   const fn = function () { return deepStub(); };
+  // React/ReactDOM named exports rolldown's __toESM(react, 1) + __copyProps must
+  // copy onto the ESM wrapper so `class extends react.Component` and hook calls
+  // resolve to a constructable/callable stub instead of undefined.
+  const stubKeys = [
+    'Component', 'PureComponent', 'Fragment', 'createElement', 'memo',
+    'useState', 'useEffect', 'useMemo', 'useRef', 'useCallback',
+    'useSyncExternalStore', 'createRoot', 'default',
+  ];
   return new Proxy(fn, {
     get: (target, key) => {
       if (key === Symbol.toPrimitive) return () => '';
@@ -408,6 +420,11 @@ function deepStub() {
       return deepStub();
     },
     apply: () => deepStub(),
+    ownKeys: (target) => [...new Set([...Reflect.ownKeys(target), ...stubKeys])],
+    getOwnPropertyDescriptor: (target, key) => {
+      if (stubKeys.includes(key)) return { configurable: true, enumerable: true, value: deepStub() };
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
   });
 }
 

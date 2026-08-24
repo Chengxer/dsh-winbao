@@ -887,6 +887,47 @@
   // 只跑主框架——主框架独占壳（标题栏/菜单/拖拽），iframe 里全部跳过。
   if (window.top !== window.self) return;
 
+  // ---- 外链点击委托（K15 / #149 / #162）：<a target="_blank"> http(s) 外链走系统浏览器 ----
+  // WebView2 导航围栏（windows.rs on_navigation）只放行 127.0.0.1 / tauri://，
+  // 内核页里 target="_blank" 的 http(s) 外链（余额充值 top_up、Go opencode.ai
+  // 等）被原生新窗导航拦掉 → 用户点了没反应。此处全局捕获点击：命中
+  // <a target="_blank"> 且 href 为 http(s)（排除内核同源 127.0.0.1）时
+  // preventDefault 原生导航、改走 dshDesktop.openExternal（系统默认浏览器）。
+  // 保守面：不碰无 target 的同站导航、不碰 window.open（JS 弹窗不走点击）、
+  // 不碰 127.0.0.1 内核内链（放行原生导航）；只 preventDefault 不
+  // stopPropagation（不干扰页内其它 click 处理器，如 ⋯ 菜单关闭）。
+  var externalLinkDelegated = false;
+  function installExternalLinkDelegation() {
+    if (externalLinkDelegated) return;
+    externalLinkDelegated = true;
+    try {
+      document.addEventListener('click', function (e) {
+        var anchor = null;
+        try {
+          var node = e && e.target;
+          while (node && node.nodeType === 1) {
+            if (String(node.tagName).toUpperCase() === 'A') { anchor = node; break; }
+            node = node.parentNode;
+          }
+        } catch (e2) { anchor = null; }
+        if (!anchor) return;
+        var target = '';
+        try { target = String((anchor.getAttribute && anchor.getAttribute('target')) || anchor.target || ''); } catch (e2) {}
+        if (target.toLowerCase() !== '_blank') return;
+        var href = '';
+        try { href = String((anchor.getAttribute && anchor.getAttribute('href')) || anchor.href || ''); } catch (e2) {}
+        var lower = href.toLowerCase();
+        if (lower.slice(0, 7) !== 'http://' && lower.slice(0, 8) !== 'https://') return;
+        if (lower.indexOf('http://127.0.0.1') === 0 || lower.indexOf('https://127.0.0.1') === 0) return;
+        if (e && e.preventDefault) { try { e.preventDefault(); } catch (e2) {} }
+        if (window.dshDesktop && typeof window.dshDesktop.openExternal === 'function') {
+          try { window.dshDesktop.openExternal(href); } catch (e2) {}
+        }
+      }, true);
+    } catch (e) { /* 委托失败不阻断桥 */ }
+  }
+  installExternalLinkDelegation();
+
   onBodyReady(function () {
     injectChromeBar();
     try {
